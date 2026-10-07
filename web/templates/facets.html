@@ -26,6 +26,10 @@
   .type-pill.numerical { background: #eef8f4; color: #14664b; border-color: #a7d7c0; }
   .type-pill.mixed { background: #fff7e0; color: #7a5b00; border-color: #eed08c; }
   .empty-note { color: var(--text-muted); font-size: 13px; padding: 20px 0; }
+  .scope-pills { display: flex; flex-wrap: wrap; gap: 3px; }
+  a.scope-link { display: inline-block; padding: 0 7px; font-size: 11px; line-height: 1.6; border-radius: 9px; border: 1px solid #cbd5e1;
+               background: #f1f5f9; color: #334155; white-space: nowrap; text-decoration: none; }
+  a.scope-link:hover { background: var(--hover); }
   .facet-summary { display: block; font-size: 12px; color: var(--text-muted); margin-top: 1px; max-width: 640px; }
   .facet-summary.undefined { font-style: italic; }
   .audit-note {
@@ -45,6 +49,7 @@
   <p>Each dataset declares how its own columns map onto a facet: a renamed author column, a value map, or one constant value. A facet is the same for all cells of one donor, so a facet effect is a difference between donors, not between cells.</p>
   <p>A facet page shows the definition, which datasets carry the facet and how their values were translated, and the expression differences (effects) tested at the level of donors. Terms such as pseudobulk, replicate unit and r-value are explained in the <a href="/help#glossary">glossary</a>.</p>
   <p>Which datasets share donors, and which are reanalyses that never count twice, is listed under <a href="/donor-groups" id="facets-donor-groups-link">donor groups</a>.</p>
+  <p id="facets-scope-about"><strong>Scopes.</strong> Results are kept apart by scope: human post-mortem tissue, and human cells grafted into mouse hosts (xenograft). The two are never counted together, because a host animal is not a donor and the biology differs. Each facet lists the scopes it has; open it to switch between them. In vitro cultures are listed but not tested, and pure mouse datasets are not part of the facet analysis (<a href="/help#glossary-scope">glossary</a>).</p>
 {% endcall %}
 {% if definitions_status and definitions_status.note %}
 <p class="audit-note" id="facet-audit-note"><strong>Definitions under audit.</strong> {{ definitions_status.note }}</p>
@@ -72,6 +77,7 @@
     <tr>
       <th class="sortable" data-key="facet" data-dir="asc">Facet <span class="sort-ind"></span></th>
       <th class="sortable" data-key="type" data-dir="asc">Type <span class="sort-ind"></span></th>
+      <th>Scope</th>
       <th class="sortable num" data-key="n_datasets" data-dir="desc">Datasets <span class="sort-ind"></span></th>
     </tr>
   </thead>
@@ -93,6 +99,7 @@
           <span class="type-pill {{ row.type }}">{{ row.type }}</span>
         {% endif %}
       </td>
+      <td><div class="scope-pills">{% for option in row.scope_options %}<a class="scope-link" data-scope="{{ option.scope }}" href="/facets/{{ row.facet|urlencode }}?scope={{ option.scope }}" title="Open {{ row.facet[4:] }} in {{ option.label }}{% if not option.tested %} (listed, not tested){% endif %}">{{ option.label }}</a>{% endfor %}</div></td>
       <td class="num">{{ row.n_datasets }}</td>
     </tr>
     {% endfor %}

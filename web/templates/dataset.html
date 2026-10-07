@@ -19,10 +19,12 @@
 {%- from "_facet_effects.html" import fx_table, fx_untested -%}
 <div class="ds-facet-fx" data-facet="{{ column }}">
   {% if slot.tested %}
-  <h3 class="subsection-head">Effects of {{ column[4:] }} <span class="muted">({{ slot.tested|length }} {{ 'cell type' if slot.tested|length == 1 else 'cell types' }} tested)</span></h3>
+  <h3 class="subsection-head">Effects of {{ facet_test_label(column)|lower if column[4:] in ('age', 'age_adjusted') else column[4:] }} {% if slot.scope %}<span class="fx-scope" data-scope="{{ slot.scope }}" title="Results are counted within one scope; scopes are never mixed.">{{ facet_scope_label(slot.scope) }}</span> {% endif %}<span class="muted">({{ slot.tested|length }} {{ 'cell type' if slot.tested|length == 1 else 'cell types' }} tested)</span></h3>
+  {% if column in ('ant_age', 'ant_age_adjusted') %}<p class="fx-intro fx-age-note">{% if column == 'ant_age' %}Not adjusted for pathology: age and AD pathology go together in every brain bank, so this partly re-detects pathology. Compare it with the adjusted twin. Donors under 60 are left out.{% else %}Adjusted for pathology: Braak stage (else pathologic AD) is in the model, so what remains is age beyond pathology. Donors under 60 are left out.{% endif %} <a href="/help#glossary-age-twins">Glossary</a></p>{% endif %}
+  {% if column == 'ant_app_nlgf' %}<p class="fx-intro fx-app-note">Host animals are the replicates. Large effects only (a handful of animals per genotype); live-cell isolation makes dissociation-response genes suspect. Animals are compared within one grafted line and timepoint. <a href="/help#glossary-app-nlgf">Glossary</a></p>{% endif %}
   {{ fx_table(slot.tested, 'fx-table-' ~ column) }}
   {% else %}
-  <div class="fx-none">Effects of {{ column[4:] }}: not tested.</div>
+  <div class="fx-none">Effects of {{ facet_test_label(column)|lower }}: not tested.</div>
   {% endif %}
   {{ fx_untested(slot.untested) }}
 </div>
@@ -37,7 +39,10 @@
     {% for f in facets %}
     <tr class="ds-facet-row{% if not f.live %} not-live{% endif %}" data-facet="{{ f.facet }}">
       <td data-label="Facet"><a class="fct-name" href="/facets/{{ f.facet|urlencode }}" title="{{ f.summary or f.facet }}">{{ f.facet[4:] }}</a>
-        {% if not f.live %}<div class="fm-warn" title="Declared in the dataset description but not in the served data (views not rebuilt, or the source column is missing).">declared, not served</div>{% endif %}</td>
+        {% if not f.live %}<div class="fm-warn" title="Declared in the dataset description but not in the served data (views not rebuilt, or the source column is missing).">declared, not served</div>{% endif %}
+        {% if f.facet.endswith('_author_cluster') %}<div class="fm-note ds-scoped-note" title="The labels are the authors' own clusters inside one cell type of this dataset. They are never compared across datasets and no gene tests run on them.">dataset-scoped, no tests <a href="/help#glossary-author-cluster">?</a></div>{% endif %}
+        {% if f.facet in ('ant_genotype', 'ant_host_genotype') %}<div class="fm-note ds-genotype-note">{{ 'host mouse' if f.facet == 'ant_host_genotype' else 'sequenced cells' }} <a href="/help#glossary-host-genotype">?</a></div>{% endif %}
+        {% if f.facet == 'ant_tissue' %}<div class="fm-note ds-tissue-note">umbrella term <a href="/help#glossary-tissue-umbrella">?</a>{% if tissue_detail and (tissue_detail.specific or tissue_detail.column) %}<div id="ds-tissue-detail" class="ds-tissue-detail">{% if tissue_detail.specific %}specific: <b>{{ tissue_detail.specific }}</b>{% endif %}{% if tissue_detail.column %}{% if tissue_detail.specific %}; {% endif %}per cell in the plain column <code>tissue_uberon</code>{% endif %}</div>{% endif %}</div>{% endif %}</td>
       <td data-label="From">{{ source_columns(f) }}</td>
       <td data-label="Mapping">{{ mapping_kind(f.mapping_kind) }}</td>
       <td data-label="Values">{{ translation(f, max_rows=6) }}</td>
@@ -808,8 +813,12 @@
       <p>Facets are the standardised <code>ant_</code> columns of this dataset. For each one the table shows the author column it comes from, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts.</p>
       <p>For facets that were tested, the effects section below shows the differences between donors per cell type. Click a facet for its definition and the other datasets that carry it. Terms are explained in the <a href="/help#glossary">glossary</a>.</p>
     {% endcall %}
+    {% if not (facet_tests and facet_tests.excluded) %}
     <p class="fx-intro" id="fx-unit-line">
+      {% set _scope = (info.facet_scope if info and info.facet_scope else (facet_tests.facet_scope if facet_tests else None)) %}
+      {% if _scope and not (facet_tests and facet_tests.excluded) %}<span id="fx-scope">Scope: <span class="fx-scope" data-scope="{{ _scope }}" title="Facet results are tested, counted and replicated within one scope; scopes are never mixed.">{{ facet_scope_label(_scope) }}</span> <a href="/help#glossary-scope">what is a scope</a>.</span>{% endif %}
       <span id="fx-replicate">Replicate unit: <strong>{{ replicate.text if replicate and replicate.unit else 'not recorded for this dataset' }}</strong>.</span>
+      {% if info and info.control_basis %}<span id="fx-control-basis">Control animals: <strong>{{ facet_control_basis(info.control_basis) }}</strong>.</span>{% endif %}
       {% if replicate and replicate.disease_text %}<span id="fx-disease-basis">Disease basis: <strong>{{ replicate.disease_text }}</strong>{% if replicate.disease_basis not in ['braak_cerad', 'nia_reagan', 'adnc'] %} (not pathology based, so not combined with other cohorts){% endif %}.</span>{% endif %}
       {% if info and info.designation %}<span id="fx-designation"><b>{{ 'Primary data' if info.designation == 'primary' else ('Reanalysis' if info.designation == 'reanalysis' else 'Designation unresolved') }}</b>{% if info.designation == 'reanalysis' %}, never counted towards replication across datasets{% endif %}.</span>{% endif %}
       {% if info and info.donor_group %}<span id="fx-donor-group">Donor group <a href="/donor-groups#dg-{{ info.donor_group }}">{{ info.donor_group }}</a>.</span>{% endif %}
@@ -818,6 +827,7 @@
       {% if facet_tests and facet_tests.cohort and facet_tests.cohort.overlap_unknown %}<span id="fx-overlap-unknown" class="fx-reason">Donor overlap with other cohorts was not checked for this cohort.</span>{% endif %}
       <a href="/help#facet-effects">About facets and their effects</a>
     </p>
+    {% endif %}
     {% if facet_tests and facet_tests.dataset_changed %}<p class="fx-intro" id="fx-changed" style="color:#7a4b0c">The dataset has changed since the facet tests were run; the effects describe the earlier version.</p>{% endif %}
 
     {% if dataset_facets or _fx_extra %}
@@ -825,8 +835,8 @@
     {% call _facet_mapping_table(dataset_facets) %}
         {% for col in _fx_extra %}
         <tr class="ds-facet-row" data-facet="{{ col }}">
-          <td data-label="Facet"><a class="fct-name" href="/facets/{{ col|urlencode }}">{{ col[4:] }}</a></td>
-          <td colspan="4" class="fm-note">Not published as a column of this dataset; the facet test derived it ({% if col == 'ant_apoe4_carrier' %}any e4 allele in ant_apoe{% else %}see the model details{% endif %}).</td>
+          <td data-label="Facet"><a class="fct-name" href="/facets/{{ (('ant_' ~ {'ant_age_adjusted': 'age', 'ant_braak_threshold': 'braak', 'ant_apoe4_dose': 'apoe4_carrier'}.get(col, col[4:]))|urlencode) }}">{{ col[4:] }}</a></td>
+          <td colspan="4" class="fm-note">Not published as a column of this dataset; the facet test derived it ({{ facet_derived_note(col) }}).</td>
         </tr>
         {% endfor %}
     {% endcall %}
@@ -847,12 +857,20 @@
       {% for col in _fx_untested_extra %}<div>{{ col[4:]|capitalize }} was not tested ({% for item in _fx[col].untested %}{{ item.cell_type }}{% if item.analysis_level == 'cell' %} <span class="fx-pill warn" title="Too few replicates for a test: the numbers describe cells, not replicates.">cell-level, descriptive only</span>{% endif %}, {{ item.reason or 'no reason recorded' }}{{ '; ' if not loop.last }}{% endfor %}).</div>{% endfor %}</div>
     {% endif %}
     {% else %}
+    {% if facet_tests and facet_tests.excluded %}
+    <h2 class="section-head" id="facets-effects-head">Facet analysis</h2>
+    <p class="facet-excluded" id="fx-excluded"><strong>This dataset is not part of the facet analysis.</strong> {{ facet_tests.excluded_text }}</p>
+    {% call doc_block('About datasets left out of the facet analysis', id='fx-excluded-about') %}
+      <p>The facet analysis needs single cells (or nuclei) that can be grouped by cell type and by donor, so that each donor gives one profile per cell type. Spatial data, proteomics, metacell sets (each row an aggregate of cells) and pure mouse datasets do not fit, and a few sets are set aside on purpose by the curators. Such a dataset keeps its facet columns for browsing and plotting, but it is never tested and never counted towards replication ({% if facet_tests.reason %}recorded reason: <code>{{ facet_tests.reason }}</code>; {% endif %}<a href="/help#glossary-facet-exclusion">glossary</a>).</p>
+    {% endcall %}
+    {% else %}
     <h2 class="section-head" id="facets-effects-head">Effects by facet</h2>
     <p class="fx-none" id="fx-not-tested">{% if facet_tests %}No facet tests for this dataset: {{ facet_tests.reason_text }}.{% else %}Facet test results could not be loaded.{% endif %}
       </p>
     {% call doc_block('About when facets are tested', id='fx-not-tested-about') %}
-      <p>A dataset is tested when it is primary data (not a reanalysis), has a raw counts layer and a replicate column (donor, or host animal for mouse and xenograft data), and has at least 3 replicates in each group of a facet. With fewer, the numbers can still be shown per cell for orientation, but they carry no p or q value (<a href="/help#facet-effects">how facets are tested</a>).</p>
+      <p>A dataset is tested when it is primary data (not a reanalysis), is human (post-mortem tissue, or human cells grafted into mouse hosts), has a raw counts layer and a replicate column (donor, or host animal for xenografts), and has at least 3 replicates in each group of a facet. With fewer, the numbers can still be shown per cell for orientation, but they carry no p or q value (<a href="/help#facet-effects">how facets are tested</a>).</p>
     {% endcall %}
+    {% endif %}
     {% endif %}
   </div>
   {{ fx_script() }}

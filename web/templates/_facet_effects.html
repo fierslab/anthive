@@ -61,6 +61,8 @@
   .fx-untested ul { margin: 4px 0 0 18px; padding: 0; }
   .fx-none { font-size: 11.5px; color: var(--text-muted); }
   .table-wrap.fx-scroll { max-height: 70vh; overflow-y: auto; border: 1px solid var(--border-light); }
+  .facet-excluded { font-size: 13px; max-width: 860px; padding: 8px 12px; border-left: 3px solid #b6c5da; background: #f4f7fb; margin: 6px 0 8px; }
+  .ds-tissue-detail { margin-top: 2px; }
   .fx-reason { font-size: 11px; color: #7a4b0c; margin-top: 2px; overflow-wrap: anywhere; }
   .fx-flag-dl { display: grid; grid-template-columns: minmax(130px, max-content) minmax(0, 1fr); gap: 3px 12px; margin: 6px 0 0; }
   .fx-flag-dl dt { white-space: normal; }
@@ -100,7 +102,12 @@
   <dl class="fx-flag-dl">
     <dt><span class="fx-pill" data-glossary="analysis-level">replicate level (donor)</span></dt><dd>Tested with one profile per replicate (donor, animal or sample). The replicate, not the cell, is the unit.</dd>
     <dt><span class="fx-pill warn" data-glossary="descriptive-only">cell-level, descriptive only</span></dt><dd>Too few replicates for a test (fewer than 3 in a group, or no replicate column). The numbers describe cells; there is no p or q value because cells of one donor are not independent.</dd>
-    <dt><span class="fx-pill warn" data-glossary="descriptive-only">descriptive only</span></dt><dd>Below the minimum for a p value (5 donors per group, 10 for a trend such as Braak or age; 3 and 6 animals). The estimate is shown for orientation, without p, q or confidence interval.</dd>
+    <dt><span class="fx-pill warn" data-glossary="p-value-floor">descriptive: below the p-value floor (donors need 5 per group)</span></dt><dd>The unit was fitted, but with fewer replicates than the p-value floor (5 donors per group, 10 for a trend such as Braak or age; 3 animals per group, 6 for a trend). The estimate is shown without p, q or interval, and the unit is not counted towards replication.</dd>
+    <dt><span class="fx-pill" data-glossary="small-cohorts">small sample</span></dt><dd>Above the floor but with fewer than 5 replicates per group (10 for a trend): tested and counted, with little power. The group line says how many of the cohorts counted in m have fewer than 20 donors.</dd>
+    <dt><span class="fx-pill warn" data-glossary="lambda">inflated, lambda 2.3</span></dt><dd>Many genes shift together (lambda above 1.3), which usually points to a batch, depth or composition difference rather than biology.</dd>
+    <dt><span class="fx-pill" data-glossary="covariates">covariates dropped (1)</span></dt><dd>A covariate (sex, age, post-mortem interval, batch) was left out to keep the test or at least 4 residual degrees of freedom; the tooltip names it.</dd>
+    <dt><span class="fx-pill" data-glossary="app-nlgf">control: humanised-App host</span></dt><dd>What the control animals of an App NL-G-F comparison are.</dd>
+    <dt><span class="fx-pill" data-glossary="age-twins">persists after pathology adjustment</span></dt><dd>For the age facet: the gene's age effect is still there when Braak stage (else pathologic AD) is in the model.</dd>
     <dt><span class="fx-pill warn" data-glossary="disease-basis">provisional</span></dt><dd>What counts as control still differs between studies, so disease results may change.</dd>
     <dt><span class="fx-pill warn" data-glossary="composition">composition</span></dt><dd>The share of this cell type among a donor's cells changes with the facet (p &lt; 0.05, uncorrected). The effect may reflect which cells were captured. A change in the mix of states inside the cell type is not flagged.</dd>
     <dt><span class="fx-pill warn" data-glossary="covariates">batch confounded</span></dt><dd>The facet and batch cannot be separated, so batch was left out of the model.</dd>
@@ -155,7 +162,12 @@
 {% macro fx_unit_notes(unit, show_dataset=False) -%}
 {%- if unit.analysis_level == 'cell' -%}
 <div class="fx-reason">Cell-level, descriptive only{% if unit.analysis_level_reason or unit.reason %}: {{ unit.analysis_level_reason or unit.reason }}{% endif %}. No test, p or q for this unit.</div>
+{%- elif unit.analysis_level == 'below_floor' -%}
+<div class="fx-reason">Descriptive: below the p-value floor ({{ unit.floor_text }}){% if unit.analysis_level_reason %}; {{ unit.analysis_level_reason }}{% endif %}. The estimate is shown without p, q or interval, and the unit is not counted towards replication.</div>
 {%- endif -%}
+{%- for note in unit.notes or [] -%}{%- if not note.startswith(('genomic inflation', 'small sample', 'stratified')) -%}
+<div class="fx-model fx-unit-note">{{ note[0]|upper }}{{ note[1:] }}.</div>
+{%- endif -%}{%- endfor -%}
 {%- if unit.facet == 'disease' -%}
 <div class="fx-model">Disease definition: {{ unit.disease_basis_text or 'not recorded' }}{% if unit.disease_basis and unit.disease_basis not in ['braak_cerad', 'nia_reagan', 'adnc'] %}; not pathology based, so never combined with other cohorts{% endif %}.</div>
 {%- endif -%}
@@ -178,15 +190,15 @@
 {% macro fx_rows(unit, show_dataset=False) -%}
 <tr class="fx-row" id="{{ unit.unit_id }}" data-db-id="{{ unit.db_id }}" data-facet="{{ unit.facet }}"
     data-cell-type="{{ unit.cell_type }}" data-celltype-source="{{ unit.celltype_source }}"
-    data-descriptive="{{ 'true' if unit.no_test else 'false' }}"
+    data-descriptive="{{ 'true' if unit.no_test else 'false' }}" data-level="{{ unit.analysis_level }}"
     data-n-perm="{{ ((unit.model or {}).get('modules') or {}).get('n_permutations') or '' }}"
     data-has-genes="{{ 'true' if unit.genes else 'false' }}" data-has-modules="{{ 'true' if unit.modules_view else 'false' }}">
   {% if show_dataset %}
   <td class="card-title fx-dataset">{% if unit.is_pool %}<strong>{{ unit.db_id }}</strong>{% else %}<a href="/browse/{{ unit.db_id }}#data" title="{{ unit.title }}"><strong>{{ unit.db_id }}</strong></a>{% endif %}
     <div class="muted" style="font-size:11px">{{ unit.title }}</div></td>
-  <td data-label="Cell type">{{ unit.celltype_group or unit.cell_type }}{% if unit.celltype_group and unit.celltype_group != unit.cell_type %}<div class="fx-raw-label">{{ unit.cell_type }}</div>{% endif %}</td>
+  <td data-label="Cell type">{{ unit.celltype_group or unit.cell_type }}{% if unit.celltype_group and unit.celltype_group != unit.cell_type %}<div class="fx-raw-label">{{ unit.cell_type }}</div>{% endif %}{% if unit.stratum %}<div class="fx-raw-label">stratum: {{ unit.stratum }}</div>{% endif %}</td>
   {% else %}
-  <td class="card-title"><strong>{{ unit.cell_type }}</strong></td>
+  <td class="card-title"><strong>{{ unit.cell_type }}</strong>{% if unit.stratum %}<div class="fx-raw-label">stratum: {{ unit.stratum }}</div>{% endif %}</td>
   {% endif %}
   <td data-label="Contrast">{{ unit.contrast_label }}</td>
   <td data-label="Donors" class="num fx-donors">{{ unit.donors_text }}</td>
@@ -239,8 +251,8 @@
     <li><strong>Unit of analysis.</strong> The replicate (donor for human cohorts, host animal for mouse and xenograft data). Raw counts are summed per replicate within one cell type (at least 10 cells per replicate).</li>
     <li><strong>Genes.</strong> limma-voom with quality weights and robust moderation; model <code>expression ~ facet + sex + age + pmi [+ batch]</code>, covariates only when known for enough donors. q values are Benjamini-Hochberg within one dataset, cell type and facet. A second test, limma treat, asks whether the change exceeds a 10% minimum; its q is shown as q (&ge;10% change).</li>
     <li><strong>Modules.</strong> A per-donor score, an ordinary linear model per module, and permutations of the facet labels across donors (10,000 by default). q_param and q_perm are Benjamini-Hochberg within one dataset, cell type, facet, method and score source.</li>
-    <li><strong>Contrasts.</strong> Sex m vs f, pathologic AD vs control, APOE e4 carrier vs non-carrier, App NL-G-F vs control; Braak and age are straight-line trends (per stage, per decade). Below the minimum number of replicates (5 donors per group, 10 for a trend; 3 and 6 animals) a row is descriptive only.</li>
-    <li><strong>Replication.</strong> One anchor unit per cohort, cell type group and scope. A partial conjunction test (Benjamini and Heller 2008, Simes) of "same direction in at least 2 cohorts" gives an r-value per gene, adjusted by Benjamini-Hochberg over the genes of the group; replicated means r &lt; 0.05. The effect filter and the count k of cohorts individually at q &lt; 0.05 are descriptive.</li>
+    <li><strong>Contrasts.</strong> Sex m vs f, pathologic AD vs control, APOE e4 carrier vs non-carrier, App NL-G-F vs control (host animals of xenografts); Braak and age are straight-line trends (per stage, per decade of age, donors from 60 years). Age is tested twice: not adjusted for pathology, and adjusted for it (Braak stage, else pathologic AD). Braak stage III or higher against lower and the number of e4 alleles are sensitivity analyses. With fewer replicates than the p-value floor (5 donors per group, 10 for a trend; 3 and 6 animals) a row is descriptive: estimate only, no p, q or interval, not counted.</li>
+    <li><strong>Replication.</strong> One anchor unit per cohort, cell type group and scope. A partial conjunction test (Benjamini and Heller 2008, Simes) of "same direction in at least 2 cohorts" gives an r-value per gene, adjusted by Benjamini-Hochberg over the genes of the group; replicated means r &lt; 0.05. The effect filter (at least 10% in 2 cohorts), the second tier "replicated with at least a 10% change" (the same test on the treat p values) and the count k of cohorts individually at q &lt; 0.05 are shown beside it. Results are counted within one scope (human post-mortem, or human cells in mouse hosts); scopes are never mixed.</li>
     <li><strong>Provenance.</strong> Each row states its own model, covariates and run under "details". Rows are separate tests; units of one cohort are not summed.</li>
   </ul>
 {% endcall %}
@@ -301,7 +313,7 @@
         box.innerHTML = '<div class="muted fx-note">loading genes…</div>';
         getJson(base + '/genes?' + query(row, params)).then(function (data) {
             var note = descriptive
-                ? 'Descriptive only: this unit has too few replicates for a test, so there is no p or q. Largest absolute log2 fold changes first.'
+                ? (row.dataset.level === 'below_floor' ? 'Descriptive: below the p-value floor, so there is no p or q. Largest absolute log2 fold changes first.' : 'Descriptive only: this unit has too few replicates for a test, so there is no p or q. Largest absolute log2 fold changes first.')
                 : orientation ? 'No gene at q < 0.05. The ' + (all ? 'smallest p values (up to 2,000)' : '10 smallest p values') + ' are listed for orientation; none passes the threshold.'
                 : (data.n_matching + ' ' + (data.n_matching === 1 ? 'gene' : 'genes') + ' at q < 0.05, smallest q first.');
             if (!descriptive && !orientation && data.n_matching === 0) {
@@ -471,6 +483,9 @@
   .fxf-badge.rep { background: #e8f3ee; border-color: #a7d7c0; color: #14532d; }
   .fxf-badge.disc { background: #fdf3e1; border-color: #f0d3a1; color: #7a4b0c; }
   .fxf-badge.part { background: #eef2f7; border-color: #cbd5e1; color: #334155; }
+  .fxf-badge.rep2 { background: #dff0e6; border-color: #7fc09f; color: #0f4326; font-weight: 600; }
+  .fxf-geneflags { white-space: nowrap; }
+  .fxf-caveat-served { color: #7a4b0c; }
   .fxf-badge { cursor: default; }
   .fxs-k { font-size: 11px; color: #1e293b; padding: 0 7px; border-radius: 9px; }
   .fxf-method { font-size: 12px; line-height: 1.5; margin: 2px 0 8px; max-width: 900px; }
@@ -535,6 +550,8 @@
   .fx-tabs button { font: inherit; font-size: 12px; padding: 2px 10px; border: 1px solid var(--border); background: #fff; cursor: pointer; border-radius: 4px; }
   .fx-tabs button.active { background: var(--link); color: #fff; border-color: var(--link); }
   .fx-tabs button .muted { font-size: 11px; }
+  .fx-scope-tabs { border-bottom: 1px solid var(--border-light); padding-bottom: 6px; }
+  .fx-scope-tabs button { font-weight: 600; }
   .fx-tabs button.active .muted { color: #e2e8f0; }
   .fx-rec-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; margin: 6px 0; }
   .fx-rec-controls select, .fx-rec-controls input { font: inherit; font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); }
@@ -565,8 +582,10 @@ window.antFx = window.antFx || (function () {
     function donors(u) {
         if (u.n_donors_test != null && u.n_donors_ref != null) return u.level_test + ' ' + u.n_donors_test + ' / ' + u.level_ref + ' ' + u.n_donors_ref;
         var lc = u.level_counts || {};
-        if (lc.braak_min != null) return (u.n_donors || lc.n_donors) + ', stages ' + lc.braak_min + ' to ' + lc.braak_max;
-        return (u.n_donors || '?') + ' donors';
+        var n = u.n_donors || lc.n_donors;
+        if (lc.braak_min != null) return n + ', stages ' + lc.braak_min + ' to ' + lc.braak_max;
+        if (lc.value_min != null && lc.value_max != null) return n + ', ' + (currentFacet === 'apoe4_dose' ? 'e4 alleles ' : 'ages ') + Math.round(lc.value_min) + ' to ' + Math.round(lc.value_max);
+        return (n || '?') + ' ' + unitNoun;
     }
     function median(values) {
         var v = values.filter(function (x) { return x != null && !isNaN(x); }).sort(function (a, b) { return a - b; });
@@ -606,9 +625,22 @@ window.antFx = window.antFx || (function () {
             });
         });
     }
+    var unitNoun = 'donors';   // 'animals' for a xenograft card
+    var currentFacet = '';
+    var NUMERIC_FACETS = { braak: 1, age: 1, age_adjusted: 1, apoe4_dose: 1 };
+    var GENE_FLAGS = {
+        mitochondrial: ['MT', 'Mitochondrial gene: tracks nuclear RNA quality and cell damage, not regulation.'],
+        ribosomal: ['ribosomal', 'Ribosomal protein gene: tracks library quality and cell state.'],
+        lncrna_or_clone: ['lncRNA / clone', 'Non-coding or clone-named transcript: often technical and poorly annotated.'],
+        sex_chromosome: ['sex chromosome', 'X or Y linked: sex composition can move it.'],
+        long_gene: ['long gene', 'Gene span above 500 kb: intron-rich, tracks nuclear RNA quality and post-mortem interval.'],
+        apoe_locus: ['APOE locus', 'Allele-linked expression and read-mapping differences near APOE can produce an e4 effect that need not be biology.']
+    };
+    var SCOPE_LABELS = { human_postmortem: 'human post-mortem', xenograft_human_in_mouse: 'human cells in mouse hosts (xenograft)', in_vitro: 'in vitro cultures' };
+    var CONTROL_BASIS = { humanised_app_host: 'humanised-App host (App hu/hu)', wild_type_host: 'wild-type host', wild_type: 'wild-type host' };
     // The one-line summary of a cell type group. The partial conjunction
-    // r-value decides "replicated"; k of m (cohorts with q_treat < 0.05) is
-    // descriptive only.
+    // r-value decides "replicated"; the effect filter, the second tier
+    // (r_treat) and k of m (cohorts with q < 0.05) are shown apart from it.
     function groupSummary(rep, counted, facet) {
         var m = rep.m != null ? rep.m : (rep.cohorts_tested || 0);
         var k = rep.k != null ? rep.k : (rep.cohorts_sig_same_sign || 0);
@@ -616,36 +648,68 @@ window.antFx = window.antFx || (function () {
         var line;
         if (m < 2) {
             line = 'tested in one cohort only; replication not assessable';
+        } else if (rep.r_value == null) {
+            line = 'replication not assessable';
         } else if (replicated) {
             line = 'replicated (r = ' + qfmt(rep.r_value) + (rep.r_direction ? ', ' + esc(rep.r_direction) : '') + ')';
         } else {
-            line = 'no evidence of replication' + (rep.r_value != null ? ' (r = ' + qfmt(rep.r_value) + ')' : '');
+            line = 'not replicated (r = ' + qfmt(rep.r_value) + ')';
         }
+        var carried = (replicated && (rep.r_cohorts || []).length) ? 'carried by ' + esc(rep.r_cohorts.slice(0, 2).join(' and ')) : '';
         var kText = k + ' of ' + plural(m, 'cohort') + ' individually at q &lt; 0.05';
         var med = median(counted.map(function (u) { return u.logFC; }));
-        var medText = med == null ? '' : 'median log2FC ' + signed(med) + (facet.name === 'braak' ? ' per Braak stage' : (facet.name === 'age' || facet.name === 'age_adjusted' ? ' per decade' : (facet.contrast ? ' (' + esc(facet.contrast) + ')' : '')));
-        // Served by newer APIs only: the effect filter (shown apart from r) and the second tier.
-        var gate = '';
+        var medText = med == null ? '' : 'median log2FC ' + signed(med) + (facet.name === 'braak' ? ' per Braak stage' : (facet.name === 'age' || facet.name === 'age_adjusted' ? ' per decade' : (facet.name === 'apoe4_dose' ? ' per e4 allele' : (facet.contrast ? ' (' + esc(facet.contrast) + ')' : ''))));
+        // The effect filter is a separate condition and not part of the error control.
         var gateUnit = esc(rep.effect_gate_unit || '10%');
-        if (m >= 2 && rep.effect_gate_passed === true) gate = 'effect of at least ' + gateUnit + ' in 2 cohorts';
-        else if (m >= 2 && rep.effect_gate_passed === false && replicated) gate = 'effect below ' + gateUnit + ' in fewer than 2 cohorts';
-        if (m >= 2 && rep.replicated_effect === true) gate += (gate ? '; ' : '') + 'also replicated with at least ' + gateUnit;
-        var small = (rep.anchors || []).filter(function (a) { return a.n_donors != null && a.n_donors < 20; }).length;
-        var smallText = (m >= 2 && small) ? 'm includes ' + plural(small, 'cohort') + ' below 20 donors' : '';
-        return { line: line, kText: kText, med: medText, gate: gate, smallText: smallText, k: k, m: m, replicated: replicated, r: rep.r_value };
+        var filter = null;
+        if (m >= 2 && replicated && rep.effect_gate_passed === true) {
+            filter = { cls: '', text: 'effect filter: at least ' + gateUnit + ' in 2 cohorts', title: 'At least 2 cohorts each show a change of at least ' + (rep.effect_gate_unit || '10%') + ' in the replicated direction' + ((rep.effect_gate_cohorts || []).length ? ': ' + rep.effect_gate_cohorts.slice(0, 4).join(', ') : '') + '. A filter on the estimates, not part of the error control.' };
+        } else if (m >= 2 && replicated && rep.effect_gate_passed === false) {
+            filter = { cls: 'warn', text: 'effect filter: below ' + gateUnit + ' in fewer than 2 cohorts', title: 'Fewer than 2 cohorts show a change of at least ' + (rep.effect_gate_unit || '10%') + '. The direction replicates, but the change is small.' };
+        }
+        // Second tier: the same test on the treat p values.
+        var tier = null;
+        if (m >= 2 && rep.replicated_effect === true) {
+            tier = { text: 'replicated with at least ' + gateUnit + ' change', title: 'Second tier: the partial conjunction on the treat p values (r_treat = ' + qfmt(rep.r_treat) + '). Replicated and large enough to matter at an FDR of 5 percent.' + (rep.replicated_strong ? ' Also at 25 percent (r = ' + qfmt(rep.r_strong) + ').' : '') };
+        }
+        var nSmall = rep.n_small != null ? rep.n_small : (rep.anchors || []).filter(function (a) { return a.n_donors != null && a.n_donors < 20; }).length;
+        var smallText = (m >= 2 && nSmall) ? 'm includes ' + plural(nSmall, 'cohort') + ' below ' + (rep.small_cohort_replicates || 20) + ' ' + unitNoun : '';
+        return { line: line, carried: carried, kText: kText, med: medText, filter: filter, tier: tier, smallText: smallText, k: k, m: m, replicated: replicated, r: rep.r_value };
     }
-    function levelPill(u) {
-        return u.analysis_level === 'cell' ? '<span class="fx-pill warn" data-glossary="descriptive-only" title="Too few replicates for a test; the numbers describe cells, so there is no p or q value.">cell-level, descriptive only</span>' : '';
+    function floorText(u, facetName) {
+        var animals = unitNoun === 'animals';
+        var noun = unitNoun;
+        if (NUMERIC_FACETS[facetName]) return noun + ' need ' + (animals ? 6 : 10) + ' for a trend';
+        return noun + ' need ' + (animals ? 3 : 5) + ' per group';
     }
-    function flagPills(u) {
+    function levelPill(u, facetName) {
+        if (u.analysis_level === 'cell') return '<span class="fx-pill warn" data-glossary="descriptive-only" title="Too few replicates for a test; the numbers describe cells, so there is no p or q value.">cell-level, descriptive only</span>';
+        if (u.analysis_level === 'below_floor') return '<span class="fx-pill warn" data-glossary="p-value-floor" title="Fewer replicates than the p-value floor. The estimate is shown without p, q or interval, and the unit is not counted towards replication.">descriptive: below the p-value floor (' + floorText(u, facetName) + ')</span>';
+        return '';
+    }
+    function flagPills(u, facetName) {
         var f = u.flags || {}, out = [];
-        if (u.descriptive_only) out.push('<span class="fx-pill warn" data-glossary="descriptive-only" title="Too few donors in a group for a p or q value; the estimate is shown for orientation.">descriptive only</span>');
+        if (u.descriptive_only && u.analysis_level !== 'below_floor') out.push('<span class="fx-pill warn" data-glossary="descriptive-only" title="Too few donors in a group for a p or q value; the estimate is shown for orientation.">descriptive only</span>');
+        if (f.small_sample && u.analysis_level === 'replicate') out.push('<span class="fx-pill" data-glossary="small-cohorts" title="Fewer than 5 replicates in a group (10 for a trend): tested, but with little power.">small sample</span>');
+        if (u.inflated) out.push('<span class="fx-pill warn" data-glossary="lambda" title="Many genes shift together (lambda above 1.3): often a batch, depth or composition difference rather than biology. Read the p values with care.">inflated, lambda ' + num(u.lambda_gc) + '</span>');
+        if ((u.covariates_dropped || []).length) out.push('<span class="fx-pill" data-glossary="covariates" title="Left out of the model to keep the test: ' + esc(u.covariates_dropped.join('; ')) + '">covariates dropped (' + u.covariates_dropped.length + ')</span>');
+        if (u.control_basis) out.push('<span class="fx-pill" data-glossary="app-nlgf" title="What the control animals of this comparison are.">control: ' + esc(CONTROL_BASIS[u.control_basis] || String(u.control_basis).replace(/_/g, ' ')) + '</span>');
+        if (u.persists_after_pathology_adjustment === true) out.push('<span class="fx-pill" data-glossary="age-twins" title="The age effect of this gene is still present when Braak stage (else pathologic AD) is in the model.">persists after pathology adjustment</span>');
+        if (u.persists_after_pathology_adjustment === false) out.push('<span class="fx-pill warn" data-glossary="age-twins" title="The age effect of this gene is gone or weaker when Braak stage (else pathologic AD) is in the model, so it may reflect pathology.">does not persist after pathology adjustment</span>');
+        if (u.age_top_coded) out.push('<span class="fx-pill warn" data-glossary="age-twins" title="Ages above a ceiling are recorded as the ceiling, which flattens the oldest donors.">ages top-coded</span>');
+        if (u.n_sex_discordant > 0) out.push('<span class="fx-pill warn" data-glossary="sex-check" title="XIST and Y-linked expression contradict the recorded sex of these donors.">' + u.n_sex_discordant + ' of ' + u.n_sex_checked + ' sex labels disagree</span>');
         if (f.composition_flag) out.push('<span class="fx-pill warn" data-glossary="composition" title="The share of this cell type among each donor\'s cells changes with the facet, so the effect may reflect which cells were captured.">composition</span>');
         if (f.batch_confounded) out.push('<span class="fx-pill warn" data-glossary="covariates" title="The facet cannot be separated from batch, so batch was left out.">batch confounded</span>');
         if (f.batch_used) out.push('<span class="fx-pill" data-glossary="covariates" title="A donor-level batch column was in the model.">batch adjusted</span>');
         if (u.pooled) out.push('<span class="fx-pill" data-glossary="pooled-unit" title="Several files of one cohort were combined per donor into one unit.">pooled</span>');
         if (u.independence === 'unknown') out.push('<span class="fx-pill warn" data-glossary="donor-overlap" title="It is not known whether this cohort shares donors with another one.">donor overlap not checked</span>');
-        return levelPill(u) + out.join('');
+        return levelPill(u, facetName) + out.join('');
+    }
+    function geneFlagPills(flags) {
+        return (flags || []).map(function (flag) {
+            var info = GENE_FLAGS[flag] || [String(flag).replace(/_/g, ' '), 'Gene class flag.'];
+            return '<span class="fx-pill warn" data-glossary="gene-class-flags" title="' + esc(info[1]) + '">' + esc(info[0]) + '</span>';
+        }).join('');
     }
     function docBlock(title, id, bodyHtml) {
         return '<details class="doc-block"' + (id ? ' id="' + id + '"' : '') + '><summary>&#9432; ' + title + '</summary><div class="doc-body">' + bodyHtml + '</div></details>';
@@ -658,6 +722,8 @@ window.antFx = window.antFx || (function () {
         opts = opts || {};
         var units = card.units || [];
         var facet = card.facet || {};
+        unitNoun = card.scope === 'xenograft_human_in_mouse' ? 'animals' : 'donors';
+        currentFacet = facet.name || '';
         if (!units.length) { box.innerHTML = '<p class="fx-none">' + esc(card.gene) + ' was not tested for ' + esc(facet.name) + ' (not in any tested dataset, or removed by the expression filter).</p>'; return; }
         var reps = {};
         (card.replication || []).forEach(function (r) { reps[r.celltype_group || r.cell_type] = r; });
@@ -665,11 +731,18 @@ window.antFx = window.antFx || (function () {
         var methodName = METHOD_NAME[anyRep.replication_method] || 'Simes';
         var perStage = facet.name === 'braak' ? '; per Braak stage log2(1.1)/3' : '';
         var methodBody = '<p>' + methodName + ' partial conjunction test of "same direction in at least 2 cohorts" on one-sided p values, one anchor unit per cohort (<a href="/help#glossary-partial-conjunction">glossary</a>). A gene is replicated when its r-value is below 0.05: among all genes listed as replicated, about 5 percent are expected to be false entries. This is a statement about the list, not about one gene, and not about effect size. <em>k of m</em> counts the cohorts that individually reach q &lt; 0.05 in that direction; it depends on donor numbers and is descriptive.</p>' +
-            '<p>"No evidence of replication" does not show that the effect is absent. The effect filter (at least ' + (facet.name === 'braak' ? '10% over three Braak stages' : (facet.name === 'age' || facet.name === 'age_adjusted' ? '10% per decade' : '10%')) + ' in 2 cohorts) is a filter on the estimates and not part of the error control.</p>' +
+            '<p>"Not replicated" does not show that the effect is absent: with few cohorts or few ' + unitNoun + ' it means the data do not support a shared effect. The effect filter (at least ' + (facet.name === 'braak' ? '10% over three Braak stages' : (facet.name === 'age' || facet.name === 'age_adjusted' ? '10% per decade' : (facet.name === 'apoe4_dose' ? '10% over two e4 alleles' : '10%'))) + ' in 2 cohorts) is a filter on the estimates and not part of the error control. The second badge, "replicated with at least a 10% change", repeats the test on the treat p values. <em>m</em> counts every cohort that tested the gene, small ones included.</p>' +
             (card.definition ? '<details class="doc-block"><summary>&#9432; About the full rule</summary><div class="doc-body">' + esc(card.definition) + '</div></details>' : '');
-        var html = '<div class="fxf-head">' + esc(facet.effect_unit) + '; ' + esc(facet.contrast) + '. Each line is one cell type group; open it for its anchors and datasets.</div>' +
+        var scopeName = SCOPE_LABELS[card.scope] || String(card.scope || '').replace(/_/g, ' ');
+        var flagPillsHtml = geneFlagPills((card.gene_flags || []).concat(card.apoe_locus && (card.gene_flags || []).indexOf('apoe_locus') < 0 ? ['apoe_locus'] : []));
+        var html = '<div class="fxf-head">' + (card.scope ? '<span class="fx-scope" data-scope="' + esc(card.scope) + '" title="Results are counted within one scope; scopes are never mixed.">' + esc(scopeName) + '</span> ' : '') +
+            esc(facet.effect_unit) + '; ' + esc(facet.contrast) + '. Each line is one cell type group; open it for its anchors and datasets.' +
+            (flagPillsHtml ? ' <span class="fxf-geneflags" id="fxf-gene-flags">Gene class: ' + flagPillsHtml + '</span>' : '') + '</div>' +
             '<div class="fxf-caveat" id="fxf-caveat">A change in a whole cell type can also be a change in the mix of cell states within it (<a href="/help#glossary-composition">composition</a>).</div>' +
             docBlock('About replication', 'fxf-method', methodBody);
+        var served = {};
+        units.forEach(function (u) { (u.notes || []).forEach(function (n) { if (/^(detects large effects only|live-cell isolation)/.test(n)) served[n] = 1; }); });
+        Object.keys(served).forEach(function (n) { html += '<div class="fxf-note fxf-caveat-served">' + esc(n.charAt(0).toUpperCase() + n.slice(1)) + '.</div>'; });
         (card.notes || []).forEach(function (n) {
             if (n === 'exploratory' || n.indexOf('no meta-analysis') === 0 || n.indexOf('cohort table') === 0 || n.indexOf('cell types are counted by group') === 0 || n.indexOf('datasets are tested separately') === 0) return;
             html += '<div class="fxf-note">' + esc(n) + '</div>';
@@ -714,15 +787,22 @@ window.antFx = window.antFx || (function () {
             var labels = (rep.labels || []).length ? rep.labels : Array.from(new Set(g.rows.map(function (u) { return u.cell_type; })));
             var labelText = labels.filter(function (l) { return l !== g.name; });
             var share = sum.m ? sum.k / sum.m : 0;
+            var nInflated = g.counted.filter(function (u) { return u.inflated; }).length;
+            var persist = (facet.name === 'age') ? g.counted.filter(function (u) { return u.persists_after_pathology_adjustment != null; }) : [];
+            var persistYes = persist.filter(function (u) { return u.persists_after_pathology_adjustment === true; }).length;
             var out = '<details class="fxs-group" data-group="' + esc(g.name) + '"' + (open ? ' open' : '') + '><summary>' +
                 '<span class="fxs-name">' + esc(g.name) + '</span>' +
                 (g.counted.length ? '<span class="fxf-badge ' + cls + '">' + sum.line + '</span>' +
+                    (sum.tier ? '<span class="fxf-badge rep2" title="' + esc(sum.tier.title) + '">' + sum.tier.text + '</span>' : '') +
                     '<span class="fxs-k" style="background:rgba(51,65,85,' + (0.05 + 0.3 * share).toFixed(2) + ')">' + sum.kText + '</span>' : '<span class="fxs-nc">not counted</span>') +
+                (g.counted.length && sum.carried ? '<span class="fxs-gate">' + sum.carried + '</span>' : '') +
+                (g.counted.length && sum.filter ? '<span class="fx-pill ' + sum.filter.cls + '" data-glossary="effect-filter" title="' + esc(sum.filter.title) + '">' + sum.filter.text + '</span>' : '') +
                 (g.counted.length && rep.sign_discordant && !sum.replicated ? '<span class="fx-pill warn" data-glossary="agreement" title="Cohorts that individually reach q &lt; 0.05 disagree in direction.">sign discordant</span>' : '') +
                 (g.counted.length && rep.overlap_unknown ? '<span class="fx-pill warn" data-glossary="donor-overlap" title="Not known whether these cohorts share donors with another: ' + esc((rep.cohorts_overlap_unknown || []).join(', ')) + '">donor overlap not checked</span>' : '') +
+                (g.counted.length && nInflated ? '<span class="fx-pill warn" data-glossary="lambda" title="Many genes shift together in these units (lambda above 1.3): often a batch, depth or composition difference rather than biology.">' + plural(nInflated, 'counted unit') + ' inflated</span>' : '') +
+                (g.counted.length && persist.length ? '<span class="fx-pill ' + (persistYes === persist.length ? '' : 'warn') + '" data-glossary="age-twins" title="Whether the age effect of this gene stays when Braak stage (else pathologic AD) is in the model.">persists after pathology adjustment in ' + persistYes + ' of ' + plural(persist.length, 'cohort') + '</span>' : '') +
                 (g.counted.length && sum.med ? '<span class="fxs-med">' + sum.med + '</span>' : '') +
-                (g.counted.length && sum.gate ? '<span class="fxs-gate">' + sum.gate + '</span>' : '') +
-                (g.counted.length && sum.smallText ? '<span class="fxs-gate">' + sum.smallText + '</span>' : '') +
+                (g.counted.length && sum.smallText ? '<span class="fxs-gate" data-glossary="small-cohorts">' + sum.smallText + '</span>' : '') +
                 '<span class="fxs-n">' + plural(g.rows.length, 'dataset row') + (g.counted.length && g.counted.length < g.rows.length ? ', ' + g.counted.length + ' counted' : '') + '</span>' +
                 (labelText.length ? '<span class="fxs-labels">labels: ' + esc(labelText.join(', ')) + '</span>' : '') +
                 '</summary>';
@@ -736,11 +816,16 @@ window.antFx = window.antFx || (function () {
             if (!anchors.length) return '';
             var showDisease = facet.name === 'disease';
             var unknown = rep.cohorts_overlap_unknown || [];
-            var out = '<div class="fxf-anchors"><div class="fxf-anchors-title">Anchors: the unit that counted for each cohort</div><div class="table-wrap"><table class="fxf fxa"><thead><tr><th>Cohort</th><th>Anchor unit</th><th>Donors</th><th>log2FC</th><th>p (≥10% change)</th><th>q (≥10% change)</th>' + (showDisease ? '<th>Disease definition</th>' : '') + '</tr></thead><tbody>';
+            var carriers = rep.r_cohorts || [], gateCohorts = rep.effect_gate_cohorts || [];
+            var out = '<div class="fxf-anchors"><div class="fxf-anchors-title">Anchors: the unit that counted for each cohort</div><div class="table-wrap"><table class="fxf fxa"><thead><tr><th>Cohort</th><th>Anchor unit</th><th>' + (unitNoun === 'animals' ? 'Animals' : 'Donors') + '</th><th>log2FC</th><th>p</th><th>q</th><th>p (≥10% change)</th><th>q (≥10% change)</th>' + (showDisease ? '<th>Disease definition</th>' : '') + '</tr></thead><tbody>';
             anchors.forEach(function (a) {
-                out += '<tr><td>' + esc(a.cohort_label || a.cohort) + (unknown.indexOf(a.cohort_label) >= 0 || a.independence === 'unknown' ? ' <span class="fx-pill warn" data-glossary="donor-overlap" title="It is not known whether this cohort shares donors with another one.">donor overlap not checked</span>' : '') + '</td>' +
+                var label = a.cohort_label || a.cohort;
+                var marks = (carriers.indexOf(label) >= 0 ? ' <span class="fx-pill" data-glossary="r-value" title="One of the two cohorts with the smallest p values: they carry the r-value.">carries r</span>' : '') +
+                    (gateCohorts.indexOf(label) >= 0 ? ' <span class="fx-pill" data-glossary="effect-filter" title="This cohort shows a change of at least ' + esc(rep.effect_gate_unit || '10%') + ' in the replicated direction.">passes the effect filter</span>' : '');
+                out += '<tr><td>' + esc(label) + marks + (unknown.indexOf(a.cohort_label) >= 0 || a.independence === 'unknown' ? ' <span class="fx-pill warn" data-glossary="donor-overlap" title="It is not known whether this cohort shares donors with another one.">donor overlap not checked</span>' : '') + '</td>' +
                     '<td class="fxf-ds">' + datasetLink(a) + (a.pooled ? ' <span class="fx-pill" data-glossary="pooled-unit" title="Several files of this cohort were combined per donor into one unit.">pooled</span>' : '') + '</td>' +
                     '<td class="num">' + esc(a.n_donors == null ? 'NA' : a.n_donors) + '</td><td class="num">' + signed(a.logFC) + '</td>' +
+                    '<td class="num">' + qfmt(a.p_value) + '</td><td class="num">' + qfmt(a.q_value) + '</td>' +
                     '<td class="num">' + qfmt(a.p_treat) + '</td><td class="num">' + qfmt(a.q_treat) + '</td>' +
                     (showDisease ? '<td>' + esc(DISEASE_BASIS[a.disease_basis] || a.disease_basis || 'not recorded') + '</td>' : '') + '</tr>';
             });
@@ -789,12 +874,17 @@ window.antFx = window.antFx || (function () {
                 if (u.n_sibling_strata > 1) qCell += '<div class="fxf-sub" title="' + u.n_sibling_strata + ' strata of this dataset share one vote, so their q values are multiplied by ' + u.n_sibling_strata + '">×' + u.n_sibling_strata + ': ' + qfmt(u.q_counted) + '</div>';
                 var sub = '';
                 if (u.cell_type && u.cell_type !== groupName) sub += '<div class="fxf-sub">' + esc(u.cell_type) + '</div>';
+                var stratum = u.design_subset || ((String(u.celltype_source || '').split('@')[1]) || '');
+                if (stratum) sub += '<div class="fxf-sub" title="Animals are compared within one stratum, never across strata.">stratum: ' + esc(stratum.replace(/\|/g, ', ')) + '</div>';
                 if (!u.counted && !u.is_secondary && u.not_counted_reason) sub += '<div class="fxf-sub fxf-reason">not counted: ' + esc(u.not_counted_reason) + '</div>';
-                var modelText = '95% CI ' + ciText + '; donors ' + donors(u) + '. ' + (u.role || 'role not recorded') + '. Model: ' + u.model +
-                    (u.covariates_left_out && u.covariates_left_out.length ? '; left out: ' + u.covariates_left_out.join(', ') : '') + '; ' + u.method +
+                var modelText = '95% CI ' + ciText + '; ' + donors(u) + '. ' + (u.role || 'role not recorded') + '. Model: ' + u.model +
+                    (u.covariates_left_out && u.covariates_left_out.length ? '; left out: ' + u.covariates_left_out.join(', ') : '') +
+                    ((u.covariates_dropped || []).length ? '; dropped to keep the test: ' + u.covariates_dropped.join('; ') : '') + '; ' + u.method +
+                    (u.lambda_gc != null ? '; lambda ' + num(u.lambda_gc) + (u.df_total_median != null ? ', median residual df ' + num(u.df_total_median, 1) : '') : '') +
+                    (u.control_basis ? '; control: ' + (CONTROL_BASIS[u.control_basis] || u.control_basis) : '') +
                     (u.tau_log2 != null ? '; treat tau log2 ' + num(u.tau_log2, 3) + ', p ' + qfmt(u.p_treat) : '');
                 sub += '<details class="fxf-row-model"><summary>model</summary><div>' + esc(modelText) + '</div></details>';
-                var pills = (u.is_secondary ? '<span class="fx-pill warn" data-glossary="cohort" title="A reanalysis of cells another dataset serves; shown but never counted.">reanalysis, not counted</span>' : '') + flagPills(u);
+                var pills = (u.is_secondary ? '<span class="fx-pill warn" data-glossary="cohort" title="A reanalysis of cells another dataset serves; shown but never counted.">reanalysis, not counted</span>' : '') + flagPills(u, facet.name);
                 out += '<tr class="' + (u.counted ? '' : 'not-counted') + '">' +
                     '<td class="fxf-ds">' + datasetLink(u) + sub + '</td>' +
                     '<td class="num">' + num(u.logFC) + '</td><td class="fxf-bar">' + bar + '</td>' +
@@ -809,7 +899,7 @@ window.antFx = window.antFx || (function () {
 </script>
 {%- endmacro %}
 
-{# Gene page panel: one tab per tested facet. #}
+{# Gene page panel: a scope selector, then one tab per tested facet of that scope. #}
 {% macro fx_gene_panel(gene) -%}
 {{ fx_styles() }}
 {{ fx_forest_assets() }}
@@ -820,13 +910,13 @@ window.antFx = window.antFx || (function () {
   {% call doc_block('About these effects', id='gene-fx-about') %}
     <p>Each dataset and cell type is tested on its own, with one profile per donor (a <a href="/help#glossary-pseudobulk">pseudobulk</a>). One line per cell type group says whether {{ gene }} <a href="/help#glossary-r-value">replicates</a> across cohorts: the same direction in at least 2 cohorts, counted through one anchor unit per cohort. Open a line for its anchors and datasets.</p>
     <p>The r-value is a false discovery rate for the whole list of replicated genes, not a probability for {{ gene }}, and it does not say how large the change is. A change in a whole cell type can also be a change in the mix of cell states within it. "Disease" means pathologic AD (Braak and CERAD), and only pathology-based definitions are combined. Terms are explained in the <a href="/help#glossary">glossary</a>.</p>
+    <p id="gene-fx-scope-about"><strong>Scopes.</strong> Human post-mortem tissue and human cells grafted into mouse hosts are analysed and counted separately and never mixed: in a xenograft the replicate is the host animal, and the gene is the human gene in a mouse brain. Pick the scope first, then the facet. The age facet appears twice, not adjusted and adjusted for pathology; Braak stage III or higher and the number of e4 alleles are sensitivity analyses of the Braak trend and the carrier contrast (<a href="/help#glossary-scope">glossary</a>).</p>
   {% endcall %}
-  <div class="fx-tabs" role="tablist" id="gene-fx-tabs">
-    <button type="button" data-facet="sex" class="active">sex</button>
-    <button type="button" data-facet="disease">pathologic AD <span class="muted">(provisional)</span></button>
-    <button type="button" data-facet="apoe4_carrier">APOE e4 carrier</button>
-    <button type="button" data-facet="braak">Braak stage</button>
+  <div class="fx-tabs fx-scope-tabs" role="tablist" id="gene-fx-scopes" aria-label="Scope">
+    <button type="button" data-scope="human_postmortem" class="active">{{ facet_scope_label('human_postmortem') }}</button>
+    <button type="button" data-scope="xenograft_human_in_mouse">{{ facet_scope_label('xenograft_human_in_mouse') }}</button>
   </div>
+  <div class="fx-tabs" role="tablist" id="gene-fx-tabs"></div>
   <div id="gene-fx-body" class="muted" style="font-size:12px">loading…</div>
 </section>
 <script>
@@ -834,37 +924,93 @@ window.antFx = window.antFx || (function () {
     var panel = document.getElementById('gene-facet-effects');
     if (!panel || !window.antFx) return;
     var gene = panel.dataset.gene, body = document.getElementById('gene-fx-body');
-    var tabs = Array.from(document.querySelectorAll('#gene-fx-tabs button'));
-    var cards = {}, active = 'sex';
+    var tabBox = document.getElementById('gene-fx-tabs');
+    var scopeTabs = Array.from(document.querySelectorAll('#gene-fx-scopes button'));
+    var FACETS = {
+        human_postmortem: [['sex', 'sex'], ['disease', 'pathologic AD <span class="muted">(provisional)</span>'], ['apoe4_carrier', 'APOE e4 carrier'],
+            ['apoe4_dose', 'APOE e4 dose'], ['braak', 'Braak stage'], ['braak_threshold', 'Braak III or higher'],
+            ['age', 'age, not adjusted for pathology'], ['age_adjusted', 'age, adjusted for pathology']],
+        xenograft_human_in_mouse: [['sex', 'sex'], ['app_nlgf', 'App NL-G-F host']]
+    };
+    var cards = {}, activeScope = 'human_postmortem', activeFacet = 'sex', started = {}, userPicked = false;
+    function key(scope, facet) { return scope + '|' + facet; }
     function show(facet) {
-        active = facet;
-        tabs.forEach(function (b) { b.classList.toggle('active', b.dataset.facet === facet); });
-        var card = cards[facet];
-        if (!card) { body.textContent = 'loading…'; return; }
-        if (card.error) { body.textContent = 'Facet effects ' + card.error + '.'; return; }
+        activeFacet = facet;
+        Array.from(tabBox.querySelectorAll('button')).forEach(function (b) { b.classList.toggle('active', b.dataset.facet === facet); });
+        var card = cards[key(activeScope, facet)];
+        if (!card) { body.classList.add('muted'); body.textContent = 'loading…'; return; }
+        if (card.error) { body.classList.add('muted'); body.textContent = 'Facet effects ' + card.error + '.'; return; }
         body.classList.remove('muted');
         antFx.renderCard(body, card);
     }
-    tabs.forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.facet); }); });
-    var pending = tabs.length;
-    tabs.forEach(function (b) {
-        var facet = b.dataset.facet;
-        antFx.getJson('/api/facets/' + facet + '/effects?gene=' + encodeURIComponent(gene)).then(function (card) {
-            cards[facet] = card;
-            // replicated groups outrank any k; ties on k keep the tab order
-            var best = Math.max.apply(null, (card.replication || []).map(function (r) { return (r.replicated ? 1000 : 0) + (r.k || 0); }).concat([0]));
-            b.dataset.best = best;
-            b.insertAdjacentHTML('beforeend', ' <span class="muted">' + (card.n_units || 0) + '</span>');
-        }).catch(function (err) { cards[facet] = { error: err.message }; })
-          .finally(function () {
-            pending -= 1;
-            if (facet === active) show(active);
-            if (pending === 0) {
-                // open the facet with the most replicated result (ties keep the order)
-                var pick = tabs.reduce(function (acc, t) { return (+t.dataset.best || 0) > (+acc.dataset.best || 0) ? t : acc; }, tabs[0]);
-                show(pick.dataset.facet);
-            }
+    function buildTabs(scope) {
+        tabBox.innerHTML = FACETS[scope].map(function (f) { return '<button type="button" data-facet="' + f[0] + '">' + f[1] + '</button>'; }).join('');
+        Array.from(tabBox.querySelectorAll('button')).forEach(function (b) {
+            var card = cards[key(scope, b.dataset.facet)];
+            if (card && !card.error) b.insertAdjacentHTML('beforeend', ' <span class="muted">' + (card.n_units || 0) + '</span>');
+            b.addEventListener('click', function () { userPicked = true; show(b.dataset.facet); });
         });
+    }
+    function best(card) {
+        return Math.max.apply(null, (card.replication || []).map(function (r) { return (r.replicated ? 1000 : 0) + (r.k || 0); }).concat([0]));
+    }
+    function pickBest(scope) {
+        var pick = FACETS[scope][0][0], score = -1;
+        FACETS[scope].forEach(function (f) {
+            var card = cards[key(scope, f[0])];
+            if (card && !card.error && (card.n_units || 0) && best(card) > score) { score = best(card); pick = f[0]; }
+        });
+        return pick;
+    }
+    function nUnits(scope) {
+        return FACETS[scope].reduce(function (acc, f) { var c = cards[key(scope, f[0])]; return acc + (c && !c.error ? (c.n_units || 0) : 0); }, 0);
+    }
+    function labelScopes() {
+        scopeTabs.forEach(function (b) {
+            var n = b.dataset.scope in started ? nUnits(b.dataset.scope) : null;
+            var old = b.querySelector('.muted'); if (old) old.remove();
+            if (n != null) b.insertAdjacentHTML('beforeend', ' <span class="muted">' + n + ' units</span>');
+        });
+    }
+    function load(scope, then) {
+        if (started[scope]) return;
+        started[scope] = true;
+        var pending = FACETS[scope].length;
+        FACETS[scope].forEach(function (f) {
+            antFx.getJson('/api/facets/' + f[0] + '/effects?gene=' + encodeURIComponent(gene) + '&scope=' + encodeURIComponent(scope)).then(function (card) {
+                cards[key(scope, f[0])] = card;
+            }).catch(function (err) { cards[key(scope, f[0])] = { error: err.message }; })
+              .finally(function () {
+                pending -= 1;
+                if (scope === activeScope) {
+                    var current = tabBox.querySelector('button[data-facet="' + f[0] + '"]');
+                    if (current && !current.querySelector('.muted') && cards[key(scope, f[0])] && !cards[key(scope, f[0])].error) {
+                        current.insertAdjacentHTML('beforeend', ' <span class="muted">' + (cards[key(scope, f[0])].n_units || 0) + '</span>');
+                    }
+                    if (f[0] === activeFacet) show(activeFacet);
+                }
+                if (pending === 0) { labelScopes(); if (then) then(); }
+            });
+        });
+    }
+    function selectScope(scope, auto) {
+        activeScope = scope;
+        scopeTabs.forEach(function (b) { b.classList.toggle('active', b.dataset.scope === scope); });
+        buildTabs(scope);
+        activeFacet = FACETS[scope][0][0];
+        show(activeFacet);
+        load(scope, function () {
+            if (activeScope !== scope) return;
+            buildTabs(scope);
+            show(userPicked ? activeFacet : pickBest(scope));
+        });
+        if (started[scope] && cards[key(scope, activeFacet)]) { buildTabs(scope); show(userPicked ? activeFacet : pickBest(scope)); }
+    }
+    scopeTabs.forEach(function (b) { b.addEventListener('click', function () { userPicked = false; selectScope(b.dataset.scope); }); });
+    selectScope('human_postmortem');
+    // the other scope loads in the background so its unit count shows on its button
+    load('xenograft_human_in_mouse', function () {
+        if (nUnits('human_postmortem') === 0 && nUnits('xenograft_human_in_mouse') > 0 && !userPicked) selectScope('xenograft_human_in_mouse');
     });
 })();
 </script>
@@ -872,10 +1018,10 @@ window.antFx = window.antFx || (function () {
 
 {# Facet page, part two: replicated genes per cell type group, and a gene box
    that shows that gene's forest. #}
-{% macro fx_recurring(facet_column) -%}
+{% macro fx_recurring(facet_column, scope=None) -%}
 {{ fx_forest_assets() }}
-<div id="fx-recurring" data-facet="{{ facet_column[4:] }}" data-label="{{ facet_column[4:]|replace('_', ' ') }}">
-  <h3 class="subsection-head">Replicated genes <span class="muted">(cohort table is a DRAFT)</span>
+<div id="fx-recurring" data-facet="{{ facet_column[4:] }}" data-label="{{ facet_test_label(facet_column) }}" data-scope="{{ scope or '' }}">
+  <h3 class="subsection-head">Replicated genes {% if scope %}<span class="fx-scope" data-scope="{{ scope }}" title="Results are counted within one scope; scopes are never mixed.">{{ facet_scope_label(scope) }}</span> {% endif %}<span class="muted">(cohort table is a DRAFT)</span>
     <span class="info" id="fx-rec-ranking" data-glossary="r-value" title="Genes with r below 0.05, ranked by r, then by k, agreement and median size of the change.">ⓘ</span></h3>
   <div class="fx-rec-controls">
     <label>cell type group <select id="fx-rec-celltype"></select></label>
@@ -891,15 +1037,18 @@ window.antFx = window.antFx || (function () {
 (function () {
     var root = document.getElementById('fx-recurring');
     if (!root || !window.antFx) return;
-    var facet = root.dataset.facet, facetLabel = root.dataset.label;
+    var facet = root.dataset.facet, facetLabel = root.dataset.label, scope = root.dataset.scope || '';
+    function scopeQuery(prefix) { return scope ? prefix + 'scope=' + encodeURIComponent(scope) : ''; }
     var sel = document.getElementById('fx-rec-celltype'), tableBox = document.getElementById('fx-rec-table');
     var geneInput = document.getElementById('fx-rec-gene'), forest = document.getElementById('fx-rec-forest');
     var status = document.getElementById('fx-rec-status');
     var labelsBox = document.getElementById('fx-rec-labels'), rankingInfo = document.getElementById('fx-rec-ranking');
     function plural(n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); }
+    var SCOPE_NAMES = { human_postmortem: 'human post-mortem', xenograft_human_in_mouse: 'human cells in mouse hosts (xenograft)', in_vitro: 'in vitro cultures' };
+    var GENE_FLAG_NAMES = { mitochondrial: 'MT', ribosomal: 'ribosomal', lncrna_or_clone: 'lncRNA / clone', sex_chromosome: 'sex chromosome', long_gene: 'long gene', apoe_locus: 'APOE locus' };
     function load(cellType) {
         tableBox.textContent = 'loading…';
-        var url = '/api/facets/' + facet + '/effects/top?n=40' + (cellType ? '&cell_type=' + encodeURIComponent(cellType) : '');
+        var url = '/api/facets/' + facet + '/effects/top?n=40' + (cellType ? '&cell_type=' + encodeURIComponent(cellType) : '') + scopeQuery('&');
         antFx.getJson(url).then(function (data) {
             if (!sel.options.length) {
                 (data.cell_types || []).forEach(function (o) {
@@ -920,22 +1069,28 @@ window.antFx = window.antFx || (function () {
                 return;
             }
             var anyUnknown = rows.some(function (r) { return r.overlap_unknown; });
-            var html = '<div class="muted fx-note">' + Number(data.n_replicated).toLocaleString('en-US') + ' of ' + Number(data.n_genes_in_family).toLocaleString('en-US') + ' genes tested in at least 2 of the ' + plural(data.cohorts_in_cell_type, 'counted cohort') + ' replicate in ' + antFx.esc(groupName) + (data.n_replicated > rows.length ? '; the first ' + rows.length + ' are shown' : '') + ' (r &lt; 0.05). Click a gene for its forest.</div>' +
-                '<details class="doc-block" id="fx-rec-about"><summary>&#9432; About this list</summary><div class="doc-body"><p>Replicated means an r-value below 0.05: a partial conjunction test of the same direction in at least 2 cohorts. Among all genes listed about 5 percent are expected to be false entries; this is a statement about the list, not about one gene, and not about effect size (<a href="/help#glossary-r-value">glossary</a>).</p>' +
+            var scopeName = data.scope ? (SCOPE_NAMES[data.scope] || data.scope) : '';
+            var counts = data.n_effect_gate != null ? ', ' + Number(data.n_effect_gate).toLocaleString('en-US') + ' of them with an effect of at least ' + (facet === 'braak' ? '10% over three stages' : (facet === 'age' || facet === 'age_adjusted' ? '10% per decade' : '10%')) + ' in 2 cohorts' + (data.n_replicated_effect != null ? ' and ' + Number(data.n_replicated_effect).toLocaleString('en-US') + ' replicated with at least that change' : '') : '';
+            var html = '<div class="muted fx-note">' + (scopeName ? '<span class="fx-scope" data-scope="' + antFx.esc(data.scope) + '">' + antFx.esc(scopeName) + '</span> ' : '') + Number(data.n_replicated).toLocaleString('en-US') + ' of ' + Number(data.n_genes_in_family).toLocaleString('en-US') + ' genes tested in at least 2 of the ' + plural(data.cohorts_in_cell_type, 'counted cohort') + ' replicate in ' + antFx.esc(groupName) + (data.n_replicated > rows.length ? '; the first ' + rows.length + ' are shown' : '') + ' (r &lt; 0.05)' + counts + '. Click a gene for its forest.</div>' +
+                '<details class="doc-block" id="fx-rec-about"><summary>&#9432; About this list</summary><div class="doc-body"><p>Replicated means an r-value below 0.05: a partial conjunction test of the same direction in at least 2 cohorts. Among all genes listed about 5 percent are expected to be false entries; this is a statement about the list, not about one gene, and not about effect size (<a href="/help#glossary-r-value">glossary</a>). The effect filter and the second tier are shown separately: the filter acts on the estimates, the second tier repeats the test on the treat p values (<a href="/help#glossary-treat-tier">glossary</a>).</p>' +
                 (data.ranking ? '<p id="fx-rec-ranking-text">Ranking: ' + antFx.esc(data.ranking) + '</p>' : '') + '</div></details>' +
                 (anyUnknown ? '<div class="fx-note" style="color:#7a4b0c">Rows marked "donor overlap not checked" include a cohort whose donor overlap with the other cohorts was never checked.</div>' : '') +
                 '<div class="table-wrap"><table class="fx-rec"><thead><tr><th>Gene</th>' +
                 '<th>r-value <span class="info" data-glossary="r-value" title="The false discovery rate at which replication in at least 2 cohorts can be claimed for the whole list.">ⓘ</span></th>' +
                 '<th>Cohorts individually at q &lt; 0.05 (k of m) <span class="info" data-glossary="k-of-m" title="How many of the cohorts that tested the gene reach q below 0.05 on their own; it depends on donor numbers.">ⓘ</span></th>' +
+                '<th>Effect <span class="info" data-glossary="effect-filter" title="Effect filter: at least 2 cohorts with a change of at least 10 percent (per stage or per decade for trends). Second tier: replicated with at least that change, on the treat p values.">ⓘ</span></th>' +
                 '<th>Agreement <span class="info" data-glossary="agreement" title="Share of the tested cohorts whose estimate points the same way, significant or not.">ⓘ</span></th><th>Direction</th>' +
-                '<th title="Median absolute log2 fold change over the tested cohorts">Median |log2FC|</th><th>Significant cohorts</th></tr></thead><tbody>';
+                '<th title="Median absolute log2 fold change over the tested cohorts">Median |log2FC|</th><th>Carried by</th><th>Significant cohorts</th></tr></thead><tbody>';
             rows.forEach(function (r) {
                 var agreement = r.agreement != null ? Math.round(r.agreement * 100) + '%' : 'NA';
-                html += '<tr><td><a href="#" class="fx-rec-gene" data-gene="' + antFx.esc(r.gene) + '">' + antFx.esc(r.gene) + '</a>' + (r.apoe_locus ? ' <span class="fx-pill warn" title="APOE locus gene">APOE locus</span>' : '') +
+                var effect = (r.effect_gate_passed === true ? '<span class="fx-pill" data-glossary="effect-filter" title="At least 2 cohorts show a change of at least the threshold in the replicated direction.">passes the filter</span>' : (r.effect_gate_passed === false ? '<span class="fx-pill warn" data-glossary="effect-filter" title="Fewer than 2 cohorts show a change of at least the threshold.">below the filter</span>' : '')) +
+                    (r.replicated_effect ? '<span class="fx-pill" data-glossary="treat-tier" title="Second tier: replicated on the treat p values (r_treat = ' + antFx.qfmt(r.r_treat) + ').">replicated with at least 10% change</span>' : '');
+                var flags = (r.gene_flags || []).map(function (flag) { var info = GENE_FLAG_NAMES[flag] || flag.replace(/_/g, ' '); return '<span class="fx-pill warn" data-glossary="gene-class-flags" title="Gene class flag">' + antFx.esc(info) + '</span>'; }).join('');
+                html += '<tr><td><a href="#" class="fx-rec-gene" data-gene="' + antFx.esc(r.gene) + '">' + antFx.esc(r.gene) + '</a>' + flags + (r.apoe_locus && (r.gene_flags || []).indexOf('apoe_locus') < 0 ? ' <span class="fx-pill warn" data-glossary="gene-class-flags" title="APOE locus gene">APOE locus</span>' : '') +
                     (r.overlap_unknown ? ' <span class="fx-pill warn" title="Donor overlap with other cohorts was never checked for: ' + antFx.esc((r.cohorts_overlap_unknown || []).join(', ')) + '">donor overlap not checked</span>' : '') + '</td>' +
                     '<td class="num">' + antFx.qfmt(r.r_value) + '</td>' +
-                    '<td class="num">' + r.k + ' of ' + r.m + '</td><td class="num">' + agreement + '</td><td>' + antFx.esc(r.direction) + (r.sign_discordant ? ' <span class="fx-pill warn">sign discordant</span>' : '') + '</td>' +
-                    '<td class="num">' + antFx.num(r.median_abs_logFC) + '</td><td class="fx-rec-cohorts">' + antFx.esc((r.cohorts || []).join(', ')) + '</td></tr>';
+                    '<td class="num">' + r.k + ' of ' + r.m + '</td><td>' + effect + '</td><td class="num">' + agreement + '</td><td>' + antFx.esc(r.direction) + (r.sign_discordant ? ' <span class="fx-pill warn">sign discordant</span>' : '') + '</td>' +
+                    '<td class="num">' + antFx.num(r.median_abs_logFC) + '</td><td class="fx-rec-cohorts">' + antFx.esc((r.r_cohorts || []).join(' and ')) + '</td><td class="fx-rec-cohorts">' + antFx.esc((r.cohorts || []).join(', ')) + '</td></tr>';
             });
             tableBox.classList.remove('muted');
             tableBox.innerHTML = html + '</tbody></table></div>';
@@ -949,13 +1104,19 @@ window.antFx = window.antFx || (function () {
         var gene = geneInput.value.trim();
         if (!gene) return;
         status.textContent = 'loading ' + gene + '…';
-        antFx.getJson('/api/facets/' + facet + '/effects?gene=' + encodeURIComponent(gene)).then(function (card) {
+        antFx.getJson('/api/facets/' + facet + '/effects?gene=' + encodeURIComponent(gene) + scopeQuery('&')).then(function (card) {
             status.textContent = '';
             antFx.renderCard(forest, card, { open: sel.value });
             forest.scrollIntoView({ block: 'nearest' });
         }).catch(function (err) { status.textContent = gene + ': ' + err.message; });
     }
     sel.addEventListener('change', function () { load(sel.value); });
+    // the variant tabs of the facet page switch the tested variant (age: not adjusted / adjusted) in place
+    window.antFxRecurring = { setFacet: function (name, label) {
+        facet = name; facetLabel = label || name.replace(/_/g, ' ');
+        sel.innerHTML = ''; forest.innerHTML = ''; status.textContent = '';
+        load(null);
+    } };
     document.getElementById('fx-rec-go').addEventListener('click', showForest);
     geneInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); showForest(); } });
     load(null);

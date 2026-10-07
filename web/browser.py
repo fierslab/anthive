@@ -2793,6 +2793,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         'replicate_column': db.get('replicate_column'),
         'replicate_basis': db.get('replicate_basis'),
         'disease_basis': db.get('disease_basis'),
+        'facet_scope': db.get('facet_scope'),
+        'control_basis': db.get('control_basis'),
     }
 
     accession = db.get('accession')
@@ -2937,11 +2939,18 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     dataset_facets = [f for f in dataset_facets if not f.get('hidden_by_config')]
 
     facet_tests = _dataset_facet_tests(api_url, db_id)
+    observed_columns = db.get('obs') if isinstance(db.get('obs'), dict) else {}
+    tissue_detail = {
+        'specific': _flatten_annotation_field(db.get('tissue')),
+        'column': 'tissue_uberon' in (observed_columns.get('categorical') or []),
+    }
     return templates.TemplateResponse(request, "dataset.html", {
+        "tissue_detail": tissue_detail,
         "dataset_facets": dataset_facets,
         "dataset_facets_other": dataset_facets_other,
         "n_facets_total": sum(1 for f in dataset_facets + dataset_facets_other if f.get('live', True)),
-        "show_facets_tab": bool(dataset_facets or dataset_facets_other),
+        # an excluded dataset (spatial, proteomics, metacells, mouse) keeps the tab to say why it has no facet analysis
+        "show_facets_tab": bool(dataset_facets or dataset_facets_other or (facet_tests or {}).get('excluded')),
         "folder_name": friendly_group,
         "folder_browse_id": group_id,
         "group_id": group_id,
@@ -3567,6 +3576,8 @@ async def facets_index(request: Request):
         error = f"Failed to load facets from ant-serve: {exc}"
     # facets_visible: the others are not shown for now (still in the data and
     # the API, flagged hidden_by_config). Admins get them as a list of links.
+    for facet_row in facets:
+        facet_row['scope_options'] = _facet_scope_options(facet_row.get('scopes'), None)
     hidden_facets = [f for f in facets if f.get("hidden_by_config")]
     facets = [f for f in facets if not f.get("hidden_by_config")]
     return templates.TemplateResponse(request, "facets.html", {
@@ -3616,11 +3627,16 @@ async def facet_detail_view(request: Request, facet_name: str):
     visible = _facets_visible()
     if visible and facet_name not in visible and not is_admin:
         return _facet_hidden_page(request, facet_name, visible)
+    requested_scope = request.query_params.get('scope') or ''
+    if requested_scope not in _FACET_SCOPE_ORDER:
+        requested_scope = ''
     try:
         # A cold /facets/{name} scans every carrying dataset (value counts
         # plus the per-dataset mapping); give it longer than the default.
-        facet_data = _api_get_as_user(request, api_url, f"/facets/{url_quote(facet_name, safe='')}",
-                                      timeout=90)
+        facet_data = _api_get_as_user(
+            request, api_url,
+            f"/facets/{url_quote(facet_name, safe='')}" + (f'?scope={requested_scope}' if requested_scope else ''),
+            timeout=90)
     except requests.HTTPError as exc:
         status = getattr(getattr(exc, 'response', None), 'status_code', None)
         # In tests the fake raises a bare HTTPError with no response attached;
@@ -3638,9 +3654,18 @@ async def facet_detail_view(request: Request, facet_name: str):
         return _facet_hidden_page(request, facet_name, visible)
     # The effects table is slow on a cold cache: the page renders first and
     # the table is fetched from /facets/{name}/effects-table.
-    facet_effects_pending = facet_name.startswith('ant_') and facet_name[4:] in _FACET_TEST_LABELS
+    scope = facet_data.get('scope') or requested_scope or None
+    scope_options = _facet_scope_options(facet_data.get('scopes'), scope)
+    facet_effects_pending = (facet_name.startswith('ant_') and facet_name[4:] in _FACET_TEST_LABELS
+                             and (scope is None or scope in _FACET_SCOPES_TESTED))
+    variants = [{'name': 'ant_' + name, 'label': label, 'note': _FACET_VARIANT_NOTES.get(name, '')}
+                for name, label in _FACET_VARIANTS.get(facet_name[4:], [])] if facet_name.startswith('ant_') else []
     non_carriers = facet_data.get("non_carriers") or []
     return templates.TemplateResponse(request, "facet.html", {
+        "facet_scope": scope,
+        "facet_scope_options": scope_options,
+        "facet_variants": variants,
+        "facet_dataset_scoped": (facet_data.get('definition') or {}).get('scope') == 'dataset',
         "facet_effects_pending": facet_effects_pending,
         "hidden_by_config": bool(facet_data.get("hidden_by_config")
                                  or (visible and facet_name not in visible)),
@@ -3664,11 +3689,18 @@ async def facet_effects_table(request: Request, facet_name: str):
     Same visibility rule as the facet page.
     """
     visible = _facets_visible()
+    variant = request.query_params.get('variant') or facet_name
+    scope = request.query_params.get('scope') or None
+    if scope is not None and scope not in _FACET_SCOPE_ORDER:
+        return HTMLResponse('<p class="fx-none">Unknown scope.</p>', status_code=400)
+    variants = [f'ant_{name}' for name, _ in _FACET_VARIANTS.get(facet_name[4:], [])] or [facet_name]
     if (visible and facet_name not in visible and not _is_admin(request)) \
-            or not (facet_name.startswith('ant_') and facet_name[4:] in _FACET_TEST_LABELS):
+            or not (facet_name.startswith('ant_') and facet_name[4:] in _FACET_TEST_LABELS) \
+            or variant not in variants:
         return HTMLResponse('<p class="fx-none">No effects are shown for this facet.</p>', status_code=404)
-    effects = _facet_tests_across(_api_url(request), facet_name)
-    return templates.TemplateResponse(request, "_facet_effects_across.html", {"facet_effects": effects})
+    effects = _facet_tests_across(_api_url(request), variant, scope)
+    return templates.TemplateResponse(request, "_facet_effects_across.html", {
+        "facet_effects": effects, "facet_scope": scope})
 
 
 def _facet_hidden_page(request: Request, facet_name: str, visible: List[str]) -> HTMLResponse:
@@ -4258,8 +4290,99 @@ _FACET_TEST_LABELS = {
     'sex': 'Sex',
     'disease': 'Disease',
     'apoe4_carrier': 'APOE e4 carrier',
+    'apoe4_dose': 'APOE e4 dose',
     'braak': 'Braak stage',
+    'braak_threshold': 'Braak stage III or higher',
+    'age': 'Age, not adjusted for pathology',
+    'age_adjusted': 'Age, adjusted for pathology',
+    'app_nlgf': 'App NL-G-F host',
 }
+
+# Tested variants of one facet column: the page of ``ant_<first>`` shows all of them
+# (the later ones are sensitivity or twin analyses with no column of their own).
+_FACET_VARIANTS = {
+    'age': [('age', 'not adjusted for pathology'), ('age_adjusted', 'adjusted for pathology')],
+    'braak': [('braak', 'trend per stage'), ('braak_threshold', 'stage III or higher vs lower')],
+    'apoe4_carrier': [('apoe4_carrier', 'carrier vs non-carrier'), ('apoe4_dose', 'per e4 allele')],
+}
+
+_FACET_VARIANT_NOTES = {
+    'age': ('Age, not adjusted for pathology: the straight-line trend per decade of age at death, in donors of 60 years and older. '
+            'Age and AD pathology go together in every brain bank, so this result partly re-detects pathology; read it next to the adjusted twin.'),
+    'age_adjusted': ('Age, adjusted for pathology: the same trend with Braak stage (else pathologic AD) in the model. '
+                     'The gene rows say whether an age effect persists after that adjustment.'),
+    'braak': 'Braak stage: the straight-line trend per stage (0 to VI), adjusted for sex and, where known, age and post-mortem interval.',
+    'braak_threshold': 'Sensitivity analysis of the Braak trend: Braak stage III or higher against II or lower.',
+    'apoe4_carrier': 'APOE e4 carrier: any e4 allele against none (e2 carriers pooled with e3/e3).',
+    'apoe4_dose': 'Sensitivity analysis of the carrier contrast: the change per e4 allele (0, 1 or 2 alleles).',
+}
+
+# Facets tested on a numeric axis (trend per unit) rather than between two groups.
+_NUMERIC_TEST_FACETS = frozenset({'braak', 'age', 'age_adjusted', 'apoe4_dose'})
+
+# What a test variant without a column of its own was derived from (dataset Facets tab).
+_FACET_DERIVED_NOTES = {
+    'ant_age_adjusted': 'the age test with a pathology term in the model (Braak stage, else pathologic AD)',
+    'ant_braak_threshold': 'Braak stage III or higher against II or lower, from ant_braak',
+    'ant_apoe4_dose': 'the number of e4 alleles (0, 1, 2), from ant_apoe',
+    'ant_apoe4_carrier': 'any e4 allele in ant_apoe',
+}
+
+_FACET_SCOPE_LABELS = {
+    'human_postmortem': 'human post-mortem',
+    'xenograft_human_in_mouse': 'human cells in mouse hosts (xenograft)',
+    'in_vitro': 'in vitro cultures',
+}
+_FACET_SCOPE_ORDER = ('human_postmortem', 'xenograft_human_in_mouse', 'in_vitro')
+_FACET_SCOPES_TESTED = ('human_postmortem', 'xenograft_human_in_mouse')
+
+_CONTROL_BASIS_TEXT = {
+    'humanised_app_host': 'humanised-App host (App hu/hu)',
+    'wild_type_host': 'wild-type host',
+    'wild_type': 'wild-type host',
+}
+
+# p-value floors by replicate unit: (replicates per group, replicates of a trend); lib/facet_rules.py
+_P_VALUE_FLOORS = {'donor': (5, 10), 'animal': (3, 6), 'sample': (3, 6)}
+
+
+def _facet_scope_label(scope: Optional[str]) -> str:
+    """Plain name of a facet scope; unknown names are shown with underscores replaced."""
+    return _FACET_SCOPE_LABELS.get(str(scope or ''), str(scope or '').replace('_', ' '))
+
+
+def _facet_test_label(column_or_name: Optional[str]) -> str:
+    """Plain label of a tested facet given as ``ant_age`` or ``age``."""
+    name = str(column_or_name or '')
+    name = name[4:] if name.startswith('ant_') else name
+    return _FACET_TEST_LABELS.get(name, name.replace('_', ' '))
+
+
+def _facet_scope_options(scopes: Any, current: Optional[str]) -> List[Dict[str, Any]]:
+    """Scope selector entries from the ``scopes`` list of ``GET /facets/{name}``.
+
+    Entries are ``{scope, label, n_datasets, n_cells, current, tested}`` in display order; the
+    pseudo scope ``none`` (datasets outside every scope) is dropped.
+    """
+    by_scope: Dict[str, Dict[str, Any]] = {}
+    for item in scopes or []:
+        row = item if isinstance(item, dict) else {'scope': item}
+        name = str(row.get('scope') or '')
+        if name and name != 'none':
+            by_scope[name] = row
+    ordered = [name for name in _FACET_SCOPE_ORDER if name in by_scope] + \
+        sorted(name for name in by_scope if name not in _FACET_SCOPE_ORDER)
+    return [{'scope': name, 'label': _facet_scope_label(name), 'n_datasets': by_scope[name].get('n_datasets'),
+             'n_cells': by_scope[name].get('n_cells'), 'current': name == current,
+             'tested': name in _FACET_SCOPES_TESTED} for name in ordered]
+
+
+templates.env.globals['facet_scope_label'] = _facet_scope_label
+templates.env.globals['facet_test_label'] = _facet_test_label
+templates.env.globals['facet_derived_note'] = lambda column: _FACET_DERIVED_NOTES.get(str(column), 'see the model details')
+templates.env.globals['facet_scope_order'] = _FACET_SCOPE_ORDER
+templates.env.globals['facet_control_basis'] = lambda value: _CONTROL_BASIS_TEXT.get(str(value), str(value).replace('_', ' '))
+
 
 _METHOD_LABELS = {
     ('cell_mean', 'geneset'): 'cell mean, scanpy score',
@@ -4270,24 +4393,65 @@ _METHOD_LABELS = {
 
 def _facet_contrast_label(unit: Dict[str, Any]) -> str:
     """Plain contrast wording: the test level first, the reference second."""
-    if unit.get('facet') == 'braak':
+    facet = unit.get('facet')
+    if facet == 'braak':
         return 'trend per Braak stage'
+    if facet == 'braak_threshold':
+        return 'Braak stage III or higher vs II or lower'
+    if facet in ('age', 'age_adjusted'):
+        return 'trend per decade of age' + (', adjusted for pathology' if facet == 'age_adjusted'
+                                            else ', not adjusted for pathology')
+    if facet == 'apoe4_dose':
+        return 'trend per APOE e4 allele'
+    if facet == 'app_nlgf':
+        return 'App NL-G-F vs control'
     test, ref = unit.get('level_test'), unit.get('level_ref')
     if test and ref:
         return f'{test} vs {ref}'
     return unit.get('contrast') or ''
 
 
+def _replicate_noun(unit: Dict[str, Any], plural: bool = True) -> str:
+    """'donors', 'animals' or 'samples' for the replicate unit of a unit (donors when unknown)."""
+    noun = {'animal': 'animal', 'sample': 'sample'}.get(str(unit.get('replicate_unit') or ''), 'donor')
+    return noun + ('s' if plural else '')
+
+
 def _fx_donors_text(unit: Dict[str, Any]) -> str:
     counts = unit.get('level_counts') or {}
-    if unit.get('facet') == 'braak':
+    noun = _replicate_noun(unit)
+    facet = unit.get('facet')
+    if facet in _NUMERIC_TEST_FACETS:
         n_donors = unit.get('n_donors') or counts.get('n_donors') or 0
-        low, high = counts.get('braak_min'), counts.get('braak_max')
-        span = f', stages {low} to {high}' if low is not None and high is not None else ''
-        return f'{n_donors} donors{span}'
+        low = counts.get('braak_min', counts.get('value_min'))
+        high = counts.get('braak_max', counts.get('value_max'))
+        what = {'braak': 'stages', 'apoe4_dose': 'e4 alleles'}.get(facet, 'age')
+        span = ''
+        if low is not None and high is not None:
+            low_text, high_text = (f'{low:.0f}', f'{high:.0f}') if facet in ('age', 'age_adjusted') else (f'{low:g}', f'{high:g}')
+            span = f', {what} {low_text} to {high_text}'
+        return f'{n_donors} {noun}{span}'
     if unit.get('n_donors_ref') is not None and unit.get('n_donors_test') is not None:
         return f"{unit.get('level_test')} {unit['n_donors_test']}, {unit.get('level_ref')} {unit['n_donors_ref']}"
     return ', '.join(f'{level} {n}' for level, n in counts.items())
+
+
+def _floor_text(unit: Dict[str, Any]) -> str:
+    """How many replicates the p-value floor of this unit asks for, in words ('donors need 5 per group')."""
+    per_level, numeric = _P_VALUE_FLOORS.get(str(unit.get('replicate_unit') or 'donor'), _P_VALUE_FLOORS['donor'])
+    noun = _replicate_noun(unit)
+    if unit.get('facet') in _NUMERIC_TEST_FACETS:
+        return f'{noun} need {numeric} for a trend'
+    return f'{noun} need {per_level} per group'
+
+
+def _fx_stratum(unit: Dict[str, Any]) -> str:
+    """Design stratum of a unit ('line=3A21', 'timepoint=6m'), from ``design_subset`` or the ``@`` part of the cell type source."""
+    subset = unit.get('design_subset')
+    if subset:
+        return str(subset)
+    source = str(unit.get('celltype_source') or '')
+    return source.split('@', 1)[1] if '@' in source else ''
 
 
 def _fx_pills(unit: Dict[str, Any]) -> List[Tuple[str, str, str, str]]:
@@ -4299,6 +4463,11 @@ def _fx_pills(unit: Dict[str, Any]) -> List[Tuple[str, str, str, str]]:
         pills.append(('cell-level, descriptive only', 'warn',
                       (unit.get('analysis_level_reason') or unit.get('reason') or 'Too few replicates for a test')
                       + '; the numbers describe cells, so there is no p or q value.', 'descriptive-only'))
+    elif level == 'below_floor':
+        pills.append((f'descriptive: below the p-value floor ({_floor_text(unit)})', 'warn',
+                      (unit.get('analysis_level_reason') or 'Fewer replicates than the p-value floor')
+                      + '. The estimate is shown without p, q or interval and the unit is not counted towards replication.',
+                      'p-value-floor'))
     elif level == 'replicate':
         pills.append((f'replicate level ({replicate})' if replicate else 'replicate level', 'info',
                       f'Tested with one value per {replicate or "replicate"}, not per cell.', 'analysis-level'))
@@ -4313,10 +4482,39 @@ def _fx_pills(unit: Dict[str, Any]) -> List[Tuple[str, str, str, str]]:
     if unit.get('is_secondary'):
         pills.append(('reanalysis, not counted', 'warn',
                       'A reanalysis of cells another dataset serves; shown but never counted.', 'cohort'))
-    if flags.get('descriptive_only'):
+    if flags.get('descriptive_only') and level != 'below_floor':
         pills.append(('descriptive only', 'warn',
                       'Too few donors in a group for a p or q value; the estimate is shown for orientation.',
                       'descriptive-only'))
+    if flags.get('small_sample') and level == 'replicate':
+        pills.append(('small sample', 'info',
+                      'Fewer than 5 replicates in a group (10 for a trend): tested, but with little power.',
+                      'small-cohorts'))
+    if unit.get('inflated'):
+        lam = unit.get('lambda_gc')
+        pills.append((f'inflated, lambda {lam:.2f}' if isinstance(lam, (int, float)) else 'inflated', 'warn',
+                      'Many genes shift together (lambda above 1.3): often a batch, depth or composition difference '
+                      'rather than biology. Read the p values with care.', 'lambda'))
+    dropped = unit.get('covariates_dropped') or []
+    if dropped:
+        pills.append((f'covariates dropped ({len(dropped)})', 'info',
+                      'Left out of the model to keep the test: ' + '; '.join(str(item) for item in dropped), 'covariates'))
+    if unit.get('control_basis'):
+        pills.append((f"control: {_CONTROL_BASIS_TEXT.get(str(unit['control_basis']), str(unit['control_basis']).replace('_', ' '))}",
+                      'info', 'What the control animals of this comparison are.', 'app-nlgf'))
+    stratum = _fx_stratum(unit)
+    if stratum and unit.get('facet') == 'app_nlgf':
+        pills.append((f"stratum {stratum.replace('|', ', ')}", 'info',
+                      'Animals are compared within one grafted line and timepoint, never across them.', 'app-nlgf'))
+    if unit.get('age_top_coded'):
+        pills.append(('ages top-coded', 'warn',
+                      f"Ages above {unit['age_top_coded']} are recorded as {unit['age_top_coded']}, which flattens the oldest donors."
+                      if not isinstance(unit['age_top_coded'], bool) else
+                      'Ages above a ceiling are recorded as the ceiling, which flattens the oldest donors.', 'age-twins'))
+    discordant = unit.get('n_sex_discordant')
+    if isinstance(discordant, int) and discordant > 0:
+        pills.append((f"{discordant} of {unit.get('n_sex_checked')} sex labels disagree", 'warn',
+                      'XIST and Y-linked expression contradict the recorded sex of these donors.', 'sex-check'))
     if flags.get('provisional'):
         pills.append(('provisional', 'warn',
                       'What counts as control still differs between studies, so these results may change.',
@@ -4429,6 +4627,28 @@ def _replicate_view(*sources: Optional[Dict[str, Any]]) -> Optional[Dict[str, An
     }
 
 
+def _fx_model_view_with_qc(unit: Dict[str, Any]) -> Dict[str, Any]:
+    """Model line and detail rows of a unit, plus its quality and design rows (inflation, dropped covariates, control, stratum)."""
+    view = _fx_model_view(unit.get('model'))
+    details = view['details']
+    if isinstance(unit.get('lambda_gc'), (int, float)):
+        text = f"lambda {unit['lambda_gc']:.2f}" + (' (inflated: above 1.3)' if unit.get('inflated') else ' (calibrated)')
+        if isinstance(unit.get('df_total_median'), (int, float)):
+            text += f"; median residual degrees of freedom {unit['df_total_median']:.1f}"
+        details.append(('Calibration', text))
+    if unit.get('covariates_dropped'):
+        details.append(('Covariates dropped', '; '.join(str(item) for item in unit['covariates_dropped'])))
+    if unit.get('control_basis'):
+        details.append(('Control', _CONTROL_BASIS_TEXT.get(str(unit['control_basis']), str(unit['control_basis']).replace('_', ' '))))
+    stratum = _fx_stratum(unit)
+    if stratum:
+        details.append(('Design stratum', stratum.replace('|', ', ')))
+    if unit.get('age_top_coded'):
+        details.append(('Age ceiling', f"ages above {unit['age_top_coded']} are recorded as {unit['age_top_coded']}"
+                        if not isinstance(unit['age_top_coded'], bool) else 'ages above a ceiling are recorded as the ceiling'))
+    return view
+
+
 def _fx_unit_view(unit: Dict[str, Any], index: int, db_id: str = '', title: str = '',
                   pool_members: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
     modules = [{**m, 'label': _METHOD_LABELS.get((m.get('method'), m.get('source')),
@@ -4443,10 +4663,14 @@ def _fx_unit_view(unit: Dict[str, Any], index: int, db_id: str = '', title: str 
         'donors_text': _fx_donors_text(unit),
         'pills': _fx_pills(unit),
         'modules_view': modules,
-        'model_view': _fx_model_view(unit.get('model')),
+        'model_view': _fx_model_view_with_qc(unit),
         'unit_id': f'fx-{index}',
-        # a cell-level unit has no test, whatever its flags say
-        'no_test': unit.get('analysis_level') == 'cell' or bool((unit.get('flags') or {}).get('descriptive_only')),
+        # a cell-level or below-floor unit has no test, whatever its flags say
+        'no_test': unit.get('analysis_level') in ('cell', 'below_floor')
+                   or bool((unit.get('flags') or {}).get('descriptive_only')),
+        'is_below_floor': unit.get('analysis_level') == 'below_floor',
+        'floor_text': _floor_text(unit),
+        'stratum': _fx_stratum(unit).replace('|', ', '),
         'is_pool': str(db_id or unit.get('db_id') or '').startswith('pool:'),
         'pool_members_list': (pool_members or {}).get(db_id or unit.get('db_id') or '') or [],
         'disease_basis_text': _disease_basis_text(unit.get('disease_basis')),
@@ -4454,12 +4678,44 @@ def _fx_unit_view(unit: Dict[str, Any], index: int, db_id: str = '', title: str 
 
 
 _FX_SYSTEM_REASONS = {
-    'xenograft': 'a xenograft: the replicate is the host animal, not the donor of the cells, and tests per animal are not set up yet',
+    'xenograft': 'a xenograft with too few host animals per group in any cell type for a test',
     'bulk_tissue': 'bulk tissue: about one observation per sample, no cell types to test within',
     'in_vitro_2d': 'an in vitro culture: there is no donor-level group to compare',
     'in_vitro_3d': 'an in vitro culture: there is no donor-level group to compare',
-    'chimera': 'a chimera: the replicate is the host animal, not the donor of the cells, and tests per animal are not set up yet',
+    'organoid': 'an organoid culture: there is no donor-level group to compare',
+    'chimera': 'a chimera with too few host animals per group in any cell type for a test',
 }
+
+_FX_EXCLUDED_PREFIX = 'excluded from the facet layer:'
+_FX_MOUSE_ONLY = ('mouse-only dataset', 'organism not human (mouse)')
+
+
+def _fx_exclusion_text(reason: Optional[str]) -> Optional[str]:
+    """Plain sentence why a dataset is outside the facet layer on purpose, or None when it is not.
+
+    Covers the served reasons of the facet tool: ``excluded from the facet layer: ...`` (spatial and
+    proteomics data, metacell sets and sets set aside in the dataset ``.md``) and pure mouse datasets.
+    """
+    text = (reason or '').strip()
+    if text.startswith(_FX_MOUSE_ONLY):
+        return ('This is a pure mouse dataset. The facet analysis covers human cells only (post-mortem tissue, and '
+                'human cells grafted into mouse hosts); mouse datasets keep their columns for browsing and plotting '
+                'but have no facet tests and no replication.')
+    if not text.startswith(_FX_EXCLUDED_PREFIX):
+        return None
+    detail = text[len(_FX_EXCLUDED_PREFIX):].strip()
+    spatial = re.match(r'spatial technology \(([^)]*)\)', detail)
+    if spatial or detail.startswith('experimental_system spatial'):
+        platform = f' ({spatial.group(1)})' if spatial else ''
+        return (f'This is spatial data{platform}. A spot or bin is not a single cell of one cell type, so there is no '
+                'per-donor profile of a cell type to compare and no facet analysis.')
+    if detail.startswith('proteomics'):
+        return ('This is proteomics, not single-cell expression: there are no cells to group by cell type and donor, '
+                'so there is no facet analysis.')
+    if detail.startswith('metacell'):
+        return (f'This set is left out of the facet analysis on purpose: {detail}. Metacells are aggregates, so '
+                'they cannot be counted as donors or cells.')
+    return f'This set is left out of the facet analysis on purpose: {detail}.'
 
 
 def _fx_reason_text(status: Optional[str], reason: Optional[str]) -> str:
@@ -4469,6 +4725,9 @@ def _fx_reason_text(status: Optional[str], reason: Optional[str]) -> str:
     ``/databases/{id}/facet-tests``); unknown reasons are quoted verbatim.
     """
     text = (reason or '').strip()
+    excluded = _fx_exclusion_text(text)
+    if excluded:
+        return excluded[0].lower() + excluded[1:].rstrip('.')
     if status == 'not_run' and not text.startswith(('experimental_system', 'organism', 'secondary')):
         return 'no facet test has been run on this dataset yet'
     system = re.match(r'experimental_system\s+(\S+)', text)
@@ -4480,8 +4739,7 @@ def _fx_reason_text(status: Optional[str], reason: Optional[str]) -> str:
                 'only, so the effects are shown there')
     organism = re.match(r'organism not human \((.*)\)', text)
     if organism:
-        return (f'organism {organism.group(1)}: the facet tests are human only; for mouse datasets the replicate '
-                'would be the animal, which is not set up yet')
+        return f'organism {organism.group(1)}: the facet analysis covers human cells only'
     donors = re.match(r'(\d+) donors? \(< (\d+)\)', text)
     if donors:
         return f'only {donors.group(1)} donors; at least {donors.group(2)} are needed'
@@ -4490,8 +4748,8 @@ def _fx_reason_text(status: Optional[str], reason: Optional[str]) -> str:
     if 'no ant_donor' in text:
         return 'no donor column is mapped (ant_donor), so no donor-level test is possible'
     if 'enough donors per level' in text:
-        return ('no combination of facet and cell type had enough donors per level (at least 3 donors in each level, '
-                'at least 6 donors in total); some facets may have no levels at all in this dataset')
+        return ('no combination of facet and cell type had enough donors per level (at least 3 replicates in each level, '
+                'at least 4 in total); some facets may have no levels at all in this dataset')
     return text or 'no reason was recorded'
 
 
@@ -4506,7 +4764,7 @@ def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Opt
     index = 0
     for unit in summary.get('units') or []:
         column = 'ant_' + str(unit.get('facet'))
-        slot = by_facet.setdefault(column, {'tested': [], 'untested': []})
+        slot = by_facet.setdefault(column, {'tested': [], 'untested': [], 'scope': unit.get('facet_scope')})
         if unit.get('tested'):
             slot['tested'].append(_fx_unit_view({**unit, 'dataset_changed': summary.get('dataset_changed')},
                                                 index, db_id=db_id))
@@ -4515,10 +4773,14 @@ def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Opt
             slot['untested'].append({'cell_type': unit.get('cell_type'), 'reason': unit.get('reason'),
                                      'analysis_level': unit.get('analysis_level'),
                                      'analysis_level_label': unit.get('analysis_level_label')})
+    exclusion = _fx_exclusion_text(summary.get('reason')) if summary.get('status') != 'tested' else None
     return {
         'status': summary.get('status'),
         'reason': summary.get('reason'),
         'reason_text': _fx_reason_text(summary.get('status'), summary.get('reason')),
+        'excluded': exclusion is not None,
+        'excluded_text': exclusion,
+        'facet_scope': summary.get('facet_scope') if summary.get('n_units') else None,
         'dataset_changed': bool(summary.get('dataset_changed')),
         'by_facet': by_facet,
         'n_units_tested': summary.get('n_units_tested') or 0,
@@ -4557,11 +4819,13 @@ def _pool_members(api_url: str) -> Dict[str, List[str]]:
             if str(row.get('db_id') or '').startswith('pool:')}
 
 
-def _facet_tests_across(api_url: str, facet_name: str) -> Optional[Dict[str, Any]]:
+def _facet_tests_across(api_url: str, facet_name: str, scope: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Rows for the "Effects across datasets" section of /facets/{name};
-    None when the facet is not tested or the API cannot answer."""
+    None when the facet is not tested or the API cannot answer. ``scope`` names one
+    facet scope (None lets the API choose the default of the facet)."""
     try:
-        payload = _api_get(api_url, f"/facets/{url_quote(facet_name, safe='')}/tests", timeout=90)
+        payload = _api_get(api_url, f"/facets/{url_quote(facet_name, safe='')}/tests"
+                           + (f'?scope={scope}' if scope else ''), timeout=90)
     except Exception:
         return None
     if not isinstance(payload, dict):
@@ -4572,6 +4836,7 @@ def _facet_tests_across(api_url: str, facet_name: str) -> Optional[Dict[str, Any
             for index, row in enumerate(payload.get('rows') or [])]
     return {
         'facet': payload.get('facet'),
+        'scope': payload.get('scope') or scope,
         'rows': rows,
         'n_datasets_tested': payload.get('n_datasets_tested') or 0,
         'not_tested': payload.get('not_tested') or [],

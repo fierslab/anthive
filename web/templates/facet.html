@@ -55,6 +55,15 @@
   table.nc-table .num { text-align: right; font-variant-numeric: tabular-nums; }
   .nc-hint { display: inline-block; font-family: var(--font-mono); font-size: 11px; padding: 0 5px; margin: 1px 3px 1px 0; border-radius: 3px; background: #fdf6e9; border: 1px solid #ecd3a5; color: #7a5212; }
   .nc-declared { display: inline-block; font-size: 11px; padding: 0 5px; border-radius: 3px; background: #fbeaea; border: 1px solid #e3b5b5; color: #9E2A2B; }
+  .scope-nav { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+  .scope-nav a { display: inline-block; padding: 3px 12px; border: 1px solid var(--border); border-radius: 14px; font-size: 12.5px;
+                 background: #fff; color: var(--text); text-decoration: none; }
+  .scope-nav a:hover { background: var(--hover); }
+  .scope-nav a.active { background: var(--link); border-color: var(--link); color: #fff; }
+  .scope-nav a .muted { font-size: 11px; }
+  .scope-nav a.active .muted { color: #e2e8f0; }
+  .scope-note { font-size: 12.5px; max-width: 860px; margin: 4px 0 10px; }
+  .facet-note { font-size: 12.5px; max-width: 860px; margin: 6px 0 10px; padding: 6px 10px; border-left: 3px solid var(--link); background: #f4f8fb; color: #1f3b4d; }
   @media (max-width: 760px) {
     table.carrier-table, table.carrier-table > tbody, table.carrier-table > tbody > tr, table.carrier-table > tbody > tr > td { display: block; width: 100%; }
     table.carrier-table > thead { display: none; }
@@ -111,6 +120,23 @@
   {% endif %}
 </section>
 
+{% if facet_dataset_scoped %}
+<p class="facet-note" id="facet-dataset-scoped">Dataset-scoped facet. These labels are the authors' own clusters inside one cell type of one dataset (written <code>&lt;dataset&gt;/cluster_&lt;label&gt;</code>). They are shown here as a mapping only: no gene tests are run on them and a label is never compared with another dataset's label. <a href="/help#glossary-author-cluster">Glossary</a></p>
+{% endif %}
+{% if facet_name == 'ant_tissue' %}
+<p class="facet-note" id="facet-tissue-umbrella">Umbrella terms. Every dissection of a region (for example BA9/46, frontal pole and superior frontal gyrus) is grouped under one coarse term (prefrontal cortex) so datasets can be compared. The most specific term of a dataset is kept in the plain column <code>tissue_uberon</code> (and <code>tissue_uberon_id</code>), which is not a facet; it is shown as detail on the dataset's Facets tab. <a href="/help#glossary-tissue-umbrella">Glossary</a></p>
+{% endif %}
+{% if facet_name in ('ant_genotype', 'ant_host_genotype') %}
+<p class="facet-note" id="facet-genotype-pair">{% if facet_name == 'ant_genotype' %}<code>ant_genotype</code> is the genotype of the sequenced cells themselves (the grafted line of a xenograft, or the donor). The genotype of the mouse host is <a href="/facets/ant_host_genotype">ant_host_genotype</a>.{% else %}<code>ant_host_genotype</code> is the genotype of the mouse host of a xenograft. The genotype of the grafted human cells is <a href="/facets/ant_genotype">ant_genotype</a>. The tested facet <a href="/facets/ant_app_nlgf">ant_app_nlgf</a> is derived from this one.{% endif %} <a href="/help#glossary-host-genotype">Glossary</a></p>
+{% endif %}
+
+{% if facet_scope_options %}
+<nav class="scope-nav" id="facet-scope-nav" aria-label="Scope">
+  {% for option in facet_scope_options %}<a href="/facets/{{ facet_name|urlencode }}?scope={{ option.scope }}"{% if option.current %} class="active" aria-current="page"{% endif %} data-scope="{{ option.scope }}"{% if not option.tested %} title="Listed, not tested"{% endif %}>{{ option.label }} <span class="muted">{{ option.n_datasets }} datasets{% if not option.tested %}, not tested{% endif %}</span></a>{% endfor %}
+</nav>
+<p class="scope-note muted" id="facet-scope-note">Everything below is for one scope: <span class="fx-scope" data-scope="{{ facet_scope }}">{{ facet_scope_label(facet_scope) }}</span>. Scopes are tested, counted and replicated separately and never mixed (<a href="/help#glossary-scope">glossary</a>).</p>
+{% endif %}
+
 <div class="stats-row">
   <div>datasets: <span class="val">{{ fd.n_datasets }}</span></div>
   <div>total cells: <span class="val">{{ '{:,}'.format(fd.total_n_cells) }}</span></div>
@@ -127,9 +153,22 @@
 {% from "_facet_effects.html" import fx_styles, fx_intro, fx_methods_box, fx_script, fx_recurring %}
 {{ fx_styles() }}
 <div class="card" id="facet-effects">
-  <h2 class="section-head">Effects across datasets
+  <h2 class="section-head">Effects across datasets {% if facet_scope %}<span class="fx-scope" data-scope="{{ facet_scope }}" title="Results are counted within one scope; scopes are never mixed.">{{ facet_scope_label(facet_scope) }}</span>{% endif %}
     <span class="info" data-glossary="replicate-unit" title="Tests of this facet per donor, one row per dataset and cell type, with replication counted across cohorts.">ⓘ</span></h2>
   {{ fx_intro('facet') }}
+  {% if facet_name == 'ant_app_nlgf' %}
+  <p class="fx-intro" id="fx-app-nlgf-short"><strong>Host animals, not donors.</strong> The replicate is the mouse. This test detects large effects only (a handful of animals per genotype), and the cells were isolated live, so dissociation-response genes are suspect. <a href="/help#glossary-app-nlgf">Glossary</a></p>
+  {% call doc_block('About the App NL-G-F comparison', id='fx-app-nlgf-about') %}
+    <p>The facet contrasts App NL-G-F knock-in host mice with control hosts in xenograft studies of human microglia. The control is stated on every unit (the humanised-App host, App hu/hu, isolates the three familial AD mutations; a wild-type host does not). Animals are compared within one grafted human line and one timepoint, because the amyloid response grows with age and differs between lines; a stratum where genotype cannot be separated from line or timepoint is not tested. The genotype of the grafted cells themselves is the facet <a href="/facets/ant_genotype">ant_genotype</a>; the host's is <a href="/facets/ant_host_genotype">ant_host_genotype</a>.</p>
+    <p>Few animals mean wide intervals and low power: a gene that is not detected here is not shown to be unchanged. Strata of one dataset (lines, timepoints) share one vote in the replication count, so a study counts once.</p>
+  {% endcall %}
+  {% endif %}
+  {% if facet_variants|length > 1 %}
+  <div class="fx-tabs" id="fx-variants" role="tablist" aria-label="Tested variant of this facet">
+    {% for variant in facet_variants %}<button type="button" data-variant="{{ variant.name }}" data-label="{{ facet_test_label(variant.name) }}" class="{{ 'active' if loop.first }}">{{ variant.label }}</button>{% endfor %}
+  </div>
+  {% for variant in facet_variants %}<p class="fx-intro fx-variant-note" id="fx-variant-note-{{ variant.name[4:] }}" data-variant="{{ variant.name }}"{% if not loop.first %} hidden{% endif %}>{{ variant.note }}</p>{% endfor %}
+  {% endif %}
   {% if facet_name == 'ant_disease' %}
 <p class="fx-intro" id="fx-disease-definition"><strong>Disease means pathologic AD</strong> (Braak and CERAD neuropathology), not a clinical diagnosis. Some of these donors had no dementia.</p>
   {% call doc_block('About the disease definition', id='fx-disease-about') %}
@@ -137,8 +176,8 @@
   {% endcall %}
   {% endif %}
   {{ fx_methods_box() }}
-  {{ fx_recurring(facet_name) }}
-  <div id="fx-across-slot" data-url="/facets/{{ facet_name|urlencode }}/effects-table">
+  {{ fx_recurring(facet_name, facet_scope) }}
+  <div id="fx-across-slot" data-url="/facets/{{ facet_name|urlencode }}/effects-table" data-scope="{{ facet_scope or '' }}">
     <p class="fx-none" id="fx-across-loading">Loading the per dataset results&hellip;</p>
   </div>
 </div>
@@ -147,16 +186,35 @@
 (function () {
     var slot = document.getElementById('fx-across-slot');
     if (!slot) return;
-    fetch(slot.dataset.url, { credentials: 'same-origin' }).then(function (response) {
-        if (!response.ok) throw new Error('HTTP ' + response.status);
-        return response.text();
-    }).then(function (html) {
-        slot.innerHTML = html;
-        if (window.antFxBind) window.antFxBind(slot);
-        if (location.hash && document.querySelector(location.hash)) document.querySelector(location.hash).scrollIntoView();
-    }).catch(function () {
-        slot.innerHTML = '<p class="fx-none" id="fx-across-error">The per dataset results could not be loaded. Reload the page to try again.</p>';
+    var variantTabs = Array.from(document.querySelectorAll('#fx-variants button'));
+    function tableUrl(variant) {
+        var params = [];
+        if (slot.dataset.scope) params.push('scope=' + encodeURIComponent(slot.dataset.scope));
+        if (variant) params.push('variant=' + encodeURIComponent(variant));
+        return slot.dataset.url + (params.length ? '?' + params.join('&') : '');
+    }
+    function loadTable(variant, scrollToHash) {
+        slot.innerHTML = '<p class="fx-none" id="fx-across-loading">Loading the per dataset results&hellip;</p>';
+        fetch(tableUrl(variant), { credentials: 'same-origin' }).then(function (response) {
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            return response.text();
+        }).then(function (html) {
+            slot.innerHTML = html;
+            if (window.antFxBind) window.antFxBind(slot);
+            if (scrollToHash && location.hash && document.querySelector(location.hash)) document.querySelector(location.hash).scrollIntoView();
+        }).catch(function () {
+            slot.innerHTML = '<p class="fx-none" id="fx-across-error">The per dataset results could not be loaded. Reload the page to try again.</p>';
+        });
+    }
+    variantTabs.forEach(function (button) {
+        button.addEventListener('click', function () {
+            variantTabs.forEach(function (b) { b.classList.toggle('active', b === button); });
+            document.querySelectorAll('.fx-variant-note').forEach(function (note) { note.hidden = note.dataset.variant !== button.dataset.variant; });
+            if (window.antFxRecurring) window.antFxRecurring.setFacet(button.dataset.variant.replace(/^ant_/, ''), button.dataset.label);
+            loadTable(button.dataset.variant, false);
+        });
     });
+    loadTable(variantTabs.length ? variantTabs[0].dataset.variant : '', true);
 })();
 </script>
 {% endif %}
@@ -240,7 +298,7 @@
 </div>
 
 <div class="card" id="facet-datasets">
-  <h2 class="section-head">Datasets <span class="muted">({{ fd.datasets|length }} with this facet, {{ non_carriers|length }} without)</span>
+  <h2 class="section-head">Datasets {% if facet_scope %}<span class="fx-scope" data-scope="{{ facet_scope }}">{{ facet_scope_label(facet_scope) }}</span> {% endif %}<span class="muted">({{ fd.datasets|length }} with this facet, {{ non_carriers|length }} without)</span>
     <span class="info" data-glossary="facet" title="Where each dataset's values for this facet come from and how the author's values were translated.">ⓘ</span></h2>
   {% if fd.datasets %}
   <div class="table-wrap">
