@@ -493,3 +493,20 @@ secondary (S25/V6C, V6S, V6M and the other `prs.*` objects).
 * **Retired singleton facets**: `lesion`, `ms_type`, `cause_of_death`, `ethnicity`, `source_institution`, `technology`,
   `group` are deprecated registry entries; the values live in plain obs columns.
 * `ant_genotype` is the genotype of the sequenced cells, `ant_host_genotype` the mouse host (registered, xenograft scope).
+
+## Update 2026-10-07: the age facet is human years only
+
+`ant_age` is the age of the human donor in years (post-mortem: age at death; biopsy: age at surgery). Never a mouse
+or other animal age, never the host age of a xenograft, never months or days. Binned or categorical author ages
+('60-70', 'aged') are not mapped; they stay plain columns, or are mapped to a number only when the author gives an
+exact year ('90+' to 90) and the `.md` names the top-coding. `age` is in neither `MOUSE_ONLY_ALLOWED_TAGS` nor any
+xenograft scope (`facet_scopes: [human_postmortem]`). Rules (`lib/facet_lint.py`):
+
+| Rule id | Severity | Needs data | Meaning |
+| --- | --- | --- | --- |
+| `facet_scope_mismatch` | error | no | `ant_age` in a mouse-only or xenograft dataset |
+| `age_not_human` | error | no | `ant_age` published while the organism is not human (rat, mixed organisms) |
+| `age_not_years` | error | `--with-data` | `ant_age` source stored as text (`__obscat`), or a value outside 0 to 120 |
+| `age_top_coded` | warning | `--with-data` | maximum is exactly 89 or 90 and the `.md` never mentions top-coding |
+
+`ant ingest-check` reports the two data rules under `facets.mapping_data`.

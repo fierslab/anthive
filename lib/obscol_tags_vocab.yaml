@@ -165,24 +165,29 @@ tags:
   age:
     label: Age
     description: >
-      Donor age at sample collection. Continuous (years) or binned
-      ('60-70', 'aged'). Applies to per-cell obs when every cell
-      inherits its donor's age. For post-mortem cohorts this is the
-      age-at-death; declare separately if you also carry
-      age-at-onset.
+      Age of the human donor in years: age at death for post-mortem
+      cohorts, age at surgery for biopsies. Human datasets only; never the
+      age of a mouse or any other animal, and never the host age of a
+      xenograft. Binned or categorical author ages ('60-70', 'aged') are not
+      mapped to ant_age: keep them as plain columns, or map to a number only
+      when the author gives an exact year (for example '90+' to 90, with a
+      top-coding caveat in the .md). Applies to per-cell obs when every
+      cell inherits its donor's age.
     facet:
       status: registered
       scope: cross_dataset
       facet_scopes: [human_postmortem]
-      summary: Age of the donor or animal at sampling (post-mortem cohorts, age at death).
+      summary: Age of the human donor in years (post-mortem cohorts, age at death; biopsies, age at surgery).
       definition: >
-        Age of the biological subject when the sample was taken. For
-        post-mortem human cohorts this is age at death. Every cell
+        Age of the human donor in years when the sample was taken: age at
+        death for post-mortem cohorts, age at surgery for biopsies. Human
+        datasets only; animal ages, the host age of a xenograft and binned
+        or categorical author ages are not mapped to this facet. Every cell
         inherits its donor's age.
       kind: numerical
       values: >
-        Years for human donors. The unit for animal studies is not yet
-        harmonised; check the dataset. Binned author ages are not converted.
+        Years (0 to 120), stored as a number. Ages top-coded by the
+        author (89, 90) are kept as given and the .md names the top-coding.
       missing: Empty (NULL) when not recorded.
       hint_keywords: [age, ageatdeath, age_death]
 

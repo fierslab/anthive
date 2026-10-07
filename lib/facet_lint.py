@@ -32,6 +32,7 @@ count violations per rule.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,7 +87,16 @@ RULES: Dict[str, str] = {
     'control_basis_missing': 'dataset publishes ant_app_nlgf but declares no control_basis',
     'control_basis_invalid': 'control_basis is not wt_host, humanised_app_host or other, or app_nlgf_design is malformed',
     'facet_scope_mismatch': 'dataset publishes a facet outside the facet scopes the registry allows for it',
+    'age_not_years': 'ant_age is not a number of years between 0 and 120 stored as numeric (data rule)',
+    'age_top_coded': 'ant_age maxes out at 89 or 90 (top-coded) and the .md does not mention top-coding (data rule)',
+    'age_not_human': 'ant_age is published for a dataset whose organism is not human',
 }
+
+#: Largest plausible human age in years; ``ant_age`` values outside 0..AGE_MAX_YEARS are not years.
+AGE_MAX_YEARS = 120
+#: Ages at which cohorts commonly top-code (ROSMAP 90, HIPAA 89).
+AGE_TOP_CODES = (89.0, 90.0)
+_TOP_CODING_RE = re.compile(r'top[\s_-]?cod', re.IGNORECASE)
 
 _ROMAN = {'0': 0, 'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6, 'VII': 7}
 _DONOR_GROUP_RE = re.compile(r'^[a-z0-9][a-z0-9_-]*$')
@@ -329,7 +339,7 @@ ValueLookup = Callable[[str], Optional[List[Tuple[Any, int]]]]
 
 def lint_api_data(api: Mapping[str, Any], columns: Mapping[str, str],
                   distinct_values: ValueLookup, max_listed: int = 5,
-                  store_root: Optional[Path] = None) -> List[Finding]:
+                  store_root: Optional[Path] = None, metadata: Optional[Mapping[str, Any]] = None) -> List[Finding]:
     """Rules that need the dataset's stored columns and values.
 
     Args:
@@ -340,6 +350,8 @@ def lint_api_data(api: Mapping[str, Any], columns: Mapping[str, str],
             distinct non-NULL stored values, or None when unreadable.
         max_listed: Values named per finding.
         store_root: Where join tables live (default: the configured store).
+        metadata: The dataset ``.md`` front matter; a mention of top-coding anywhere in it silences
+            ``age_top_coded``.
 
     Returns:
         Findings in a stable order.
@@ -372,6 +384,9 @@ def lint_api_data(api: Mapping[str, Any], columns: Mapping[str, str],
                 continue
             published.append((renamed.get(key, value), n_cells))
         _check_numeric_values(findings, target, entry, published, f'source {source}', max_listed)
+        if _facet_of(target) == 'age':
+            _check_age(findings, target, f'source {source}', columns[source] == 'categorical', published,
+                       metadata, max_listed)
         if columns[source] == 'categorical':
             findings.append(Finding(WARNING, 'numeric_from_text',
                                     f'{target} is numerical but is renamed from text column {source}; it '
@@ -386,6 +401,12 @@ def lint_api_data(api: Mapping[str, Any], columns: Mapping[str, str],
                                     f'obs_derive[{target}] source {source} is not a stored column; the '
                                     f'view builder drops {target}'))
             continue
+        if _facet_of(target) == 'age':
+            written = [(value, 1) for value in (spec.get('map') or {}).values() if value is not None]
+            if spec.get('default') is not None:
+                written.append((spec['default'], 1))
+            _check_age(findings, target, f'derived from {source}', spec.get('dtype') == 'categorical', written,
+                       metadata, max_listed)
         form = derive_form(spec)
         if form == FORM_TEMPLATE:
             continue  # every non-NULL value is rendered
@@ -471,6 +492,28 @@ def _check_numeric_values(findings: List[Finding], target: str, entry: Mapping[s
         listed = ', '.join(f'{v!r} ({n} cells)' for v, n in outside[:max_listed])
         findings.append(Finding(ERROR, 'numeric_range',
                                 f'{target} ({where}) carries values outside its range: {listed}'))
+
+
+def _check_age(findings: List[Finding], target: str, where: str, stored_as_text: bool,
+               values: Sequence[Tuple[Any, int]], metadata: Optional[Mapping[str, Any]], max_listed: int) -> None:
+    """``ant_age`` is years: numeric storage, 0..AGE_MAX_YEARS, top-coding named in the .md."""
+    if stored_as_text:
+        findings.append(Finding(ERROR, 'age_not_years',
+                                f'{target} ({where}) is stored as text; ant_age must be a number of years in '
+                                f'obsnum. Binned or categorical ages stay plain columns'))
+    numbers = [(value, n_cells, _as_number(value)) for value, n_cells in values]
+    numbers = [(value, n_cells, number) for value, n_cells, number in numbers if number is not None]
+    outside = [(value, n_cells) for value, n_cells, number in numbers if not 0 <= number <= AGE_MAX_YEARS]
+    if outside:
+        listed = ', '.join(f'{v!r} ({n} cells)' for v, n in outside[:max_listed])
+        findings.append(Finding(ERROR, 'age_not_years',
+                                f'{target} ({where}) carries values outside 0 to {AGE_MAX_YEARS} years: {listed}. '
+                                f'ant_age is years only (not months, days or animal ages)'))
+    if numbers and max(number for _v, _n, number in numbers) in AGE_TOP_CODES and not outside:
+        if not _TOP_CODING_RE.search(json.dumps(metadata or {}, default=str)):
+            findings.append(Finding(WARNING, 'age_top_coded',
+                                    f'{target} ({where}) tops out at {_fmt(max(n for _v, _c, n in numbers))}; '
+                                    f'if the author top-codes ages, say so in the .md (the word top-coding)'))
 
 
 # ── lineage ──────────────────────────────────────────────────────────────────
@@ -659,6 +702,25 @@ def lint_facet_scope(api: Mapping[str, Any], scope: Optional[str], mouse_only: b
     return findings
 
 
+def lint_age_human_only(api: Mapping[str, Any], organisms: Iterable[str]) -> List[Finding]:
+    """Error when ``ant_age`` is published for a dataset whose organism is not human.
+
+    Pure mouse and xenograft datasets are also caught by ``lint_facet_scope``; this rule covers every other
+    organism (rat, mixed human and animal). No organism recorded: nothing to say.
+
+    Args:
+        api: The raw ``api:`` mapping of a dataset ``.md``.
+        organisms: Organism values of the resolved ``.h5ad.mus`` annotation.
+    """
+    names = [str(name).strip().lower() for name in organisms if name is not None and str(name).strip()]
+    if not names or names == ['human'] or names == ['mouse']:
+        return []
+    columns = sorted({column for column, _ in _targets(api or {}) if _facet_of(column) == 'age'})
+    return [Finding(ERROR, 'age_not_human',
+                    f'{column} is published but the organism is {", ".join(names)}; ant_age is the age of human '
+                    f'donors in years only') for column in columns]
+
+
 # ── reading a dataset's duckdb ───────────────────────────────────────────────
 
 def duckdb_reader(duckdb_path: Path) -> Optional[Tuple[Dict[str, str], ValueLookup, Callable[[], None]]]:
@@ -704,6 +766,6 @@ def duckdb_reader(duckdb_path: Path) -> Optional[Tuple[Dict[str, str], ValueLook
 
 __all__ = [
     'ERROR', 'WARNING', 'NAMESPACE_DEFAULT_MODE', 'RULES', 'Finding',
-    'braak_group_of', 'parse_braak_label', 'lint_api', 'lint_api_data', 'lint_lineage', 'lint_replicate', 'lint_disease_basis',
+    'braak_group_of', 'parse_braak_label', 'lint_api', 'lint_api_data', 'lint_lineage', 'lint_replicate', 'lint_disease_basis', 'lint_facet_scope', 'lint_age_human_only',
     'duckdb_reader',
 ]

@@ -376,6 +376,8 @@ def check_md_folder(
         scope_info = _facet_scope(md_path, api, folder, db_id, metadata)
         for finding in facet_lint.lint_facet_scope(api, scope_info[0], mouse_only=scope_info[1]):
             report.add_finding(rel_path, finding)
+        for finding in facet_lint.lint_age_human_only(api, _organisms(md_path, folder)):
+            report.add_finding(rel_path, finding)
         if not with_data:
             continue
         duckdb_path = md_path.with_suffix('.duckdb')
@@ -389,7 +391,8 @@ def check_md_folder(
                 if finding.rule == 'replicate_column_missing':
                     report.add_finding(rel_path, finding)
             if api:
-                for finding in facet_lint.lint_api_data(api, columns, distinct_values, store_root=join_root):
+                for finding in facet_lint.lint_api_data(api, columns, distinct_values, store_root=join_root,
+                                                         metadata=metadata):
                     report.add_finding(rel_path, finding)
             report.data_checked += 1
         finally:
@@ -413,6 +416,18 @@ def _facet_scope(md_path: Path, api: Any, folder: Path, db_id: Optional[str],
                 facet_scopes.is_mouse_only(annotation))
     except Exception:
         return None, False
+
+
+def _organisms(md_path: Path, folder: Path) -> List[str]:
+    """Organism values of the dataset's ``.h5ad.mus`` cascade (empty when unreadable or not recorded)."""
+    try:
+        import mus  # noqa: PLC0415
+        value = mus.resolve_annotation(md_path.with_suffix('.h5ad'), root=folder).get('organism')
+    except Exception:
+        return []
+    if value is None:
+        return []
+    return [str(item) for item in value] if isinstance(value, (list, tuple, set)) else [str(value)]
 
 
 def _join_root(folder: Path, api: Any) -> Optional[Path]:

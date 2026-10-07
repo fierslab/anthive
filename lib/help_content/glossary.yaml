@@ -2,7 +2,7 @@ terms:
 - slug: facet
   term: Facet
   definition_html: |
-    A donor-level or animal-level variable that anthive has standardised across datasets, such as sex, pathologic AD, Braak stage, APOE e4 carrier status, age or App NL-G-F genotype. Every dataset declares how its own column maps onto the facet. A facet is constant for all cells of one donor, so a facet effect is a difference between donors, not between cells.
+    A donor-level or animal-level variable that anthive has standardised across datasets, such as sex, pathologic AD, Braak stage, APOE e4 carrier status, age (human donors, in years) or App NL-G-F genotype. Every dataset declares how its own column maps onto the facet. A facet is constant for all cells of one donor, so a facet effect is a difference between donors, not between cells.
 - slug: replicate-unit
   term: Replicate unit
   definition_html: |
@@ -114,7 +114,7 @@ terms:
 - slug: age-twins
   term: 'Age: not adjusted and adjusted for pathology'
   definition_html: |
-    Age is tested twice: once on its own (which partly re-detects AD pathology, since older donors have more of it) and once with Braak stage, else pathologic AD, in the model. A gene "persists after pathology adjustment" when its age association is still present in the adjusted test. Age is per decade, from 60 years; ROSMAP ages above 90 are recorded as 90.
+    Age is tested twice: once on its own (which partly re-detects AD pathology, since older donors have more of it) and once with Braak stage, else pathologic AD, in the model. A gene "persists after pathology adjustment" when its age association is still present in the adjusted test. Age is the age of the human donor in years (humans only, never animal ages), per decade, from 60 years; ROSMAP ages above 90 are recorded as 90.
 - slug: app-nlgf
   term: App NL-G-F and control basis
   definition_html: |

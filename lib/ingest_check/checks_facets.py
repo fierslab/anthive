@@ -80,7 +80,8 @@ def facets_mapping_data(ctx) -> Outcome:
         return no_database(ctx)
     columns, distinct_values, close = reader
     try:
-        findings = facet_lint.lint_api_data(ctx.api, columns, distinct_values, store_root=ctx.store_root)
+        findings = facet_lint.lint_api_data(ctx.api, columns, distinct_values, store_root=ctx.store_root,
+                                          metadata=ctx.md)
         findings += [item for item in facet_lint.lint_replicate(ctx.md, ctx.api, stored_columns=columns)
                      if item.rule == 'replicate_column_missing']
     finally:
