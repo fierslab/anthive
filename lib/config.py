@@ -399,6 +399,7 @@ def get_library_upload_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[st
         'git_push': bool(cfg.get('library_git_push', False)),
         's3_autopush': bool(cfg.get('library_s3_autopush', False)),
         'index_publisher': bool(cfg.get('library_index_publisher', False)),
+        'index_pull': bool(cfg.get('library_index_pull', True)),
     }
 
 

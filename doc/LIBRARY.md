@@ -426,6 +426,26 @@ ids and loads the index at startup (in the background) and on
 tools `search_literature`, `get_paper`, `related_papers`,
 `get_dataset_context` (`doc/MCP_LINKS.md`).
 
+### A site's library is a closed world
+
+A `papers:` link on a dataset, collection or gene set to a citekey that is
+not in **this site's** library is dropped everywhere: pages, lists, REST,
+BibTeX and MCP show no placeholder, citekey or title for it, and `related:`
+entries to missing citekeys are not shown either. The links that do not
+resolve are listed (for admins only, never on a site without login) as
+`unresolved_references` in `/library/status`, and by `ant lib-check` on the
+host. This is what lets a mirror serve a hand-picked subset of a bigger
+library without leaking the rest.
+
+A library folder does not have to be a git checkout. A read-only one made of
+symlinks to another library's records and PDFs works (`papers/<folder>/<citekey>.md`
+and `.pdf` as links; see `doc/DEPLOY_CONTAINERS.md`, "A mirror with a
+hand-picked subset"): no git command runs in it, additions and removals are
+noticed by fingerprinting the record files, and a dangling link counts as a
+missing PDF or an unreadable record. Uploads, `ant sync library` and
+`ant-stack publish-library` need a real checkout. Build such a site's index
+from its own papers with `ant lib-index --library <library> --out <index>/library_chunks.parquet`.
+
 ## Who sees the library
 
 Everyone who can sign in to the site sees every record, note and PDF in the

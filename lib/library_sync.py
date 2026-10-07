@@ -545,6 +545,10 @@ def git_sync(library_dir: Path, *, push: bool, dry_run: bool = False,
     """Records are git: pull --rebase from the library remote, then push when
     allowed. Never forces; a conflict aborts the rebase and is reported."""
     library_dir = Path(library_dir)
+    if not (library_dir / '.git').exists():
+        # A plain folder (symlinked records, a copy): never run git in it, not
+        # even when it happens to sit inside some other repository.
+        return {'status': 'skipped', 'detail': f'{library_dir} is not a git checkout'}
     probe = _git(library_dir, 'rev-parse', '--is-inside-work-tree')
     if probe.returncode != 0 or probe.stdout.strip() != 'true':
         return {'status': 'skipped', 'detail': f'{library_dir} is not a git repository'}

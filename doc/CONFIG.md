@@ -138,6 +138,11 @@ See `doc/LIBRARY.md` and `doc/LIBRARY_INDEX.md`.
 - **Default**: `false`
 - **Description**: This site publishes the literature index to S3 during `ant sync`. Set it on exactly one site; the others download the published index as a starting point and add their own papers (`doc/LIBRARY.md`, "Two-way sync").
 
+#### `library_index_pull`
+- **Type**: boolean
+- **Default**: `true`
+- **Description**: `ant sync` downloads the shared literature index (`_library_index/` on S3) when the site has none or an older one. Set `false` on a site that builds its own index from its own (possibly hand-picked) library with `ant lib-index`: it then never receives passages of papers it does not hold. `ant-stack` renders `false` when `s3.enabled` is false or `library.index_pull: false`.
+
 #### `mcp.max_upload_mb`
 - **Type**: integer
 - **Default**: `25`

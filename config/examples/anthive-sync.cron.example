@@ -1,0 +1,18 @@
+# EXAMPLE: crontab entry that pulls new data from S3 into one container site
+# every night (`ant-stack ingest -- ant sync pull`: datasets, the paper
+# library PDFs, _facet_tests/). Install with `crontab -e` as the user that
+# owns the stores (the run_as uid of site.yaml) and may run docker. Fill the
+# <PLACEHOLDERS>.
+#
+# cron starts jobs with PATH=/usr/bin:/bin. ant-stack and ant-sync begin with
+# `#!/usr/bin/env -S uv run ...`, so uv must be on PATH: the installer puts it
+# in ~/.local/bin, which cron does not search. Without the PATH line below the
+# job dies with "env: 'uv': No such file or directory" (nothing from ant-stack
+# itself, it never got to start). `ant-stack check` prints where uv is.
+# Alternative: call uv explicitly, `<HOME>/.local/bin/uv run --script
+# <REPO_PATH>/bin/ops/ant-stack ...`.
+
+PATH=<HOME>/.local/bin:/usr/local/bin:/usr/bin:/bin
+ANTHIVE_SITE=<REPO_PATH>/site.yaml
+
+17 3 * * *  flock -n /tmp/anthive-sync.lock <REPO_PATH>/bin/ops/ant-stack ingest -- ant sync pull >> <LOG_DIR>/sync-pull.log 2>&1

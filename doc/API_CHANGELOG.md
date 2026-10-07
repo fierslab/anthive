@@ -114,6 +114,21 @@ Facet engine v3c (same unreleased version, 2026-10-07):
 - Datasets excluded from the facet layer (spatial, proteomics, metacell sets, Francken2026) have no results and no cohort rows.
 - The metadata cache version is 7.
 
+Library changes in 2.44.0 (no new endpoints):
+
+- **Papers a site does not hold are hidden.** A `papers:` link (dataset, collection, gene set) to a citekey that is not in
+  this site's own library is dropped from `/databases/{id}/papers`, `/databases/{id}/context`, `/papers/{citekey}`
+  (`datasets`, `genesets`), `/papers` and BibTeX; a paper's `related:` entries to citekeys the library lacks are not shown
+  either (the raw `related` field, `/library.bib`).
+- **`GET /library/status` is trimmed for non-admins.** `unresolved_references` (the dropped `papers:` links),
+  `issues.errors` / `issues.warnings` texts, `library_dir` and `index.path` are given to admins only (on `auth.mode: none`
+  nobody is an admin); everybody gets `papers`, `linked_datasets`, `index.*` and the new `n_errors` / `n_warnings`. Clients
+  that read `unresolved_references` as a non-admin now find the key missing; `issues` keeps its shape with empty lists.
+- **PDF warnings are live.** "`<citekey>`: file ... not found next to the sidecar" is computed from the disk at each
+  `/library/status` call, so it no longer outlives the PDF's arrival (it used to survive a reload and `POST /admin/rescan`).
+- Plain (non-git) libraries are re-read when record files are added, removed or replaced (a fingerprint replaces the git HEAD
+  check); a record symlink with a missing target is an `issues.errors` entry instead of a failed load.
+
 Clients to update: pyvark (`scope` on the facet calls, the new replication fields, `by_scope`), vark, the agent
 skills (facet and replication texts), the JupyterLite vendored client and the web UI (scope selector, effect gate,
 `small_sample` instead of descriptive-only for small cohorts, age and app_nlgf facet pages).

@@ -496,6 +496,9 @@ def load_library(root: Path) -> Tuple[Dict[str, Paper], LibraryIssues]:
     for path in record_paths(papers_dir):
         try:
             paper = parse_sidecar(path)
+        except OSError as exc:   # e.g. a symlinked record whose target is gone
+            issues.errors.append(f"{rel(path)}: cannot read the record ({exc.strerror or exc})")
+            continue
         except (ValueError, yaml.YAMLError) as exc:
             if path.read_text(encoding='utf-8', errors='replace').startswith('---'):
                 issues.errors.append(f"{rel(path)}: {exc}")
@@ -532,8 +535,8 @@ def find_references(store: Path) -> List[Reference]:
             continue
         try:
             data, _ = parse_front_matter(path.read_text(encoding='utf-8'))
-        except (ValueError, yaml.YAMLError, UnicodeDecodeError):
-            continue
+        except (ValueError, yaml.YAMLError, UnicodeDecodeError, OSError):
+            continue   # includes a dangling symlink
         papers = data.get('papers')
         if not papers:
             continue

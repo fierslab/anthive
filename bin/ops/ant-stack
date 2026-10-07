@@ -144,6 +144,20 @@ def _abs(value: Any, field: str, required: bool = True) -> Path | None:
     return path
 
 
+def _extra_mounts(value: Any) -> list[Path]:
+    """data.extra_mounts as absolute host paths (deduplicated, order kept)."""
+    if value in (None, ''):
+        return []
+    if not isinstance(value, list):
+        raise SiteError("data.extra_mounts must be a list of absolute host paths")
+    mounts: list[Path] = []
+    for index, item in enumerate(value):
+        path = _abs(item, f"data.extra_mounts[{index}]")
+        if path not in mounts:
+            mounts.append(path)
+    return mounts
+
+
 def validate_site(site: dict, path: Path) -> dict:
     name = str(site['site'].get('name') or '')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,40}', name):
@@ -176,6 +190,7 @@ def validate_site(site: dict, path: Path) -> dict:
     site['_starcatstore'] = _abs(site['data'].get('starcatstore'), 'data.starcatstore', False)
     site['_library'] = _abs(site['data'].get('library'), 'data.library', False)
     site['_library_index'] = _abs(site['data'].get('library_index'), 'data.library_index', False)
+    site['_extra_mounts'] = _extra_mounts(site['data'].get('extra_mounts'))
     site['_state'] = _abs(site.get('state_dir'), 'state_dir')
     site['_scratch'] = _abs(site.get('scratch_dir'), 'scratch_dir', False)
     run_as = site.get('run_as') or {}
@@ -420,6 +435,7 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
         'library_git_committer': str(lib.get('git_committer') or 'anthive <noreply@anthive.local>'),
         'library_s3_autopush': bool(lib.get('s3_autopush', False)),
         'library_index_publisher': bool(lib.get('index_publisher', False)),
+        'library_index_pull': _index_pull_enabled(site),
     })
     cfg['mcp']['max_upload_mb'] = int(lib.get('max_pdf_mb') or 25)
     if site['_starcatstore']:
@@ -622,6 +638,12 @@ def render_compose_site(site: dict) -> dict:
         if site[extra]:
             data_rw.append(_bind(site[extra], str(site[extra]), read_only=True))
             data_ro.append(_bind(site[extra], str(site[extra]), read_only=True))
+    # data.extra_mounts: targets of symlinks in the stores (a mirror whose
+    # datasets and papers link into another site's stores). Read-only, at the
+    # same absolute path, in every container that reads data.
+    extra_ro = [_bind(path, str(path), read_only=True) for path in site.get('_extra_mounts') or []]
+    data_rw += extra_ro
+    data_ro += extra_ro
     # Library PDFs + literature index: the API only reads them, unless paper
     # uploads are on (it then writes records, PDFs and the index); the ingest
     # container writes them (`ant sync library`, `ant lib-add`, `ant lib-index`).
@@ -647,7 +669,7 @@ def render_compose_site(site: dict) -> dict:
                 + [config_mount('api')] + api_state + [scratch, webapp_rw],
                 'tmpfs': api_tmpfs},
         'web': {'volumes': data_ro + [config_mount('serve')]},
-        'mcp': {'volumes': [config_mount('serve')] + mcp_state + [webapp_rw], 'tmpfs': mcp_tmpfs},
+        'mcp': {'volumes': extra_ro + [config_mount('serve')] + mcp_state + [webapp_rw], 'tmpfs': mcp_tmpfs},
         # ingest is the operator's own tool: the whole state_dir and the full S3 keys
         'ingest': {'volumes': data_rw + library_rw + [config_mount('ingest'), state_mount, scratch, webapp_rw]},
         'caddy': {
@@ -821,8 +843,12 @@ def _check_library(site: dict) -> list[str]:
         return problems
     parquet = index_dir / 'library_chunks.parquet'
     if index_dir.is_dir() and not parquet.is_file():
-        _warn(f"{parquet} is missing: run `ant-stack ingest -- ant sync pull --library-only` "
-              f"(or build it with `ant lib-index`)")
+        if _index_pull_enabled(site):
+            _warn(f"{parquet} is missing: run `ant-stack ingest -- ant sync pull --library-only` "
+                  f"(or build it with `ant lib-index`)")
+        else:
+            _warn(f"{parquet} is missing: this site does not pull the shared index; build its own with "
+                  f"`ant lib-index --library {library} --out {parquet}` (doc/LIBRARY_INDEX.md)")
     meta_file = index_dir / 'library_chunks.json'
     if parquet.is_file() and meta_file.is_file():
         try:
@@ -950,6 +976,105 @@ def _check_proxy_trust(site: dict) -> None:
               "X-Forwarded-Proto with http and Authelia refuses logins as insecure")
 
 
+def _index_pull_enabled(site: dict) -> bool:
+    """True when `ant sync` may download the shared literature index: S3 is on
+    and library.index_pull is not false. A site with its own index never pulls."""
+    return bool((site.get('s3') or {}).get('enabled')) and bool((site.get('library') or {}).get('index_pull', True))
+
+
+def _is_within(path: Path, parent: Path) -> bool:
+    """True when ``path`` equals ``parent`` or sits below it (lexical, after resolving)."""
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _check_extra_mounts(site: dict) -> list[str]:
+    """data.extra_mounts: each must exist, stay out of state_dir (and not
+    contain it: the secrets would be exposed), and should not overlap the
+    other mounts (overlap is only a warning, docker allows nested mounts)."""
+    problems: list[str] = []
+    mounts = site.get('_extra_mounts') or []
+    state = site['_state']
+    others = [(field, site[key]) for field, key in (
+        ('data.h5adstore', '_h5adstore'), ('data.genesetstore', '_genesetstore'),
+        ('data.starcatstore', '_starcatstore'), ('data.library', '_library'),
+        ('data.library_index', '_library_index')) if site.get(key)]
+    for index, mount in enumerate(mounts):
+        field = f"data.extra_mounts[{index}]"
+        if not mount.exists():
+            problems.append(f"{field}: {mount} does not exist")
+            continue
+        if _is_within(mount, state):
+            problems.append(f"{field}: {mount} is inside state_dir {state} (secrets live there)")
+        elif _is_within(state, mount):
+            problems.append(f"{field}: {mount} contains state_dir {state}; mounting it would expose the secrets")
+        for other_field, other in others:
+            if _is_within(mount, other) or _is_within(other, mount):
+                _warn(f"{field}: {mount} overlaps {other_field} {other}; the mounts are nested, "
+                      f"check that is intended (extra mounts are read-only)")
+        for other_index, other in enumerate(mounts[:index]):
+            if _is_within(mount, other) or _is_within(other, mount):
+                _warn(f"{field}: {mount} overlaps data.extra_mounts[{other_index}] {other}")
+    return problems
+
+
+def _symlink_targets_outside_mounts(site: dict, limit: int = 2000) -> list[tuple[Path, Path]]:
+    """(link, target) for symlinks in the stores and the library whose
+    target is not below any mounted path: in the containers they dangle."""
+    roots = [site[key] for key in ('_h5adstore', '_genesetstore', '_starcatstore', '_library', '_library_index')
+             if site.get(key)] + list(site.get('_extra_mounts') or [])
+    resolved_roots = [root.resolve() for root in roots if root.exists()]
+    found: list[tuple[Path, Path]] = []
+    seen = 0
+    for root in [site[key] for key in ('_h5adstore', '_genesetstore', '_starcatstore', '_library')
+                 if site.get(key) and site[key].is_dir()]:
+        for current, dirs, files in os.walk(root):
+            dirs[:] = [name for name in dirs if name not in ('.git', 'static')]
+            for name in dirs + files:
+                link = Path(current) / name
+                if not link.is_symlink():
+                    continue
+                seen += 1
+                if seen > limit:
+                    return found
+                target = Path(os.path.realpath(link))
+                if not any(_is_within(target, root_) for root_ in resolved_roots):
+                    found.append((link, target))
+    return found
+
+
+def _check_symlinks(site: dict) -> None:
+    """Warn about store/library symlinks that dangle inside the containers."""
+    outside = _symlink_targets_outside_mounts(site)
+    if not outside:
+        return
+    parents = sorted({str(target.parent) for _link, target in outside})[:5]
+    link, target = outside[0]
+    _warn(f"{len(outside)} symlink(s) in the stores/library point outside every mounted path and "
+          f"will dangle in the containers (first: {link} -> {target}); add their target folder(s) "
+          f"to data.extra_mounts, e.g. {', '.join(parents)}")
+
+
+def _check_uv() -> None:
+    """Host-side tools (ant-stack, ant-sync) start with a `uv` shebang. Say
+    where uv is, and warn when it is only reachable through a PATH that cron
+    or systemd will not have."""
+    uv = shutil.which('uv')
+    if uv is None:
+        _warn("uv was not found on PATH: ant-stack and ant-sync (`#!/usr/bin/env -S uv run`) cannot "
+              "start without it. Install it (https://docs.astral.sh/uv/) or, in a cron job or systemd "
+              "unit, set PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin "
+              "(see config/examples/anthive-sync.cron.example)")
+        return
+    minimal = shutil.which('uv', path='/usr/local/bin:/usr/bin:/bin')
+    if minimal is None:
+        _say(f"uv is {uv}: cron/systemd jobs need PATH to include {Path(uv).parent} "
+             f"(templates in config/examples/ set it)")
+
+
 def _check_publish_library(site: dict) -> None:
     key = site.get('_deploy_key')
     library = site.get('library') or {}
@@ -1022,8 +1147,11 @@ def check(site: dict, running: bool = False) -> list[str]:
                       + ("served from S3 (slow)" if remote else
                          "not served (the api has no S3 access, s3.api_access: none)")
                       + "; pull them with `ant-stack ingest -- ant sync pull --include-duckdb`")
+    problems += _check_extra_mounts(site)
+    _check_symlinks(site)
     problems += _check_library(site)
     _check_publish_library(site)
+    _check_uv()
     if site['_scratch'] and not site['_scratch'].is_dir():
         problems.append(f"scratch_dir {site['_scratch']} does not exist")
     if not running and _site_is_up(site):

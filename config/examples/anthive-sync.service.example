@@ -1,0 +1,30 @@
+# EXAMPLE: systemd service that pulls new data from S3 into one container
+# site (`ant-stack ingest -- ant sync pull`). Pair it with a timer like
+# anthive-publish-library.timer.example (change the unit name and the
+# interval, e.g. OnCalendar=*-*-* 03:17:00).
+#
+#   sudo cp anthive-sync.service.example /etc/systemd/system/anthive-sync.service
+#   (fill the <PLACEHOLDERS>)
+#   sudo systemctl daemon-reload && sudo systemctl start anthive-sync.service
+#   journalctl -u anthive-sync.service
+#
+# <USER> must be the run_as user of site.yaml and may run docker.
+
+[Unit]
+Description=Anthive: pull datasets, library PDFs and facet results from S3
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=<USER>
+WorkingDirectory=<REPO_PATH>
+# systemd services do not read ~/.profile: uv (installed in ~/.local/bin) must
+# be on PATH explicitly, or the `#!/usr/bin/env -S uv run` shebang of
+# ant-stack fails with "env: 'uv': No such file or directory".
+Environment=HOME=<HOME>
+Environment=PATH=<HOME>/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=ANTHIVE_SITE=<REPO_PATH>/site.yaml
+ExecStart=<REPO_PATH>/bin/ops/ant-stack ingest -- ant sync pull
+TimeoutStartSec=6h
+Nice=10

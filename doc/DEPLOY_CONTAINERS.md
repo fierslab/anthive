@@ -255,7 +255,7 @@ Where the library lives:
 | --- | --- | --- |
 | paper records (`.md`) | the library git repo | `git` (pulled and pushed by `ant sync library`) |
 | paper PDFs | S3, under `_library/papers/<folder>/` in the same bucket and prefix as the data | `ant sync` (both directions) |
-| literature index (`library_chunks.parquet` + `.json`) | S3, under `_library_index/` | `ant sync` (downloaded by every site; uploaded only by the site with `library_index_publisher: true`) |
+| literature index (`library_chunks.parquet` + `.json`) | S3, under `_library_index/` | `ant sync` (downloaded by every site with S3 unless `library.index_pull: false`; uploaded only by the site with `library_index_publisher: true`) |
 
 The leading `_` keeps these folders out of the dataset sync. A site that
 adds papers updates its own index locally after each sync, so it does not
@@ -409,6 +409,85 @@ Other sites get the new papers with their next `ant sync pull` (or `ant sync
 library`), which pulls the records from git and the PDFs from S3. See
 `doc/LIBRARY.md` for conflicts and deletes.
 
+### A mirror with a hand-picked subset (symlinked stores and library)
+
+A public mirror can serve a few curated datasets and papers that physically
+live in another site's stores. Make the mirror's `h5adstore` and
+`library/papers` folders of symlinks to the other site's files, and list
+the folders the links point into under `data.extra_mounts`:
+
+```yaml
+data:
+  h5adstore: /srv/mirror/h5adstore          # .md/.h5ad/.duckdb symlinks into /srv/intern/h5adstore
+  library: /srv/mirror/library              # papers/<folder>/<citekey>.md + .pdf symlinks into /srv/intern/library
+  library_index: /srv/mirror/library_index  # this site's OWN index, see below
+  extra_mounts: [/srv/intern/h5adstore, /srv/intern/library]
+  readonly: true
+auth:
+  mode: none
+s3:
+  enabled: false
+```
+
+Rules and limits:
+
+- `extra_mounts` are absolute host paths, mounted **read-only at the same
+  path** into api, web, mcp and ingest. `ant-stack check` fails when one does
+  not exist or is inside (or contains) `state_dir`, and warns when it
+  overlaps another mount or when a symlink in the stores or the library
+  points outside every mounted path (it would dangle in the containers).
+- A library that is not a git checkout works read-only. Leave
+  `services.paper_upload` off (uploads answer 503) and do not set
+  `library.deploy_key`. No git command is ever run in a folder without its own
+  `.git`, not even when it sits inside another repository; `ant-stack
+  publish-library` refuses it. The api notices added, removed or replaced
+  record files within about 30 s (or on `POST /admin/rescan`), not only git
+  commits. A record symlink whose target is gone is listed as an error in
+  the admin `/library/status`; a PDF symlink that dangles counts as "no PDF".
+- **The site builds its own literature index** from its own PDFs, never the
+  shared one:
+
+  ```sh
+  bin/ops/ant-stack ingest -- ant lib-index --library /srv/mirror/library \
+      --out /srv/mirror/library_index/library_chunks.parquet
+  ```
+
+  Nothing in `ant-stack` fetches the index: only `ant sync` does, and it
+  needs an `s3:` block, which a site with `s3.enabled: false` does not get.
+  On a site that does have S3 but selects its own papers, set
+  `library.index_pull: false`. The api reads only `data.library_index`, and
+  literature search answers only for papers that are in the site's own
+  library, so passages of other papers could not appear even from a stray
+  index.
+- **Papers the site does not hold are invisible.** A `papers:` link on a
+  dataset or collection to a citekey that is not in this site's library is
+  dropped on every surface: dataset and collection pages, paper lists,
+  `GET /databases/{id}/papers`, `/databases/{id}/context`, `related` lists,
+  BibTeX and the MCP tools show nothing about it (no placeholder, citekey,
+  title or metadata). Only admins see the list, in
+  `GET /library/status` as `unresolved_references`; with `auth.mode: none`
+  there are no admins, so nobody does. `ant lib-check` on the host still
+  reports them.
+
+### Run syncs from cron or a systemd timer
+
+`ant-stack` and `ant-sync` start with `#!/usr/bin/env -S uv run ...`, so
+`uv` must be on `PATH`. The installer puts it in `~/.local/bin`, which cron
+(`PATH=/usr/bin:/bin`) and systemd services do not search; the job then fails
+with `env: 'uv': No such file or directory` before any anthive code runs.
+Set `PATH` in the crontab or the unit, as the templates do:
+
+| Job | Templates in `config/examples/` |
+| --- | --- |
+| `ant-stack ingest -- ant sync pull` (data, library PDFs, `_facet_tests/`) | `anthive-sync.cron.example`, `anthive-sync.service.example` (+ a timer like the next row) |
+| `ant-stack publish-library` | `anthive-publish-library.{cron,service,timer}.example` |
+
+`ant-stack check` prints where `uv` is and which directory cron needs on
+`PATH`, and warns when `uv` is not found at all. Alternatively call uv by its
+absolute path (`/home/you/.local/bin/uv run --script <repo>/bin/ops/ant-stack ...`), or prefix
+the command with `bin/ops/ant-cron-run`, which adds the usual uv folders to
+`PATH` and, when uv is still missing, prints that plainly and exits 127.
+
 ### Upgrade to a new release
 
 ```sh
@@ -441,6 +520,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.41.0** | Secrets reach only the containers that use them: S3 keys go to the ingest container alone, api and mcp no longer see `state_dir/secrets`. `library.s3_autopush` is off by default; papers are published from the host with `ant-stack publish-library`. Caddy believes `X-Forwarded-*` from private addresses when `tls.mode` is off, which fixes Authelia behind a TLS proxy. `ant-stack pull` now pulls the tag in `site.yaml`. In the library, the per-paper access and LLM fields (`anthive_access`, `anthive_llm`) are gone: everyone with site access sees the whole library, and snippets go to the AI providers of connected clients. Role defaults to `background`; document types; `papers/proposals/`; uploads answer 503 `disabled` when the library is read-only and are hidden from non-uploaders. Expression layers are read relative to each `.duckdb`, so stores that moved or were renamed work again. | read "Upgrading to 2.41.0" below; before upgrading, check that nothing in the library must stay hidden from people who can sign in (move it out of the library); `ant lib-check` warns about leftover fields |
 | **2.42.0** | Hybrid literature search keeps paraphrase matches; upload index status lists the queue; help page quick start; one-paste setup prompt on the MCP page; MCP snippets use a per-site connection name. | none: set `images: tag: 2.42.0`, `ant-stack pull`, `ant-stack up` (from 2.40.x, first follow "Upgrading to 2.41.0") |
 | **2.42.1** | A running server picks up records and a literature index that a sync changed on disk (within about 30 s). Needed on the site that publishes the index and on sites that download it. | none: set `images: tag: 2.42.1`, `ant-stack pull`, `ant-stack up` |
+| **2.44.0** | (1) **Facets**: `ant sync pull` now also brings `_facet_tests/` (the facet test results the API serves; logs and scripts stay out), and the h5adstore repo has many changed `.md` files (facet layer metadata, lineage fields). (2) **Mirror sites with symlinks**: new `data.extra_mounts` bind-mounts folders read-only at the same path into api, web, mcp and ingest, so symlinks from your stores into another site's stores resolve in the containers; `ant-stack check` validates them and warns about symlinks that would dangle. (3) **Hidden paper links**: on every site a `papers:` link to a citekey that is not in the site's own library is hidden everywhere (web, REST, MCP, BibTeX); `GET /library/status` shows `unresolved_references`, issue texts and paths to admins only (on `auth.mode: none` to nobody), non-admins get counts (`n_errors`, `n_warnings`). (4) **Library**: a plain, non-git library of symlinked records works read-only (no git is run in it); `file not found` warnings are computed from the disk on each call and no longer outlive the PDF's arrival; a symlinked record whose target is gone is an error entry, not a crash. (5) **Own literature index**: new `library.index_pull` (default true); `ant sync` never downloads the shared index when `s3.enabled` is false or `library.index_pull: false`. (6) **Cron and systemd**: new `config/examples/anthive-sync.{cron,service}.example` set PATH for uv; `ant-stack check` says where uv is and warns when it is missing. | none required. `git pull` the h5adstore, then `ant-stack ingest -- ant sync pull` for `_facet_tests/`. Set `images: tag: 2.44.0`, `ant-stack pull`, `ant-stack up`. Optional: `data.extra_mounts`, `library.index_pull`; cron jobs: add `PATH=$HOME/.local/bin:...` (see "Run syncs from cron or a timer") |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.
@@ -529,6 +609,8 @@ catalogue from git.
 | upload warns "git push failed" | no remote, or the container cannot authenticate | leave `library.git_push: false` and use `ant-stack publish-library` (see "Let people add papers") |
 | Authelia log: "has an insecure scheme 'http'" | `tls.mode: off` behind a proxy, and Caddy did not believe the proxy's `X-Forwarded-Proto` | check `tls.trusted_proxies` (default `private_ranges`) and that the proxy sends `X-Forwarded-Proto https`; release 2.41.0 or newer |
 | `check` says the app image is missing right after `pull` | before 2.41.0, `pull` used the image tag of the previous render | upgrade the checkout; `pull` now renders first and lists every image it pulled |
+| cron or timer job fails with `env: 'uv': No such file or directory` | cron and systemd do not have `~/.local/bin` on PATH | set `PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin` in the crontab or unit (templates in `config/examples/`), or call uv by absolute path; `ant-stack check` shows where uv is |
+| `check`: "symlink(s) ... will dangle in the containers" | a store or library symlink points outside every mounted folder | add the target folder to `data.extra_mounts` |
 | `publish-library`: "dubious ownership" or permission denied | the command runs as another user than the one owning the library checkout | run it as the `run_as` user (the `User=` of the systemd unit) |
 | `publish-library`: git push failed, "Permission denied (publickey)" | the deploy key is not added to the repository with write access, or the remote is HTTPS | add the `.pub` as a write deploy key; `git remote set-url origin git@...` |
 | `ant sync library` reports a conflict | the same PDF changed on this site and on S3 | keep one: `ant sync library --prefer local` or `--prefer remote`, then delete the `.conflict-*.pdf` copy |
@@ -612,6 +694,7 @@ absolute path.
 | `data.h5adstore`, `data.genesetstore` | the data folders (absolute paths) |
 | `data.library`, `data.library_index` | the paper library checkout and the literature index folder (absolute paths; leave out to run without papers) |
 | `data.readonly` | mount the data read-only (a mirror that never annotates) |
+| `data.extra_mounts` | absolute host folders bind-mounted read-only at the same path into api, web, mcp and ingest: the targets of symlinks in your stores or library (see "A mirror with a hand-picked subset") |
 | `state_dir` | secrets, users, caches and the rendered config |
 | `scratch_dir` | disk for temporary DuckDB files and conversions (default: a docker volume) |
 | `auth.*`, `tls.*`, `ports.*` | see above |
@@ -620,7 +703,7 @@ absolute path.
 | `services.mcp` | personal MCP links for AI clients (on by default; the supported way to use AI with anthive) |
 | `mcp.token_ttl_days`, `mcp.max_links_per_user` | how long a link lives (0 = forever) and how many links one user may hold (default 5) |
 | `services.paper_upload` | let `library.upload_groups` add papers through the API and MCP (mounts the library read-write) |
-| `library.*` | upload groups, PDF size limit, git committer and push, S3 autopush, index publisher |
+| `library.*` | upload groups, PDF size limit, git committer and push, S3 autopush, index publisher, `index_pull` (false: this site never downloads the shared literature index) |
 | `library.deploy_key` | SSH key `ant-stack publish-library` pushes the library with (host path) |
 | `s3.api_access` | what the api may do on S3: `none` (default), `read` (own read-only key pair) or `write` |
 | `tls.trusted_proxies` | addresses whose `X-Forwarded-*` Caddy believes (default `private_ranges` with `tls.mode: off`) |

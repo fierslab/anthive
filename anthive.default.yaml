@@ -83,6 +83,13 @@ library_s3_autopush: false
 # site (the main one) should; the others only pull it as a bootstrap and add
 # their local papers.
 library_index_publisher: false
+# `ant sync` downloads the shared literature index (S3 _library_index/) when
+# this site has none or an older one. Set false on a site that builds its own
+# index from its own library (`ant lib-index --library ... --out ...`): such a
+# site must never receive the index of papers it does not hold. Container
+# sites: ant-stack renders false when s3.enabled is false or library.index_pull
+# is false in site.yaml.
+library_index_pull: true
 
 # Dataset ingestion (doc/DESIGN_dataset_ingestion.md). P1 reads these in
 # `ant ingest-check`.

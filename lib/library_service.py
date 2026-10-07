@@ -44,6 +44,11 @@ log = logging.getLogger(__name__)
 LIBRARY_S3_PREFIX = '_library/papers'
 INDEX_S3_PREFIX = '_library_index'
 INDEX_FILENAME = 'library_chunks.parquet'
+# Suffix of the lib/library.py warning for a `file:` that is not there. PDFs
+# arrive later than records (git first, S3 afterwards, or a dangling symlink
+# that gets fixed), so these warnings are never stored: status() derives them
+# from the disk each time.
+PDF_MISSING_SUFFIX = 'not found next to the sidecar'
 
 TOPIC_FIELDS = {
     'cohort': 'anthive_cohorts',
@@ -209,10 +214,15 @@ class LibraryService:
         return (info.st_mtime_ns, info.st_size) if info else None
 
     def _records_head(self) -> Optional[str]:
-        """The library checkout's current commit, read from .git (no git call)."""
+        """The library checkout's current commit, read from .git (no git call).
+        A library that is not a git checkout (a plain folder, symlinked
+        records) gets a fingerprint of its record files instead, so added,
+        removed or replaced records are noticed there too."""
         if not self.library_dir:
             return None
         git_dir = self.library_dir / '.git'
+        if not git_dir.exists():
+            return self._folder_fingerprint()
         try:
             head = (git_dir / 'HEAD').read_text().strip()
             if head.startswith('ref: '):
@@ -228,6 +238,25 @@ class LibraryService:
             return head
         except OSError:
             return None
+
+    def _folder_fingerprint(self) -> Optional[str]:
+        """Names and link/file mtimes of the record files (lstat: a symlink
+        counts by itself, and a dangling one does not raise)."""
+        import hashlib  # noqa: PLC0415
+        from library import library_papers_dir, record_paths  # noqa: PLC0415
+        if not self.library_dir or not self.library_dir.is_dir():
+            return None
+        papers_dir = library_papers_dir(self.library_dir)
+        digest = hashlib.sha1()
+        for path in record_paths(papers_dir):
+            try:
+                info = path.lstat()
+                target = path.stat()
+            except OSError:
+                digest.update(f"{path}:dangling;".encode())
+                continue
+            digest.update(f"{path}:{info.st_mtime_ns}:{target.st_mtime_ns}:{target.st_size};".encode())
+        return 'fs:' + digest.hexdigest()
 
     def refresh_if_changed(self, min_interval: float = 30.0) -> bool:
         """Reload the records and/or the index in the background when they
@@ -267,26 +296,41 @@ class LibraryService:
         state = LibraryState()
         if self.library_dir and self.library_dir.is_dir():
             state.papers, state.issues = load_library(self.library_dir)
+            state.issues.warnings = [w for w in state.issues.warnings if not w.endswith(PDF_MISSING_SUFFIX)]
+            for paper in state.papers.values():
+                # A `related:` citekey that is not in this library is not shown anywhere
+                # (record, BibTeX); `ant lib-check` and the admin status still report it.
+                related = paper.fields.get('related')
+                if related:
+                    kept = [key for key in _as_list(related) if key in state.papers]
+                    paper.fields['related'] = kept
+                    if not kept:
+                        paper.fields.pop('related')
+                        paper.fields.pop('relatedtype', None)
         md_to_db: Dict[Path, str] = {p.resolve(): db for db, p in self._db_md.items()}
         dirs_to_dbs: Dict[Path, List[str]] = defaultdict(list)
         for db, md in self._db_md.items():
             dirs_to_dbs[md.parent.resolve()].append(db)
         if self.store_dir and self.store_dir.is_dir():
-            store = self.store_dir.resolve()
             for ref in find_references(self.store_dir):
-                path = ref.path.resolve()
+                # Stores may hold symlinks into another store: match a dataset's .md by what
+                # it resolves to, a collection by the folder it is listed in (not by where
+                # a symlinked index.md points), and report the path inside this store.
                 if ref.scope == 'dataset':
-                    dbs = [md_to_db[path]] if path in md_to_db else []
+                    resolved = ref.path.resolve()
+                    dbs = [md_to_db[resolved]] if resolved in md_to_db else []
                 else:
-                    folder = path.parent
+                    folder = ref.path.parent.resolve()
                     dbs = [db for d, members in dirs_to_dbs.items()
                            if d == folder or folder in d.parents for db in members]
                 try:
-                    source = str(path.relative_to(store))
+                    source = str(ref.path.relative_to(self.store_dir))
                 except ValueError:
-                    source = str(path)
+                    source = ref.path.name
                 if ref.citekey not in state.papers:
+                    # Not in this site's library: never linked, so no surface can show it.
                     state.unresolved.append(f"{source}: {ref.citekey}")
+                    continue
                 for db in dbs:
                     link = DatasetLink(db_id=db, role=ref.role, scope=ref.scope, source=source)
                     state.dataset_links.setdefault(ref.citekey, []).append(link)
@@ -302,9 +346,10 @@ class LibraryService:
             state.papers_by_db[db] = sorted(((ck, role) for ck, (role, _) in chosen.items()),
                                             key=lambda item: (item[1] != 'source', item[0]))
         for scope_id, citekey, role in geneset_references(self.geneset_dir):
-            state.geneset_links.setdefault(citekey, []).append((scope_id, role))
             if citekey not in state.papers:
                 state.unresolved.append(f"genesetstore {scope_id}: {citekey}")
+                continue
+            state.geneset_links.setdefault(citekey, []).append((scope_id, role))
         with self._lock:
             self.state = state
         return state
@@ -336,15 +381,33 @@ class LibraryService:
         finally:
             self.index_loading = False
 
-    def status(self) -> Dict[str, Any]:
+    def pdf_warnings(self) -> List[str]:
+        """Warnings for records whose `file:` is missing on disk right now (a
+        dangling symlink counts as missing). Checked live, never cached."""
+        out = []
+        for paper in self.state.papers.values():
+            name = paper.fields.get('file')
+            if name and paper.path is not None and not (paper.path.parent / str(name)).exists():
+                out.append(f"{paper.citekey}: file {str(name)!r} {PDF_MISSING_SUFFIX}")
+        return sorted(out)
+
+    def status(self, admin: bool = False) -> Dict[str, Any]:
+        """Library and index health. Details that could name a paper this site
+        does not hold (issue texts, `papers:` references that do not resolve)
+        and host paths are only included for ``admin`` callers."""
         self.refresh_if_changed()
         state = self.state
         meta = self.index.meta if self.index is not None else {}
-        return {
-            'library_dir': str(self.library_dir) if self.library_dir else None,
+        issues = {'errors': list(state.issues.errors),
+                  'warnings': list(state.issues.warnings) + self.pdf_warnings()}
+        shown = issues if admin else {'errors': [], 'warnings': []}
+        out = {
+            'library_dir': str(self.library_dir) if self.library_dir and admin else None,
             'papers': len(state.papers),
-            'issues': {'errors': state.issues.errors, 'warnings': state.issues.warnings},
-            'unresolved_references': state.unresolved,
+            'issues': shown,
+            'n_errors': len(issues['errors']),
+            'n_warnings': len(issues['warnings']),
+            'unresolved_references': list(state.unresolved) if admin else [],
             'linked_datasets': len(state.papers_by_db),
             'index': {
                 'path': str(self.index_path) if self.index_path else None,
@@ -358,6 +421,10 @@ class LibraryService:
                 'warnings': list(self.index.warnings) if self.index is not None else [],
             },
         }
+        if not admin:
+            out.pop('unresolved_references')
+            out['index']['path'] = None
+        return out
 
     def get(self, citekey: str) -> Optional[Paper]:
         return self.state.papers.get(citekey)

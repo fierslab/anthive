@@ -86,6 +86,14 @@ and `lib/config.py` (anthive.yaml loader).
   (leftover `anthive_access`/`anthive_llm` are ignored with a validator
   warning). Query model: fastembed, cache from `get_model_cache_dir()`.
 
+- **Papers a site lacks are invisible** (2.44): `LibraryService.load` links only citekeys that resolve
+  (`papers_by_db`, `dataset_links`, `geneset_links`); missing ones live only in `state.unresolved`, shown
+  by `status(admin=True)` (`GET /library/status` passes `_caller_is_admin`, never true on `auth.mode: none`).
+  `related:` to missing citekeys is dropped in memory. PDF-missing warnings are derived live
+  (`pdf_warnings`), never stored. A library without `.git` is fingerprinted by its record files
+  (`_folder_fingerprint`). Tests: `tests/test_library_site_modes.py`. Do not add a surface that reads
+  `papers:` front matter directly.
+
 - **Paper upload** (2.40): `GET /papers/upload/requirements`, `POST
   /papers/upload` (multipart). Logic lives in `lib/library_upload.py`
   (validation, enrichment, duplicates, folder rule, flock under `.git/`,

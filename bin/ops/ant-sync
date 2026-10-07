@@ -1219,7 +1219,9 @@ def _sync_library(args, s3_cfg: dict, push: Optional[bool] = None) -> int:
     #    it only when missing or older, then add their local papers.
     publisher = bool(cfg.get('library_index_publisher', False)) and not read_only
     pulled = False
-    if not publisher:
+    if not publisher and not cfg.get('library_index_pull', True):
+        print('  index: not pulled (library_index_pull is false: this site builds its own index)')
+    elif not publisher:
         try:
             index_dir.mkdir(parents=True, exist_ok=True)
             pulled = ls.pull_index_if_newer(client, bucket, prefix, index_dir, dry_run=dry_run,

@@ -15143,10 +15143,13 @@ def library_bibtex(request: Request,
 
 
 @app.get("/library/status", tags=["library"])
-def library_status():
-    """Library and literature-index health: counts, issues, unresolved references,
-    model, and the state of the last upload's background index update."""
-    status = _library().status()
+def library_status(request: Request):
+    """Library and literature-index health: counts, model, and the state of the
+    last upload's background index update. Admins also get the issue texts, the
+    host paths and ``unresolved_references`` (``papers:`` links to citekeys this
+    site's library does not hold: those are hidden from every other surface, and
+    sites without login have no admins, so the list is never public there)."""
+    status = _library().status(admin=_caller_is_admin(request))
     status['upload_index'] = _upload_index_snapshot()
     return status
 

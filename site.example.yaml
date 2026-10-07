@@ -48,6 +48,12 @@ data:
   # Mount the h5adstore read-only into the API (mirror sites that never
   # annotate). Admin editors and annotation writes then fail.
   readonly: false
+  # Folders bind-mounted READ-ONLY at the same absolute path into api, web, mcp
+  # and ingest. For a mirror whose stores or library hold symlinks into another
+  # site's stores: list the folders the links point into, or the links dangle
+  # in the containers. Absolute host paths; not inside state_dir.
+  # extra_mounts: [/srv/intern/h5adstore, /srv/intern/library]
+  extra_mounts: []
 
 # Persistent site state: rendered config, secrets, SQLite caches, MCP link
 # tokens, Authelia users + db. BACK THIS UP. Created by `init` (0700).
@@ -139,6 +145,9 @@ library:
   deploy_key: null          # host path of an SSH deploy key with write access to the
                             # library repo only; used by `ant-stack publish-library`
   index_publisher: false    # this site publishes the literature index to S3 (one site only)
+  index_pull: true          # `ant sync` may download the shared literature index. Set false on a
+                            # site that builds its own from a hand-picked library
+                            # (`ant lib-index --library ... --out ...`); always off when s3.enabled is false
 
 mcp:
   token_ttl_days: 90 # lifetime of a per-user MCP link (0 = never expires)

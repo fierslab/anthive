@@ -1,0 +1,24 @@
+#!/bin/sh
+# ant-cron-run: run an anthive command from cron or a systemd unit.
+#
+#   ant-cron-run COMMAND [ARGS...]
+#   e.g. ant-cron-run /srv/anthive4/bin/ops/ant-stack ingest -- ant sync pull
+#
+# ant-stack and ant-sync start with `#!/usr/bin/env -S uv run`, and cron's
+# PATH (/usr/bin:/bin) does not contain the directory uv installs into
+# (~/.local/bin). This wrapper adds the usual uv locations to PATH, then
+# either runs the command or says plainly that uv is missing (exit 127),
+# instead of cron's `env: 'uv': No such file or directory`.
+if [ "$#" -eq 0 ]; then
+    echo "usage: ant-cron-run COMMAND [ARGS...]" >&2
+    exit 2
+fi
+PATH="${HOME:-/root}/.local/bin:${HOME:-/root}/.cargo/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+export PATH
+if ! command -v uv >/dev/null 2>&1; then
+    echo "ant-cron-run: uv was not found on PATH ($PATH)." >&2
+    echo "ant-cron-run: install it (https://docs.astral.sh/uv/) as the user this job runs as, or put its" >&2
+    echo "ant-cron-run: directory on PATH in the crontab / systemd unit (config/examples/anthive-sync.*.example)." >&2
+    exit 127
+fi
+exec "$@"
