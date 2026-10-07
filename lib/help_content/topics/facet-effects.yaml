@@ -9,8 +9,9 @@ children:
 - facet-tested
 - facet-replicate-unit
 - facet-replicates-needed
+- facet-scopes
+- facet-excluded
 - facet-contrasts
-- scopes
 - donor-groups
 aliases:
 - facets

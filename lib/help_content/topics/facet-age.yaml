@@ -1,8 +1,10 @@
 id: facet-age
-title: Age
+title: 'Age: two twins'
 summary: The age facet is a linear trend per decade; age and AD pathology are correlated, so the unadjusted result overlaps the pathology result and an adjusted twin adds Braak stage.
+terms:
+- age-twins
 aliases:
 - age facet
 - age adjusted
 body_html: |
-  <p>The age facet is a straight-line trend per decade of age at death. Age and AD pathology are correlated in every brain bank, so the unadjusted age result overlaps with the pathology result. The adjusted twin of the facet adds Braak stage to the model, and the gene row shows whether the association persists. Donors under the declared age floor (60 years) are left out. In ROSMAP ages above 90 are recorded as 90.</p>
+  <p>The age facet is a straight-line trend per decade of age at death, in donors of 60 years and older (younger donors are left out; a dataset can declare another floor). Age and AD pathology are correlated in every brain bank, so the age result is tested twice. <strong>Age, not adjusted for pathology</strong> re-detects part of the pathology signal. <strong>Age, adjusted for pathology</strong> adds Braak stage (else pathologic AD) to the model; what remains is age beyond pathology. A gene row of the unadjusted test says whether the association <em>persists after pathology adjustment</em>. In ROSMAP ages above 90 are recorded as 90, which flattens the oldest donors (<a href="#glossary-age-twins">glossary</a>).</p>

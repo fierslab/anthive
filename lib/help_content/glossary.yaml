@@ -18,7 +18,7 @@ terms:
 - slug: descriptive-only
   term: Descriptive only
   definition_html: |
-    A row or unit with too few replicates for a test (below 5 donors per group, 10 for a trend; below 3 animals per group, 6 for a trend). The numbers are shown for orientation, but no p or q value is given, because treating cells as replicates would make a difference between two donors look highly significant.
+    A unit that cannot be tested: no replicate column, or fewer than 3 replicates in a group. The numbers describe cells, and no p or q value is given, because treating cells as replicates would make a difference between two donors look highly significant. A unit that was fitted but has fewer replicates than the <a href="#glossary-p-value-floor">p-value floor</a> is labelled "descriptive: below the p-value floor" instead.
 - slug: limma-voom
   term: limma-voom
   definition_html: |
@@ -62,7 +62,7 @@ terms:
 - slug: scope
   term: Scope
   definition_html: |
-    The kind of system a dataset comes from: human post-mortem, or xenograft (human cells in a mouse host). Replication is only counted within one scope, so a xenograft result never supports a human post-mortem one here.
+    The kind of system a dataset comes from: human post-mortem (cells from human brain tissue; the replicate is the donor) or human cells in mouse hosts, a xenograft (the replicate is the host animal). Facets are tested, counted and replicated within one scope, so a xenograft result never supports a human post-mortem one, and genes are never merged across scopes. In vitro cultures are listed but not tested; pure mouse datasets are outside the facet analysis.
 - slug: partial-conjunction
   term: Partial conjunction test
   definition_html: |
@@ -103,6 +103,46 @@ terms:
   term: Lambda (inflation factor)
   definition_html: |
     The median test statistic of a unit divided by its expected value under no effect. Around 1 means the unit is well calibrated; values above about 1.3 mean many genes shift together, which usually points to a batch, chemistry or composition difference rather than to biology.
+- slug: p-value-floor
+  term: p-value floor
+  definition_html: |
+    The number of replicates a unit needs before it reports p, q and confidence intervals: 5 donors per group (10 for a trend such as Braak or age) in human cohorts, 3 animals per group (6 for a trend) in xenograft hosts. Between the fit minimum (3 per group) and the floor the unit is fitted but shown as "descriptive: below the p-value floor": an estimate without p, q or interval, not counted towards replication.
+- slug: small-cohorts
+  term: Small cohorts and "m includes n cohorts below 20 donors"
+  definition_html: |
+    Every cohort that tested a gene counts in m, however small, so a very small cohort cannot make a result look better than it is but also cannot detect much. The badge says how many of the m cohorts have fewer than 20 donors, because the result then rests on fewer, larger cohorts than m suggests. A unit with fewer than 5 replicates per group is flagged "small sample".
+- slug: age-twins
+  term: 'Age: not adjusted and adjusted for pathology'
+  definition_html: |
+    Age is tested twice: once on its own (which partly re-detects AD pathology, since older donors have more of it) and once with Braak stage, else pathologic AD, in the model. A gene "persists after pathology adjustment" when its age association is still present in the adjusted test. Age is per decade, from 60 years; ROSMAP ages above 90 are recorded as 90.
+- slug: app-nlgf
+  term: App NL-G-F and control basis
+  definition_html: |
+    The App NL-G-F knock-in is a mouse model of amyloid pathology. In xenograft studies the host mouse can carry it, and the facet compares those hosts with control hosts. The control basis says what the controls are: the humanised-App host (App hu/hu) carries the human Abeta sequence without the three familial AD mutations, which isolates the mutations; a wild-type host differs in the Abeta sequence as well. The replicate is the animal, strata are formed per grafted line and timepoint, and the test detects large effects only.
+- slug: host-genotype
+  term: Genotype and host genotype
+  definition_html: |
+    Two different facets in a xenograft: <code>ant_genotype</code> is the genotype of the sequenced human cells (the grafted line, for example APOE e4/e4 or TREM2 R47H); <code>ant_host_genotype</code> is the genotype of the mouse they grew in (for example App NL-G-F). The tested App NL-G-F facet is derived from the host genotype.
+- slug: author-cluster
+  term: Author cluster (per cell type)
+  definition_html: |
+    The authors' own clusters or states inside one cell type of one dataset, kept as published and written dataset/cluster_label. A cluster label is only comparable inside its dataset and cell type, so these facets are a mapping table only: no gene tests, no comparison across datasets.
+- slug: tissue-umbrella
+  term: Tissue umbrella term
+  definition_html: |
+    The coarse brain region of a dataset (prefrontal cortex, temporal cortex, hippocampus, white matter, ...) from a fixed table, so that different dissections of the same region fall in one group. The most specific term stays in the plain column tissue_uberon, which is detail and not a facet.
+- slug: facet-exclusion
+  term: Left out of the facet analysis
+  definition_html: |
+    Datasets that cannot be analysed by donor and cell type: spatial data, proteomics, metacell sets, pure mouse datasets and sets the curators set aside. They keep their columns for browsing and plotting but have no facet tests and no replication.
+- slug: gene-class-flags
+  term: Gene class flags (MT, ribosomal, lncRNA / clone, sex chromosome, long gene, APOE locus)
+  definition_html: |
+    Small labels on a gene for classes that are over-represented among facet hits for technical or locus reasons: mitochondrial genes and ribosomal proteins track cell quality, lncRNAs and clone-named transcripts are poorly annotated, sex-chromosome genes follow sex composition, genes over 500 kb are intron-rich and track nuclear RNA quality and post-mortem interval, and genes near APOE can show allele-linked differences that need not be biology. The flag is a reason to read the result with care, not a verdict.
+- slug: sex-check
+  term: Sex check
+  definition_html: |
+    The recorded sex of each donor is checked against XIST and Y-linked expression. "n of m sex labels disagree" means the expression contradicts the label for those donors, so the label or the donor assignment may be wrong.
 - slug: per-cell-association
   term: Per-cell association (descriptive)
   definition_html: |

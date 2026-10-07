@@ -1,11 +1,12 @@
 id: facet-replicates-needed
 title: How many replicates are needed
-summary: 'A level needs at least 3 replicates (numeric facets such as Braak and age: at least 4 with 3 distinct values); fewer than 5 per level are flagged as small sample.'
+summary: A unit is fitted from 3 replicates per group (4 for a trend) but reports p and q values only from the p-value floor (5 donors per group, 10 for a trend; 3 animals and 6 in xenograft hosts); below that it is descriptive and not counted.
 terms:
-- descriptive-only
+- p-value-floor
+- small-cohorts
 aliases:
 - how many replicates
 - minimum replicates
 - small sample
 body_html: |
-  <p>Estimates are shown from 3 replicates per group. p and q values are given from 5 donors per group (10 donors for a Braak or age trend) in human cohorts, and from 3 animals per group (6 for a trend) in mouse and xenograft data, where animals of one strain and age vary far less than human donors. Below these numbers the row is <a href="#glossary-descriptive-only">descriptive only</a>. With 5 donors per group only large effects can be detected; a missing hit means "not detected with this many donors", not "no effect".</p>
+  <p>A unit is fitted from 3 replicates per group (4 replicates over at least three distinct values for a trend). p and q values are given from the <a href="#glossary-p-value-floor">p-value floor</a>: 5 donors per group (10 donors for a Braak or age trend) in human cohorts, and 3 animals per group (6 for a trend) in xenograft hosts, where animals of one line and age vary far less than human donors. Between the fit minimum and the floor the row reads "descriptive: below the p-value floor (donors need 5 per group)": an estimate without p, q or interval, not counted towards replication. A unit above the floor but with fewer than 5 replicates per group is flagged <a href="#glossary-small-cohorts">small sample</a>: tested and counted, with little power. With 5 donors per group only large effects can be detected; a missing hit means "not detected with this many donors", not "no effect".</p>

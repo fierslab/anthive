@@ -175,6 +175,20 @@ Replicate unit and Disease basis (`_replicate_view`: `/info` fields first, else
 the `/facet-tests` summary or its first unit). Hover-only text: base.html turns
 `.info` and `.fx-pill` into focusable click/Enter bubbles.
 
+**Facet engine v3 UI (API 2.44).** Results are shown per *scope* (`human_postmortem`,
+`xenograft_human_in_mouse`; `in_vitro` listed, not tested; the pseudo scope `none` is dropped by
+`_facet_scope_options`). `/facets` has a Scope column of links, `/facets/{name}?scope=` a selector
+(`#facet-scope-nav`) and the `fx-scope` pill (base.html) on every result block; the gene panel has a scope
+selector above per-scope facet tabs (JS config `FACETS` in `fx_gene_panel`, all calls pass `&scope=`). Tested
+variants without a column (`age_adjusted`, `braak_threshold`, `apoe4_dose`) are tabs on the parent page
+(`_FACET_VARIANTS`, `#fx-variants`, `window.antFxRecurring.setFacet`, fragment `?variant=&scope=`). Group lines
+show: main badge "replicated (r)", "carried by" the two `r_cohorts`, a separate effect-filter pill, the second
+tier badge (`replicated_effect`), "m includes n cohorts below 20 donors" (`n_small`), lambda, dropped covariates,
+gene-class pills (`gene-class-flags`), age persistence. `analysis_level` `below_floor` reads "descriptive: below
+the p-value floor" (`_floor_text`). Excluded datasets (`_fx_exclusion_text`, served `reason` starting
+"excluded from the facet layer" or mouse-only) keep the Facets tab with `#fx-excluded`. Author-cluster facets get
+a "dataset-scoped, no tests" note, `ant_tissue` an umbrella note plus `#ds-tissue-detail` (from `/info` `tissue`).
+
 **MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/links`,
 `POST /me/mcp/links/{id}/rotate`, `DELETE /me/mcp/links/{id}`,
 `GET /admin/mcp-links`, `DELETE /admin/mcp-links/{user}/{id}` client-side

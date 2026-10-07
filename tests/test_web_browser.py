@@ -1238,7 +1238,7 @@ def _fake_api_get(api_url, path, **kwargs):  # pyright: ignore
                                    "note": "An audit of the facets is running."},
         }
     if path.startswith("/facets/"):
-        name = path[len("/facets/"):]
+        name = path[len("/facets/"):].split("?")[0]
         if name == "ant_disease":
             return {
                 "facet": "ant_disease", "type": "categorical",
@@ -6979,8 +6979,16 @@ def test_dataset_facets_tab_hidden_without_facets(client):
 @pytest.mark.parametrize("status,reason,expected", [
     ("not_tested", "experimental_system bulk_tissue", "bulk tissue"),
     ("not_tested", "experimental_system in_vitro_2d", "in vitro"),
-    ("not_tested", "experimental_system organoid", "experimental system organoid"),
-    ("not_tested", "organism not human (mouse)", "human only"),
+    ("not_tested", "experimental_system organoid", "organoid culture"),
+    ("not_tested", "experimental_system something_new", "experimental system something_new"),
+    ("not_tested", "organism not human (mouse)", "pure mouse dataset"),
+    ("not_tested", "mouse-only dataset: not part of the facet layer (decision 2026-10-07)", "pure mouse dataset"),
+    ("not_tested", "organism not human (pig)", "human cells only"),
+    ("not_tested", "excluded from the facet layer: spatial technology (visium): no replicate-level cell-type pseudobulk",
+     "spatial data (visium)"),
+    ("not_tested", "excluded from the facet layer: proteomics (mass-spectrometry): not single-cell expression", "proteomics"),
+    ("not_tested", "excluded from the facet layer: Francken2026 sets are set aside from the facet layer until further notice",
+     "left out of the facet analysis on purpose: Francken2026"),
     ("not_tested", "secondary (is_secondary true)", "reanalysis"),
     ("not_tested", "5 donors (< 6)", "only 5 donors; at least 6"),
     ("not_tested", "no ant_donor facet in the current mapping", "no donor column"),
@@ -7047,7 +7055,9 @@ def test_facet_effects_table_fragment_failure_and_gating(client, monkeypatch):
     monkeypatch.setattr(browser, "_api_get", broken)
     assert 'id="fx-across-error"' in client.get("/facets/ant_disease/effects-table").text
     monkeypatch.setattr(browser, "_api_get", _fake_api_get)
-    assert client.get("/facets/ant_age/effects-table").status_code == 404
+    assert client.get("/facets/ant_pmi/effects-table").status_code == 404
+    assert client.get("/facets/ant_age/effects-table?variant=ant_disease").status_code == 404
+    assert client.get("/facets/ant_disease/effects-table?scope=nowhere").status_code == 400
     monkeypatch.setattr(browser, "_facets_visible_cfg", [["ant_sex"]])
     assert client.get("/facets/ant_disease/effects-table").status_code == 404
     admin = client.get("/facets/ant_disease/effects-table", headers={"Remote-User": "root", "Remote-Groups": "admins"})
@@ -7090,8 +7100,13 @@ def test_facets_index_hides_facets_and_signal(client, monkeypatch):
 def test_gene_page_has_facet_effects_panel(client):
     text = client.get("/genes/PTPRG").text
     assert 'id="gene-facet-effects"' in text and 'data-gene="PTPRG"' in text
-    for facet in ("sex", "disease", "apoe4_carrier", "braak"):
-        assert f'data-facet="{facet}"' in text
+    # scope selector first, then the tabs of the scope (built in the page script)
+    assert 'id="gene-fx-scopes"' in text and 'data-scope="human_postmortem"' in text
+    assert 'data-scope="xenograft_human_in_mouse"' in text
+    for facet in ("sex", "disease", "apoe4_carrier", "apoe4_dose", "braak", "braak_threshold", "age", "age_adjusted", "app_nlgf"):
+        assert f"['{facet}'," in text, facet
+    assert "age, not adjusted for pathology" in text and "age, adjusted for pathology" in text
+    assert "&scope=" in text
     assert "/api/facets/" in text and "renderCard" in text
     assert "exploratory" in text and 'href="/help#facet-howto"' in text
     assert 'id="gene-fx-about"' in text and 'id="gene-fx-about" open' not in text
@@ -7309,7 +7324,7 @@ def test_fx_forest_summary_first_by_cell_type_group():
 def test_fx_forest_single_cohort_wording_is_not_replication():
     html = str(browser.templates.env.get_template("_facet_effects.html").module.fx_forest_assets())
     assert "tested in one cohort only; replication not assessable" in html
-    assert "no evidence of replication" in html and "not replicated" not in html
+    assert "not replicated (r = " in html and "no evidence of replication" not in html
 
 
 def test_storage_notice_is_a_bottom_bar_at_every_width(client):
@@ -7362,10 +7377,10 @@ def test_fx_assets_show_replication_v2_wording():
     """Badge, anchors, pooled/overlap pills, zero-replicated message, q (>=10% change) column."""
     module = browser.templates.env.get_template("_facet_effects.html").module
     forest = str(module.fx_forest_assets())
-    for phrase in ("replicated (r = ", "no evidence of replication", "individually at q &lt; 0.05", "Anchors: the unit that counted",
+    for phrase in ("replicated (r = ", "not replicated (r = ", "individually at q &lt; 0.05", "Anchors: the unit that counted",
                    "data-pool", "donor overlap not checked", "with no counted row", "About the full rule",
                    "Simes", "fxf-row-model", "q (\u226510% change)", "About replication", "About this forest",
-                   "fxf-caveat", "effect_gate_passed", "replicated_effect", "below 20 donors"):
+                   "fxf-caveat", "effect_gate_passed", "replicated_effect", "m includes "):
         assert phrase in forest, phrase
     assert "table.fxf .fxf-donors-col, table.fxf .fxf-q-col { display: none; }" in forest
     assert ".fxf-reason" in forest and "fxf-reason { display: none" not in forest
@@ -7390,3 +7405,350 @@ def test_help_explains_replication_v2(client):
                    "about 5 percent"):
         assert phrase in section, phrase
     assert "\u2014" not in section
+
+
+# ── facet engine v3 UI: scopes, age twins, app_nlgf, floors, exclusions ────────
+
+_SCOPES_PAYLOAD = [{"scope": "human_postmortem", "n_datasets": 2, "n_cells": 900},
+                   {"scope": "xenograft_human_in_mouse", "n_datasets": 1, "n_cells": 50},
+                   {"scope": "none", "n_datasets": 3, "n_cells": 70}]
+
+
+def _facet_page_payload(column, scope, kind="numerical", definition_scope="cross_dataset"):
+    return {
+        "facet": column, "type": kind, "type_mixed": False, "n_datasets": 2, "total_n_cells": 900,
+        "scope": scope, "scopes": _SCOPES_PAYLOAD,
+        "definition": {"facet": column, "tag": column[4:], "label": column[4:], "defined": True,
+                       "summary": "Summary of " + column, "definition": "Definition of " + column,
+                       "kind": kind, "values": "years", "missing": "NULL", "scope": definition_scope},
+        "definitions_status": {"state": "under_audit", "note": "An audit is running."},
+        "datasets": [], "non_carriers": [],
+        "value_distribution": {"kind": kind, "fleet_min": 60, "fleet_max": 95, "per_dataset": [], "values": []},
+        "modules": {"rows": [], "n_total": 0, "truncated": False},
+    }
+
+
+def _recording_api(extra):
+    """_fake_api_get with overrides, recording every requested path."""
+    seen = []
+    base = _api_with(extra)
+
+    def api_get(api_url, path, **kwargs):  # pyright: ignore
+        seen.append(path)
+        return base(api_url, path, **kwargs)
+    return api_get, seen
+
+
+def test_facet_scope_options_drop_the_pseudo_scope_and_keep_order():
+    options = browser._facet_scope_options(_SCOPES_PAYLOAD, "xenograft_human_in_mouse")
+    assert [o["scope"] for o in options] == ["human_postmortem", "xenograft_human_in_mouse"]
+    assert [o["current"] for o in options] == [False, True]
+    assert options[0]["label"] == "human post-mortem"
+    assert options[1]["label"] == "human cells in mouse hosts (xenograft)"
+    assert all(o["tested"] for o in options)
+    plain = browser._facet_scope_options(["in_vitro", "human_postmortem", "none"], None)
+    assert [o["scope"] for o in plain] == ["human_postmortem", "in_vitro"] and plain[1]["tested"] is False
+    assert browser._facet_scope_options(None, None) == []
+
+
+def test_facets_index_lists_the_scopes_of_each_facet(client, monkeypatch):
+    payload = {"n_facets": 1, "facets": [{"facet": "ant_age", "type": "numerical", "type_mixed": False, "n_datasets": 3,
+                                          "scopes": ["human_postmortem", "none", "xenograft_human_in_mouse"],
+                                          "summary": "Age.", "defined": True}],
+               "definitions_status": {}}
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/facets": payload}))
+    text = client.get("/facets").text
+    assert 'href="/facets/ant_age?scope=human_postmortem"' in text
+    assert 'href="/facets/ant_age?scope=xenograft_human_in_mouse"' in text
+    assert "?scope=none" not in text
+    assert 'id="facets-scope-about"' in text and "never counted together" in text
+
+
+def test_facet_page_has_scope_selector_and_age_variants(client, monkeypatch):
+    api, seen = _recording_api({"/facets/ant_age": _facet_page_payload("ant_age", "human_postmortem")})
+    monkeypatch.setattr(browser, "_api_get", api)
+    text = client.get("/facets/ant_age").text
+    nav = text.split('id="facet-scope-nav"')[1].split("</nav>")[0]
+    assert 'class="active"' in nav and "human post-mortem" in nav and "human cells in mouse hosts (xenograft)" in nav
+    assert 'data-scope="none"' not in nav
+    assert 'href="/facets/ant_age?scope=xenograft_human_in_mouse"' in nav
+    assert 'id="facet-scope-note"' in text and 'class="fx-scope" data-scope="human_postmortem"' in text
+    # the effects card names its scope, offers both age twins and states what each one is
+    card = text.split('id="facet-effects"')[1]
+    assert 'class="fx-scope" data-scope="human_postmortem"' in card.split("</h2>")[0]
+    tabs = card.split('id="fx-variants"')[1].split("</div>")[0]
+    assert 'data-variant="ant_age"' in tabs and 'data-variant="ant_age_adjusted"' in tabs
+    assert "not adjusted for pathology" in tabs and "adjusted for pathology" in tabs
+    assert 'id="fx-variant-note-age"' in card and 'id="fx-variant-note-age_adjusted"' in card
+    assert "from 60 years" in card or "60 years and older" in card
+    assert 'id="fx-recurring"' in card and 'data-scope="human_postmortem"' in card
+    assert "/facets/ant_age" in seen[-1] or any(path.startswith("/facets/ant_age") for path in seen)
+
+
+def test_facet_page_forwards_a_known_scope_and_ignores_an_unknown_one(client, monkeypatch):
+    api, seen = _recording_api({
+        "/facets/ant_age?scope=xenograft_human_in_mouse": _facet_page_payload("ant_age", "xenograft_human_in_mouse"),
+        "/facets/ant_age": _facet_page_payload("ant_age", "human_postmortem")})
+    monkeypatch.setattr(browser, "_api_get", api)
+    text = client.get("/facets/ant_age?scope=xenograft_human_in_mouse").text
+    assert "/facets/ant_age?scope=xenograft_human_in_mouse" in seen
+    assert 'data-scope="xenograft_human_in_mouse"' in text.split('id="facet-effects"')[1]
+    seen.clear()
+    client.get("/facets/ant_age?scope=nowhere")
+    assert "/facets/ant_age" in seen and not any("nowhere" in path for path in seen)
+
+
+def test_facet_effects_table_fetches_the_requested_scope_and_variant(client, monkeypatch):
+    payload = {"facet": "age_adjusted", "scope": "human_postmortem", "n_datasets_tested": 0, "rows": [], "not_tested": []}
+    api, seen = _recording_api({"/facets/ant_age_adjusted/tests?scope=human_postmortem": payload})
+    monkeypatch.setattr(browser, "_api_get", api)
+    response = client.get("/facets/ant_age/effects-table?scope=human_postmortem&variant=ant_age_adjusted")
+    assert response.status_code == 200
+    assert "/facets/ant_age_adjusted/tests?scope=human_postmortem" in seen
+    assert 'data-scope="human_postmortem"' in response.text or "No dataset has a tested result" in response.text
+
+
+def test_facet_effects_table_rows_state_scope_stratum_and_floor(client, monkeypatch):
+    unit = {"db_id": "D25/HAR", "title": "Xeno", "cell_type": "microglial cell", "facet": "app_nlgf",
+            "celltype_source": "constant_all_cells@line=3A21", "design_subset": "line=3A21",
+            "contrast": "nlgf_vs_control", "level_ref": "control", "level_test": "nlgf",
+            "level_counts": {"control": 8, "nlgf": 16}, "n_donors": 24, "n_donors_ref": 8, "n_donors_test": 16,
+            "flags": {"small_sample": False}, "genes": {"n_tested": 100, "n_q05": 5}, "modules": [],
+            "analysis_level": "replicate", "replicate_unit": "animal", "inflated": True, "lambda_gc": 6.68,
+            "covariates_dropped": ["batch: pool_id has more levels than donors / 4"],
+            "control_basis": "humanised_app_host", "cohort_label": "Davis 2025", "counted": True,
+            "facet_scope": "xenograft_human_in_mouse",
+            "notes": ["detects large effects only (a handful of animals per genotype)",
+                      "live-cell isolation: dissociation-response genes (FOS, JUN, HSP, NFKBIA) are suspect",
+                      "stratified: line=3A21", "genomic inflation lambda 6.68: most genes shift together"],
+            "model": _fx_model("expression ~ app_nlgf + sex")}
+    floor = dict(unit, db_id="D25/XYZ", analysis_level="below_floor", inflated=False, covariates_dropped=[],
+                 control_basis=None, notes=[], n_donors=5, level_counts={"control": 2, "nlgf": 3},
+                 n_donors_ref=2, n_donors_test=3, analysis_level_reason="2 animals: a group reports p values from 3")
+    payload = {"facet": "app_nlgf", "scope": "xenograft_human_in_mouse", "n_datasets_tested": 2,
+               "rows": [unit, floor], "not_tested": []}
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/facets/ant_app_nlgf/tests?scope=xenograft_human_in_mouse": payload}))
+    text = client.get("/facets/ant_app_nlgf/effects-table?scope=xenograft_human_in_mouse").text
+    assert 'class="fx-scope" data-scope="xenograft_human_in_mouse"' in text
+    assert "stratum: line=3A21" in text
+    assert "App NL-G-F vs control" in text and "nlgf 16, control 8" in text
+    assert "inflated, lambda 6.68" in text and "covariates dropped (1)" in text
+    assert "control: humanised-App host (App hu/hu)" in text
+    assert "Detects large effects only" in text and "Live-cell isolation" in text
+    assert "descriptive: below the p-value floor (animals need 3 per group)" in text
+    assert "2 animals: a group reports p values from 3" in text
+    assert 'data-level="below_floor"' in text and 'data-descriptive="true"' in text
+    assert "stratified" not in text.split("fx-unit-note")[1] if "fx-unit-note" in text else True
+
+
+def test_fx_pills_cover_floor_small_sample_inflation_covariates_and_sex_check():
+    pills = {label: (css, slug) for label, css, _tip, slug in browser._fx_pills({
+        "analysis_level": "below_floor", "replicate_unit": "donor", "facet": "braak", "flags": {"descriptive_only": True},
+        "inflated": True, "lambda_gc": 1.41, "covariates_dropped": ["sex: dropped", "batch: dropped"],
+        "n_sex_discordant": 2, "n_sex_checked": 10, "age_top_coded": 90})}
+    assert pills["descriptive: below the p-value floor (donors need 10 for a trend)"] == ("warn", "p-value-floor")
+    assert "descriptive only" not in pills
+    assert pills["inflated, lambda 1.41"][1] == "lambda"
+    assert pills["covariates dropped (2)"][1] == "covariates"
+    assert pills["2 of 10 sex labels disagree"][1] == "sex-check"
+    assert pills["ages top-coded"][1] == "age-twins"
+    small = {label for label, *_ in browser._fx_pills({"analysis_level": "replicate", "flags": {"small_sample": True}})}
+    assert "small sample" in small
+    assert not {label for label, *_ in browser._fx_pills({"analysis_level": "replicate", "flags": {"small_sample": True},
+                                                          "inflated": False, "covariates_dropped": []})} & {"inflated"}
+    boolean = dict((label, tip) for label, _css, tip, _slug in browser._fx_pills({"age_top_coded": True}))
+    assert "ceiling" in boolean["ages top-coded"]
+    assert any(label.startswith("control: wild-type host") for label, *_ in browser._fx_pills(
+        {"control_basis": "wild_type_host"}))
+    assert any(label == "stratum line 3A21, timepoint 6m" for label, *_ in browser._fx_pills(
+        {"facet": "app_nlgf", "design_subset": "line=3A21|timepoint=6m".replace("=", " ").replace("line 3A21|timepoint 6m", "line 3A21, timepoint 6m")}))
+
+
+@pytest.mark.parametrize("unit,expected", [
+    ({"replicate_unit": "donor", "facet": "sex"}, "donors need 5 per group"),
+    ({"replicate_unit": "donor", "facet": "age"}, "donors need 10 for a trend"),
+    ({"replicate_unit": "animal", "facet": "app_nlgf"}, "animals need 3 per group"),
+    ({"replicate_unit": "animal", "facet": "braak"}, "animals need 6 for a trend"),
+    ({"replicate_unit": "sample", "facet": "disease"}, "samples need 3 per group"),
+    ({}, "donors need 5 per group"),
+])
+def test_floor_text_follows_replicate_unit_and_facet_kind(unit, expected):
+    assert browser._floor_text(unit) == expected
+
+
+@pytest.mark.parametrize("unit,expected", [
+    ({"facet": "age"}, "trend per decade of age, not adjusted for pathology"),
+    ({"facet": "age_adjusted"}, "trend per decade of age, adjusted for pathology"),
+    ({"facet": "braak_threshold"}, "Braak stage III or higher vs II or lower"),
+    ({"facet": "apoe4_dose"}, "trend per APOE e4 allele"),
+    ({"facet": "app_nlgf"}, "App NL-G-F vs control"),
+    ({"facet": "sex", "level_test": "m", "level_ref": "f"}, "m vs f"),
+    ({"facet": "sex", "contrast": "m_vs_f"}, "m_vs_f"),
+])
+def test_contrast_labels_of_the_v3_facets(unit, expected):
+    assert browser._facet_contrast_label(unit) == expected
+
+
+def test_donors_text_of_numeric_facets_names_the_range_and_the_replicate_unit():
+    age = {"facet": "age", "n_donors": 84, "replicate_unit": "donor",
+           "level_counts": {"n_donors": 84, "value_min": 61.4, "value_max": 94.0}}
+    assert browser._fx_donors_text(age) == "84 donors, age 61 to 94"
+    dose = {"facet": "apoe4_dose", "n_donors": 30, "level_counts": {"value_min": 0, "value_max": 2}}
+    assert browser._fx_donors_text(dose) == "30 donors, e4 alleles 0 to 2"
+    braak = {"facet": "braak", "n_donors": 21, "replicate_unit": "animal", "level_counts": {"braak_min": 0, "braak_max": 6}}
+    assert browser._fx_donors_text(braak) == "21 animals, stages 0 to 6"
+    assert browser._fx_donors_text({"facet": "age", "n_donors": 5, "level_counts": {}}) == "5 donors"
+
+
+def test_exclusion_text_and_tests_view_flag_excluded_datasets():
+    spatial = "excluded from the facet layer: spatial technology (visium): no replicate-level cell-type pseudobulk"
+    view = browser._facet_tests_view({"status": "not_tested", "reason": spatial, "units": [], "n_units": 0,
+                                      "facet_scope": "human_postmortem"})
+    assert view["excluded"] is True and "spatial data (visium)" in view["excluded_text"]
+    assert view["facet_scope"] is None
+    mouse = browser._facet_tests_view({"status": "not_tested", "reason": "mouse-only dataset: not part of the facet layer",
+                                       "units": []})
+    assert mouse["excluded"] and "pure mouse dataset" in mouse["excluded_text"]
+    plain = browser._facet_tests_view({"status": "not_tested", "reason": "secondary (is_secondary true)", "units": []})
+    assert plain["excluded"] is False and plain["excluded_text"] is None
+    tested = browser._facet_tests_view({"status": "tested", "reason": None, "n_units": 1, "facet_scope": "xenograft_human_in_mouse",
+                                        "units": [{"facet": "app_nlgf", "tested": True, "facet_scope": "xenograft_human_in_mouse",
+                                                   "cell_type": "microglial cell"}]})
+    assert tested["facet_scope"] == "xenograft_human_in_mouse"
+    assert tested["by_facet"]["ant_app_nlgf"]["scope"] == "xenograft_human_in_mouse"
+    assert browser._fx_exclusion_text(None) is None
+    assert "left out of the facet analysis on purpose: metacell set" in browser._fx_exclusion_text(
+        "excluded from the facet layer: metacell set: each row is an aggregate of cells")
+    assert "proteomics" in browser._fx_exclusion_text("excluded from the facet layer: proteomics (mass-spectrometry): x")
+
+
+def test_dataset_page_of_an_excluded_dataset_explains_why_there_is_no_facet_analysis(client, monkeypatch):
+    spatial = {"db_id": "GroupA/ds1", "status": "not_tested", "n_units": 0, "units": [], "facet_scope": "human_postmortem",
+               "reason": "excluded from the facet layer: spatial technology (visium): no replicate-level cell-type pseudobulk"}
+    monkeypatch.setattr(browser, "_api_get", _api_with({
+        "/databases/GroupA/ds1/facet-tests": spatial,
+        "/databases/GroupA/ds1/facets": {"facets": [], "n_facets": 0}}))
+    text = client.get("/browse/GroupA/ds1").text
+    assert 'data-tab="facets"' in text and 'id="tab-facets"' in text
+    block = text.split('id="fx-excluded"')[1].split("</p>")[0]
+    assert "not part of the facet analysis" in text and "spatial data (visium)" in block
+    assert 'id="fx-excluded-about"' in text and 'id="fx-excluded-about" open' not in text
+    assert "no replicate-level cell-type pseudobulk" in text
+    assert 'id="fx-unit-line"' not in text and 'id="fx-scope"' not in text
+    assert 'id="fx-not-tested"' not in text
+
+
+def test_dataset_page_of_a_pure_mouse_dataset_uses_the_mouse_text(client, monkeypatch):
+    monkeypatch.setattr(browser, "_api_get", _api_with({
+        "/databases/GroupA/ds1/facet-tests": {"db_id": "GroupA/ds1", "status": "not_tested", "n_units": 0, "units": [],
+                                              "reason": "organism not human (mouse)"}}))
+    text = client.get("/browse/GroupA/ds1").text
+    assert "This is a pure mouse dataset" in text.split('id="fx-excluded"')[1]
+
+
+def test_dataset_facets_tab_shows_scope_notes_and_derived_twins(client, monkeypatch):
+    facets = dict(_DATASET_FACETS, facets=_DATASET_FACETS["facets"] + [
+        {"facet": "ant_mg_author_cluster", "label": "Author cluster (microglia)", "summary": "Clusters.", "defined": True,
+         "mapping_kind": "renamed", "live": True, "dtype": "categorical", "source_columns": ["subclass"],
+         "sources": [{"column": "subclass", "published_as": "ant_mg_author_cluster", "hidden": False}],
+         "source_hidden": False, "redacted": False, "value_map": [], "n_cells": 10, "n_missing": 0,
+         "hidden_by_config": True},
+        {"facet": "ant_host_genotype", "label": "Host genotype (xenograft)", "summary": "Host.", "defined": True,
+         "mapping_kind": "renamed", "live": True, "dtype": "categorical", "source_columns": ["g"], "sources": [],
+         "source_hidden": False, "redacted": False, "value_map": [], "n_cells": 10, "n_missing": 0,
+         "hidden_by_config": True}])
+    tests = dict(_FACET_TESTS_DS1, facet_scope="human_postmortem", units=_FACET_TESTS_DS1["units"] + [
+        {"facet": "age_adjusted", "cell_type": "microglial cell", "celltype_source": "constant_all_cells",
+         "tested": True, "contrast": "age_per_decade", "level_counts": {"n_donors": 40, "value_min": 61, "value_max": 93},
+         "n_donors": 40, "facet_scope": "human_postmortem", "analysis_level": "replicate", "replicate_unit": "donor",
+         "flags": {}, "genes": {"n_tested": 100, "n_q05": 1}, "modules": [], "model": _fx_model("expression ~ age + braak")}])
+    info = dict(_INFO["GroupA/ds1"], facet_scope="human_postmortem", tissue="middle temporal gyrus",
+                obs={"categorical": ["tissue_uberon", "x"], "numerical": []})
+    monkeypatch.setattr(browser, "_api_get", _api_with({
+        "/databases/GroupA/ds1/facets": facets, "/databases/GroupA/ds1/facet-tests": tests,
+        "/databases/GroupA/ds1/info": info}))
+    text = client.get("/browse/GroupA/ds1").text
+    card = text.split('id="ds-facets"')[1].split("<script>")[0]
+    assert 'id="fx-scope"' in card and 'data-scope="human_postmortem"' in card.split('id="fx-scope"')[1][:260]
+    assert "dataset-scoped, no tests" in card and 'href="/help#glossary-author-cluster"' in card
+    assert "host mouse" in card and "umbrella term" in card
+    detail = card.split('id="ds-tissue-detail"')[1].split("</div>")[0]
+    assert "middle temporal gyrus" in detail and "tissue_uberon" in detail
+    # the pathology-adjusted age test has no column of its own: a derived row links to the age facet page
+    assert 'data-facet="ant_age_adjusted"' in card and "the age test with a pathology term" in card
+    assert 'href="/facets/ant_age"' in card
+    assert "Effects of age, adjusted for pathology" in card
+    assert "Adjusted for pathology: Braak stage" in card
+    assert "—" not in card
+
+
+def test_fx_assets_show_v3_replication_display():
+    module = browser.templates.env.get_template("_facet_effects.html").module
+    forest = str(module.fx_forest_assets())
+    for phrase in ("carried by ", "effect filter: at least ", "effect filter: below ", "replicated with at least ",
+                   "fxf-badge rep2", "r_treat", "m includes ", "n_small", "gene-class-flags", "GENE_FLAGS",
+                   "persists after pathology adjustment", "does not persist after pathology adjustment",
+                   "descriptive: below the p-value floor", "inflated, lambda ", "covariates dropped (",
+                   "unitNoun", "'animals'", "stratum: ", "Anchors: the unit that counted", "carries r",
+                   "passes the effect filter", "fxf-caveat-served", "detects large effects only", "SCOPE_LABELS",
+                   "Results are counted within one scope"):
+        assert phrase in forest, phrase
+    for label in ("MT", "ribosomal", "lncRNA / clone", "sex chromosome", "long gene", "APOE locus"):
+        assert label in forest, label
+    recurring = str(module.fx_recurring("ant_age", "human_postmortem"))
+    assert 'data-scope="human_postmortem"' in recurring and "human post-mortem" in recurring
+    assert "scopeQuery" in recurring and "antFxRecurring" in recurring and "Carried by" in recurring
+    assert "n_effect_gate" in recurring and "n_replicated_effect" in recurring and "gene-class-flags" in recurring
+    legend = str(module.fx_flag_legend())
+    for phrase in ("below the p-value floor", "small sample", "inflated, lambda", "covariates dropped", "control: humanised-App host",
+                   "persists after pathology adjustment"):
+        assert phrase in legend, phrase
+
+
+def test_gene_panel_loads_each_scope_with_its_own_facet_tabs():
+    module = browser.templates.env.get_template("_facet_effects.html").module
+    panel = str(module.fx_gene_panel("PTPRG"))
+    assert "human post-mortem" in panel and "human cells in mouse hosts (xenograft)" in panel
+    assert "xenograft_human_in_mouse: [['sex', 'sex'], ['app_nlgf', 'App NL-G-F host']]" in panel
+    assert "'/effects?gene=' + encodeURIComponent(gene) + '&scope='" in panel
+    assert 'id="gene-fx-scope-about"' in panel and "never mixed" in panel
+
+
+def test_facet_pages_of_dataset_scoped_tissue_and_genotype_facets_carry_their_notes(client, monkeypatch):
+    cluster = _facet_page_payload("ant_mg_author_cluster", "human_postmortem", "categorical", definition_scope="dataset")
+    tissue = _facet_page_payload("ant_tissue", "human_postmortem", "categorical")
+    host = _facet_page_payload("ant_host_genotype", "xenograft_human_in_mouse", "categorical")
+    nlgf = _facet_page_payload("ant_app_nlgf", "xenograft_human_in_mouse", "categorical")
+    monkeypatch.setattr(browser, "_api_get", _api_with({
+        "/facets/ant_mg_author_cluster": cluster, "/facets/ant_tissue": tissue,
+        "/facets/ant_host_genotype": host, "/facets/ant_app_nlgf": nlgf}))
+    text = client.get("/facets/ant_mg_author_cluster").text
+    note = text.split('id="facet-dataset-scoped"')[1].split("</p>")[0]
+    assert "no gene tests are run" in note and "never compared with another dataset" in note
+    assert 'id="facet-effects"' not in text      # mapping table only
+    assert 'id="facet-tissue-umbrella"' not in text
+    tissue_text = client.get("/facets/ant_tissue").text
+    assert "tissue_uberon" in tissue_text.split('id="facet-tissue-umbrella"')[1].split("</p>")[0]
+    host_text = client.get("/facets/ant_host_genotype").text
+    assert 'href="/facets/ant_genotype"' in host_text.split('id="facet-genotype-pair"')[1].split("</p>")[0]
+    nlgf_text = client.get("/facets/ant_app_nlgf").text
+    short = nlgf_text.split('id="fx-app-nlgf-short"')[1].split("</p>")[0]
+    assert "large effects only" in short and "dissociation-response" in short
+    assert 'id="fx-app-nlgf-about"' in nlgf_text and 'id="fx-app-nlgf-about" open' not in nlgf_text
+    assert 'id="fx-variants"' not in nlgf_text
+
+
+def test_help_covers_the_v3_facet_topics(client):
+    text = client.get("/help").text
+    effects = _help_sections(text, "facet-effects", "facet-counting")
+    for anchor in ("facet-scopes", "facet-excluded", "facet-age", "facet-sensitivity", "facet-app-nlgf",
+                   "facet-anatomy-clusters", "facet-replicates-needed"):
+        assert f'id="{anchor}"' in effects, anchor
+    for phrase in ("human post-mortem", "xenograft", "left out", "persists after pathology adjustment",
+                   "p-value floor", "dataset-scoped", "tissue_uberon", "ant_host_genotype"):
+        assert phrase in effects, phrase
+    glossary = _help_sections(text, "glossary")
+    for slug in ("p-value-floor", "small-cohorts", "age-twins", "app-nlgf", "host-genotype", "author-cluster",
+                 "tissue-umbrella", "facet-exclusion", "gene-class-flags", "sex-check", "scope"):
+        assert f'id="glossary-{slug}"' in glossary, slug
+    assert "\u2014" not in effects and "\u2014" not in glossary

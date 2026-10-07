@@ -4,7 +4,6 @@ summary: 'How replication across cohorts is counted: one anchor per cohort, a pa
 related:
 - facet-howto
 - facet-effects
-- scopes
 children:
 - facet-replication
 - facet-effect-size
@@ -12,7 +11,9 @@ children:
 - facet-cell-type-groups
 - facet-pathology-axis
 - facet-age
+- facet-sensitivity
 - facet-app-nlgf
+- facet-anatomy-clusters
 - facet-whole-cell-type
 - facet-technical-genes
 - facet-limits
