@@ -112,7 +112,39 @@ Facet engine v3c (same unreleased version, 2026-10-07):
   specific term is the plain column `tissue_uberon` (+ `tissue_uberon_id`). `ant_cell_type` is NULL for cells the authors left
   unassigned or called doublets.
 - Datasets excluded from the facet layer (spatial, proteomics, metacell sets, Francken2026) have no results and no cohort rows.
-- The metadata cache version is 7.
+- The metadata cache version is 7 (8 with the facet API fixes below).
+
+Facet API fixes (same unreleased version, 2026-10-07, found by the vark client on the live API):
+
+- **Performance.** `GET /genes/{gene}/facet-effects` without `scope` took over 170 s and nine parallel per-facet calls stalled the
+  server: the caches (4 gene tables, 8 replication families) were smaller than the facets x scopes of 2.44, so every call
+  recomputed them. Now: the gene tables of all facets and scopes are built in one pass over the result files and kept together;
+  one replication family per (facet, scope, exclude_secondary) is kept (54 slots); a gene card is cached per (facet, scope, gene)
+  until a result file changes. Builds are single flight (concurrent callers share one build, no global lock is held while it
+  runs) and, while a rebuild after a file change runs, other callers get the previous tables. ant-serve builds the tables and
+  families at start in a low priority thread (`ANTHIVE_FACET_WARMUP=0` turns that off). On a loaded 8 core slice: first call after
+  a start without warm-up 22 s (was 38 to 88 s), all scopes of a gene 41 s from cold (was over 170 s), 0.6 s warm for a repeated
+  gene and 1.0 to 1.6 s for a new gene, nine parallel per-facet calls on a new gene 4 s with other endpoints answering in under
+  2 s (was a stall of over 100 s).
+- `GET /genes/{gene}/facet-effects` adds `facet` (comma separated facets to answer; default all; an untested facet is a 404) and
+  `include_units` (default true; false keeps `n_units`, `replication`, `cell_types` and `notes` of every card but empties
+  `units`: 0.5 MB instead of 5 MB for PTPRG). `facets` is taken from `by_scope` instead of being computed twice.
+- `facet_exclude` (bool) and `facet_exclude_reason` are served on `/databases`, `/databases/{id}/info` and
+  `/databases/{id}/facet-tests`. They follow `lib/facet_scopes.facet_exclusion_reason`: the `.md` key `facet_exclude: true` with
+  its reason, a spatial or proteomics technology, `experimental_system: spatial`. The metadata cache version is 8.
+- The not-tested payload of `/databases/{id}/facet-tests` takes `facet_scope` from the dataset (it reported
+  `human_postmortem` for datasets without a run manifest, such as the xenograft AZ5/NST; None for a dataset in no scope) and its
+  `reason` from today's rules (exclusion reason, else `no facet scope: ...` for a dataset in no scope) instead of a stale run log
+  or manifest line.
+- `/facets/{facet}/effects/top` rows add `r_strong`, `replicated_strong` (the 25 percent tier; null when the run has no strong
+  p values) and, for facet `age`, `persists_after_pathology_adjustment` (the gene also replicates, same direction, in
+  `age_adjusted` of the same scope and cell type group; null for other facets or when `age_adjusted` has no such group); the
+  response adds `n_replicated_strong`.
+- Unit cards of `/facets/{facet}/effects` and `/genes/{gene}/facet-effects` add `replicate_unit` and `replicate_column`
+  (from the unit, else the run).
+- Unit `notes` no longer say "small sample: tested and counted" for a unit that is not counted: a small sample below the
+  p-value floor reads "below the p-value floor of its replicate unit, descriptive only, not counted", any other small sample
+  "small sample: low power".
 
 Library changes in 2.44.0 (no new endpoints):
 

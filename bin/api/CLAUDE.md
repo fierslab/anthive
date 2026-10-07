@@ -134,9 +134,18 @@ and `lib/config.py` (anthive.yaml loader).
   `/facets/{name}/effects[/top]` (`/top` first), `/genes/{gene}/facet-effects`,
   `/facets/cohorts` (before `/facets/{facet_name}`). Another job may rewrite
   the files at any time: never assume a file is complete. The cross-dataset
-  gene table is built on first use per facet (a few seconds, about 30 MB) and
-  cached until a file changes. `facets_visible` (config) only adds
-  `hidden_by_config` to the facet listings; nothing is dropped from the API.
+  gene tables of ALL facets and scopes are built in one pass (about 15 s CPU,
+  1.3 GB) and each replication family (one per facet x scope x
+  exclude_secondary, about 3 s) is computed once; gene cards are cached per
+  gene. Keep every cache bound at least facets x scopes (`FAMILY_CACHE_ENTRIES`):
+  a smaller LRU made each `/genes/{g}/facet-effects` recompute everything
+  (2.44: 25 s warm, 170 s cold). Builds are single flight per key
+  (`FacetResults._cached_build`: no global lock during a build, previous value
+  served while a rebuild runs); pass `reader.prepare(datasets)` to several
+  calls of one request so the files are stat-ed once. ant-serve warms the
+  caches in a low priority thread at start (`ANTHIVE_FACET_WARMUP=0` skips).
+  `facets_visible` (config) only adds `hidden_by_config` to the facet
+  listings; nothing is dropped from the API.
 
 - **Facet engine v2** (2026-10-05): dataset metadata (`/databases`, info) also carries
   `replicate_unit`, `replicate_column`, `replicate_basis`, `disease_basis` (`_lineage_fields`); the

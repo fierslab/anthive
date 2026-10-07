@@ -107,6 +107,31 @@ def scope_of(annotation: Mapping[str, Any], published_columns: Iterable[str] = (
     return None
 
 
+def no_scope_reason(annotation: Mapping[str, Any], db_id: Optional[str] = None) -> str:
+    """Why ``scope_of`` finds no scope for a dataset (the rule that applies now, in words).
+
+    Args:
+        annotation: Resolved ``.h5ad.mus`` annotation (``organism``, ``experimental_system``).
+        db_id: Dataset id (``ASSUME_HUMAN_DB_IDS``).
+
+    Returns:
+        A short reason; meaningful only when ``scope_of`` returned None.
+    """
+    organisms = _text_list(annotation.get('organism'))
+    if not organisms and db_id in ASSUME_HUMAN_DB_IDS:
+        organisms = ['human']
+    systems = set(_text_list(annotation.get('experimental_system')))
+    if not organisms:
+        return 'no facet scope: organism is not recorded'
+    if len(organisms) != 1 or organisms[0] not in ('human', 'mouse'):
+        return f'no facet scope: organism not a single human or mouse value ({", ".join(organisms)})'
+    if organisms[0] == 'mouse':
+        return 'no facet scope: organism not human (mouse); pure mouse datasets are not part of the facet layer'
+    if 'bulk_tissue' in systems:
+        return 'no facet scope: bulk tissue has no cells to pseudobulk by cell type'
+    return f'no facet scope: experimental_system {", ".join(sorted(systems))} is not a tested system'
+
+
 #: ``technology`` tokens (lower case, substring match) of data that are not dissociated single cells or nuclei:
 #: spatial platforms and mass spectrometry. They have no replicate-level cell-type pseudobulk (spots, bins, proteins).
 SPATIAL_TECHNOLOGY_TOKENS = ('visium', 'slide-seq', 'slideseq', 'slide-tags', 'slidetag', 'merfish', 'stereo-seq',

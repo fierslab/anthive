@@ -35,11 +35,13 @@ import math
 import re
 import threading
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import union_categoricals
 
 import facet_rules
 import facet_scopes
@@ -71,8 +73,24 @@ SUPPLEMENTARY_DIRNAME = 'supplementary_all_donors'
 POOLED_DIRNAME = '_pooled'
 POOL_PREFIX = 'pool:'
 
+#: Threads that read result files in parallel when the gene tables are built (pyarrow releases the GIL).
+READ_WORKERS = 6
+#: Replication families computed at the same time (numpy/pandas hold the GIL for part of the work).
+FAMILY_WORKERS = 4
+UNIT_TABLE_COLUMNS = [
+    'unit', 'db_id', 'title', 'cell_type', 'celltype_source', 'n_donors', 'n_donors_ref',
+    'n_donors_test', 'level_ref', 'level_test', 'descriptive_only', 'cohort', 'cohort_label',
+    'role', 'counted', 'independence', 'overlap_unknown', 'pooled', 'disease_basis',
+    'analysis_level', 'tau_log2', 'exclusion_missing', 'is_secondary', 'celltype_group', 'facet_scope',
+    'summary_unit', 'donor_digests']
+
 FACET_ORDER = ('sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age', 'age_adjusted',
                'app_nlgf')
+#: Replication-family cache size: every (facet, scope, exclude_secondary) fits, so no request evicts another's
+#: families (the 2.44 facets x scopes multiplied the keys past the old LRU of 16, so each call recomputed them).
+FAMILY_CACHE_ENTRIES = len(FACET_ORDER) * len(facet_scopes.SCOPES) * 2
+#: Gene cards kept (one per facet, scope and gene): a gene page asks for every facet and scope of one gene.
+CARD_CACHE_ENTRIES = 256
 METHOD_ORDER = (('cell_mean', 'geneset'), ('cell_mean', 'ucell'), ('pseudobulk', 'gene_list'))
 
 # Columns returned per gene row and per module row (only those present in the
@@ -305,6 +323,10 @@ PROVISIONAL_NOTE = ('AD vs control with the current vocabulary; controls differ 
 _SKIP_LINE = re.compile(r'^\[skip\]\s+(\S+):\s*(.+?)\s*$')
 
 
+#: ``summary(facet_scope=...)`` default: the caller names no catalogue scope.
+_UNSET: Any = object()
+
+
 class FacetResultsError(ValueError):
     """A bad query parameter (maps to HTTP 400)."""
 
@@ -394,6 +416,13 @@ def _clean_text(value: Any) -> Optional[str]:
     return text if text else None
 
 
+def _numeric(column: pd.Series, dtype: str) -> np.ndarray:
+    """``column`` as a numpy array of ``dtype`` (unparseable values become NaN); no index alignment."""
+    if column.dtype.kind in 'fiu':
+        return column.to_numpy(dtype=dtype)
+    return pd.to_numeric(column, errors='coerce').to_numpy(dtype=dtype, na_value=np.nan)
+
+
 def _split_covariates(value: Any) -> List[str]:
     text = _clean_text(value)
     if not text:
@@ -475,6 +504,14 @@ def json_safe(value: Any) -> Any:
     return value
 
 
+class PreparedDatasets:
+    """Datasets resolved by ``FacetResults.prepare``: the resolved dicts and the signature of their result files."""
+
+    def __init__(self, datasets: List[Dict[str, Any]], signature: Tuple):
+        self.datasets = datasets
+        self.signature = signature
+
+
 class FacetResults:
     """Cached, defensive reader for the facet results folder.
 
@@ -496,8 +533,15 @@ class FacetResults:
         self._summary_cache: Dict[Tuple, Dict[str, Any]] = {}
         self._cohort_cache: Optional[Tuple[Any, Dict[str, Dict[str, Any]]]] = None
         self._control_cache: Dict[Tuple, Dict[Tuple[str, str], Dict[str, Any]]] = {}
-        self._gene_tables: "OrderedDict[Tuple, Tuple[pd.DataFrame, pd.DataFrame]]" = OrderedDict()
-        self._families: "OrderedDict[Tuple, Dict[str, Dict[str, Any]]]" = OrderedDict()
+        # key -> (signature, value): one entry per key, replaced when its files change (``_cached_build``)
+        self._tables: "OrderedDict[Tuple, Tuple[Tuple, Dict[Tuple[str, str], Tuple[pd.DataFrame, pd.DataFrame]]]]" = OrderedDict()
+        self._tables_unscoped: Dict[str, Tuple[Any, Tuple[pd.DataFrame, pd.DataFrame]]] = {}
+        self._families: "OrderedDict[Tuple, Tuple[Tuple, Dict[str, Dict[str, Any]]]]" = OrderedDict()
+        self._cards: "OrderedDict[Tuple, Tuple[Tuple, Dict[str, Any]]]" = OrderedDict()
+        self._counting: Dict[Tuple, Tuple[pd.DataFrame, pd.DataFrame]] = {}
+        self._key_locks: Dict[Tuple, threading.Lock] = {}
+        self._scopes_memo: Optional[Tuple[Tuple, Dict[str, List[str]]]] = None
+        self._family_slots = threading.BoundedSemaphore(FAMILY_WORKERS)
 
     # ── low-level reads ────────────────────────────────────────────────────
 
@@ -614,21 +658,41 @@ class FacetResults:
                 out.append({**dataset, 'facet_scope': resolved})
         return out
 
-    def scopes_with_results(self, facet: str, datasets: Sequence[Dict[str, Any]]) -> List[str]:
+    def prepare(self, datasets: "Sequence[Dict[str, Any]] | PreparedDatasets") -> "PreparedDatasets":
+        """``datasets`` resolved once (donor-pooled units added, facet scope set) with the cache signature.
+
+        Every cross-dataset method accepts the result in place of a list, so a request that asks for several
+        facets and scopes stats the result files once instead of once per call.
+        """
+        if isinstance(datasets, PreparedDatasets):
+            return datasets
+        resolved = self._with_scope(self._with_pooled(datasets))
+        return PreparedDatasets(resolved, self._table_signature(resolved))
+
+    def scopes_with_results(self, facet: str, datasets: "Sequence[Dict[str, Any]] | PreparedDatasets") -> List[str]:
         """Scopes (in ``facet_scopes.SCOPES`` order) in which ``facet`` has at least one tested unit."""
-        datasets = self._with_scope(self._with_pooled(datasets))
-        found = set()
-        for dataset in datasets:
-            if dataset['facet_scope'] in found:
-                continue
-            paths = result_paths(self.results_dir, dataset['group_folder'], dataset['stem'])
-            if _file_key(paths['genes']) is None:
-                continue
-            summary = self.summary(dataset['db_id'], dataset['group_folder'], dataset['stem'],
-                                   current_sha256=dataset.get('sha256'), disease_basis=dataset.get('disease_basis'))
-            if any(u['facet'] == canonical_facet(facet) and u['tested'] and u.get('genes') for u in summary['units']):
-                found.add(dataset['facet_scope'])
-        return [scope for scope in facet_scopes.SCOPES if scope in found]
+        prepared = self.prepare(datasets)
+        with self._lock:
+            if self._scopes_memo is not None and self._scopes_memo[0] == prepared.signature:
+                by_facet = self._scopes_memo[1]
+            else:
+                by_facet = None
+        if by_facet is None:
+            found: Dict[str, set] = {}
+            for dataset in prepared.datasets:
+                paths = result_paths(self.results_dir, dataset['group_folder'], dataset['stem'])
+                if _file_key(paths['genes']) is None:
+                    continue
+                summary = self.summary(dataset['db_id'], dataset['group_folder'], dataset['stem'],
+                                       current_sha256=dataset.get('sha256'), disease_basis=dataset.get('disease_basis'))
+                for unit in summary['units']:
+                    if unit['tested'] and unit.get('genes'):
+                        found.setdefault(unit['facet'], set()).add(dataset['facet_scope'])
+            by_facet = {name: [scope for scope in facet_scopes.SCOPES if scope in scopes]
+                        for name, scopes in found.items()}
+            with self._lock:
+                self._scopes_memo = (prepared.signature, by_facet)
+        return list(by_facet.get(canonical_facet(facet), []))
 
     @staticmethod
     def default_scope(facet: str) -> str:
@@ -659,7 +723,9 @@ class FacetResults:
     # ── summary ────────────────────────────────────────────────────────────
 
     def summary(self, db_id: str, group_folder: str, stem: str,
-                current_sha256: Optional[str] = None, disease_basis: Optional[str] = None) -> Dict[str, Any]:
+                current_sha256: Optional[str] = None, disease_basis: Optional[str] = None,
+                facet_scope: Any = _UNSET, facet_exclude_reason: Optional[str] = None,
+                scope_reason: Optional[str] = None) -> Dict[str, Any]:
         """Per (facet, cell type stratum) summary of one dataset's results,
         cached until a result file, the cohort table or the run logs change.
         See ``_compute_summary``; adds ``cohort`` and, on sex units,
@@ -668,9 +734,16 @@ class FacetResults:
         ``disease_basis`` is the dataset's current ``.md`` value; it overrides
         the one recorded in the run manifest (runs before the key existed
         record none) on the summary and on every unit.
+
+        ``facet_scope`` is the dataset's catalogue scope (None: outside every scope). When given, a dataset
+        without a tested unit (no run manifest, or a skipped one) reports it instead of the human
+        post-mortem default; when omitted the manifest or default scope stays. A tested
+        dataset reports the scope its run manifest recorded. ``facet_exclude_reason`` (catalogue,
+        ``lib/facet_scopes.facet_exclusion_reason``) is carried on the payload as ``facet_exclude`` /
+        ``facet_exclude_reason`` and, for a dataset without results, becomes the ``reason``.
         """
-        key = (db_id, group_folder, stem, current_sha256, disease_basis, self.fingerprint(group_folder, stem),
-               _file_key(self.results_dir / COHORT_TABLE_NAME))
+        key = (db_id, group_folder, stem, current_sha256, disease_basis, facet_scope, facet_exclude_reason, scope_reason,
+               self.fingerprint(group_folder, stem), _file_key(self.results_dir / COHORT_TABLE_NAME))
         with self._lock:
             cached = self._summary_cache.get(key)
         if cached is not None:
@@ -679,6 +752,15 @@ class FacetResults:
         result['disease_basis'] = disease_basis or result.get('disease_basis')
         for unit in result['units']:
             unit['disease_basis'] = result['disease_basis']
+        if result['status'] != 'tested' and facet_scope is not _UNSET:
+            result['facet_scope'] = facet_scope
+            for unit in result['units']:
+                unit['facet_scope'] = facet_scope
+        result['facet_exclude'] = facet_exclude_reason is not None
+        result['facet_exclude_reason'] = facet_exclude_reason
+        current_reason = facet_exclude_reason or scope_reason
+        if current_reason and result['status'] != 'tested':
+            result['reason'] = current_reason
         cohort = self.cohorts().get(db_id)
         if cohort:
             cohort = {key: value for key, value in cohort.items() if key != 'role_internal'}
@@ -877,6 +959,8 @@ class FacetResults:
         run_scope = ((gene_manifest or module_manifest or {}).get('facet_scope')) or facet_scopes.DEFAULT_SCOPE
         for unit in units.values():
             unit['facet_scope'] = unit['facet_scope'] or run_scope
+            for field in ('replicate_unit', 'replicate_column'):
+                unit[field] = unit[field] or (gene_manifest or module_manifest or {}).get(field)
             flags = unit['flags']
             if flags['descriptive_only'] is None and flags['n_lt5'] is not None:
                 # runs before v3 (2026-10-06): n_lt5 meant descriptive only; v3 records both
@@ -1224,6 +1308,11 @@ class FacetResults:
         ``scope`` (``lib/facet_scopes.py``) keeps the datasets of that scope; None keeps every scope (only the
         offline summaries do that: replication is always computed per scope, genes are never merged across scopes).
 
+        The tables of every facet and scope are built in one pass over the result files (each parquet file is
+        read once) and cached together; the cache is rebuilt when a result file, the cohort table or a dataset
+        attribute changes. Concurrent callers of a cold cache share one build; while a rebuild after a file
+        change runs, other callers get the previous tables.
+
         Returns:
             (rows, units). ``rows`` has ``unit`` (index into ``units``),
             ``gene``, ``logFC``, ``ci_low``, ``ci_high``, ``q_value``,
@@ -1238,61 +1327,138 @@ class FacetResults:
             unit dict). ``rows`` also carries ``p_value`` (the ordinary two-sided limma p).
         """
         facet = canonical_facet(facet) if facet else facet
-        everything = self._facet_gene_table_all(facet, datasets)
-        if scope is None:
-            return everything
-        rows, units = everything
-        units = units[units['facet_scope'] == scope]
-        return rows[rows['unit'].isin(units['unit'])], units
-
-    def _facet_gene_table_all(self, facet: str, datasets: Sequence[Dict[str, Any]]
-                              ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """``facet_gene_table`` over every scope, cached once per facet (scopes are slices of it)."""
-        datasets = self._with_scope(self._with_pooled(datasets))
-        signature = (facet, _file_key(self.results_dir / COHORT_TABLE_NAME), tuple(
-            (d['db_id'], bool(d.get('is_secondary')), d.get('disease_basis'), self.fingerprint(d['group_folder'], d['stem']))
-            for d in datasets))
+        prepared = self.prepare(datasets)
+        tables = self._cached_build(self._tables, ('tables',), prepared.signature,
+                                    lambda: self._build_gene_tables(prepared.datasets), max_entries=1)
+        if scope is not None:
+            return tables.get((facet, scope)) or self._empty_gene_table()
         with self._lock:
-            cached = self._gene_tables.get(signature)
-            if cached is not None:
-                self._gene_tables.move_to_end(signature)
-                return cached
-        cohorts = self.cohorts()
-        unit_rows: List[Dict[str, Any]] = []
-        parts: List[pd.DataFrame] = []
-        for dataset in datasets:
-            paths = result_paths(self.results_dir, dataset['group_folder'], dataset['stem'])
-            if _file_key(paths['genes']) is None:
+            merged = self._tables_unscoped.get(facet)
+            if merged is not None and merged[0] is tables:
+                return merged[1]
+        parts = [tables[key] for key in tables if key[0] == facet]
+        if len(parts) == 1:
+            result = parts[0]
+        elif parts:
+            result = (pd.concat([rows for rows, _ in parts], ignore_index=True).astype(
+                          {'gene': 'category', 'gene_upper': 'category'}),
+                      pd.concat([units for _, units in parts], ignore_index=True))
+        else:
+            result = self._empty_gene_table()
+        with self._lock:
+            self._tables_unscoped[facet] = (tables, result)
+        return result
+
+    def _table_signature(self, datasets: Sequence[Dict[str, Any]]) -> Tuple:
+        """Cache key of the gene tables: changes when a result file, the cohort table or a dataset attribute
+        that enters the tables changes. ``datasets`` are already resolved (``_with_scope(_with_pooled(...))``)."""
+        return (_file_key(self.results_dir / COHORT_TABLE_NAME), tuple(
+            (d['db_id'], bool(d.get('is_secondary')), d.get('disease_basis'), d['facet_scope'],
+             self.fingerprint(d['group_folder'], d['stem'])) for d in datasets))
+
+    def _cached_build(self, store: "OrderedDict[Tuple, Tuple[Tuple, Any]]", key: Tuple, signature: Tuple,
+                      build: Any, max_entries: int) -> Any:
+        """Value of ``key`` in ``store`` for ``signature``; built once however many threads ask.
+
+        ``store`` maps ``key -> (signature, value)``, so an entry is replaced (not accumulated) when its
+        files change. A cold key is built by the first caller while the others wait on a per-key lock (no
+        global lock is held during the build, so unrelated requests keep running). When a rebuild after a file
+        change is already running, callers get the previous value instead of queueing behind it.
+        """
+        lock_key = (id(store), key)
+        with self._lock:
+            entry = store.get(key)
+            if entry is not None and entry[0] == signature:
+                store.move_to_end(key)
+                return entry[1]
+            key_lock = self._key_locks.setdefault(lock_key, threading.Lock())
+        if entry is not None:
+            if not key_lock.acquire(blocking=False):
+                return entry[1]
+        else:
+            key_lock.acquire()
+        try:
+            with self._lock:
+                entry = store.get(key)
+                if entry is not None and entry[0] == signature:
+                    return entry[1]
+            value = build()
+            with self._lock:
+                store[key] = (signature, value)
+                store.move_to_end(key)
+                while len(store) > max_entries:
+                    store.popitem(last=False)
+            return value
+        finally:
+            key_lock.release()
+
+    @staticmethod
+    def _empty_gene_table() -> Tuple[pd.DataFrame, pd.DataFrame]:
+        rows = pd.DataFrame({'unit': pd.Series(dtype='int32'), 'gene': pd.Series(dtype='category'),
+                             'logFC': pd.Series(dtype='float32'), 'ci_low': pd.Series(dtype='float32'),
+                             'ci_high': pd.Series(dtype='float32'), 'p_value': pd.Series(dtype='float64'),
+                             'p_treat_strong': pd.Series(dtype='float64'),
+                             'persists_after_pathology_adjustment': pd.Series(dtype='float32'),
+                             'q_value': pd.Series(dtype='float64'),
+                             'p_treat': pd.Series(dtype='float64'), 'q_treat': pd.Series(dtype='float64'),
+                             'gene_upper': pd.Series(dtype='category')})
+        units = pd.DataFrame([], columns=UNIT_TABLE_COLUMNS)
+        return rows, units
+
+    def _read_dataset_tables(self, dataset: Dict[str, Any], cohorts: Dict[str, Dict[str, Any]]
+                             ) -> Dict[str, Tuple[List[Dict[str, Any]], List[pd.DataFrame]]]:
+        """Gene rows of every tested facet of one dataset: ``facet -> (unit dicts, row frames)``.
+        The parquet file is read once, whatever the number of facets."""
+        paths = result_paths(self.results_dir, dataset['group_folder'], dataset['stem'])
+        if _file_key(paths['genes']) is None:
+            return {}
+        summary = self.summary(dataset['db_id'], dataset['group_folder'], dataset['stem'],
+                               current_sha256=dataset.get('sha256'), disease_basis=dataset.get('disease_basis'))
+        tested: Dict[str, Dict[Tuple[str, str], Dict[str, Any]]] = {}
+        for unit in summary['units']:
+            if unit['tested'] and unit.get('genes'):
+                tested.setdefault(unit['facet'], {})[(unit['cell_type'], unit['celltype_source'])] = unit
+        if not tested:
+            return {}
+        try:
+            import pyarrow.parquet as pq
+            available = set(pq.read_schema(paths['genes']).names)
+            wanted = [c for c in ('facet', 'cell_type', 'celltype_source', 'gene', 'logFC', 'ci_low',
+                                  'ci_high', 'p_value', 'q_value', 'p_treat', 'q_treat',
+                                  'persists_after_pathology_adjustment', 'p_treat_strong') if c in available]
+            stored = {name for facet in tested for name in _stored_facet_names(facet)}
+            # dictionary-encoded strings: grouping and gene lookup work on integer codes
+            frame = pq.read_table(
+                paths['genes'], columns=wanted, filters=[('facet', 'in', sorted(stored))],
+                read_dictionary=[c for c in ('facet', 'cell_type', 'celltype_source', 'gene') if c in wanted]
+            ).to_pandas()
+            for column in ('facet', 'cell_type', 'celltype_source', 'gene'):
+                if column in frame.columns and not isinstance(frame[column].dtype, pd.CategoricalDtype):
+                    frame[column] = frame[column].astype('category')
+            if frame['facet'].cat.categories.isin(list(DEPRECATED_FACET_TAGS)).any():
+                frame['facet'] = pd.Categorical(frame['facet'].astype(object).replace(DEPRECATED_FACET_TAGS))
+        except Exception as exc:
+            log.warning('facet results: cannot read %s: %s', paths['genes'], exc)
+            return {}
+        for column in ('p_value', 'p_treat', 'q_treat', 'persists_after_pathology_adjustment', 'p_treat_strong'):
+            if column not in frame.columns:
+                frame[column] = np.nan
+        cohort = summary.get('cohort') or cohorts.get(dataset['db_id']) or {}
+        digests = self.unit_donor_digests(dataset['group_folder'], dataset['stem'])
+        out: Dict[str, Tuple[List[Dict[str, Any]], List[pd.DataFrame]]] = {}
+        for facet, facet_frame in frame.groupby('facet', sort=False, observed=True):
+            facet = str(facet)
+            units_of_facet = tested.get(facet)
+            if not units_of_facet:
                 continue
-            summary = self.summary(dataset['db_id'], dataset['group_folder'], dataset['stem'],
-                                   current_sha256=dataset.get('sha256'), disease_basis=dataset.get('disease_basis'))
-            tested = {(u['cell_type'], u['celltype_source']): u for u in summary['units']
-                      if u['facet'] == facet and u['tested'] and u.get('genes')}
-            if not tested:
-                continue
-            try:
-                import pyarrow.parquet as pq
-                available = set(pq.read_schema(paths['genes']).names)
-                wanted = [c for c in ('facet', 'cell_type', 'celltype_source', 'gene', 'logFC', 'ci_low',
-                                      'ci_high', 'p_value', 'q_value', 'p_treat', 'q_treat',
-                                      'persists_after_pathology_adjustment', 'p_treat_strong') if c in available]
-                frame = _rename_deprecated_facets(pd.read_parquet(
-                    paths['genes'], columns=wanted, filters=[('facet', 'in', _stored_facet_names(facet))]))
-            except Exception as exc:
-                log.warning('facet results: cannot read %s: %s', paths['genes'], exc)
-                continue
-            for column in ('p_value', 'p_treat', 'q_treat', 'persists_after_pathology_adjustment', 'p_treat_strong'):
-                if column not in frame.columns:
-                    frame[column] = np.nan
-            cohort = summary.get('cohort') or cohorts.get(dataset['db_id']) or {}
-            digests = self.unit_donor_digests(dataset['group_folder'], dataset['stem'])
-            for (cell_type, celltype_source), group in frame.groupby(['cell_type', 'celltype_source'], sort=False):
-                unit = tested.get((str(cell_type), str(celltype_source)))
+            unit_dicts: List[Dict[str, Any]] = []
+            parts: List[pd.DataFrame] = []
+            for (cell_type, celltype_source), group in facet_frame.groupby(['cell_type', 'celltype_source'], sort=False, observed=True):
+                unit = units_of_facet.get((str(cell_type), str(celltype_source)))
                 if unit is None:
                     continue
-                index = len(unit_rows)
-                unit_rows.append({
-                    'unit': index, 'db_id': dataset['db_id'], 'title': dataset.get('title') or dataset['db_id'],
+                unit_dicts.append({
+                    'db_id': dataset['db_id'], 'title': dataset.get('title') or dataset['db_id'],
                     'cell_type': str(cell_type), 'celltype_source': str(celltype_source),
                     'n_donors': unit.get('n_donors'), 'n_donors_ref': unit.get('n_donors_ref'),
                     'n_donors_test': unit.get('n_donors_test'), 'level_ref': unit.get('level_ref'),
@@ -1314,45 +1480,112 @@ class FacetResults:
                     'donor_digests': digests.get(_unit_key(facet, cell_type, celltype_source)),
                 })
                 parts.append(pd.DataFrame({
-                    'unit': pd.Series(index, index=group.index, dtype='int32'),
-                    'gene': group['gene'].astype(str),
-                    'logFC': pd.to_numeric(group['logFC'], errors='coerce').astype('float32'),
-                    'ci_low': pd.to_numeric(group['ci_low'], errors='coerce').astype('float32'),
-                    'ci_high': pd.to_numeric(group['ci_high'], errors='coerce').astype('float32'),
-                    'p_value': pd.to_numeric(group['p_value'], errors='coerce').astype('float64'),
-                    'q_value': pd.to_numeric(group['q_value'], errors='coerce').astype('float64'),
-                    'p_treat_strong': pd.to_numeric(group['p_treat_strong'], errors='coerce').astype('float64'),
-                    'persists_after_pathology_adjustment': pd.to_numeric(
-                        group['persists_after_pathology_adjustment'], errors='coerce').astype('float32'),
-                    'p_treat': pd.to_numeric(group['p_treat'], errors='coerce').astype('float64'),
-                    'q_treat': pd.to_numeric(group['q_treat'], errors='coerce').astype('float64'),
+                    'gene': group['gene'].array,
+                    'logFC': _numeric(group['logFC'], 'float32'),
+                    'ci_low': _numeric(group['ci_low'], 'float32'),
+                    'ci_high': _numeric(group['ci_high'], 'float32'),
+                    'p_value': _numeric(group['p_value'], 'float64'),
+                    'q_value': _numeric(group['q_value'], 'float64'),
+                    'p_treat_strong': _numeric(group['p_treat_strong'], 'float64'),
+                    'persists_after_pathology_adjustment': _numeric(
+                        group['persists_after_pathology_adjustment'], 'float32'),
+                    'p_treat': _numeric(group['p_treat'], 'float64'),
+                    'q_treat': _numeric(group['q_treat'], 'float64'),
                 }))
-        units = pd.DataFrame(unit_rows, columns=[
-            'unit', 'db_id', 'title', 'cell_type', 'celltype_source', 'n_donors', 'n_donors_ref',
-            'n_donors_test', 'level_ref', 'level_test', 'descriptive_only', 'cohort', 'cohort_label',
-            'role', 'counted', 'independence', 'overlap_unknown', 'pooled', 'disease_basis',
-            'analysis_level', 'tau_log2', 'exclusion_missing', 'is_secondary', 'celltype_group', 'facet_scope',
-            'summary_unit', 'donor_digests'])
-        if parts:
-            rows = pd.concat(parts, ignore_index=True)
-            rows['gene_upper'] = rows['gene'].str.upper().astype('category')
-            rows['gene'] = rows['gene'].astype('category')
-        else:
-            rows = pd.DataFrame({'unit': pd.Series(dtype='int32'), 'gene': pd.Series(dtype='category'),
-                                 'logFC': pd.Series(dtype='float32'), 'ci_low': pd.Series(dtype='float32'),
-                                 'ci_high': pd.Series(dtype='float32'), 'p_value': pd.Series(dtype='float64'),
-                                 'p_treat_strong': pd.Series(dtype='float64'),
-                                 'persists_after_pathology_adjustment': pd.Series(dtype='float32'),
-                                 'q_value': pd.Series(dtype='float64'),
-                                 'p_treat': pd.Series(dtype='float64'), 'q_treat': pd.Series(dtype='float64'),
-                                 'gene_upper': pd.Series(dtype='category')})
-        result = (rows, units)
+            if unit_dicts:
+                out[facet] = (unit_dicts, parts)
+        return out
+
+    @staticmethod
+    def _gene_vocabulary(gene_arrays: Sequence[pd.Categorical]) -> Tuple[pd.Index, Dict[int, np.ndarray]]:
+        """One gene vocabulary for all result files, and per distinct category list the map from its codes to it.
+
+        The parts of one file share their category list, so the union is taken once per file, not once
+        per (facet, cell type) part; the maps are keyed by ``id`` of the category ``Index``.
+        """
+        position: Dict[str, int] = {}
+        names: List[str] = []
+        code_maps: Dict[int, np.ndarray] = {}
+        previous: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        for array in gene_arrays:
+            categories = array.dtype.categories
+            if id(categories) in code_maps:
+                continue
+            symbols = categories.to_numpy(dtype=object)
+            if previous is not None and len(symbols) == len(previous[0]) and (symbols == previous[0]).all():
+                code_maps[id(categories)] = previous[1]
+                continue
+            codes = np.empty(len(symbols), dtype='int64')
+            for index, symbol in enumerate(symbols):
+                code = position.get(symbol)
+                if code is None:
+                    code = position[symbol] = len(names)
+                    names.append(symbol)
+                codes[index] = code
+            code_maps[id(categories)] = codes
+            previous = (symbols, codes)
+        return pd.Index(names, dtype=object), code_maps
+
+    def _build_gene_tables(self, datasets: Sequence[Dict[str, Any]]
+                           ) -> Dict[Tuple[str, str], Tuple[pd.DataFrame, pd.DataFrame]]:
+        """Gene tables of every (facet, scope): every result file is read once, in parallel."""
+        cohorts = self.cohorts()
+        with ThreadPoolExecutor(max_workers=READ_WORKERS) as pool:
+            per_dataset = list(pool.map(lambda dataset: self._read_dataset_tables(dataset, cohorts), datasets))
+        unit_rows: Dict[str, List[Dict[str, Any]]] = {}
+        parts: Dict[str, List[pd.DataFrame]] = {}
+        for facet_tables in per_dataset:
+            for facet, (unit_dicts, frames) in facet_tables.items():
+                numbered = unit_rows.setdefault(facet, [])
+                for unit_dict, frame in zip(unit_dicts, frames):
+                    frame.insert(0, 'unit', np.full(len(frame), len(numbered), dtype='int32'))
+                    numbered.append({'unit': len(numbered), **unit_dict})
+                    parts.setdefault(facet, []).append(frame)
+        vocabulary, code_maps = self._gene_vocabulary([part['gene'].array for frames in parts.values() for part in frames])
+        upper_codes, upper_names = pd.factorize(vocabulary.str.upper())
+        gene_dtype = pd.CategoricalDtype(vocabulary)
+        upper_dtype = pd.CategoricalDtype(upper_names)
+        tables: Dict[Tuple[str, str], Tuple[pd.DataFrame, pd.DataFrame]] = {}
+        for facet, facet_units in unit_rows.items():
+            units = pd.DataFrame(facet_units, columns=UNIT_TABLE_COLUMNS)
+            gene_codes = np.concatenate([code_maps[id(part['gene'].array.dtype.categories)][part['gene'].array.codes]
+                                         for part in parts[facet]])
+            rows = pd.concat([part.drop(columns='gene') for part in parts[facet]], ignore_index=True)
+            rows['gene'] = pd.Categorical.from_codes(gene_codes, dtype=gene_dtype)
+            rows['gene_upper'] = pd.Categorical.from_codes(upper_codes[gene_codes], dtype=upper_dtype)
+            for scope in sorted(set(units['facet_scope'])):
+                scope_units = units[units['facet_scope'] == scope]
+                tables[(facet, scope)] = (rows if len(scope_units) == len(units)
+                                          else rows[rows['unit'].isin(scope_units['unit'])], scope_units)
+        return tables
+
+    def _counted_units(self, units: pd.DataFrame, exclude_secondary: bool, facet: Optional[str]) -> pd.DataFrame:
+        """``counting_units`` of a cached unit table, remembered (the table object is stable until its files change)."""
+        key = (id(units), bool(exclude_secondary), facet)
         with self._lock:
-            self._gene_tables[signature] = result
-            self._gene_tables.move_to_end(signature)
-            while len(self._gene_tables) > 8:
-                self._gene_tables.popitem(last=False)
+            hit = self._counting.get(key)
+        if hit is not None and hit[0] is units:
+            return hit[1]
+        result = self.counting_units(units, exclude_secondary, facet)
+        with self._lock:
+            if len(self._counting) >= 4 * FAMILY_CACHE_ENTRIES:
+                self._counting.clear()
+            self._counting[key] = (units, result)
         return result
+
+    def warm(self, datasets: Sequence[Dict[str, Any]], exclude_secondary: bool = True) -> int:
+        """Build the gene tables and every replication family so the first request is a cache hit.
+
+        Meant for a background thread at server start; safe to call concurrently with requests (they
+        share the builds). Returns the number of families built.
+        """
+        prepared = self.prepare(datasets)
+        gene_classes.flags('TREM2')  # parses the GENCODE file once
+        self.facet_gene_table(FACET_ORDER[0], prepared, facet_scopes.DEFAULT_SCOPE)
+        wanted = [(facet, scope) for facet in FACET_ORDER for scope in self.scopes_with_results(facet, prepared)]
+        with ThreadPoolExecutor(max_workers=FAMILY_WORKERS) as pool:
+            list(pool.map(lambda pair: self.replication_families(pair[0], prepared, exclude_secondary, pair[1]), wanted))
+        return len(wanted)
 
     @staticmethod
     def counting_units(units: pd.DataFrame, exclude_secondary: bool = True,
@@ -1598,29 +1831,22 @@ class FacetResults:
         """
         facet = canonical_facet(facet) if facet else facet
         scope = scope or self.default_scope(facet)
-        datasets = self._with_scope(self._with_pooled(datasets), scope)
-        signature = ('families', facet, scope, exclude_secondary, _file_key(self.results_dir / COHORT_TABLE_NAME), tuple(
-            (d['db_id'], bool(d.get('is_secondary')), d.get('disease_basis'), self.fingerprint(d['group_folder'], d['stem']))
-            for d in datasets))
-        with self._lock:
-            cached = self._families.get(signature)
-            if cached is not None:
-                self._families.move_to_end(signature)
-                return cached
-        rows, units = self.facet_gene_table(facet, datasets, scope)
-        families: Dict[str, Dict[str, Any]] = {}
-        if len(units):
-            units = self.counting_units(units, exclude_secondary, facet)
-            counted = units[units['counted_effective']]
-            for group, group_units in counted.groupby('celltype_group'):
-                sub = rows[rows['unit'].isin(group_units['unit'])]
-                families[group] = self._family(sub, group_units, facet)
-        with self._lock:
-            self._families[signature] = families
-            self._families.move_to_end(signature)
-            while len(self._families) > 16:
-                self._families.popitem(last=False)
-        return families
+        prepared = self.prepare(datasets)
+
+        def build() -> Dict[str, Dict[str, Any]]:
+            rows, units = self.facet_gene_table(facet, prepared, scope)
+            families: Dict[str, Dict[str, Any]] = {}
+            if len(units):
+                units = self._counted_units(units, exclude_secondary, facet)
+                counted = units[units['counted_effective']]
+                with self._family_slots:
+                    for group, group_units in counted.groupby('celltype_group'):
+                        sub = rows[rows['unit'].isin(group_units['unit'])]
+                        families[group] = self._family(sub, group_units, facet)
+            return families
+
+        return self._cached_build(self._families, (facet, scope, bool(exclude_secondary)), prepared.signature, build,
+                                  max_entries=FAMILY_CACHE_ENTRIES)
 
     @staticmethod
     def _family(sub: pd.DataFrame, group_units: pd.DataFrame, facet: Optional[str] = None) -> Dict[str, Any]:
@@ -1642,7 +1868,11 @@ class FacetResults:
         """
         columns = ['unit', 'cohort', 'n_siblings']
         sub = sub.merge(group_units[columns], on='unit', how='left')
-        sub = sub.assign(gene_key=sub['gene_upper'].astype(str), gene=sub['gene'].astype(str))
+        # group on integer gene codes (string keys make every groupby and pivot below several times slower);
+        # the symbols are put back at the end
+        upper = pd.Categorical(sub['gene_upper'])
+        display = pd.Categorical(sub['gene'])
+        sub = sub.assign(gene_key=upper.codes, gene=display.codes)
         log_fc = sub['logFC'].astype(float)
         p_two = sub['p_value']
         half = p_two / 2.0
@@ -1713,19 +1943,44 @@ class FacetResults:
         order = np.argsort(-np.nan_to_num(signed.to_numpy(), nan=-np.inf), axis=1)
         names = np.asarray(p_up.columns, dtype=object)
         carried = carries.to_numpy()
+        any_carries = carried.any(axis=1)
         frame['effect_gate_cohorts'] = [
-            [names[i] for i in row_order if row_carries[i]] for row_order, row_carries in zip(order, carried)]
+            [names[i] for i in row_order if row_carries[i]] if has_carriers else []
+            for row_order, row_carries, has_carriers in zip(order, carried, any_carries)]
         # the two cohorts that carry the r-value: the smallest one-sided p in the replicated direction
         best = np.where((frame['r_direction'] == 'up').to_numpy()[:, None], p_up.to_numpy(), p_down.to_numpy())
         best = np.nan_to_num(best, nan=np.inf)
         carriers = np.argsort(best, axis=1, kind='stable')[:, :replication.DEFAULT_U]
-        frame['r_cohorts'] = [[names[i] for i in row if np.isfinite(best[n, i])] for n, row in enumerate(carriers)]
+        carrier_finite = np.isfinite(np.take_along_axis(best, carriers, axis=1))
+        frame['r_cohorts'] = [[names[i] for i, finite in zip(row, flags) if finite]
+                              for row, flags in zip(carriers.tolist(), carrier_finite.tolist())]
         frame['r_significant'] = frame['r_value'] < replication.R_THRESHOLD
         frame['replicated'] = frame['r_significant']
         frame['replicated_effect'] = frame['r_treat'] < replication.R_THRESHOLD
         frame['replicated_strong'] = frame['r_strong'] < replication.R_THRESHOLD
         frame['gene'] = per_cohort.groupby('gene_key')['gene'].first().reindex(frame.index)
+        upper_names = np.asarray(upper.categories, dtype=object)
+        display_names = np.asarray(display.categories, dtype=object)
+        frame['gene'] = display_names[frame['gene'].to_numpy(dtype=int)]
+        frame.index = pd.Index(upper_names[frame.index.to_numpy(dtype=int)], name='gene_key')
+        per_cohort['gene'] = display_names[per_cohort['gene'].to_numpy(dtype=int)]
+        per_cohort['gene_key'] = upper_names[per_cohort['gene_key'].to_numpy(dtype=int)]
+        frame = frame.sort_index()
+        per_cohort = per_cohort.sort_values(['gene_key', 'cohort'], kind='stable').reset_index(drop=True)
         return {'frame': frame, 'per_cohort': per_cohort, 'units': group_units}
+
+    def _adjusted_age_family(self, facet: str, datasets: Sequence[Dict[str, Any]], exclude_secondary: bool,
+                             scope: str, group: str) -> Optional[pd.DataFrame]:
+        """Replication table of the pathology-adjusted age model for one cell type group, or None.
+
+        Only the ``age`` facet has it: a gene of the unadjusted age ranking persists after the pathology
+        adjustment when it also replicates, in the same direction, in ``age_adjusted`` (same scope and group).
+        None for other facets, or when the adjusted model has no counted cohorts in the group.
+        """
+        if facet != 'age':
+            return None
+        entry = self.replication_families('age_adjusted', datasets, exclude_secondary, scope).get(group)
+        return None if entry is None else entry['frame']
 
     def _resolve_group_filter(self, units: pd.DataFrame, cell_type: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
         """``cell_type`` as (group, raw label): a group name selects the group,
@@ -1740,6 +1995,21 @@ class FacetResults:
     def gene_effects(self, facet: str, gene: str, datasets: Sequence[Dict[str, Any]],
                      cell_type: Optional[str] = None, exclude_secondary: bool = True,
                      scope: Optional[str] = None) -> Dict[str, Any]:
+        """The result card of one gene for one facet (``_gene_effects``), cached per gene until a file changes.
+
+        The returned dict is shared between callers: do not modify it.
+        """
+        facet = canonical_facet(facet) if facet else facet
+        scope = scope or self.default_scope(facet)
+        prepared = self.prepare(datasets)
+        return self._cached_build(
+            self._cards, (facet, gene.upper(), cell_type, bool(exclude_secondary), scope), prepared.signature,
+            lambda: self._gene_effects(facet, gene, prepared, cell_type, exclude_secondary, scope),
+            max_entries=CARD_CACHE_ENTRIES)
+
+    def _gene_effects(self, facet: str, gene: str, datasets: Sequence[Dict[str, Any]],
+                      cell_type: Optional[str] = None, exclude_secondary: bool = True,
+                      scope: Optional[str] = None) -> Dict[str, Any]:
         """The result card of one gene for one facet: every tested unit, grouped
         by cohort, with the replication entry per cell type group.
 
@@ -1766,10 +2036,11 @@ class FacetResults:
         """
         facet = canonical_facet(facet) if facet else facet
         scope = scope or self.default_scope(facet)
+        datasets = self.prepare(datasets)
         rows, units = self.facet_gene_table(facet, datasets, scope)
         families = self.replication_families(facet, datasets, exclude_secondary, scope)
         info = FACET_INFO.get(facet, {'contrast': facet, 'effect_unit': 'log2 fold change', 'provisional': False})
-        units = self.counting_units(units, exclude_secondary, facet) if len(units) else units
+        units = self._counted_units(units, exclude_secondary, facet) if len(units) else units
         gene_rows = rows[rows['gene_upper'] == gene.upper()] if len(rows) else rows
         merged = gene_rows.merge(units, on='unit', how='left') if len(gene_rows) else None
         unit_cards: List[Dict[str, Any]] = []
@@ -1835,6 +2106,8 @@ class FacetResults:
                     'independence': record.get('independence'),
                     'disease_basis': record.get('disease_basis'),
                     'analysis_level': record.get('analysis_level'),
+                    'replicate_unit': summary_unit_value(record, 'replicate_unit'),
+                    'replicate_column': summary_unit_value(record, 'replicate_column'),
                     'facet_scope': record.get('facet_scope'),
                     'persists_after_pathology_adjustment': (None if record.get('persists_after_pathology_adjustment')
                                                             is None or pd.isna(record.get('persists_after_pathology_adjustment'))
@@ -1936,9 +2209,10 @@ class FacetResults:
         """
         facet = canonical_facet(facet) if facet else facet
         scope = scope or self.default_scope(facet)
+        datasets = self.prepare(datasets)
         rows, units = self.facet_gene_table(facet, datasets, scope)
         families = self.replication_families(facet, datasets, exclude_secondary, scope)
-        units = self.counting_units(units, exclude_secondary, facet) if len(units) else units
+        units = self._counted_units(units, exclude_secondary, facet) if len(units) else units
         counted = units[units['counted_effective']] if len(units) else units
         options = []
         if len(counted):
@@ -1958,6 +2232,7 @@ class FacetResults:
         n_r_significant = 0
         n_effect_gate = 0
         n_replicated_effect = 0
+        n_replicated_strong = 0
         n_family = 0
         group_donors: Dict[str, Optional[int]] = {'n_donors_sum': None, 'n_donors_distinct': None}
         overlap_labels: Dict[str, bool] = {}
@@ -1979,6 +2254,8 @@ class FacetResults:
                 n_replicated = int(len(replicated))
                 n_effect_gate = int(replicated['effect_gate_passed'].astype(bool).sum())
                 n_replicated_effect = int(usable['replicated_effect'].astype(bool).sum())
+                n_replicated_strong = int(usable['replicated_strong'].astype(bool).sum())
+                adjusted = self._adjusted_age_family(facet, datasets, exclude_secondary, scope, chosen)
                 ranked = replicated.sort_values(['r_value', 'k', 'agreement', 'median_abs_logFC'],
                                                 ascending=[True, False, False, False]).head(limit)
                 for gene_key, record in ranked.iterrows():
@@ -2000,6 +2277,13 @@ class FacetResults:
                         'effect_gate_cohorts': [labels.get(c) or c for c in record.get('effect_gate_cohorts') or []],
                         'r_treat': _finite(record.get('r_treat')),
                         'replicated_effect': bool(record.get('replicated_effect')),
+                        'persists_after_pathology_adjustment': (
+                            None if adjusted is None else bool(
+                                gene_key in adjusted.index and bool(adjusted.loc[gene_key, 'replicated'])
+                                and adjusted.loc[gene_key, 'r_direction'] == direction)),
+                        'r_strong': _finite(record.get('r_strong')),
+                        'replicated_strong': (bool(record.get('replicated_strong'))
+                                              if _finite(record.get('r_strong')) is not None else None),
                         'r_cohorts': [labels.get(c) or c for c in record.get('r_cohorts') or []],
                         'gene_flags': gene_classes.flags(str(record['gene'])),
                         'agreement': _finite(record.get('agreement')),
@@ -2028,6 +2312,7 @@ class FacetResults:
             'n_r_significant': n_r_significant,
             'n_effect_gate': n_effect_gate,
             'n_replicated_effect': n_replicated_effect,
+            'n_replicated_strong': n_replicated_strong,
             'n_genes_in_family': n_family,
             'donors_in_cell_type': group_donors,
             'donor_count_definition': DONOR_COUNT_DEFINITION,
@@ -2065,7 +2350,7 @@ class FacetResults:
         facet = canonical_facet(facet) if facet else facet
         scope = scope or self.default_scope(facet)
         all_scopes = self.scopes_with_results(facet, datasets)
-        datasets = self._with_scope(self._with_pooled(datasets), None if scope == 'all' else scope)
+        datasets = self._with_scope(self._with_pooled(self.prepare(datasets).datasets), None if scope == 'all' else scope)
         signature = (facet, scope, top_genes, exclude_secondary, _file_key(self.results_dir / COHORT_TABLE_NAME), tuple(
             (d['db_id'], bool(d.get('is_secondary')), d.get('disease_basis'), self.fingerprint(d['group_folder'], d['stem']))
             for d in datasets))
@@ -2431,8 +2716,12 @@ def unit_notes(unit: Dict[str, Any]) -> List[str]:
     if (unit.get('n_sex_discordant') or 0) > 0:
         notes.append(f"{unit['n_sex_discordant']} of {unit.get('n_sex_checked')} replicates express the other sex "
                      f"than their label")
-    if (unit.get('flags') or {}).get('small_sample'):
-        notes.append('small sample: tested and counted, low power')
+    flags = unit.get('flags') or {}
+    if flags.get('small_sample'):
+        if unit.get('analysis_level') == replicates.LEVEL_BELOW_FLOOR or flags.get('descriptive_only'):
+            notes.append('small sample: below the p-value floor of its replicate unit, descriptive only, not counted')
+        else:
+            notes.append('small sample: low power')
     return notes
 
 

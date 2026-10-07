@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -30,8 +31,28 @@ _lock = threading.Lock()
 _cache: Dict[str, Dict[str, Tuple[str, int]]] = {}
 
 
+_PATH_TTL_SECONDS = 10.0
+_path_memo: Optional[Tuple[float, Tuple[Optional[str], Optional[str]], Optional[Path]]] = None
+
+
 def gtf_path() -> Optional[Path]:
-    """The configured GENCODE GTF, else the dev host file when it exists, else None."""
+    """The configured GENCODE GTF, else the dev host file when it exists, else None.
+
+    The answer is remembered for a few seconds (per environment setting): the config file is parsed on
+    every lookup otherwise, and a gene card asks once per gene.
+    """
+    global _path_memo
+    environment = (os.environ.get('ANTHIVE_GENE_GTF'), os.environ.get('ANTHIVE_CONFIG'))
+    memo = _path_memo
+    now = time.monotonic()
+    if memo is not None and memo[1] == environment and now - memo[0] < _PATH_TTL_SECONDS:
+        return memo[2]
+    path = _gtf_path_uncached()
+    _path_memo = (now, environment, path)
+    return path
+
+
+def _gtf_path_uncached() -> Optional[Path]:
     explicit = os.environ.get('ANTHIVE_GENE_GTF')
     if not explicit:
         try:

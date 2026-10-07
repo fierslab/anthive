@@ -13,6 +13,8 @@ import ast
 import json
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
@@ -623,7 +625,7 @@ _SERVE_WANTED = {
     'get_facet_tests', 'get_facet_test_genes', 'get_facet_test_modules', 'get_facet_test_volcano',
     'get_facet_tests_across_datasets', '_tested_facet', '_facet_test_datasets',
     'get_facet_recurring_genes', 'get_facet_gene_effects', 'get_gene_facet_effects', 'get_facet_cohorts',
-    '_scope_param', '_facet_scope_of', '_SCOPE_QUERY_DESC', '_with_help', '_FACET_HELP_TOPICS',
+    '_scope_param', '_facet_scope_of', '_SCOPE_QUERY_DESC', '_with_help', '_FACET_HELP_TOPICS', '_no_scope_reason',
 }
 
 
@@ -670,7 +672,9 @@ def serve(results):
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
-    return TestClient(app)
+    client = TestClient(app)
+    client.registry = registry
+    return client
 
 
 def test_serve_registers_routes_in_a_safe_order():
@@ -960,3 +964,351 @@ def test_scope_parameter_on_the_endpoints(serve):
     human_only = serve.get('/genes/Trem2/facet-effects', params={'scope': 'human_postmortem'}).json()
     assert 'by_scope' not in human_only and human_only['scope'] == 'human_postmortem'
 
+
+
+# ── 2.44.0 API fixes: caches, single flight, scope and exclusion reasons, card fields ─────────────
+
+EVERYTHING = DATASETS + MOUSE_DATASETS
+
+
+def test_every_facet_and_scope_fits_the_family_cache(results):
+    """The 2.44 facets x scopes outgrew the old LRU of 16 families, so every call recomputed them."""
+    reader = fr.FacetResults(results)
+    scopes = facet_scopes.SCOPES
+    assert fr.FAMILY_CACHE_ENTRIES >= len(fr.FACET_ORDER) * len(scopes) * 2
+    first = {(f, sc): reader.replication_families(f, EVERYTHING, True, sc) for f in fr.FACET_ORDER for sc in scopes}
+    for exclude_secondary in (False,):
+        for facet in fr.FACET_ORDER:
+            for scope in scopes:
+                reader.replication_families(facet, EVERYTHING, exclude_secondary, scope)
+    for (facet, scope), families in first.items():
+        assert reader.replication_families(facet, EVERYTHING, True, scope) is families
+
+
+def test_gene_tables_are_built_once_for_all_facets_and_scopes(results, monkeypatch):
+    reader = fr.FacetResults(results)
+    calls = []
+    original = fr.FacetResults._read_dataset_tables
+
+    def counting(self, dataset, cohorts):
+        calls.append(dataset['db_id'])
+        return original(self, dataset, cohorts)
+
+    monkeypatch.setattr(fr.FacetResults, '_read_dataset_tables', counting)
+    for facet in fr.FACET_ORDER:
+        reader.facet_gene_table(facet, EVERYTHING, 'human_postmortem')
+    reader.facet_gene_table('sex', EVERYTHING)
+    assert calls and len(calls) == len(set(calls))             # each result file was read once, for all facets
+
+
+def test_unscoped_table_joins_the_scopes_and_is_cached(results):
+    reader = fr.FacetResults(results)
+    rows, units = reader.facet_gene_table('sex', EVERYTHING)
+    assert set(units['facet_scope']) == {'human_postmortem', 'xenograft_human_in_mouse'}
+    assert set(rows['unit']) == set(units['unit'])
+    assert reader.facet_gene_table('sex', EVERYTHING)[0] is rows
+    human_rows, human_units = reader.facet_gene_table('sex', EVERYTHING, 'human_postmortem')
+    assert set(human_units['facet_scope']) == {'human_postmortem'} and set(human_rows['unit']) <= set(units['unit'])
+    empty_rows, empty_units = reader.facet_gene_table('app_nlgf', EVERYTHING, 'human_postmortem')
+    assert len(empty_rows) == 0 and len(empty_units) == 0 and list(empty_units.columns) == fr.UNIT_TABLE_COLUMNS
+
+
+def test_gene_lookup_is_case_insensitive_through_the_shared_vocabulary(results):
+    reader = fr.FacetResults(results)
+    rows, _ = reader.facet_gene_table('sex', EVERYTHING)
+    assert set(rows['gene_upper'].dropna().astype(str)) >= {'XIST', 'RPS4Y1'}
+    assert 'Xist' in set(rows['gene'].astype(str)) and 'XIST' in set(rows['gene'].astype(str))
+    assert reader.gene_effects('sex', 'xist', EVERYTHING)['units'] and reader.gene_effects('sex', 'Xist', EVERYTHING)['units']
+
+
+def test_single_flight_one_build_for_concurrent_cold_callers(results, monkeypatch):
+    reader = fr.FacetResults(results)
+    builds = []
+    original = fr.FacetResults._build_gene_tables
+
+    def slow(self, datasets):
+        builds.append(1)
+        time.sleep(0.3)
+        return original(self, datasets)
+
+    monkeypatch.setattr(fr.FacetResults, '_build_gene_tables', slow)
+    answers = []
+    threads = [threading.Thread(target=lambda: answers.append(reader.facet_gene_table('sex', EVERYTHING, 'human_postmortem')))
+               for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(builds) == 1 and len(answers) == 8 and all(a is answers[0] for a in answers)
+
+
+def test_a_slow_build_does_not_block_other_keys(results):
+    reader = fr.FacetResults(results)
+    release = threading.Event()
+    started = threading.Event()
+
+    def slow_build():
+        started.set()
+        release.wait(5)
+        return 'slow'
+
+    holder = threading.Thread(target=lambda: reader._cached_build(reader._cards, ('slow',), ('sig',), slow_build, 8))
+    holder.start()
+    assert started.wait(5)
+    t0 = time.monotonic()
+    assert reader._cached_build(reader._cards, ('other',), ('sig',), lambda: 'fast', 8) == 'fast'
+    assert time.monotonic() - t0 < 1.0                          # no global lock is held during the slow build
+    release.set()
+    holder.join()
+
+
+def test_rebuild_after_a_change_serves_the_previous_value_to_other_callers(results):
+    reader = fr.FacetResults(results)
+    store = reader._cards
+    assert reader._cached_build(store, ('k',), ('v1',), lambda: 'old', 8) == 'old'
+    release, started = threading.Event(), threading.Event()
+
+    def rebuild():
+        started.set()
+        release.wait(5)
+        return 'new'
+
+    leader = threading.Thread(target=lambda: reader._cached_build(store, ('k',), ('v2',), rebuild, 8))
+    leader.start()
+    assert started.wait(5)
+    assert reader._cached_build(store, ('k',), ('v2',), lambda: 'never', 8) == 'old'     # stale while revalidating
+    release.set()
+    leader.join()
+    assert reader._cached_build(store, ('k',), ('v2',), lambda: 'never', 8) == 'new'
+    assert len(store) == 1                                       # replaced, not accumulated
+
+
+def test_cache_evicts_the_oldest_key_beyond_the_bound(results):
+    reader = fr.FacetResults(results)
+    for index in range(5):
+        reader._cached_build(reader._cards, (index,), ('s',), lambda index=index: index, 3)
+    assert [key[0] for key in reader._cards] == [2, 3, 4]
+
+
+def test_gene_cards_are_cached_until_a_result_file_changes(results):
+    reader = fr.FacetResults(results)
+    card = reader.gene_effects('sex', 'XIST', EVERYTHING)
+    assert reader.gene_effects('sex', 'xist', EVERYTHING) is card
+    assert reader.gene_effects('sex', 'XIST', EVERYTHING, exclude_secondary=False) is not card
+    manifest = results / 'G1' / 'ds1.facet_run_manifest.json'
+    os.utime(manifest, ns=(manifest.stat().st_atime_ns, manifest.stat().st_mtime_ns + 10_000_000))
+    assert reader.gene_effects('sex', 'XIST', EVERYTHING) is not card
+
+
+def test_prepare_is_idempotent_and_scopes_are_memoised(results):
+    reader = fr.FacetResults(results)
+    prepared = reader.prepare(EVERYTHING)
+    assert reader.prepare(prepared) is prepared
+    assert {d['facet_scope'] for d in prepared.datasets} >= {'human_postmortem', 'xenograft_human_in_mouse'}
+    assert reader.scopes_with_results('sex', prepared) == ['human_postmortem', 'xenograft_human_in_mouse']
+    assert reader.scopes_with_results('app_nlgf', prepared) == ['xenograft_human_in_mouse']
+    assert reader.scopes_with_results('age', prepared) == []
+
+
+def test_warm_builds_every_family_and_later_calls_hit(results):
+    reader = fr.FacetResults(results)
+    built = reader.warm(EVERYTHING)
+    assert built == sum(len(reader.scopes_with_results(f, EVERYTHING)) for f in fr.FACET_ORDER) > 0
+    families = reader.replication_families('sex', EVERYTHING, True, 'human_postmortem')
+    assert reader.replication_families('sex', EVERYTHING, True, 'human_postmortem') is families
+    assert len(reader._tables) == 1
+
+
+def test_counting_units_are_remembered_per_table(results):
+    reader = fr.FacetResults(results)
+    _, units = reader.facet_gene_table('braak', DATASETS, 'human_postmortem')
+    assert reader._counted_units(units, True, 'braak') is reader._counted_units(units, True, 'braak')
+    assert reader._counted_units(units, False, 'braak') is not reader._counted_units(units, True, 'braak')
+
+
+def test_numeric_helper_and_gene_vocabulary():
+    assert fr._numeric(pd.Series([1.5, None]), 'float32').dtype == 'float32'
+    parsed = fr._numeric(pd.Series(['1.5', 'x', None], dtype=object), 'float64')
+    assert parsed[0] == 1.5 and pd.isna(parsed[1]) and pd.isna(parsed[2])
+    first = pd.Categorical(['B', 'A'], categories=['A', 'B'])
+    second = pd.Categorical(['C', 'A'], categories=['A', 'C'])
+    third = pd.Categorical(['A'], categories=['A', 'C'])                   # same symbols as ``second``, another object
+    vocabulary, maps = fr.FacetResults._gene_vocabulary([first, second, third])
+    assert list(vocabulary) == ['A', 'B', 'C']
+    assert list(maps[id(first.dtype.categories)]) == [0, 1] and list(maps[id(second.dtype.categories)]) == [0, 2]
+    assert list(maps[id(third.dtype.categories)]) == [0, 2]
+
+
+def test_summary_reports_the_dataset_scope_not_the_human_default(results):
+    reader = fr.FacetResults(results)
+    default = reader.summary('G3/ds3', 'G3', 'ds3')
+    assert default['status'] == 'not_tested' and default['facet_scope'] == 'human_postmortem'
+    xeno = reader.summary('G3/ds3', 'G3', 'ds3', facet_scope='xenograft_human_in_mouse')
+    assert xeno['facet_scope'] == 'xenograft_human_in_mouse' and xeno['facet_exclude'] is False
+    none = reader.summary('G3/ds3', 'G3', 'ds3', facet_scope=None)
+    assert none['facet_scope'] is None
+    tested = reader.summary('G1/ds1', 'G1', 'ds1', facet_scope='xenograft_human_in_mouse')
+    assert tested['status'] == 'tested' and tested['facet_scope'] == 'human_postmortem'      # the run's own scope
+
+
+def test_summary_reason_follows_the_current_rule_not_the_stale_run_log(results):
+    reader = fr.FacetResults(results)
+    assert reader.summary('G3/ds3', 'G3', 'ds3')['reason'] == 'no raw counts layer served'
+    excluded = reader.summary('G3/ds3', 'G3', 'ds3', facet_exclude_reason='spatial technology (visium): no pseudobulk')
+    assert excluded['reason'] == 'spatial technology (visium): no pseudobulk'
+    assert excluded['facet_exclude'] is True and excluded['facet_exclude_reason'] == excluded['reason']
+    scoped = reader.summary('G3/ds3', 'G3', 'ds3', facet_scope=None, scope_reason='no facet scope: organism not human')
+    assert scoped['reason'] == 'no facet scope: organism not human' and scoped['facet_exclude'] is False
+    both = reader.summary('G3/ds3', 'G3', 'ds3', facet_exclude_reason='excluded', scope_reason='no scope')
+    assert both['reason'] == 'excluded'
+    tested = reader.summary('G1/ds1', 'G1', 'ds1', facet_exclude_reason='excluded now')
+    assert tested['status'] == 'tested' and tested['reason'] is None and tested['facet_exclude'] is True
+
+
+@pytest.mark.parametrize('annotation,expected', [
+    ({}, 'organism is not recorded'),
+    ({'organism': 'mouse'}, 'organism not human (mouse)'),
+    ({'organism': ['human', 'mouse']}, 'not a single human or mouse value'),
+    ({'organism': 'human', 'experimental_system': 'bulk_tissue'}, 'bulk tissue'),
+    ({'organism': 'human', 'experimental_system': 'mystery'}, 'experimental_system mystery is not a tested system'),
+])
+def test_no_scope_reason_names_the_rule(annotation, expected):
+    assert expected in facet_scopes.no_scope_reason(annotation)
+    assert facet_scopes.no_scope_reason(annotation).startswith('no facet scope')
+
+
+def test_no_scope_reason_assumes_human_for_listed_datasets():
+    assert 'organism is not recorded' not in facet_scopes.no_scope_reason({}, db_id='WA4/MEC')
+
+
+def test_small_sample_note_does_not_claim_the_unit_is_counted():
+    below = fr.unit_notes({'facet': 'sex', 'flags': {'small_sample': True, 'descriptive_only': True},
+                           'analysis_level': 'below_floor'})
+    assert any('descriptive only, not counted' in note for note in below) and not any('tested and counted' in n for n in below)
+    below_level = fr.unit_notes({'facet': 'sex', 'flags': {'small_sample': True}, 'analysis_level': 'below_floor'})
+    assert any('not counted' in note for note in below_level)
+    ordinary = fr.unit_notes({'facet': 'sex', 'flags': {'small_sample': True}, 'analysis_level': 'replicate'})
+    assert 'small sample: low power' in ordinary and not any('counted' in note for note in ordinary)
+
+
+def test_gene_cards_carry_the_replicate_unit(results):
+    reader = fr.FacetResults(results)
+    mouse = reader.gene_effects('app_nlgf', 'Trem2', EVERYTHING)['units'][0]
+    assert mouse['replicate_unit'] == 'animal' and mouse['replicate_column'] == 'mouse_id'
+    human = reader.gene_effects('sex', 'XIST', DATASETS)['units'][0]
+    assert 'replicate_unit' in human and 'replicate_column' in human
+
+
+def test_recurring_genes_rows_carry_the_strong_tier_and_the_age_adjustment(results):
+    reader = fr.FacetResults(results)
+    top = reader.recurring_genes('braak', DATASETS, limit=50)
+    assert 'n_replicated_strong' in top and isinstance(top['n_replicated_strong'], int)
+    for row in top['rows']:
+        assert {'r_treat', 'replicated_effect', 'r_strong', 'replicated_strong',
+                'persists_after_pathology_adjustment'} <= set(row)
+        assert row['persists_after_pathology_adjustment'] is None            # only the age facet has the adjusted model
+        assert row['replicated_strong'] in (None, True, False)
+
+
+def test_adjusted_age_family_decides_persistence(results, monkeypatch):
+    reader = fr.FacetResults(results)
+    assert reader._adjusted_age_family('sex', DATASETS, True, 'human_postmortem', 'microglia') is None
+    frame = pd.DataFrame({'replicated': [True, False], 'r_direction': ['up', 'up']}, index=['AAA', 'BBB'])
+    monkeypatch.setattr(fr.FacetResults, 'replication_families',
+                        lambda self, facet, datasets, exclude, scope: {'microglia': {'frame': frame}})
+    adjusted = reader._adjusted_age_family('age', DATASETS, True, 'human_postmortem', 'microglia')
+    assert adjusted is frame
+    assert reader._adjusted_age_family('age', DATASETS, True, 'human_postmortem', 'astrocytes') is None
+
+
+def test_gene_classes_remember_the_gtf_path_briefly(monkeypatch, tmp_path):
+    import gene_classes
+    gtf = tmp_path / 'genes.gtf'
+    gtf.write_text('chrX\tsrc\tgene\t1\t100\t.\t+\t.\tgene_name "XISTX";\n')
+    monkeypatch.setenv('ANTHIVE_GENE_GTF', str(gtf))
+    monkeypatch.setattr(gene_classes, '_path_memo', None)
+    assert gene_classes.gtf_path() == gtf
+    calls = []
+    monkeypatch.setattr(gene_classes, '_gtf_path_uncached', lambda: calls.append(1) or gtf)
+    gene_classes.gtf_path()
+    gene_classes.gtf_path()
+    assert len(calls) == 0                                       # served from the memo
+    monkeypatch.setenv('ANTHIVE_GENE_GTF', str(tmp_path / 'other.gtf'))
+    gene_classes.gtf_path()
+    assert len(calls) == 1                                       # another setting is not answered from the memo
+
+
+def test_endpoint_gene_facet_effects_subsets_and_trims(serve):
+    full = serve.get('/genes/XIST/facet-effects').json()
+    assert set(full['facets']) == set(fr.FACET_ORDER) and 'by_scope' in full
+    one = serve.get('/genes/XIST/facet-effects', params={'facet': 'sex, ant_braak'}).json()
+    assert list(one['facets']) == ['sex', 'braak']
+    assert set(one['by_scope']['human_postmortem']) <= {'sex', 'braak'}
+    trimmed = serve.get('/genes/XIST/facet-effects', params={'facet': 'sex', 'include_units': 'false'}).json()
+    card = trimmed['facets']['sex']
+    assert card['units'] == [] and card['n_units'] == one['facets']['sex']['n_units'] > 0
+    assert card['replication'] == one['facets']['sex']['replication']
+    scoped = serve.get('/genes/XIST/facet-effects', params={'facet': 'sex', 'scope': 'human_postmortem'}).json()
+    assert 'by_scope' not in scoped and scoped['facets']['sex']['scope'] == 'human_postmortem'
+    assert serve.get('/genes/XIST/facet-effects', params={'facet': 'nonsense'}).status_code == 404
+    assert one['facets']['sex'] == full['facets']['sex']
+
+
+def test_endpoint_facet_tests_scope_and_reason_come_from_the_dataset(serve):
+    xeno = serve.get('/databases/M1/mus/facet-tests').json()
+    assert xeno['facet_scope'] == 'xenograft_human_in_mouse' and xeno['facet_exclude'] is False
+    cache = serve.registry.metadata_cache
+    cache['G3/ds3'] = {'facet_scope': 'xenograft_human_in_mouse'}
+    body = serve.get('/databases/G3/ds3/facet-tests').json()
+    assert body['status'] == 'not_tested' and body['facet_scope'] == 'xenograft_human_in_mouse'
+    assert body['reason'] == 'no raw counts layer served'
+    cache['G3/ds3'] = {'facet_scope': 'xenograft_human_in_mouse', 'facet_exclude': True,
+                       'facet_exclude_reason': 'spatial technology (novast): no replicate-level cell-type pseudobulk'}
+    body = serve.get('/databases/G3/ds3/facet-tests').json()
+    assert body['facet_exclude'] is True and body['reason'].startswith('spatial technology (novast)')
+    assert body['facet_exclude_reason'] == body['reason'] and body['facet_scope'] == 'xenograft_human_in_mouse'
+    cache['G3/ds3'] = {'facet_scope': None, 'organism': 'mouse', 'experimental_system': 'in_vivo'}
+    body = serve.get('/databases/G3/ds3/facet-tests').json()
+    assert body['facet_scope'] is None and body['facet_exclude'] is False
+    assert 'organism not human (mouse)' in body['reason'] and body['reason'].startswith('no facet scope')
+
+
+def _warmup_namespace(monkeypatch, calls: List[str], fail: bool = False) -> Dict[str, Any]:
+    tree = ast.parse(SERVE_PATH.read_text())
+    wanted = {'_warm_facet_results', '_start_facet_warmup'}
+    body = [node for node in tree.body if getattr(node, 'name', None) in wanted]
+
+    class _Reader:
+        def warm(self, datasets):
+            calls.append('warm')
+            if fail:
+                raise RuntimeError('boom')
+            return 3
+
+    namespace: Dict[str, Any] = {
+        'os': os, 'time': time, 'threading': threading, 'log': logging.getLogger('test-warmup'),
+        '_facet_results': lambda: _Reader(), '_facet_test_datasets': lambda: []}
+    exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
+    return namespace
+
+
+def test_startup_warmup_runs_in_a_thread_and_can_be_disabled(monkeypatch):
+    calls: List[str] = []
+    namespace = _warmup_namespace(monkeypatch, calls)
+    monkeypatch.setenv('ANTHIVE_FACET_WARMUP', '0')
+    namespace['_start_facet_warmup']()
+    assert calls == []
+    monkeypatch.delenv('ANTHIVE_FACET_WARMUP')
+    namespace['_start_facet_warmup']()
+    for thread in threading.enumerate():
+        if thread.name == 'facet-warmup':
+            thread.join(5)
+    assert calls == ['warm']
+
+
+def test_warmup_failure_is_logged_not_raised(monkeypatch, caplog):
+    calls: List[str] = []
+    namespace = _warmup_namespace(monkeypatch, calls, fail=True)
+    with caplog.at_level(logging.WARNING, logger='test-warmup'):
+        namespace['_warm_facet_results']()
+    assert calls == ['warm'] and 'warm-up failed' in caplog.text

@@ -379,11 +379,16 @@ def test_lineage_fields(serve):
                    ['ant_donor_uid']) == {
         'designation': 'reanalysis', 'reanalysis_of': ['V25/SAL'], 'donor_group': 'voet2025',
         'has_donor_uid': True, 'replicate_unit': 'none', 'replicate_column': None,
-        'replicate_basis': 'inferred', 'disease_basis': None, 'control_basis': None, 'facet_scope': None}
+        'replicate_basis': 'inferred', 'disease_basis': None, 'control_basis': None, 'facet_scope': None,
+        'facet_exclude': False, 'facet_exclude_reason': None}
     human = {'organism': 'human', 'experimental_system': 'post_mortem_tissue'}
     assert lineage({}, ['ant_sex'], human, [], db_id='G1/PRI')['facet_scope'] == 'human_postmortem'
     assert lineage({}, ['ant_host_sex'], human, [], db_id='G1/PRI')['facet_scope'] == 'xenograft_human_in_mouse'
     assert lineage({}, [], {'organism': 'mouse'}, [])['facet_scope'] is None          # pure mouse: no facet layer
+    excluded = lineage({'facet_exclude': True, 'facet_exclude_reason': 'metacell set'}, ['ant_sex'], human, [], db_id='G1/PRI')
+    assert (excluded['facet_exclude'], excluded['facet_exclude_reason']) == (True, 'metacell set')
+    spatial = lineage({}, ['ant_sex'], {**human, 'technology': ['Visium']}, [], db_id='G1/PRI')
+    assert spatial['facet_exclude'] is True and 'spatial technology' in spatial['facet_exclude_reason']
     assert lineage({'is_secondary': False}, [])['designation'] == 'primary'
     assert lineage({}, [])['designation'] == 'unresolved'
     assert namespace['_secondary_db_ids']() == {'G1/REA'}

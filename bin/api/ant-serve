@@ -55,6 +55,7 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -621,7 +622,7 @@ class ConnectionPool:
         }
 
 
-_METADATA_CACHE_VERSION = 7       # bump when the cache format OR the cached metadata payload (keys derived in _load_database_metadata) changes
+_METADATA_CACHE_VERSION = 8       # bump when the cache format OR the cached metadata payload (keys derived in _load_database_metadata) changes
 _METADATA_CACHE_TTL_S3  = 86_400  # 24 h for S3 databases (no local mtime)
 
 
@@ -652,9 +653,14 @@ def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str],
     ``facet_scope`` (``lib/facet_scopes.py``: human_postmortem,
     xenograft_human_in_mouse, in_vitro, or None) is derived from the resolved
     ``.h5ad.mus`` annotation and the published ``ant_*`` columns.
+    ``facet_exclude`` / ``facet_exclude_reason`` say whether the dataset is outside the
+    facet layer by data type (``.md`` ``facet_exclude: true``, spatial or proteomics
+    technology; ``facet_scopes.facet_exclusion_reason``) and why; they are served on
+    ``/databases``, ``/databases/{id}/info`` and ``/databases/{id}/facet-tests``.
     """
     import facet_scopes  # noqa: PLC0415
     import replicates  # noqa: PLC0415
+    exclusion_reason = facet_scopes.facet_exclusion_reason(annotation or {}, file_metadata)
     try:
         replicate = replicates.resolve_replicate(
             file_metadata, annotation or {}, list(obs_categorical or []) + list(obs_numerical or []))
@@ -678,6 +684,8 @@ def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str],
         'control_basis': file_metadata.get('control_basis'),
         'facet_scope': facet_scopes.scope_of(
             annotation or {}, {c for c in (obs_categorical or []) if str(c).startswith('ant_')}, db_id=db_id),
+        'facet_exclude': exclusion_reason is not None,
+        'facet_exclude_reason': exclusion_reason,
     }
 
 
@@ -1872,6 +1880,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_build_startup_indexes())
     # Paper library + literature index: a few seconds, also off the startup path.
     asyncio.create_task(asyncio.to_thread(_library_refresh_safe))
+    # Facet result tables and replication families: about a minute of CPU, so build them in a
+    # low-priority thread; the first gene page then hits a warm cache.
+    _start_facet_warmup()
     # Slave-mode banner — make the deployment role obvious in the logs
     # so it's the first thing visible when debugging "why won't this
     # write?". Banner ONLY fires when role=slave is opt-in; primaries
@@ -4046,6 +4057,38 @@ def _facet_results() -> FacetResults:
         return _facet_results_reader
 
 
+def _no_scope_reason(db_id: str, meta: Dict[str, Any]) -> Optional[str]:
+    """Why a served dataset has no facet scope (``facet_scopes.no_scope_reason``), None when it has one."""
+    if 'facet_scope' not in meta or meta.get('facet_scope') is not None:
+        return None
+    return facet_scopes_lib.no_scope_reason(
+        {'organism': meta.get('organism'), 'experimental_system': meta.get('experimental_system')}, db_id=db_id)
+
+
+def _warm_facet_results() -> None:
+    """Build the facet gene tables and replication families (``FacetResults.warm``) at low priority.
+
+    Never raises: a failure only means the first request builds the cache itself.
+    """
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
+    except (AttributeError, OSError):
+        pass
+    started = time.monotonic()
+    try:
+        built = _facet_results().warm(_facet_test_datasets())
+        log.info("facet results warm-up: %d replication families in %.1f s", built, time.monotonic() - started)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("facet results warm-up failed: %s", exc)
+
+
+def _start_facet_warmup() -> None:
+    """Start ``_warm_facet_results`` in a daemon thread unless ``ANTHIVE_FACET_WARMUP=0``."""
+    if os.environ.get('ANTHIVE_FACET_WARMUP', '1').strip() == '0':
+        return
+    threading.Thread(target=_warm_facet_results, name='facet-warmup', daemon=True).start()
+
+
 def _facet_results_location(db_id: str) -> Tuple[str, str]:
     """(collection folder, file stem) of a served dataset; 404 when unknown."""
     if registry is None or db_id not in registry.databases:
@@ -4194,11 +4237,19 @@ def get_facet_tests(db_id: str):
     composition rather than expression. ``provisional``: disease vocabulary is
     not settled; results will change. Missing or partly written files count
     as not available.
+
+    ``facet_scope`` is the dataset's scope (None when it is in no scope); ``facet_exclude`` /
+    ``facet_exclude_reason`` say whether the dataset is outside the facet layer by data type (spatial,
+    proteomics, metacell sets) and why. A dataset without results carries today's reason in ``reason``
+    (the exclusion, else ``no facet scope: ...``), not the line a past run logged.
     """
     group_folder, stem = _facet_results_location(db_id)
     meta = registry.metadata_cache.get(db_id) or {}
     return _with_help(_facet_results().summary(db_id, group_folder, stem, current_sha256=meta.get('sha256'),
-                                               disease_basis=meta.get('disease_basis')),
+                                               disease_basis=meta.get('disease_basis'),
+                                               facet_scope=meta.get('facet_scope'),
+                                               facet_exclude_reason=meta.get('facet_exclude_reason'),
+                                               scope_reason=_no_scope_reason(db_id, meta)),
                       *_FACET_HELP_TOPICS)
 
 
@@ -13367,6 +13418,11 @@ def get_facet_recurring_genes(
     ``cell_types`` lists the groups (with their raw ``labels``) and counted
     cohorts. Cell types are counted by group (``lib/celltype_groups.yaml``).
 
+    Rows also carry ``r_treat`` / ``replicated_effect`` (at least a tau-sized change), ``r_strong`` /
+    ``replicated_strong`` (at least 25 percent; null when the run has no strong p values) and, for facet
+    ``age``, ``persists_after_pathology_adjustment`` (the gene also replicates in the same direction in
+    ``age_adjusted``; null for other facets); ``n_replicated_strong`` counts the group.
+
     Exploratory. The disease facet only combines pathology-based definitions
     (``disease_basis`` nia_reagan, braak_cerad, adnc). Cohorts come from the
     DRAFT cohort selection table; cohorts flagged ``overlap_unknown`` never had
@@ -13430,6 +13486,8 @@ def get_gene_facet_effects(
     gene: str,
     exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
     scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC + " Without `scope`, `facets` holds each facet's default scope and `by_scope` every scope separately."),
+    facet: Optional[str] = Query(None, description="Comma-separated facets to answer (sex, disease, apoe4_carrier, apoe4_dose, braak, braak_threshold, age, age_adjusted, app_nlgf); default all. `strongest_facet` is chosen among those."),
+    include_units: bool = Query(True, description="false: every card keeps `n_units`, `replication`, `cell_types` and `notes` but `units` is empty (the all-facets payload is several MB; fetch the units of one facet with /facets/{facet}/effects)"),
 ):
     """Result cards of one gene for every tested facet (sex, disease,
     apoe4_carrier, braak, age, app_nlgf), keyed by facet; same shape as
@@ -13463,20 +13521,28 @@ def get_gene_facet_effects(
     answered scope and the scopes with results for this facet; genes are never matched
     across scopes (mouse and human symbols stay apart).
     """
+    wanted = [name.strip() for name in facet.split(',') if name.strip()] if facet else list(facet_results_lib.FACET_ORDER)
+    wanted = [_tested_facet(name) for name in wanted]
     datasets = _facet_test_datasets()
     reader = _facet_results()
     scope = _scope_param(scope)
-    result: Dict[str, Any] = {
-        'gene': gene, 'scope': scope,
-        'facets': {facet: reader.gene_effects(facet, gene, datasets, exclude_secondary=exclude_secondary, scope=scope)
-                   for facet in facet_results_lib.FACET_ORDER}}
-    result['strongest_facet'] = facet_results_lib.strongest_facet(result['facets'])
+
+    def card(facet_name: str, facet_scope: Optional[str]) -> Dict[str, Any]:
+        entry = reader.gene_effects(facet_name, gene, datasets, exclude_secondary=exclude_secondary, scope=facet_scope)
+        return entry if include_units else {**entry, 'units': []}
+
+    by_scope: Dict[str, Dict[str, Any]] = {}
     if scope is None:
-        by_scope: Dict[str, Dict[str, Any]] = {}
-        for facet in facet_results_lib.FACET_ORDER:
-            for facet_scope in reader.scopes_with_results(facet, datasets):
-                by_scope.setdefault(facet_scope, {})[facet] = reader.gene_effects(
-                    facet, gene, datasets, exclude_secondary=exclude_secondary, scope=facet_scope)
+        for facet_name in wanted:
+            for facet_scope in reader.scopes_with_results(facet_name, datasets):
+                by_scope.setdefault(facet_scope, {})[facet_name] = card(facet_name, facet_scope)
+    facets: Dict[str, Any] = {}
+    for facet_name in wanted:
+        default = facet_results_lib.FacetResults.default_scope(facet_name)
+        facets[facet_name] = by_scope.get(default, {}).get(facet_name) or card(facet_name, scope or default)
+    result: Dict[str, Any] = {'gene': gene, 'scope': scope, 'facets': facets,
+                              'strongest_facet': facet_results_lib.strongest_facet(facets)}
+    if scope is None:
         result['by_scope'] = by_scope
     return _with_help(result, *_FACET_HELP_TOPICS)
 
