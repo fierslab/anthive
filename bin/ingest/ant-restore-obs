@@ -1,0 +1,282 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "duckdb>=0.10.0",
+#   "h5py>=3.8.0",
+#   "numpy>=1.24.0",
+#   "pandas>=2.0.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-restore-obs: write the obs columns an .md lists but the .duckdb lacks, from the .h5ad.
+
+Why
+---
+A dataset converted with empty ``obscat_include`` / ``obsnum_include`` has a
+.duckdb without obs columns although the .h5ad has them (Gabitto2024 ExN,
+2026-10). Rebuilding with ``ant-convert`` loads the whole h5ad into RAM (over
+100 GB for the large ones) and rewrites the layer sidecars. This tool reads the
+h5ad **obs only** (h5py, X is never touched) and adds the missing columns to
+the existing .duckdb through ``AnnotationWriter`` (release / restore of
+ant-serve, one transaction per column, views rebuilt).
+
+The columns already exist in the h5ad, so they are written with
+``record_pending=False``: no ``__pending_cols`` row, nothing for
+``ant-merge-h5ad`` to write back and ``ant-convert`` is not blocked.
+
+What it does
+------------
+1. Reads ``obsnum_include`` and ``obscat_include`` from the sibling .md.
+2. Skips columns that are absent from the h5ad obs, already stored in the
+   duckdb, reserved names, case-insensitive duplicates, unreadable (nested)
+   columns and categoricals with more than 10,000 distinct values (cell-id
+   like), each reported.
+3. Writes numerical columns as DOUBLE and categorical ones as VARCHAR (bool as
+   'True' / 'False', NaN as NULL), the same conventions as ``ant-convert``.
+4. Verifies the non-null count of every written column against the h5ad.
+
+Run ``bin/ops/ant-rebuild-obs-views --only <db_id>`` afterwards when the .md
+``api:`` block derives from several of the new columns (views are rebuilt per
+column while the columns arrive).
+
+Usage::
+
+  ant-restore-obs plan  FILE.h5ad            # what would be written, no change
+  ant-restore-obs apply FILE.h5ad [--db-id G/ID] [--api-url URL | --no-coordinate]
+
+Inputs: .h5ad (obs only), sibling .md and .duckdb. Output: new obs columns in the .duckdb.
+"""
+from __future__ import annotations
+
+import argparse
+import secrets
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import duckdb
+import h5py
+import numpy as np
+import pandas as pd
+
+script_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(script_dir.parent.parent / 'lib'))
+
+from anthive_db import AnnotationWriter, AnnotationWriterError  # type: ignore  # noqa: E402
+from metadata import parse_md_file  # type: ignore  # noqa: E402
+
+MAX_CATEGORIES = 10000   # AnnotationWriter.add_categorical refuses more
+RESERVED_COLUMNS = {'cell_id', 'cell_name', 'gene_id', 'gene_name'}
+
+
+def _decode(values: np.ndarray) -> np.ndarray:
+    """Bytes to str (h5py returns bytes for fixed-width strings)."""
+    if values.dtype.kind in 'SO':
+        return np.array([v.decode() if isinstance(v, bytes) else v for v in values], dtype=object)
+    return values
+
+
+def read_obs_index(obs_group: h5py.Group) -> List[str]:
+    """Cell names of an AnnData obs group."""
+    key = obs_group.attrs.get('_index', '_index')
+    if isinstance(key, bytes):
+        key = key.decode()
+    return [str(name) for name in _decode(obs_group[key][:])]
+
+
+def read_obs_column(obs_group: h5py.Group, column: str) -> Optional[pd.Series]:
+    """One obs column as a pandas Series (no index), or None when its encoding is not a plain column.
+
+    Handles categorical, plain numeric / bool / string arrays and the nullable
+    integer / boolean groups.
+    """
+    node = obs_group[column]
+    if isinstance(node, h5py.Dataset):
+        return pd.Series(_decode(node[:]))
+    encoding = node.attrs.get('encoding-type', '')
+    if isinstance(encoding, bytes):
+        encoding = encoding.decode()
+    if encoding == 'categorical':
+        categories = _decode(node['categories'][:])
+        codes = node['codes'][:].astype('int64')
+        labels = np.empty(len(codes), dtype=object)
+        valid = codes >= 0
+        labels[~valid] = None
+        labels[valid] = categories[codes[valid]]
+        return pd.Series(labels)
+    if encoding in ('nullable-integer', 'nullable-boolean'):
+        values = node['values'][:]
+        mask = node['mask'][:].astype(bool)
+        series = pd.Series(values.astype('float64') if encoding == 'nullable-integer' else values.astype(object))
+        series[mask] = np.nan if encoding == 'nullable-integer' else None
+        return series
+    return None
+
+
+def plan_columns(
+    wanted_numeric: List[str],
+    wanted_categorical: List[str],
+    obs_columns: List[str],
+    stored_columns: set,
+) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+    """Split the include lists into (column, kind) to write and (column, reason) skipped."""
+    to_write: List[Tuple[str, str]] = []
+    skipped: List[Tuple[str, str]] = []
+    seen_lower = {name.lower() for name in stored_columns}
+    for kind, names in (('num', wanted_numeric), ('cat', wanted_categorical)):
+        for name in names:
+            if name not in obs_columns:
+                skipped.append((name, 'not in h5ad obs'))
+            elif name in stored_columns:
+                skipped.append((name, 'already stored'))
+            elif name.lower() in RESERVED_COLUMNS:
+                skipped.append((name, 'reserved name'))
+            elif name.lower() in seen_lower:
+                skipped.append((name, 'case-insensitive duplicate'))
+            else:
+                to_write.append((name, kind))
+                seen_lower.add(name.lower())
+    return to_write, skipped
+
+
+def stored_obs_columns(duckdb_path: Path) -> Tuple[set, int]:
+    """Columns of __obsnum / __obscat (read-only) and the number of cells."""
+    connection = duckdb.connect(str(duckdb_path), read_only=True)
+    try:
+        names = {row[0] for row in connection.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name IN ('__obsnum', '__obscat') AND column_name <> 'cell_id'").fetchall()}
+        n_cells = connection.execute("SELECT count(*) FROM __cells").fetchone()[0]
+    finally:
+        connection.close()
+    return names, n_cells
+
+
+def to_category_strings(series: pd.Series) -> pd.Series:
+    """Categorical text as ant-convert stores it: strings, NaN and 'nan' as NULL."""
+    text = series.astype(object)
+    text = text.where(text.notna(), None)
+    text = text.map(lambda value: None if value is None else str(value))
+    return text.replace('nan', None)
+
+
+def resolve_db_id(md_path: Path) -> Optional[str]:
+    """group_id/file_id from the sibling index.md and the dataset .md."""
+    index_path = md_path.parent / 'index.md'
+    if not md_path.exists() or not index_path.exists():
+        return None
+    data_meta, _ = parse_md_file(md_path)
+    index_meta, _ = parse_md_file(index_path)
+    file_id = str(data_meta.get('id') or '').strip()
+    group_id = str(index_meta.get('group_id') or '').strip()
+    return f'{group_id}/{file_id}' if file_id and group_id else None
+
+
+def run(args: argparse.Namespace) -> int:
+    h5ad_path = Path(args.file).resolve()
+    duckdb_path = h5ad_path.with_suffix('.duckdb')
+    md_path = h5ad_path.with_suffix('.md')
+    for path in (h5ad_path, duckdb_path, md_path):
+        if not path.exists():
+            print(f'ERROR: not found: {path}', file=sys.stderr)
+            return 3
+    metadata, _ = parse_md_file(md_path)
+    stored, n_cells = stored_obs_columns(duckdb_path)
+    started = time.time()
+    with h5py.File(h5ad_path, 'r') as handle:
+        obs_group = handle['obs']
+        obs_columns = [name.decode() if isinstance(name, bytes) else str(name)
+                       for name in obs_group.attrs['column-order']]
+        to_write, skipped = plan_columns(list(metadata.get('obsnum_include') or []),
+                                         list(metadata.get('obscat_include') or []),
+                                         obs_columns, stored)
+        print(f'{h5ad_path.name}: {len(obs_columns)} h5ad obs columns, {len(stored)} stored in duckdb, '
+              f'{len(to_write)} to write, {len(skipped)} skipped')
+        for name, reason in skipped:
+            print(f'  skip {name!r}: {reason}')
+        if args.command == 'plan' or not to_write:
+            for name, kind in to_write:
+                print(f'  would write {name!r} ({kind})')
+            return 0
+
+        cell_names = read_obs_index(obs_group)
+        if len(cell_names) != n_cells:
+            print(f'ERROR: h5ad has {len(cell_names):,} cells, duckdb {n_cells:,}', file=sys.stderr)
+            return 1
+        run_id = f'restore-obs-{secrets.token_hex(3)}'
+        db_id = args.db_id or resolve_db_id(md_path)
+        api_url = None if args.no_coordinate else (args.api_url or 'http://localhost:8080/api')
+        if api_url and not db_id:
+            print('  could not resolve db_id; ant-serve coordination disabled', file=sys.stderr)
+            api_url = None
+        expected_non_null: Dict[str, int] = {}
+        written: List[Tuple[str, str]] = []
+        # One writer (one transaction) per column: DuckDB refuses to commit a
+        # single transaction that adds many columns to the same table and
+        # updates them ("another transaction has altered this table").
+        # Columns committed before a failure stay; a rerun skips them.
+        try:
+            for name, kind in to_write:
+                raw = read_obs_column(obs_group, name)
+                if raw is None or len(raw) != n_cells:
+                    print(f'  skip {name!r}: unsupported obs encoding')
+                    continue
+                raw.index = cell_names
+                if kind == 'num':
+                    values = pd.to_numeric(raw.replace({None: np.nan}), errors='coerce')
+                else:
+                    values = to_category_strings(raw)
+                    if values.nunique() > MAX_CATEGORIES:
+                        print(f'  skip {name!r}: {values.nunique():,} distinct values (one per cell, not a category)')
+                        continue
+                with AnnotationWriter(duckdb_path, annotator='ant-restore-obs', run_id=run_id,
+                                      catalog='h5ad_obs_restore', db_id=db_id, ant_serve_url=api_url,
+                                      verbatim_names=True) as writer:
+                    if kind == 'num':
+                        writer.add_numerical(name, values, record_pending=False)
+                    else:
+                        writer.add_categorical(name, values, record_pending=False)
+                    writer.commit()
+                expected_non_null[name] = int(values.notna().sum())
+                written.append((name, kind))
+        except AnnotationWriterError as exc:
+            print(f'ERROR: {exc}', file=sys.stderr)
+            return 1
+
+    # verify non-null counts after commit
+    connection = duckdb.connect(str(duckdb_path), read_only=True)
+    try:
+        mismatches = []
+        for name, kind in written:
+            table = '__obsnum' if kind == 'num' else '__obscat'
+            quoted = '"' + name.replace('"', '""') + '"'
+            found = connection.execute(f'SELECT count({quoted}) FROM {table}').fetchone()[0]
+            if found != expected_non_null[name]:
+                mismatches.append((name, expected_non_null[name], found))
+        pending = connection.execute(
+            "SELECT count(*) FROM __pending_cols WHERE annotator = 'ant-restore-obs'").fetchone()[0]
+    finally:
+        connection.close()
+    print(f'  wrote {len(written)} columns in {time.time() - started:.0f}s; '
+          f'{len(mismatches)} count mismatches; pending rows from this tool: {pending}')
+    for name, expected, found in mismatches:
+        print(f'  MISMATCH {name!r}: h5ad {expected:,} non-null, duckdb {found:,}', file=sys.stderr)
+    return 1 if mismatches else 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = parser.add_subparsers(dest='command', required=True)
+    for command in ('plan', 'apply'):
+        p = sub.add_parser(command)
+        p.add_argument('file', help='path to the .h5ad (sibling .md and .duckdb are used)')
+        p.add_argument('--db-id', help='group/id for the ant-serve release (default: from the .md files)')
+        p.add_argument('--api-url', help='ant-serve API base, e.g. http://localhost:8080/api')
+        p.add_argument('--no-coordinate', action='store_true', help='do not talk to ant-serve')
+    return run(parser.parse_args())
+
+
+if __name__ == '__main__':
+    sys.exit(main())

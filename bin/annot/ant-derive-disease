@@ -89,7 +89,7 @@ def _derivations() -> Dict[str, Tuple[Dict[str, Any], str]]:
     """db_id -> (disease_derivation spec, source note)."""
     table: Dict[str, Tuple[Dict[str, Any], str]] = {}
     seaad = 'SEA-AD donor table: Braak stage and CERAD score'
-    for suffix in ('MAs', 'MEn', 'MIn', 'MMG', 'MOP', 'MOl', 'MVL', 'PAs', 'PEn', 'PIn', 'PMG', 'POP', 'POl', 'PVL'):
+    for suffix in ('MAs', 'MEn', 'MEx', 'MIn', 'MMG', 'MOP', 'MOl', 'MVL', 'PAs', 'PEn', 'PEx', 'PIn', 'PMG', 'POP', 'POl', 'PVL'):
         table[f'G24/{suffix}'] = (_spec('Braak', SEAAD_BRAAK, 'CERAD score', SEAAD_CERAD), seaad)
     radc = ('ROSMAP clinical table (RADC): braaksc and ceradsc (1 definite, 2 probable, 3 possible = sparse, '
             '4 no AD); niareagansc is not part of this distribution')

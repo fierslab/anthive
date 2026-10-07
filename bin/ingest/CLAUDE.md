@@ -7,6 +7,7 @@ The conversion + maintenance tools that turn `.h5ad` files into the
 | --- | --- |
 | `ant-convert` | Full rebuild of a `.duckdb` from a `.h5ad`. Refuses if `__pending_cols` is non-empty (`--force-discard-pending` to override). |
 | `ant-merge-h5ad` | Cold-path merge of pending duckdb obs columns back into the h5ad without rewriting X. Self-heals half-completed merges. |
+| `ant-restore-obs` | Writes the obs columns an `.md` lists (`obscat_include` / `obsnum_include`) but the `.duckdb` lacks, reading the `.h5ad` **obs only** (h5py, no X). For datasets converted with empty include lists, where a full `ant-convert` would need the whole h5ad in RAM (over 100 GB for Gabitto2024 ExN). Goes through `AnnotationWriter(verbatim_names=True)` with `record_pending=False`: author column names with spaces are accepted and nothing lands in `__pending_cols` (the columns are already in the h5ad). `plan` / `apply`; afterwards run `ant-rebuild-obs-views --only <db_id>`. |
 | `ant-build-all` | Walk the whole h5adstore, rebuild stale `.duckdb` (h5ad newer than duckdb), refresh `.md` (sha256/n_obs/layer_stats). Parallel-friendly. |
 | `ant-h5ad-check` | Validate one `.h5ad` against the ingestion contract — log-norm in `.X`, raw counts in `layers['counts']`, embedding present, etc. |
 | `ant-drop-indexes` | Rewrite existing `.duckdb` files without the redundant ART indexes older ant-convert runs created (flock + sentinel + ant-serve release/restore, verified content, atomic swap). `--dry-run` first. |
