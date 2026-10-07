@@ -159,7 +159,7 @@ def test_docs_placeholder_is_filled_in_html_and_markdown():
 def test_topic_html_renders_children_as_h3_with_the_anchor_id():
     html = help_content.topic_html('facet-effects')
     assert '<h3 class="subsection-head" id="facet-replicate-unit">Replicate unit and analysis level</h3>' in html
-    assert html.index('id="facet-tested"') < html.index('id="scopes"')
+    assert html.index('id="facet-tested"') < html.index('id="facet-scopes"')
     assert 'id="facets-columns">Facets (<code>ant_*</code> columns)</h3>' in help_content.topic_html('pages')
 
 

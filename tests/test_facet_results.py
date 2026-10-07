@@ -623,7 +623,7 @@ _SERVE_WANTED = {
     'get_facet_tests', 'get_facet_test_genes', 'get_facet_test_modules', 'get_facet_test_volcano',
     'get_facet_tests_across_datasets', '_tested_facet', '_facet_test_datasets',
     'get_facet_recurring_genes', 'get_facet_gene_effects', 'get_gene_facet_effects', 'get_facet_cohorts',
-    '_scope_param', '_facet_scope_of', '_SCOPE_QUERY_DESC',
+    '_scope_param', '_facet_scope_of', '_SCOPE_QUERY_DESC', '_with_help', '_FACET_HELP_TOPICS',
 }
 
 
