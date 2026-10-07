@@ -70,7 +70,12 @@ def _h5_index_dataset_name(h5_obs) -> str:
 
 def _h5_cell_names(h5_obs) -> list:
     name = _h5_index_dataset_name(h5_obs)
-    raw = h5_obs[name][:]
+    node = h5_obs[name]
+    if isinstance(node, h5py.Group):
+        # anndata 0.12 'nullable-string-array' index (mask + values)
+        raw = node['values'][:]
+    else:
+        raw = node[:]
     return [v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
             for v in raw]
 
