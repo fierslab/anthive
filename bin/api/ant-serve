@@ -13523,8 +13523,8 @@ def get_gene_facet_effects(
     """
     wanted = [name.strip() for name in facet.split(',') if name.strip()] if facet else list(facet_results_lib.FACET_ORDER)
     wanted = [_tested_facet(name) for name in wanted]
-    datasets = _facet_test_datasets()
     reader = _facet_results()
+    datasets = reader.prepare(_facet_test_datasets())     # resolved once: the files are stat-ed once per request
     scope = _scope_param(scope)
 
     def card(facet_name: str, facet_scope: Optional[str]) -> Dict[str, Any]:
