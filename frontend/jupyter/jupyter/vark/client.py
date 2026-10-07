@@ -4,9 +4,11 @@ Targets the anthive REST API contract. See
 `https://codeberg.org/mfiers/pyvark` for sources and
 `https://codeberg.org/mfiers/vark` for the Go CLI that ships the same surface.
 
-API surface verified against **REST API 2.43.0** (facet tests, donor groups,
-exclude_secondary, facet engine v2, replicate fields). Older servers still work for every endpoint they expose; new params degrade
-to "server ignores it" rather than client-side errors.
+API surface verified against **REST API 2.44.0** (facet tests with
+facet scopes, replication with an effect gate, donor groups,
+exclude_secondary, replicate fields). Older servers still work for every
+endpoint they expose; new params degrade to "server ignores it" rather
+than client-side errors.
 
 Works in standard Python 3.9+, in Pyodide / JupyterLite, and inside
 Streamlit (auto-detects environment).
@@ -246,7 +248,7 @@ class AnthiveClient:
     """
 
     #: Anthive REST API version this client release was last verified against.
-    API_TARGET = "2.43.0"
+    API_TARGET = "2.44.0"
 
     #: Server-side plot geoms the client knows about. Validation prevents a
     #: round-trip on typos. Update with every new server geom.
@@ -463,6 +465,20 @@ class AnthiveClient:
         serve them (or datasets without a value) leave them absent or
         ``None``.
 
+        Facet fields (REST API 2.44.0+): ``facet_scope`` (the scope the
+        dataset's facet results belong to, see :attr:`FACET_SCOPES`;
+        ``None`` when the dataset has no facet layer: pure mouse, bulk
+        and other datasets outside the three scopes) and
+        ``control_basis`` (for datasets with ``ant_app_nlgf``: what the
+        control animal is, ``'wt_host'``, ``'humanised_app_host'`` or
+        ``'other'``). Datasets the curators set aside
+        (``facet_exclude: true`` with a ``facet_exclude_reason`` in the
+        dataset's ``.md``, for example metacell sets) and spatial or
+        proteomics datasets have no facet results and no cohort rows.
+        The server does not return the ``facet_exclude`` flag in
+        ``/databases``; :meth:`get_facet_tests` answers such a dataset
+        with ``status: 'not_tested'`` and the reason.
+
         Args:
             refresh: Force a fresh catalog scan on the server.
             format: ``'list'`` (default) or ``'dataframe'`` (needs pandas).
@@ -527,7 +543,13 @@ class AnthiveClient:
         ``reanalysis_of``, ``donor_group`` and ``has_donor_uid``
         (described under :meth:`get_databases`) and the replicate
         fields ``replicate_unit``, ``replicate_column``,
-        ``replicate_basis`` and ``disease_basis``.
+        ``replicate_basis`` and ``disease_basis``, plus (REST API
+        2.44.0+) ``facet_scope`` and ``control_basis`` (described under
+        :meth:`get_databases`). ``replicate_unit`` says what the n of a
+        test is (donors, animals or samples), ``replicate_basis``
+        whether that was declared by the curators or inferred,
+        ``disease_basis`` how the disease label was defined (so that
+        "control" can be compared between studies).
         """
         return _self._get(f'/databases/{db_id}/info')
 
@@ -1313,6 +1335,7 @@ class AnthiveClient:
                                limit: int = 500,
                                format: str = 'json',
                                exclude_secondary: bool = True,
+                               scope: Optional[str] = None,
                                ) -> Union[Dict, Any]:
         """``GET /module-variability``. Fleet-wide module variability
         table (dataset x source x catalog x module x tag x statistic).
@@ -1346,10 +1369,18 @@ class AnthiveClient:
                 (reanalyses) are left out unless ``db_id`` names one.
                 JSON then carries ``n_excluded_secondary``, CSV / TSV the
                 ``X-Excluded-Secondary`` header. Sent only when ``False``.
+            scope: Facet scope, one of :attr:`FACET_SCOPES`
+                (``'human_postmortem'``, ``'xenograft_human_in_mouse'``,
+                ``'in_vitro'``). Keeps only the rows of the
+                datasets in that scope (REST API 2.44.0+). Default: every
+                scope. Unknown names give HTTP 400.
+                Sent only when given.
         """
         params: Dict[str, Any] = {'sort': sort, 'limit': limit}
         if not exclude_secondary:
             params['exclude_secondary'] = 'false'
+        if scope is not None:
+            params['scope'] = scope
         for key, value in (('dataset', db_id), ('source', source),
                            ('catalog', catalog), ('module', module),
                            ('tag', tag), ('tag_column', tag_column),
@@ -1519,6 +1550,9 @@ class AnthiveClient:
         ``facets_visible`` list. The web UI hides those, the API still
         lists them.
 
+        Rows also carry ``scopes`` (REST API 2.44.0+): the facet scopes
+        in which the facet is published.
+
         Rows are pre-sorted by ``n_datasets`` descending, then by facet
         name.
 
@@ -1551,7 +1585,8 @@ class AnthiveClient:
                   top_modules: int = 200,
                   per_facet_value_limit: Optional[int] = None,
                   mapping: bool = True,
-                  exclude_secondary: bool = True) -> Dict:
+                  exclude_secondary: bool = True,
+                  scope: Optional[str] = None) -> Dict:
         """``GET /facets/{facet_name}``. Detail page for one facet.
 
         Returns a dict describing this facet across every dataset that
@@ -1589,8 +1624,33 @@ class AnthiveClient:
           ``value_distribution`` and ``modules``;
           ``n_excluded_secondary`` counts them.
 
+        REST API 2.44.0+ answers inside one facet scope (``scope``): the
+        datasets, cell counts, value distribution, per-cell module
+        statistics and non-carriers are those of that scope, and the
+        response carries ``scope`` and ``scopes`` (a list of
+        ``{scope, n_datasets, n_cells}`` for every scope that has the
+        facet). Mouse and human values are different things; do not
+        pool them. New facets: ``ant_age``; ``ant_app_nlgf``
+        (``nlgf`` or ``control``, xenograft hosts); ``ant_host_genotype``
+        (genotype of the host mouse); ``ant_tissue`` (21 umbrella
+        terms, human post-mortem only; the specific anatomical term is
+        the plain obs column ``tissue_uberon`` with
+        ``tissue_uberon_id``); and one author-cluster facet per cell
+        type (``ant_mg_author_cluster``, ``ant_astro_author_cluster``,
+        ``ant_oligo_author_cluster``, ``ant_opc_author_cluster``,
+        ``ant_exn_author_cluster``, ``ant_inn_author_cluster``,
+        ``ant_endo_author_cluster``). Author clusters are defined by
+        each study, so they are dataset-scoped: they say nothing across
+        datasets and have no gene tests. ``ant_cell_type`` is null for
+        cells the authors left unassigned or called doublets. The
+        facets ``region``, ``author_cell_type``, ``author_cluster``,
+        ``lesion``, ``ms_type``, ``cause_of_death``, ``ethnicity``,
+        ``source_institution``, ``technology`` and ``group`` are
+        deprecated (:attr:`DEPRECATED_FACETS` lists the replacements).
+
         Raises ``HTTPError`` 400 when ``facet_name`` does not start with
-        ``ant_``, or 404 when no dataset carries it.
+        ``ant_`` or ``scope`` is unknown, or 404 when no dataset carries
+        it.
 
         Args:
             facet_name: Obs column name, must start with ``ant_``.
@@ -1603,6 +1663,14 @@ class AnthiveClient:
                 faster). Sent only when ``False``.
             exclude_secondary: ``False`` counts secondary datasets in
                 the pooled numbers. Sent only when ``False``.
+            scope: Facet scope, one of :attr:`FACET_SCOPES`
+                (``'human_postmortem'``, ``'xenograft_human_in_mouse'``,
+                ``'in_vitro'``). Facets are tested, counted and
+                replicated inside one scope, so human and mouse results
+                never mix. Default: ``human_postmortem``
+                (``xenograft_human_in_mouse`` for ``app_nlgf``);
+                ``'all'`` pools every scope (not recommended).
+                Unknown names give HTTP 400. Sent only when given.
 
         Example::
 
@@ -1618,6 +1686,8 @@ class AnthiveClient:
             params['mapping'] = 'false'
         if not exclude_secondary:
             params['exclude_secondary'] = 'false'
+        if scope is not None:
+            params['scope'] = scope
         return _self._get(f'/facets/{facet_name}', params=params)
 
     def get_database_facets(self, db_id: str, counts: bool = True) -> Dict:
@@ -1709,37 +1779,86 @@ class AnthiveClient:
     # plus label permutations). See FACET_TESTS_CAVEATS below and
     # doc/DESIGN_facet_testing.md in anthive4.
 
-    #: Facets with donor-level test results. The facet endpoints take the
-    #: short name or the ``ant_`` column (``'sex'`` or ``'ant_sex'``).
-    TESTED_FACETS = ('sex', 'disease', 'apoe4_carrier', 'braak')
+    #: Facets with donor-level test results (the server's order). The facet
+    #: endpoints take the short name or the ``ant_`` column (``'sex'`` or
+    #: ``'ant_sex'``). ``apoe4_dose`` (e4 allele dose), ``braak_threshold``
+    #: (early versus late Braak) and ``age_adjusted`` (age with the
+    #: pathology term in the model) are variants of ``apoe4_carrier``,
+    #: ``braak`` and ``age``. ``app_nlgf`` (App-NL-G-F knock-in versus
+    #: control) exists in the xenograft scope only.
+    TESTED_FACETS = ('sex', 'disease', 'apoe4_carrier', 'apoe4_dose',
+                     'braak', 'braak_threshold', 'age', 'age_adjusted',
+                     'app_nlgf')
+
+    #: Facet scopes. Facets are tested, counted and replicated inside one
+    #: scope; human and mouse (xenograft host) results never mix. In
+    #: ``in_vitro`` cultures facets are listed but not tested. A scope
+    #: name the server does not know (including the retired
+    #: ``mouse_in_vivo``) gives HTTP 400.
+    FACET_SCOPES = ('human_postmortem', 'xenograft_human_in_mouse',
+                    'in_vitro')
+
+    #: Scope a single-answer endpoint uses when ``scope`` is not given
+    #: (``app_nlgf`` is not allowed there and answers in
+    #: ``xenograft_human_in_mouse``).
+    DEFAULT_FACET_SCOPE = 'human_postmortem'
 
     #: Deprecated aliases the server still accepts for one release and
     #: answers with the new name.
     DEPRECATED_FACET_ALIASES = {'apoe_carrier': 'apoe4_carrier',
                                 'ant_apoe_carrier': 'ant_apoe4_carrier'}
 
+    #: Facets that are deprecated registry entries (not accepted as a new
+    #: name for anything), mapped to the facets that take over. An empty
+    #: list means no replacement.
+    DEPRECATED_FACETS = {
+        'apoe_carrier': ['apoe4_carrier'],
+        'region': ['tissue'],
+        'author_cluster': ['mg_author_cluster', 'astro_author_cluster',
+                           'oligo_author_cluster', 'opc_author_cluster',
+                           'exn_author_cluster', 'inn_author_cluster',
+                           'endo_author_cluster'],
+        'author_cell_type': [], 'lesion': [], 'ms_type': [],
+        'cause_of_death': [], 'ethnicity': [], 'source_institution': [],
+        'technology': [], 'group': [],
+    }
+
     #: How to read facet test results. Repeated in each method's docstring
     #: so ``help()`` on one method is enough.
     FACET_TESTS_CAVEATS = (
         "Facet test results are exploratory. The unit of analysis is the "
-        "donor: raw counts are summed per (donor, cell type) and each "
-        "(dataset, cell type) unit is tested on its own; nothing is pooled "
-        "and there is no meta-analysis. Datasets share donors, so rows are "
-        "not independent replications. The disease contrast (AD vs control) "
-        "is provisional: the vocabulary is not settled and 'control' means "
-        "different things between studies. descriptive_only units have a "
-        "level with fewer than 5 donors (Braak: fewer than 10); p, q, t and "
-        "CI are null and only the effect estimate is reported. counted "
-        "means the unit counts towards replication; not_counted_reason says "
-        "why not. replicated = partial-conjunction r_value < 0.05 (the "
-        "effect is present in at least 2 independent cohorts, same "
-        "direction; Benjamini and Heller, Simes combination of the "
-        "limma treat p values of one anchor unit per cohort). k of m is "
-        "descriptive: cohorts individually at q_treat < 0.05 among those "
-        "tested. The cohort table is a DRAFT, a cohort counts once, cell "
-        "types are counted by group, secondary datasets and "
-        "descriptive-only units never count. Units with analysis_level "
-        "'cell' are cell-level and descriptive only."
+        "replicate (a donor for human data, an animal for mouse hosts; "
+        "see replicate_unit): raw counts are summed per (replicate, cell "
+        "type) and each (dataset, cell type) unit is tested on its own; "
+        "nothing is pooled and there is no meta-analysis. Datasets share "
+        "donors, so rows are not independent replications. Facets are "
+        "tested, counted and replicated per scope (human_postmortem, "
+        "xenograft_human_in_mouse): human and mouse never mix. The "
+        "disease contrast (AD vs control) is provisional: 'control' means "
+        "different things between studies (see disease_basis). Small "
+        "cohorts (a level with fewer than 5 replicates, numeric facets "
+        "fewer than 10) are tested and counted but flagged small_sample; "
+        "they have little power and unstable estimates. Units with "
+        "analysis_level 'below_floor' (fewer than 4 replicates) or 'cell' "
+        "are descriptive only: no p value, never counted. counted means "
+        "the unit counts towards replication; not_counted_reason says why "
+        "not. replicated = partial-conjunction r_value < 0.05 (the effect "
+        "is present in at least 2 independent cohorts, same direction; "
+        "Benjamini and Heller, Simes combination of the one-sided limma "
+        "p values of one anchor unit per cohort); it says the direction "
+        "reproduces, not that the effect is large. effect_gate_passed "
+        "adds the size: at least 2 cohorts each with a log2 fold change "
+        "of at least tau (10 percent change) in the replicated "
+        "direction. replicated_effect is the stricter second tier "
+        "(r_treat < 0.05, the partial conjunction on limma treat p "
+        "values that test against that minimum effect). k of m is "
+        "descriptive: cohorts individually at q_value < 0.05 in the "
+        "replicated direction among those tested. The cohort table is a "
+        "DRAFT, a cohort counts once, cell types are counted by group, "
+        "secondary datasets never count. lambda_gc above 1.3 (inflated) "
+        "means the test statistics are inflated, so p values of that unit "
+        "are too small; treat it as unmodelled structure, not signal. "
+        "Absence of a hit is not evidence of no effect."
     )
 
     def _facet_rows(self, path: str, params: Dict[str, Any],
@@ -1765,6 +1884,8 @@ class AnthiveClient:
         summary of one dataset: one unit per (facet, cell type stratum).
 
         Exploratory, donor-level; the disease contrast is provisional.
+        Responses carry ``help_topics`` (REST API 2.44.0+): topic ids for
+        :meth:`get_help_topic` that explain how to read the numbers.
         Genes are tested with limma-voom on donor pseudobulks
         (``expression ~ facet + sex + age + pmi + batch`` where
         available), module scores with OLS on donor-level scores plus
@@ -1779,6 +1900,18 @@ class AnthiveClient:
         (tool, timestamp, seed, package versions, git commits, counts
         layer, batch column, permutations).
 
+        REST API 2.44.0+: the summary and every unit, gene row and
+        module row carry ``facet_scope`` (the dataset's scope, see
+        :attr:`FACET_SCOPES`). ``facet`` also takes ``age`` (log2 fold
+        change per decade of age; the effect includes disease
+        prevalence), ``age_adjusted`` (the same with the pathology term
+        in the model; ``age`` gene rows then carry
+        ``persists_after_pathology_adjustment``, True when the age
+        effect is still there after adjustment), ``apoe4_dose``,
+        ``braak_threshold`` and ``app_nlgf`` (``nlgf`` vs ``control``;
+        replicate = the animal, stratified by timepoint and graft line,
+        refused when confounded). Age facets use donors from 60 years.
+
         Each unit: ``facet``, ``cell_type``, ``celltype_source``,
         ``tested`` (``reason`` when not), ``contrast``, ``level_ref`` /
         ``level_test``, ``level_counts`` (donors per level),
@@ -1790,7 +1923,24 @@ class AnthiveClient:
         ``n_q05_param``, ``n_q05_perm``) and ``model``. Newer servers
         add ``analysis_level`` (``'replicate'`` or ``'cell'``),
         ``analysis_level_label`` (``"cell-level, descriptive only"`` for
-        cell level), ``analysis_level_reason`` and ``tau_log2``. The
+        cell level), ``analysis_level_reason`` and ``tau_log2``.
+        ``analysis_level`` is ``'replicate'`` (tested on replicate
+        pseudobulks, the proper analysis), ``'cell'`` (descriptive; cells
+        are not replicates) or, from 2.44.0, ``'below_floor'`` (fewer
+        than 4 replicates: effect sizes only, no p values). From 2.44.0
+        units also carry ``n_small`` and ``flags.small_sample`` (a level
+        with fewer than 5 replicates, numeric facets fewer than 10;
+        small cohorts are tested and counted but have little power),
+        and model quality fields: ``lambda_gc`` (genomic inflation
+        factor of the test statistics, about 1 when well calibrated),
+        ``inflated`` (``lambda_gc`` above 1.3: the p values of the unit
+        are too small and should not be trusted), ``df_total_median``
+        (median residual degrees of freedom of the genes),
+        ``covariates_dropped`` (covariates left out because there were
+        too few residual degrees of freedom), ``n_sex_checked`` and
+        ``n_sex_discordant`` (replicates whose recorded sex disagrees
+        with sex-gene expression), ``age_top_coded`` (ages capped in the
+        source), ``control_basis``, ``design_subset`` and ``notes``. The
         summary and units also carry ``replicate_unit``,
         ``replicate_column``, ``replicate_basis``, ``disease_basis`` and
         ``pool``.
@@ -1806,9 +1956,9 @@ class AnthiveClient:
         ``seed``, ``run_date``, ``versions``. Anything a manifest does
         not record reads ``'not recorded'``.
 
-        Reading the flags: ``descriptive_only`` means a level has fewer
-        than 5 donors (Braak: fewer than 10), so p, q, t and CI are null
-        and only the effect is reported. ``composition_flag`` means the
+        Reading the flags: ``descriptive_only`` marks units without
+        usable p values (cell-level or below the replicate floor), so
+        p, q, t and CI are null and only the effect is reported. ``composition_flag`` means the
         share of the donor's cells in this stratum differs with the
         facet (p < 0.05, uncorrected): an effect may reflect composition
         rather than expression. ``provisional`` marks the disease
@@ -1848,7 +1998,8 @@ class AnthiveClient:
 
         Args:
             db_id: Dataset id.
-            facet: ``sex``, ``disease``, ``apoe4_carrier`` or ``braak``.
+            facet: One of :attr:`TESTED_FACETS`, for example
+                ``sex``, ``disease``, ``braak`` or ``age``.
             cell_type: Cell type stratum as in :meth:`get_facet_tests`.
             celltype_source: Stratifier, e.g. ``constant_all_cells``.
             gene: One gene symbol (case-insensitive).
@@ -1936,7 +2087,8 @@ class AnthiveClient:
 
         Args:
             db_id: Dataset id.
-            facet: ``sex``, ``disease``, ``apoe4_carrier`` or ``braak``.
+            facet: One of :attr:`TESTED_FACETS`, for example
+                ``sex``, ``disease``, ``braak`` or ``age``.
             cell_type: Cell type stratum.
             celltype_source: Stratifier, when a cell type occurs under
                 several.
@@ -1962,6 +2114,7 @@ class AnthiveClient:
                                         top_genes: int = 5,
                                         exclude_secondary: bool = True,
                                         format: str = 'json',
+                                        scope: Optional[str] = None,
                                         ) -> Union[Dict, Any]:
         """``GET /facets/{facet}/tests``. Every tested (dataset, cell
         type stratum) of one facet, sorted by donors analysed.
@@ -1969,7 +2122,13 @@ class AnthiveClient:
         Exploratory, donor-level; the disease contrast is provisional.
         No pooling: datasets are tested independently and share donors
         (ROSMAP, SEA-AD, MADRC, ...), so rows are not independent
-        replications.
+        replications. REST API 2.44.0+ answers for one facet scope
+        (``scope``; ``'all'`` lists every scope, rows then carry
+        ``facet_scope`` and counting stays per scope); the response
+        carries ``scope`` and ``scopes``.
+
+        Responses carry ``help_topics`` (REST API 2.44.0+): topic ids for
+        :meth:`get_help_topic` that explain how to read the numbers.
 
         Returns ``{facet, facet_column, exclude_secondary, n_rows,
         n_datasets_tested, rows, not_tested, q_threshold}``. Each row
@@ -1983,18 +2142,28 @@ class AnthiveClient:
         not be tested, with the reason.
 
         Args:
-            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe4_carrier,
-                braak (see :attr:`TESTED_FACETS`). Others give 404.
+            facet: ``'sex'`` / ``'ant_sex'``, or any of
+                :attr:`TESTED_FACETS`. Others give 404.
             top_genes: Genes at q < 0.05 listed per row (0 to 50).
             exclude_secondary: Secondary datasets are listed with
                 ``is_secondary: True`` and ``counted: False`` either way;
                 ``False`` lets them count. Sent only when ``False``.
             format: ``'json'`` or ``'dataframe'`` (the rows, needs
                 pandas; nested fields stay as objects).
+            scope: Facet scope, one of :attr:`FACET_SCOPES`
+                (``'human_postmortem'``, ``'xenograft_human_in_mouse'``,
+                ``'in_vitro'``). Facets are tested, counted and
+                replicated inside one scope, so human and mouse results
+                never mix. Default: ``human_postmortem``
+                (``xenograft_human_in_mouse`` for ``app_nlgf``);
+                ``'all'`` lists every scope. Unknown names give
+                HTTP 400. Sent only when given.
         """
         params: Dict[str, Any] = {'top_genes': top_genes}
         if not exclude_secondary:
             params['exclude_secondary'] = 'false'
+        if scope is not None:
+            params['scope'] = scope
         result = self._get(f'/facets/{facet}/tests', params=params)
         if format == 'dataframe':
             import pandas as pd
@@ -2004,7 +2173,9 @@ class AnthiveClient:
     def get_facet_gene_effects(self, facet: str, gene: str,
                                cell_type: Optional[str] = None,
                                exclude_secondary: bool = True,
-                               format: str = 'json') -> Union[Dict, Any]:
+                               format: str = 'json',
+                               scope: Optional[str] = None,
+                               ) -> Union[Dict, Any]:
         """``GET /facets/{facet}/effects?gene=``. Result card of one
         gene for one facet: every tested (dataset, cell type) unit.
 
@@ -2013,8 +2184,19 @@ class AnthiveClient:
         pooled and there is no meta-analysis. The disease contrast is
         provisional. The cohort table is a DRAFT.
 
-        Returns ``{query, facet, gene, n_units, units, replication,
-        cell_types, notes, apoe_locus, definition}``.
+        Responses carry ``help_topics`` (REST API 2.44.0+): topic ids for
+        :meth:`get_help_topic` that explain how to read the numbers.
+
+        Returns ``{query, scope, scopes, facet, gene, gene_flags,
+        n_units, units, replication, cell_types, notes, apoe_locus,
+        definition, donor_count_definition}``. ``scope`` is the facet
+        scope answered (:attr:`FACET_SCOPES`), ``scopes`` the scopes
+        that have results for this facet. A gene symbol is never
+        matched across scopes. ``gene_flags`` lists gene classes that
+        are over-represented among hits for technical or locus reasons
+        (``mitochondrial``, ``ribosomal``, ``lncrna_or_clone``,
+        ``sex_chromosome``, ``long_gene`` (over 500 kb),
+        ``apoe_locus``); weigh such hits accordingly.
 
         - ``facet``: ``name``, ``column``, ``contrast``,
           ``effect_unit`` (e.g. log2 fold change, male minus female),
@@ -2033,7 +2215,15 @@ class AnthiveClient:
           limma treat threshold), ``significant_treat``,
           ``independence``, ``disease_basis`` and ``analysis_level``
           (``'replicate'`` or ``'cell'``; cell-level is descriptive
-          only; ``analysis_level_reason`` says why).
+          only; ``analysis_level_reason`` says why). From 2.44.0:
+          ``analysis_level`` may be ``'below_floor'`` (fewer than 4
+          replicates, descriptive), and units add ``p_value``,
+          ``facet_scope``, ``small_sample``, ``lambda_gc``,
+          ``inflated``, ``df_total_median``, ``covariates_dropped``,
+          ``n_sex_checked``, ``n_sex_discordant``, ``age_top_coded``,
+          ``control_basis``, ``design_subset``, ``notes`` and (age
+          facets) ``persists_after_pathology_adjustment``; see
+          :meth:`get_facet_tests` for how to read them.
         - ``replication``: one entry per cell type group with
           ``celltype_group`` (also in ``cell_type``), ``cl_id``,
           ``labels`` (the raw labels it covers), ``cohorts_tested``
@@ -2054,6 +2244,40 @@ class AnthiveClient:
           sentence the web UI shows; the pre-v2 text is
           ``legacy_badge``.
 
+          REST API 2.44.0 changes and adds, per entry:
+
+          * ``r_value`` and ``p_pc`` now come from the ordinary
+            one-sided limma p values (``replication_p``); the treat p
+            values stay in ``p_treat`` / ``q_treat``. ``k`` counts
+            cohorts with ``q_value < 0.05`` in the replicated
+            direction, ``k_treat`` those with ``q_treat < 0.05``.
+            Numbers differ from earlier servers; field names do not.
+          * ``replicated`` is ``r_value < 0.05``: the direction of the
+            effect is reproduced in at least 2 independent cohorts. It
+            says nothing about size. ``r_significant`` repeats that
+            test.
+          * ``effect_gate_passed``: at least 2 cohorts each have a
+            signed log2 fold change of at least ``effect_gate_tau`` in
+            the replicated direction (``effect_gate_unit`` words the
+            threshold, for example ``'10%'``, ``'10% per decade'``).
+            ``effect_gate_cohorts`` names those cohorts,
+            ``n_cohorts_ge_tau`` counts them, ``median_logFC`` is the
+            median effect over the anchors. ``r_cohorts`` are the two
+            cohorts that carry the r-value.
+          * ``r_treat`` / ``replicated_effect``: second tier. The
+            partial conjunction on the limma treat p values, which test
+            against a minimum effect of 10 percent;
+            ``replicated_effect`` is True when ``r_treat < 0.05``, so
+            the effect is replicated and at least that large.
+            ``r_strong`` / ``replicated_strong`` do the same with a
+            25 percent threshold. All three are ``None`` when a tier
+            could not be computed.
+          * ``n_small``: how many of the ``m`` cohorts have fewer than
+            ``small_cohort_replicates`` replicates (small cohorts give
+            noisy estimates but count).
+          * ``cohorts_up`` / ``cohorts_down`` and ``cohorts_sig_same_sign``
+            are the old counts, kept for compatibility.
+
         How to read it: ``counted`` means the unit counts towards
         replication (counted cohort, not descriptive only, not a
         secondary dataset, the anchor unit of its cohort for the group);
@@ -2061,16 +2285,18 @@ class AnthiveClient:
         partial-conjunction call (``r_value < 0.05``: the effect is
         present in at least 2 independent cohorts, same direction);
         "k of m" is only the descriptive count of cohorts individually
-        at q_treat < 0.05. ``definition`` holds the full rule; a cohort
-        counts once.
+        at ``q_value < 0.05`` in the replicated direction. For a result
+        worth following up, read ``replicated`` together with
+        ``effect_gate_passed`` and, strictest, ``replicated_effect``.
+        ``definition`` holds the full rule; a cohort counts once.
         ``descriptive_only`` units have no p or q. For APOE locus genes
         (APOE, APOC1, TOMM40, NECTIN2, ...) an e4 effect can be
         allele-linked expression or read mapping, not downstream
         biology (``notes``).
 
         Args:
-            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe4_carrier,
-                braak.
+            facet: ``'sex'`` / ``'ant_sex'``, or any of
+                :attr:`TESTED_FACETS`.
             gene: Gene symbol (case-insensitive).
             cell_type: A cell type group (``'microglia'``) or a raw
                 stratum label (``'Mic P2RY12'``).
@@ -2078,12 +2304,22 @@ class AnthiveClient:
                 Sent only when ``False``.
             format: ``'json'`` or ``'dataframe'`` (the units, needs
                 pandas).
+            scope: Facet scope, one of :attr:`FACET_SCOPES`
+                (``'human_postmortem'``, ``'xenograft_human_in_mouse'``,
+                ``'in_vitro'``). Facets are tested, counted and
+                replicated inside one scope, so human and mouse results
+                never mix. Default: the server's single-answer scope,
+                ``human_postmortem`` (``xenograft_human_in_mouse`` for
+                ``app_nlgf``). Unknown names give HTTP 400. Sent only
+                when given.
         """
         params: Dict[str, Any] = {'gene': gene}
         if cell_type is not None:
             params['cell_type'] = cell_type
         if not exclude_secondary:
             params['exclude_secondary'] = 'false'
+        if scope is not None:
+            params['scope'] = scope
         result = self._get(f'/facets/{facet}/effects', params=params)
         if format == 'dataframe':
             import pandas as pd
@@ -2094,7 +2330,9 @@ class AnthiveClient:
                                   cell_type: Optional[str] = None,
                                   n: int = 50,
                                   exclude_secondary: bool = True,
-                                  format: str = 'json') -> Union[Dict, Any]:
+                                  format: str = 'json',
+                                  scope: Optional[str] = None,
+                                  ) -> Union[Dict, Any]:
         """``GET /facets/{facet}/effects/top``. Genes that change with a
         facet in the most independent cohorts, within one cell type
         group.
@@ -2103,9 +2341,14 @@ class AnthiveClient:
         is provisional and the cohort table is a DRAFT. A high rank is a
         count of separate significant results, not a pooled estimate.
 
-        Only replicated genes are listed (partial-conjunction
-        ``r_value < 0.05``, effect present in at least 2 independent
-        cohorts, same direction). Ranking (``ranking`` in the response):
+        Responses carry ``help_topics`` (REST API 2.44.0+): topic ids for
+        :meth:`get_help_topic` that explain how to read the numbers.
+
+        Only genes that pass the effect gate and are replicated are
+        listed (partial-conjunction ``r_value < 0.05``, effect present
+        in at least 2 independent cohorts, same direction, and at least
+        2 cohorts with a log2 fold change of at least
+        ``effect_gate_tau``; REST API 2.44.0+). Ranking (``ranking`` in the response):
         ``r_value`` ascending, then k (cohorts individually at
         q_treat < 0.05 in the replicated direction), ``agreement``
         (fraction of the m tested cohorts with that sign) and
@@ -2113,14 +2356,24 @@ class AnthiveClient:
         replication call.
 
         Returns ``{facet, cell_type, celltype_group, cl_id, labels,
-        cohorts_in_cell_type, n_replicated, n_genes_in_family,
-        cell_types, rows, definition, ranking, exclude_secondary,
-        cohort_table_status}``; ``n_replicated`` counts the replicated
-        genes of the family, ``n_genes_in_family`` the genes tested in
-        at least 2 cohorts, and ``rows`` is capped at ``n``. Rows:
-        ``gene, r_value, p_pc, k, m, replicated, direction,
-        agreement, median_abs_logFC, cohorts, cohorts_tested_labels,
-        overlap_unknown, cohorts_overlap_unknown`` plus the old
+        scope, scopes, cohorts_in_cell_type, n_replicated,
+        n_r_significant, n_effect_gate, n_replicated_effect,
+        n_genes_in_family, donors_in_cell_type,
+        donor_count_definition, cell_types, rows, definition, ranking,
+        exclude_secondary, cohort_table_status}``; ``n_replicated``
+        counts the replicated genes of the family,
+        ``n_r_significant`` the genes with ``r_value < 0.05`` before
+        the gate, ``n_effect_gate`` those that also pass it,
+        ``n_replicated_effect`` those that replicate at the 10 percent
+        minimum effect (``r_treat``), ``n_genes_in_family`` the genes
+        tested in at least 2 cohorts, and ``rows`` is capped at ``n``. Rows:
+        ``gene, r_value, p_pc, k, k_treat, m, replicated, direction,
+        agreement, median_abs_logFC, median_logFC,
+        effect_gate_passed, effect_gate_tau, effect_gate_cohorts,
+        r_cohorts, r_treat, replicated_effect, gene_flags, cohorts,
+        cohorts_tested_labels, overlap_unknown,
+        cohorts_overlap_unknown`` (see :meth:`get_facet_gene_effects`
+        for the meaning) plus the old
         ``cohorts_sig_same_sign, cohorts_tested, cohorts_same_sign,
         sign_discordant, apoe_locus``. The v1 fields ``units_up``,
         ``units_down`` and ``max_abs_logFC`` are gone.
@@ -2128,39 +2381,62 @@ class AnthiveClient:
         counted cohorts.
 
         Args:
-            facet: ``'sex'`` / ``'ant_sex'``, also disease, apoe4_carrier,
-                braak.
+            facet: ``'sex'`` / ``'ant_sex'``, or any of
+                :attr:`TESTED_FACETS`.
             cell_type: A cell type group (``'microglia'``) or a raw
                 label; default: the group with most counted cohorts.
             n: Rows returned (1 to 500).
             exclude_secondary: ``False`` lets secondary datasets count.
                 Sent only when ``False``.
             format: ``'json'`` or ``'dataframe'`` (the rows, needs
-                pandas; ``n_replicated`` and ``n_genes_in_family`` go to
+                pandas; the family counts ``n_replicated``,
+                ``n_genes_in_family``, ``n_r_significant``,
+                ``n_effect_gate`` and ``n_replicated_effect`` go to
                 ``df.attrs``).
+            scope: Facet scope, one of :attr:`FACET_SCOPES`
+                (``'human_postmortem'``, ``'xenograft_human_in_mouse'``,
+                ``'in_vitro'``). Facets are tested, counted and
+                replicated inside one scope, so human and mouse results
+                never mix. Default: the server's single-answer scope,
+                ``human_postmortem`` (``xenograft_human_in_mouse`` for
+                ``app_nlgf``). Unknown names give HTTP 400. Sent only
+                when given.
         """
         params: Dict[str, Any] = {'n': n}
         if cell_type is not None:
             params['cell_type'] = cell_type
         if not exclude_secondary:
             params['exclude_secondary'] = 'false'
+        if scope is not None:
+            params['scope'] = scope
         result = self._get(f'/facets/{facet}/effects/top', params=params)
         if format == 'dataframe':
             import pandas as pd
             frame = pd.DataFrame(result.get('rows', []))
-            for key in ('n_replicated', 'n_genes_in_family'):
+            for key in ('n_replicated', 'n_genes_in_family', 'n_r_significant',
+                        'n_effect_gate', 'n_replicated_effect'):
                 if key in result:
                     frame.attrs[key] = result[key]
             return frame
         return result
 
     def get_gene_facet_effects(self, gene: str,
-                               exclude_secondary: bool = True) -> Dict:
+                               exclude_secondary: bool = True,
+                               scope: Optional[str] = None) -> Dict:
         """``GET /genes/{gene}/facet-effects``. Result cards of one gene
-        for every tested facet (sex, disease, apoe4_carrier, braak).
+        for every tested facet (:attr:`TESTED_FACETS`).
 
-        Returns ``{gene, facets: {facet: card}}``; each card has the
-        shape of :meth:`get_facet_gene_effects`. Exploratory,
+        The response carries ``help_topics`` (see
+        :meth:`get_help_topic`).
+
+        Returns ``{gene, scope, facets: {facet: card}}``; each card has
+        the shape of :meth:`get_facet_gene_effects`. Without ``scope``
+        (REST API 2.44.0+) ``facets`` holds one card per facet in its
+        default scope and ``by_scope`` holds ``{scope: {facet: card}}``
+        so human and xenograft results can be shown separately;
+        ``strongest_facet`` (``{facet, cell_type, r_value, scope}``)
+        names the facet with the strongest replication, to open on. A
+        gene symbol is never matched across scopes. Exploratory,
         donor-level, no meta-analysis; the disease card is provisional.
         The first call per facet reads every result file on the server
         (a few seconds); later calls are cached.
@@ -2169,9 +2445,21 @@ class AnthiveClient:
             gene: Gene symbol (case-insensitive).
             exclude_secondary: ``False`` lets secondary datasets count.
                 Sent only when ``False``.
+            scope: Facet scope, one of :attr:`FACET_SCOPES`
+                (``'human_postmortem'``, ``'xenograft_human_in_mouse'``,
+                ``'in_vitro'``). Facets are tested, counted and
+                replicated inside one scope, so human and mouse results
+                never mix. Default: every scope, in
+                ``by_scope``. Unknown names give HTTP 400. Sent only
+                when given.
         """
-        params = {'exclude_secondary': 'false'} if not exclude_secondary else None
-        return self._get(f'/genes/{gene}/facet-effects', params=params)
+        params: Dict[str, Any] = {}
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
+        if scope is not None:
+            params['scope'] = scope
+        return self._get(f'/genes/{gene}/facet-effects',
+                         params=params or None)
 
     def get_facet_cohorts(self, format: str = 'json') -> Union[Dict, Any]:
         """``GET /facets/cohorts``. The DRAFT cohort selection table used
@@ -2193,6 +2481,150 @@ class AnthiveClient:
             import pandas as pd
             return pd.DataFrame(result.get('datasets', []))
         return result
+
+    # ── Plain-language help (REST API 2.44.0+) ──────────────────────────
+    #
+    # The maintainers' own explanations of facets, replication, scopes,
+    # caveats and the glossary (the same texts as the web help page and
+    # the MCP ``explain`` tool). Facet, facet-test and dataset-context
+    # responses carry ``help_topics``: topic ids to pass to
+    # :meth:`get_help_topic`.
+
+    def get_help(self) -> Dict:
+        """``GET /help``. Index of the plain-language help (REST API
+        2.44.0+).
+
+        Returns ``{topics, glossary}``: ``topics`` is a list of
+        ``{id, title, summary}`` and ``glossary`` a list of
+        ``{slug, term}``. Responses of the facet endpoints, the facet
+        tests and :meth:`get_database_context` carry ``help_topics``,
+        a list of topic ids to read with :meth:`get_help_topic` before
+        you interpret the numbers. Quote these texts rather than
+        paraphrasing them from memory.
+        """
+        return self._get('/help')
+
+    def get_help_topic(self, topic: str,
+                       include_children: bool = True) -> Dict:
+        """``GET /help/{topic}``. One help topic (REST API 2.44.0+).
+
+        Returns ``{id, title, summary, body, children, related, terms,
+        anchor}``. ``body`` is markdown; ``children`` are the ids of
+        subsection topics (already appended to ``body`` unless
+        ``include_children`` is ``False``); ``related`` are topic ids
+        and ``terms`` glossary slugs for :meth:`get_glossary_term`.
+        The topics named in ``help_topics`` of the facet and context
+        responses are ``facet-effects``, ``facet-counting``,
+        ``facet-replicate-unit``, ``facet-howto``, ``facet-scopes``,
+        ``donor-groups``, ``dataset-caveats``, ``per-cell-per-donor``
+        and ``dataset-versions``.
+
+        Args:
+            topic: Topic id from :meth:`get_help` or ``help_topics``.
+            include_children: ``False`` leaves the subsections out of
+                ``body``. Sent only when ``False``.
+
+        Raises:
+            requests.HTTPError: 404 for an unknown id (the message lists
+                close matches).
+        """
+        params = {'include_children': 'false'} if not include_children else None
+        return self._get(f'/help/{topic}', params=params)
+
+    def get_glossary(self, format: str = 'markdown') -> Dict:
+        """``GET /help/glossary``. Every glossary term with its
+        definition (REST API 2.44.0+).
+
+        Returns ``{format, terms}`` with ``terms`` a list of ``{slug,
+        term, definition}``.
+
+        Args:
+            format: ``'markdown'`` (default) or ``'html'``.
+        """
+        if format not in ('markdown', 'html'):
+            raise ValueError(
+                f"format must be 'markdown' or 'html', got {format!r}")
+        params = {'format': format} if format != 'markdown' else None
+        return self._get('/help/glossary', params=params)
+
+    def get_glossary_term(self, term: str) -> Dict:
+        """``GET /help/glossary/{term}``. One glossary term by slug, for
+        example ``'replicate-unit'`` or ``'r-value'`` (REST API
+        2.44.0+).
+
+        Returns ``{slug, term, definition, anchor}``.
+
+        Raises:
+            requests.HTTPError: 404 for an unknown slug (the message
+                lists close matches).
+        """
+        return self._get(f'/help/glossary/{term}')
+
+    def search_help(self, q: str) -> Dict:
+        """``GET /help/search?q=``. Fuzzy match of ``q`` against topic
+        ids, titles and glossary terms (REST API 2.44.0+).
+
+        Returns ``{query, matches}``; ``matches`` is a list of ``{id,
+        kind, score, title}`` ordered best first, ``kind`` being
+        ``'topic'`` (fetch with :meth:`get_help_topic`) or ``'term'``
+        (fetch with :meth:`get_glossary_term`).
+        """
+        return self._get('/help/search', params={'q': q})
+
+    def explain(self, topic_or_term: str = '') -> str:
+        """Plain-language explanation of an Anthive concept as markdown
+        (REST API 2.44.0+). Mirrors the MCP ``explain`` tool.
+
+        Searches the help (:meth:`search_help`) and returns the best
+        matching topic (title, summary, body, related topics and
+        glossary terms) or glossary term, followed by the other close
+        matches. An empty or unmatched query returns the list of topics
+        and glossary terms. Use it before explaining facets,
+        replication, scopes, replicate units or caveats, and quote the
+        text instead of improvising.
+
+        Args:
+            topic_or_term: Topic id, title or glossary term, matched
+                fuzzily (``'facet-counting'``, ``'replicate unit'``,
+                ``'r-value'``).
+
+        Returns:
+            Markdown text.
+        """
+        query = (topic_or_term or '').strip()
+        if query:
+            matches = self.search_help(query).get('matches', [])
+            if matches:
+                best = matches[0]
+                if best['kind'] == 'term':
+                    data = self.get_glossary_term(best['id'])
+                    text = f"# {data['term']} (glossary)\n\n{data['definition']}"
+                else:
+                    data = self.get_help_topic(best['id'])
+                    parts = [f"# {data['title']}", '', data['summary'], '',
+                             data['body']]
+                    if data.get('related'):
+                        parts += ['', 'Related topics: ' + ', '.join(
+                            f'`{ident}`' for ident in data['related'])]
+                    if data.get('terms'):
+                        parts += ['Glossary terms: ' + ', '.join(
+                            f'`{slug}`' for slug in data['terms'])]
+                    text = '\n'.join(parts)
+                others = [f"{hit['kind']} `{hit['id']}`"
+                          for hit in matches[1:]]
+                if others:
+                    text += '\n\nOther close matches: ' + ', '.join(others)
+                return text
+        prefix = (f"No help topic or glossary term matches '{query}'.\n\n"
+                  if query else '')
+        index = self.get_help()
+        lines = ['# Anthive help topics', '']
+        lines += [f"- `{topic['id']}`: {topic['title']}. {topic['summary']}"
+                  for topic in index.get('topics', [])]
+        terms = ', '.join(f"`{term['slug']}`"
+                          for term in index.get('glossary', []))
+        lines += ['', '## Glossary terms', '', terms or '(none)']
+        return prefix + '\n'.join(lines)
 
     # ── Dataset summaries + downloads ───────────────────────────────────
 
@@ -2419,16 +2851,31 @@ class AnthiveClient:
         analysing a dataset with an LLM: metadata, caveats, obs columns,
         module scores, source papers with methods passages and related
         papers, trimmed to about ``budget_tokens`` (200 to 50000).
-        ``level`` is ``'brief'`` or ``'full'``."""
+        ``level`` is ``'brief'`` or ``'full'``. REST API 2.44.0+ adds
+        ``help_topics`` (``dataset-caveats``, ``facet-replicate-unit``,
+        ``per-cell-per-donor``, ``dataset-versions``) for
+        :meth:`get_help_topic`."""
         return self._get(f'/databases/{db_id}/context',
                          params={'level': level,
                                  'budget_tokens': budget_tokens})
 
     def get_library_status(self) -> Dict:
         """``GET /library/status``. Library and literature-index health:
-        counts, issues, unresolved references, embedding model, and
-        ``upload_index`` (state of the last upload's background index
-        update)."""
+        counts, issues, embedding model, and ``upload_index`` (state of
+        the last upload's background index update).
+
+        Everybody gets ``papers``, ``linked_datasets``, ``index``
+        (without ``path``), ``issues`` and, from REST API 2.44.0,
+        ``n_errors`` and ``n_warnings`` (counts of the issues).
+        Administrators additionally get the issue texts
+        (``issues.errors`` and ``issues.warnings``),
+        ``unresolved_references`` (``papers:`` links to citekeys the
+        site's library does not hold), ``library_dir`` and
+        ``index.path``. For everybody else (and on sites without login,
+        where nobody is an administrator) ``unresolved_references``,
+        ``library_dir`` and ``index.path`` are absent and the issue
+        lists are empty, so read ``n_errors`` / ``n_warnings`` for the
+        counts."""
         return self._get('/library/status')
 
     # ── Paper upload (REST API 2.40+, uploaders only) ───────────────────
