@@ -1,0 +1,15 @@
+id: plots
+title: Plots
+summary: Plots are drawn on the server from the visualize menu or the column icons; they cover scatter, violin, box, bar, histogram, heatmap and differential expression geoms, with subsetting and subsampling.
+aliases:
+- plot types
+- visualize
+body_html: |
+  <ul>
+    <li><strong>Where.</strong> Use the <em>visualize</em> menu on a dataset page, or the small chart icons next to a column. Plots are rendered on the server, so they work on very large datasets.</li>
+    <li><strong>Plot types.</strong> Scatter and hexbin (on an embedding such as UMAP, or one variable against another), violin, box, bar, histogram, ECDF, KDE and 2-D KDE, heatmap, rolling average along a variable, and for differential expression: volcano, MA, forest and DE heatmap.</li>
+    <li><strong>Colour, subset and sample.</strong> Colour by a gene or a column; restrict to a subset of cells (for example one sex or one disease group); subsample very large datasets for speed. Settings such as palette and size live in the side panel.</li>
+    <li><strong>Downloads.</strong> PNG, SVG or PDF. Figures contain no visible caption text, so they are clean for manuscripts; the caption is available separately.</li>
+    <li><strong>Sharing.</strong> <em>copy URL</em> copies the address of the interactive plot page with all settings; <em>copy thumbnail md</em> copies a snippet to embed the plot in a description.</li>
+    <li><strong>Notebook.</strong> <em>📓 notebook</em> opens the same plot as a JupyterLite notebook in your browser, with the code to fetch the data and redraw it. Download the notebook to keep changes.</li>
+  </ul>

@@ -1,0 +1,20 @@
+id: facet-contrasts
+title: Contrasts and other row details
+summary: The direction of each contrast (sex m vs f, disease AD vs control, APOE e4 carrier vs non-carrier, Braak and age as trends) and the flags that appear on a result row.
+terms:
+- composition
+- lambda
+aliases:
+- contrasts
+- flags
+- composition
+body_html: |
+  <ul>
+    <li><strong>Contrasts.</strong> Sex is m vs f, disease is pathologic AD vs control, APOE e4 carrier vs non-carrier, App NL-G-F vs control. A positive log2 fold change means higher in the first-named group. Braak stage and age are numbers, so their effect is the change per Braak stage and per decade of age.</li>
+    <li><strong>Composition.</strong> This flag means the fraction of each donor's cells in the cell type changes with the facet (p &lt; 0.05, uncorrected). It tests only the size of the cell type, not the mix of states inside it (see <a href="#glossary-composition">composition</a>).</li>
+    <li><strong>Batch.</strong> "batch adjusted" means a batch column entered the model; "batch confounded" means the facet cannot be separated from batch and batch was left out.</li>
+    <li><strong>Inflation.</strong> A unit whose <a href="#glossary-lambda">lambda</a> is above about 1.3 is flagged: many genes shift together, which usually points to a batch, chemistry or composition difference rather than to biology.</li>
+    <li><strong>Provisional.</strong> Disease results depend on vocabulary decisions that are still open (what counts as control differs between studies), so they may change.</li>
+    <li><strong>Permutation q.</strong> A permutation p cannot go below 1/(n + 1) for n permutations (about 0.0001 with 10,000). After Benjamini-Hochberg over m modules, one strong module reaches at best q_perm of about m/(n + 1), which is below 0.05 only when fewer than about 500 modules were tested. Read q_param and p_perm together.</li>
+    <li><strong>Per-cell numbers.</strong> The variability heatmap and the per-cell association columns are labelled <em>per-cell (descriptive)</em>. They carry no test; for effects per replicate use the Facets tab.</li>
+  </ul>

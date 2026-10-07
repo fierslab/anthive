@@ -1,0 +1,9 @@
+id: facet-sensitivity
+title: Sensitivity analyses
+summary: 'Two sensitivity tests check whether a Braak or APOE result depends on how the facet was coded: Braak III or higher against II or lower, and APOE e4 dose.'
+aliases:
+- sensitivity analyses
+- braak threshold
+- apoe4 dose
+body_html: |
+  <p>Two extra tests check whether a Braak or APOE result depends on how the facet was coded. <em>Braak stage III or higher against II or lower</em> replaces the straight-line trend by a two-group contrast; <em>APOE e4 dose</em> (0, 1 or 2 alleles) replaces carrier against non-carrier by a trend per allele. They are shown as tabs next to their parent facet, are counted separately, and are one observation read twice with it, not independent findings.</p>

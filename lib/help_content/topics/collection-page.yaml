@@ -1,0 +1,5 @@
+id: collection-page
+title: Collection page
+summary: The collection page lists the datasets of one study or source, the annotations that differ between them, the linked papers and downloads.
+body_html: |
+  <p>Lists the datasets of one collection with their size and the annotations that differ between them (values shared by all datasets are shown once, as pills under the title). Below the table: the collection description, the linked <strong>papers</strong> (with why they are linked) and downloads.</p>

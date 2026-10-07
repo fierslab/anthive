@@ -1,0 +1,12 @@
+id: facet-replicates-needed
+title: How many replicates are needed
+summary: A unit is fitted from 3 replicates per group (4 for a trend) but reports p and q values only from the p-value floor (5 donors per group, 10 for a trend; 3 animals and 6 in xenograft hosts); below that it is descriptive and not counted.
+terms:
+- p-value-floor
+- small-cohorts
+aliases:
+- how many replicates
+- minimum replicates
+- small sample
+body_html: |
+  <p>A unit is fitted from 3 replicates per group (4 replicates over at least three distinct values for a trend). p and q values are given from the <a href="#glossary-p-value-floor">p-value floor</a>: 5 donors per group (10 donors for a Braak or age trend) in human cohorts, and 3 animals per group (6 for a trend) in xenograft hosts, where animals of one line and age vary far less than human donors. Between the fit minimum and the floor the row reads "descriptive: below the p-value floor (donors need 5 per group)": an estimate without p, q or interval, not counted towards replication. A unit above the floor but with fewer than 5 replicates per group is flagged <a href="#glossary-small-cohorts">small sample</a>: tested and counted, with little power. With 5 donors per group only large effects can be detected; a missing hit means "not detected with this many donors", not "no effect".</p>

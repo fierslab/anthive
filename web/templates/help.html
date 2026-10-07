@@ -147,277 +147,50 @@
   </nav>
 
   <details class="help-section" id="what"><summary><h2 class="section-head">What anthive is</h2></summary>
-    <ul>
-      <li><strong>Datasets</strong> are single-cell (or bulk or spatial) expression matrices with their cell annotations, converted from curated <code>.h5ad</code> files into fast databases. Each has an id such as <code>L26/FMG</code>: the collection code, then the dataset code. A small grey version such as <code>v0.1.4</code> marks the dataset release: a minor bump means the data changed, a patch bump means only the metadata did.</li>
-      <li><strong>Collections</strong> group the datasets that come from one study or source, usually one paper.</li>
-      <li><strong>Papers</strong> live in the <a href="/library">paper library</a>: the publications behind the datasets plus papers kept for background, with their full text searchable.</li>
-      <li><strong>Gene sets and module scores</strong>: curated gene modules, scored per cell in many datasets.</li>
-      <li><strong>Facets</strong>: standardised annotation columns (<code>ant_*</code>) that mean the same thing in every dataset, so you can compare across studies.</li>
-    </ul>
-    <p>The site is maintained by the BADS lab at KU Leuven (Mark Fiers). The software and its documentation are on <a href="https://gitlab.kuleuven.be/bdslab/anthive/anthive4" target="_blank" rel="noopener">GitLab</a>.</p>
+    {{ help_topic_html('what') }}
   </details>
 
   <details class="help-section" id="finding"><summary><h2 class="section-head">Finding data</h2></summary>
-    <p>The <a href="/">front page</a> lists every collection, newest first.</p>
-    <ul>
-      <li><strong>Search box.</strong> Type anything: a paper title, an author, a journal or year, a DOI or PubMed id, a tissue, cell type, disease or method, a collection or dataset code, or the name of a dataset inside a collection. Several words must all match (so <code>microglia prefrontal</code> narrows the list). Case and accents do not matter, and matching words are highlighted.</li>
-      <li><strong>Shortcut and sharing.</strong> Press <code>/</code> anywhere on the page to jump to the search box. The search is kept in the address bar, so you can copy the URL to share exactly the list you see.</li>
-      <li><strong>Filters.</strong> The <em>Filters</em> button opens chips for organism, cell type, tissue, method and disease, with counts. Chips in one group combine as OR, chips in different groups as AND. Filters are also kept in the URL and remembered in your browser.</li>
-      <li><strong>Tags only where it matters.</strong> Each collection shows small tags only for what is unusual in this catalogue (for example <em>mouse</em>, <em>spatial</em>, <em>astrocytes</em>, <em>prefrontal cortex</em>). The common case (human, brain, microglia, single-cell RNA, Alzheimer's) is not repeated on every row. Collections whose access differs from the usual get a small mark (for example <em>public</em>).</li>
-      <li><strong>Sorting.</strong> Recently added, paper year, number of cells, or name.</li>
-      <li><strong>Table view.</strong> The <em>Table view</em> button switches to a classic table with all columns, following the same search and filters.</li>
-    </ul>
+    {{ help_topic_html('finding') }}
   </details>
 
   <details class="help-section" id="pages"><summary><h2 class="section-head">Collection and dataset pages</h2></summary>
-    <h3 class="subsection-head">Collection page</h3>
-    <p>Lists the datasets of one collection with their size and the annotations that differ between them (values shared by all datasets are shown once, as pills under the title). Below the table: the collection description, the linked <strong>papers</strong> (with why they are linked) and downloads.</p>
-    <h3 class="subsection-head">Dataset page</h3>
-    <p>At the top: the <strong>id strip</strong> with the collection, dataset and database ids (click to select and copy; you need the database id, for example <code>L26/FMG</code>, in the API, vark, pyvark and MCP), provenance (access, source, license, links to the DOI or accession), the title, a short description, context pills and the numbers of cells and genes. The <em>visualize</em> menu (top right) opens the plot builder.</p>
-    <div class="table-wrap">
-    <table>
-      <tr><th>Tab</th><th>What it shows</th></tr>
-      <tr><td>Overview</td><td>The written description of the dataset, when there is one.</td></tr>
-      <tr><td>Data</td><td>Layers, embeddings (UMAP, PCA) and an overview of the cell annotation columns.</td></tr>
-      <tr><td>Genes</td><td>Expression statistics per gene (mean, standard deviation, coefficient of variation, fraction of cells expressing it); search, sort and star favourites.</td></tr>
-      <tr><td>Genesets</td><td>Module scores already computed for curated gene sets, with how strongly they vary across the dataset's annotations.</td></tr>
-      <tr><td>Numerical</td><td>Numeric cell annotations (age, Braak stage, QC metrics, scores) with summaries and quick plots.</td></tr>
-      <tr><td>Categorical</td><td>Categorical annotations (cell type, donor, disease, sex) with value counts and quick plots.</td></tr>
-      <tr><td>Differential expression</td><td>Precomputed differential expression results, when the dataset has them: studies, terms, contrasts and genes, with volcano and MA plots.</td></tr>
-      <tr><td>Papers</td><td>The papers linked to this dataset, with the reason (for example <em>Source of this dataset</em>), a short summary, PDF, DOI, PubMed and BibTeX.</td></tr>
-      <tr><td>Downloads</td><td>The original <code>.h5ad</code> file, the papers' PDFs and any other files that belong to the study.</td></tr>
-      <tr><td>⚠ Caveats</td><td>Known problems with this dataset (contamination, batch effects, missing metadata). Read them before drawing conclusions. A ⚠ in the lists marks datasets that have caveats.</td></tr>
-    </table>
-    </div>
-    <p>Tabs only appear when the dataset has that kind of data.</p>
-    <h3 class="subsection-head">Facets (<code>ant_*</code> columns)</h3>
-    <p>Columns starting with <code>ant_</code>, such as <code>ant_cell_type</code>, <code>ant_disease</code>, <code>ant_donor</code>, <code>ant_sex</code>, <code>ant_age</code>, <code>ant_braak</code> and <code>ant_apoe</code>, are the site's standardised annotations: same name and same values in every dataset that has them. Prefer them when you group, colour or filter, and when you compare datasets. They are shown in bold with a small <em>facet</em> pill; the tooltip gives the original column name.</p>
-    <p>The facet <code>ant_apoe4_carrier</code> (APOE e4 carrier) was called <code>ant_apoe_carrier</code> until October 2026. The old name still works in URLs, API calls and the facet tests for one release; please switch to the new one.</p>
+    {{ help_topic_html('pages') }}
   </details>
 
   <details class="help-section" id="plots"><summary><h2 class="section-head">Plots</h2></summary>
-    <ul>
-      <li><strong>Where.</strong> Use the <em>visualize</em> menu on a dataset page, or the small chart icons next to a column. Plots are rendered on the server, so they work on very large datasets.</li>
-      <li><strong>Plot types.</strong> Scatter and hexbin (on an embedding such as UMAP, or one variable against another), violin, box, bar, histogram, ECDF, KDE and 2-D KDE, heatmap, rolling average along a variable, and for differential expression: volcano, MA, forest and DE heatmap.</li>
-      <li><strong>Colour, subset and sample.</strong> Colour by a gene or a column; restrict to a subset of cells (for example one sex or one disease group); subsample very large datasets for speed. Settings such as palette and size live in the side panel.</li>
-      <li><strong>Downloads.</strong> PNG, SVG or PDF. Figures contain no visible caption text, so they are clean for manuscripts; the caption is available separately.</li>
-      <li><strong>Sharing.</strong> <em>copy URL</em> copies the address of the interactive plot page with all settings; <em>copy thumbnail md</em> copies a snippet to embed the plot in a description.</li>
-      <li><strong>Notebook.</strong> <em>📓 notebook</em> opens the same plot as a JupyterLite notebook in your browser, with the code to fetch the data and redraw it. Download the notebook to keep changes.</li>
-    </ul>
+    {{ help_topic_html('plots') }}
   </details>
 
   <details class="help-section" id="genes"><summary><h2 class="section-head">Genes, gene sets and facets</h2></summary>
-    <ul>
-      <li><strong>Gene atlas.</strong> Open <a href="/genes">genes</a> in the top bar and type a gene to see it across all datasets; several genes separated by commas give a heatmap. Favourite genes (set in Preferences) are marked.</li>
-      <li><strong>Reading the dots.</strong> In the gene tables (dataset Genes tab, gene atlas) and the gene set variability tables, each value is also drawn as a big dot on a thin grey line. The position is the value on that statistic's range, from the left end (lowest) to the right end (highest); the colour shows the low (red), middle (amber) or high (green) third. Hover a dot for the exact value. Green always means the higher, more notable end, and the position carries the same information for readers who cannot tell the colours apart.</li>
-      <li><strong>Gene sets</strong> (<a href="/genesets">/genesets</a>): browse curated gene sets by study and experiment, open one to see its genes and where its module score varies most, or look up every set containing a gene. The <a href="/genesets/variability">variability heatmap</a> compares modules across datasets; its numbers are <em>per-cell associations (descriptive)</em>, computed over cells and not over donors (see <a href="#per-cell-per-donor">Per cell vs per donor</a>).</li>
-      <li><strong>Module scores</strong> are computed per cell with scanpy (default) or UCell; choose the method in Preferences.</li>
-      <li><strong>Facets browser</strong> (<a href="/facets">/facets</a>, marked <em>EXP</em>): every facet with how many datasets carry it, its definition and its donor-level effects across datasets. Each dataset has a <strong>Facets</strong> tab with the same information for that dataset. It is experimental: numbers and groupings may still change.</li>
-    </ul>
+    {{ help_topic_html('genes') }}
   </details>
 
   <details class="help-section" id="per-cell-per-donor"><summary><h2 class="section-head">Per cell vs per donor</h2></summary>
-    <p>Two kinds of numbers on the site look alike and mean different things.</p>
-    <ul>
-      <li><strong>Facet effects are per donor.</strong> On the <strong>Facets</strong> tab of a dataset, an effect is tested within one cell type, with the donor (or host animal) as the unit of replication. A donor's cells are added up into one profile first, so ten thousand cells from one donor count once. These are the numbers to quote, as exploratory results.</li>
-      <li><strong>A per-cell association (descriptive) is not a test.</strong> The omega&sup2;, spearman and similar values in the Genesets tab, on the gene set pages and in the <a href="/genesets/variability">variability heatmap</a> are computed over individual cells. Cells of one donor are not independent, and every cell carries its donor's facet value, so these numbers mostly measure how different donors are from each other. They help to find candidates and show where a score differs, not whether a difference is real. Columns such as donor or cluster are off in the default view because they explain a lot by construction. The same applies to the <em>spread across cells</em> column on the Genes tab, the standard deviation of the log-normalised expression across cells.</li>
-      <li><strong>Mouse and xenograft datasets.</strong> The replicate there is the host animal, not the human donor of the transplanted cells. Facet tests exist for them too (the App NL-G-F facet in particular), and they are never combined with human post-mortem data.</li>
-    </ul>
-    <p>Facet effects are explained in <a href="#facet-effects">Facets and facet effects</a>, and every term is defined in the <a href="#glossary">glossary</a>.</p>
+    {{ help_topic_html('per-cell-per-donor') }}
   </details>
 
   <details class="help-section" id="facet-effects"><summary><h2 class="section-head">Facets and facet effects</h2></summary>
-    <p>A facet is a donor-level (or animal-level) variable that anthive has standardised across datasets: the same name and the same values in every dataset that has it. Each dataset declares how its own columns map onto a facet, and the Facets tab of a dataset shows that mapping value by value. A facet is constant for all cells of one donor, so a facet effect is a difference between donors, not between cells.</p>
-    <p id="facet-effects-visible">The facets that are tested are sex, pathologic AD (disease), APOE e4 carrier status, Braak stage, age (per decade of age, both unadjusted and adjusted for pathology) and, in mouse and xenograft hosts, App NL-G-F genotype. The tissue facet uses umbrella terms (for example cortex) so that datasets with different dissections can be compared. Only the tested facets are shown on the <a href="/facets">facet pages</a> while the audit of the facet definitions is open; the Facets tab of a dataset still lists every facet it has, the others under "Not analysed yet". The other <code>ant_</code> columns stay in the data, the plots, SQL and the API.</p>
-
-    <h3 class="subsection-head" id="facet-tested">What was tested</h3>
-    <p>For each dataset and each cell type in it, the facets are tested at the level of the replicate: the donor for human cohorts, the host animal for mouse and xenograft data. The raw counts of a replicate's cells in that cell type are added up into one <a href="#glossary-pseudobulk">pseudobulk</a>; replicates with fewer than 10 such cells are left out. Genes are tested with <a href="#glossary-limma-voom">limma-voom</a> with sample quality weights and robust moderation, adjusting for sex, age and post-mortem interval when these are known for enough donors, and for a batch column when one exists and is not confounded with the facet. Each row says which <a href="#glossary-covariates">covariates</a> were included; a row without age adjustment can carry age-related genes into a disease or Braak result.</p>
-    <p>q values are Benjamini-Hochberg adjusted within one dataset, cell type and facet (<a href="#glossary-fdr">FDR</a>). A second test, limma <a href="#glossary-treat">treat</a>, asks whether the change exceeds a 10 percent minimum; its q is shown next to the ordinary q. Module (gene set) scores are summarised per donor and tested with an ordinary linear model plus permutations of the facet labels across donors (10,000 by default; the model line of each row gives the number used).</p>
-    <p>Every result row states its exact model. Click <em>details</em> next to the model line for the cell type definition, the formula (for example <code>expression ~ braak + sex + age_z + pmi_z</code>), which covariates were left out and why, the donors per group, the multiple-testing scope, and the tool version, seed and run date. Anything the run did not record says "not recorded".</p>
-
-    <h3 class="subsection-head" id="facet-replicate-unit">Replicate unit and analysis level</h3>
-    <p>Each dataset declares what an independent <a href="#glossary-replicate-unit">replicate</a> is: a donor for human cohorts, the host animal for xenografts and mouse data (the human donor line of a xenograft is never the replicate), a sample for some bulk and in vitro data, or none. The Facets tab shows it as <em>Replicate unit</em> (for example "donor (ant_donor)"), and the Data tab repeats it.</p>
-    <p>A unit is tested at <strong>replicate level</strong> when the dataset has a replicate unit and at least 3 replicates in every group of a two-group facet (at least 4 replicates over at least three distinct values for a trend such as Braak or age). Otherwise it is <strong>cell-level, descriptive only</strong>: no test, p or q is given, because cells are not replicates and treating them as such would make a difference between two donors look highly significant. The reason is stated on the unit (<a href="#glossary-analysis-level">analysis level</a>).</p>
-
-    <h3 class="subsection-head" id="facet-replicates-needed">How many replicates are needed</h3>
-    <p>A unit is fitted from 3 replicates per group (4 replicates over at least three distinct values for a trend). p and q values are given from the <a href="#glossary-p-value-floor">p-value floor</a>: 5 donors per group (10 donors for a Braak or age trend) in human cohorts, and 3 animals per group (6 for a trend) in xenograft hosts, where animals of one line and age vary far less than human donors. Between the fit minimum and the floor the row reads "descriptive: below the p-value floor (donors need 5 per group)": an estimate without p, q or interval, not counted towards replication. A unit above the floor but with fewer than 5 replicates per group is flagged <a href="#glossary-small-cohorts">small sample</a>: tested and counted, with little power. With 5 donors per group only large effects can be detected; a missing hit means "not detected with this many donors", not "no effect".</p>
-
-    <h3 class="subsection-head" id="facet-scopes">Scopes: human post-mortem and xenograft</h3>
-    <p>Every facet result belongs to one <a href="#glossary-scope">scope</a>. <strong>Human post-mortem</strong> covers cells from human brain tissue (post-mortem or biopsy), where the replicate is the donor. <strong>Human cells in mouse hosts (xenograft)</strong> covers human cells grafted into mouse brain, where the replicate is the host animal and the gene is the human gene in a mouse environment. The scopes are tested, counted and replicated separately and never mixed. Facet pages have a scope selector, the gene page has one above its facet tabs, and every result block carries its scope label. In vitro cultures are listed but not tested; pure mouse datasets are not part of the facet analysis at all.</p>
-
-    <h3 class="subsection-head" id="facet-excluded">Datasets left out of the facet analysis</h3>
-    <p>The analysis needs single cells or nuclei that can be grouped by cell type and donor. Spatial data (a spot is not a cell), proteomics, metacell sets (each row an aggregate of cells), pure mouse datasets and a few sets set aside by the curators (for example the Francken2026 sets, for now) are therefore left out: they keep their facet columns for browsing and plotting, but have no tests and no replication. Their dataset page says why in plain words on the Facets tab (<a href="#glossary-facet-exclusion">glossary</a>).</p>
-
-    <h3 class="subsection-head" id="facet-contrasts">Contrasts and other row details</h3>
-    <ul>
-      <li><strong>Contrasts.</strong> Sex is m vs f, disease is pathologic AD vs control, APOE e4 carrier vs non-carrier, App NL-G-F vs control. A positive log2 fold change means higher in the first-named group. Braak stage and age are numbers, so their effect is the change per Braak stage and per decade of age.</li>
-      <li><strong>Composition.</strong> This flag means the fraction of each donor's cells in the cell type changes with the facet (p &lt; 0.05, uncorrected). It tests only the size of the cell type, not the mix of states inside it (see <a href="#glossary-composition">composition</a>).</li>
-      <li><strong>Batch.</strong> "batch adjusted" means a batch column entered the model; "batch confounded" means the facet cannot be separated from batch and batch was left out.</li>
-      <li><strong>Inflation.</strong> A unit whose <a href="#glossary-lambda">lambda</a> is above about 1.3 is flagged: many genes shift together, which usually points to a batch, chemistry or composition difference rather than to biology.</li>
-      <li><strong>Provisional.</strong> Disease results depend on vocabulary decisions that are still open (what counts as control differs between studies), so they may change.</li>
-      <li><strong>Permutation q.</strong> A permutation p cannot go below 1/(n + 1) for n permutations (about 0.0001 with 10,000). After Benjamini-Hochberg over m modules, one strong module reaches at best q_perm of about m/(n + 1), which is below 0.05 only when fewer than about 500 modules were tested. Read q_param and p_perm together.</li>
-      <li><strong>Per-cell numbers.</strong> The variability heatmap and the per-cell association columns are labelled <em>per-cell (descriptive)</em>. They carry no test; for effects per replicate use the Facets tab.</li>
-    </ul>
+    {{ help_topic_html('facet-effects') }}
   </details>
 
   <details class="help-section" id="facet-counting"><summary><h2 class="section-head">Replication across cohorts and how to read it</h2></summary>
-    <h3 class="subsection-head" id="facet-replication">Replication across cohorts</h3>
-    <p>A gene is called <strong>replicated</strong> for one facet and cell type group when its <a href="#glossary-r-value">r-value</a> is below 0.05. The r-value comes from a <a href="#glossary-partial-conjunction">partial conjunction test</a> of "changes in the same direction in at least 2 of the m cohorts" (Benjamini and Heller 2008): the smallest cohort p value is set aside, the remaining ones are combined by Simes' method, the result is doubled for the two directions and adjusted over all genes of the group. Each cohort contributes one <a href="#glossary-anchor-unit">anchor unit</a>, so datasets that share donors cannot count twice. Replication is only counted within one <a href="#glossary-scope">scope</a>: human post-mortem and xenograft results are never combined.</p>
-    <p>r below 0.05 means that among all genes listed as replicated about 5 percent are expected to be false entries. It is a statement about the list, not a probability for one gene, and it does not say how large the effect is. The badge names the two cohorts that carry the result. <a href="#glossary-k-of-m">m</a> counts every cohort that tested the gene, including small ones that could not detect the effect, and the badge says how many of them have fewer than 20 donors.</p>
-
-    <h3 class="subsection-head" id="facet-effect-size">Effect size: the 10 percent filter and the second tier</h3>
-    <p>Separately from the r-value, a gene is marked "at least 10 percent in 2 cohorts" when at least two counted cohorts show a log2 fold change of at least 0.14 in the replicated direction (for Braak 0.046 per stage, a 10 percent change over three stages; for age 10 percent per decade). This <a href="#glossary-effect-filter">effect filter</a> acts on the estimates and is not part of the error control, so the list of genes that pass both conditions can contain somewhat more than 5 percent false entries. A second, stricter tier, "replicated with at least 10 percent change", repeats the partial conjunction on the treat p values (<a href="#glossary-treat">treat tier</a>). The cohort estimates and confidence intervals are in the forest.</p>
-
-    <h3 class="subsection-head" id="facet-not-replicated">Reading "no evidence of replication"</h3>
-    <p>"No evidence of replication" means the data at these donor numbers do not support a shared effect. It does not show that the effect is absent. "Tested in one cohort only" means replication could not be assessed. Cohorts with 9 controls (SEA-AD for pathologic AD) or 17 donors (Fancy2024) rarely contribute. <em>k of m</em> counts the cohorts that individually reach q below 0.05 in the replicated direction; it depends strongly on donor numbers (a 1,000-donor cohort almost always counts, a 17-donor cohort almost never does) and is descriptive.</p>
-
-    <h3 class="subsection-head" id="facet-cell-type-groups">Cell type groups and what counts</h3>
-    <p>Datasets name their cell types differently ("microglial cell", "Microglia", "MG", "Mic P2RY12"). For counting, every label is placed in a <a href="#glossary-cell-type-group">cell type group</a> (microglia, astrocyte, inhibitory neuron, and so on) from the table <code>lib/celltype_groups.yaml</code>; the raw label stays visible in small text next to the group. Mixed populations (myeloid, glia, immune, vascular) have their own groups and never count as evidence for a pure class, and labels without a group are "unmapped" and never count. Neuron groups are coarse and can combine brain regions, so read the raw labels before drawing a biological conclusion.</p>
-    <ul>
-      <li><strong>One anchor per cohort and cell type group.</strong> Each cohort contributes exactly one unit to a group, however many of its datasets were tested: a donor-pooled unit (<code>pool:&lt;id&gt;</code>, marked "pooled") for multi-region cohorts such as MADRC and SEA-AD, otherwise the dataset named as anchor in the DRAFT cohort selection table. Other units of the cohort stay on the card, folded, each with the reason it is not counted.</li>
-      <li><strong>What does not count.</strong> Descriptive-only and cell-level rows, reanalyses (datasets that re-serve cells of another dataset, marked "reanalysis, not counted"), cohorts whose role is a duplicate, supplement or alternative, datasets missing from the cohort table and unmapped labels. For disease, cohorts with a clinical or author diagnosis do not count either.</li>
-      <li><strong>One source per dataset.</strong> Within a dataset and group only the rows with the most direct cell type source count: per-cell <code>ant_cell_type</code> or a dataset constant first, then author cell type columns, then author clusters.</li>
-      <li><strong>Several strata in one group.</strong> When several equal strata of the anchor dataset fall into the same group, they share the cohort's single vote and their p values are multiplied by the number of strata (Bonferroni); the forest shows this as "&times;n" under q.</li>
-      <li><strong>Why Simes.</strong> Cohorts are not independent (shared pathology and cell-state shifts, sometimes shared persons). Fisher's method assumes independence and calls more genes replicated than the data justify.</li>
-      <li><strong>Donor overlap.</strong> Cohorts whose donor independence was never checked are still counted but flagged "donor overlap not checked", because shared donors make agreement look stronger than it is.</li>
-    </ul>
-    <p><strong>Replicated genes</strong> on a facet page are ranked by (1) the r-value, smallest first; (2) k; (3) <a href="#glossary-agreement">agreement</a>; (4) the median absolute log2 fold change over the tested cohorts. Which datasets are primary data and which are reanalyses is listed on the <a href="/donor-groups">donor groups</a> page and shown at the top of each dataset page.</p>
-
-    <h3 class="subsection-head" id="facet-pathology-axis">Pathologic AD and Braak are one axis</h3>
-    <p>In every pathology-based cohort, "AD" is defined from Braak stage and CERAD plaque score (AD is Braak III or higher with moderate or frequent plaques; control is Braak II or lower with no or sparse plaques; other donors are left out). A gene replicated under both Braak and pathologic AD is one observation read twice, not two findings. Some pathologic AD donors had no dementia, so this is not a clinical diagnosis (<a href="#glossary-disease-basis">disease basis</a>).</p>
-
-    <h3 class="subsection-head" id="facet-age">Age: two twins</h3>
-    <p>The age facet is a straight-line trend per decade of age at death, in donors of 60 years and older (younger donors are left out; a dataset can declare another floor). Age and AD pathology are correlated in every brain bank, so the age result is tested twice. <strong>Age, not adjusted for pathology</strong> re-detects part of the pathology signal. <strong>Age, adjusted for pathology</strong> adds Braak stage (else pathologic AD) to the model; what remains is age beyond pathology. A gene row of the unadjusted test says whether the association <em>persists after pathology adjustment</em>. In ROSMAP ages above 90 are recorded as 90, which flattens the oldest donors (<a href="#glossary-age-twins">glossary</a>).</p>
-
-    <h3 class="subsection-head" id="facet-sensitivity">Sensitivity analyses</h3>
-    <p>Two extra tests check whether a Braak or APOE result depends on how the facet was coded. <em>Braak stage III or higher against II or lower</em> replaces the straight-line trend by a two-group contrast; <em>APOE e4 dose</em> (0, 1 or 2 alleles) replaces carrier against non-carrier by a trend per allele. They are shown as tabs next to their parent facet, are counted separately, and are one observation read twice with it, not independent findings.</p>
-
-    <h3 class="subsection-head" id="facet-app-nlgf">App NL-G-F</h3>
-    <p>In xenograft datasets the facet contrasts App NL-G-F knock-in host mice with control hosts. The host animal is the replicate. The control is stated on every unit (<a href="#glossary-app-nlgf">control basis</a>): the humanised-App host (App hu/hu) isolates the three familial AD mutations, a wild-type host does not. Units are formed per grafted human line and per timepoint where these vary, because the amyloid response grows with age and differs between lines; a unit where genotype cannot be separated from line or timepoint is not tested. These tests detect large effects only (a handful of animals per genotype), and the cells were isolated live, which can itself induce dissociation-response genes (FOS, JUN, heat-shock genes, NFKBIA). Human microglia in mouse hosts and human post-mortem microglia are never combined. The genotype of the grafted cells is a different facet (<a href="#glossary-host-genotype">genotype and host genotype</a>).</p>
-
-    <h3 class="subsection-head" id="facet-anatomy-clusters">Tissue, genotype and author clusters</h3>
-    <ul>
-      <li><strong>Tissue</strong> is a coarse umbrella term (prefrontal cortex, temporal cortex, hippocampus, white matter and so on) so that datasets with different dissections can be compared. The most specific term of a dataset stays in the plain column <code>tissue_uberon</code>, which is shown as detail on the dataset's Facets tab and is not a facet (<a href="#glossary-tissue-umbrella">glossary</a>).</li>
-      <li><strong>Genotype and host genotype.</strong> <code>ant_genotype</code> is the genotype of the sequenced cells (the grafted line, or the donor); <code>ant_host_genotype</code> is the genotype of the mouse host. The tested App NL-G-F facet is derived from the host genotype.</li>
-      <li><strong>Author clusters</strong> are published per cell type (<code>ant_mg_author_cluster</code> for microglia, and the same for astrocytes, oligodendrocytes, OPCs, excitatory and inhibitory neurons and endothelial cells). They are dataset-scoped: a label such as <code>L26/FMG/cluster_Homeo</code> only has meaning inside one cell type of one dataset, so these facets are shown as a mapping table only, with no gene tests and no comparison across datasets (<a href="#glossary-author-cluster">glossary</a>).</li>
-    </ul>
-
-    <h3 class="subsection-head" id="facet-whole-cell-type">What a whole-cell-type effect can mean</h3>
-    <p>A pseudobulk within a cell type does not separate a change inside cells from a change in the mix of states within the cell type. In AD microglia the dominant published effect is a shift toward lipid-associated and MHC-II-high states, so a rise in GPNMB, APOE, SPP1 or PTPRG at the whole-microglia level is at least partly "more cells in that state". Both are real donor-level effects; neither on its own shows that a gene is induced within a cell.</p>
-
-    <h3 class="subsection-head" id="facet-technical-genes">Technical genes</h3>
-    <p>Mitochondrial transcripts, ribosomal proteins, long intron-rich genes and lncRNAs track nuclear RNA quality, post-mortem interval and ambient RNA in nuclei data, and are flagged on the gene row. A microglial gene changing in an astrocyte unit (for example INPP5D) is most likely ambient RNA or doublets, and the unit shows a foreign-marker flag when such genes move with the facet. Cytoplasmic transcripts such as cytokines are under-represented in nuclei, so a null for them is not informative.</p>
-
-    <h3 class="subsection-head" id="facet-limits">Limits</h3>
-    <p>All of this is exploratory. No hit means "not detected with this many donors", not "no effect". The same donors occur in several datasets (ROSMAP, SEA-AD, MADRC and others), which is why each cohort counts once through its anchor and why overlap that was never checked is flagged. Replication is a statement about which genes change in at least 2 cohorts; there is no pooled effect size across datasets.</p>
-    <p>The full method, thresholds and outputs are described in <a href="{{ _docs }}/DESIGN_facet_testing.md" target="_blank" rel="noopener" id="help-facet-design-doc">DESIGN_facet_testing.md</a>; the code is <code>bin/annot/ant-facet-test</code> and <code>bin/annot/ant-facet-test-modules</code> in the anthive4 repository. The results are also available through the API (<code>/api/databases/{id}/facet-tests</code>, <code>/api/facets/{name}/tests</code>) and the MCP tool <code>get_facet_tests</code>.</p>
+    {{ help_topic_html('facet-counting') }}
   </details>
 
   <details class="help-section" id="facet-howto"><summary><h2 class="section-head">How to read a facet result: PTPRG in microglia with Braak stage</h2></summary>
-    <p>A worked example of the logic. The numbers are from one saved run and shown per dataset; the live card pools some cohorts, so its exact values differ.</p>
-    <ol>
-      <li><strong>Open the gene page for PTPRG and the Braak tab.</strong> The facet is a trend: the effect is the log2 fold change per Braak stage in microglia pseudobulks, adjusted for sex, and for age and post-mortem interval where the cohort had at least 15 donors with those values.</li>
-      <li><strong>Look at the anchors table first.</strong> One row per cohort. ROSMAP: 413 donors, +0.58 per stage, q 1.1e-16 after the correction for three sibling strata. SEA-AD: 84 donors, +0.48 per stage, q 0.0013. MADRC: about 30 donors, +0.33 to +0.55 in five regions, pooled into one estimate. Lee2026 (PsychAD without its ROSMAP participants): 1,122 donors, +0.43 per stage, q 3e-85. Fancy2024: 17 donors, +0.53 per stage, q 0.12. All five estimates have the same sign; the confidence intervals of the three small cohorts are wide.</li>
-      <li><strong>See how the r-value arises.</strong> The smallest p value (Lee2026) is set aside, because it must not carry the result alone. The remaining four are combined by Simes: the smallest of them (ROSMAP) is multiplied by 4 for the four values, then by 2 for the two directions. Benjamini-Hochberg over the roughly 15,000 microglia genes tested in at least two cohorts leaves r far below 0.05, so the badge reads "replicated (up)" and names ROSMAP and Lee2026 as the two cohorts that carry it. Without ROSMAP the second-best p value would have been SEA-AD's (about 1e-4), and the gene would most likely not have passed. That is what the badge should make visible: this replication rests on two large cohorts plus consistent direction in three small ones.</li>
-      <li><strong>Read k of m and agreement.</strong> k is 3 or 4 of 5 depending on the MADRC pool; agreement is 5 of 5. Fancy2024 is in m although it could not reach significance; it only dilutes the r-value slightly and adds a consistent sign.</li>
-      <li><strong>Check the effect filter.</strong> The per-stage threshold is 0.046 and every cohort is far above it; the median over the anchors is about +0.48 per stage. Over six stages that is a log2 change near 2.9, a seven-fold difference between Braak 0 and VI, which is large for a pseudobulk.</li>
-      <li><strong>Ask what it means biologically before quoting it.</strong> Green et al. 2024 (Nature 633:634) name the lipid-associated, tau-coupled ROSMAP microglial subpopulation "Mic.13 (PTPRG)", and Wachter et al. 2024 (Acta Neuropathol 147:65, the MADRC dataset here, so not independent) list PTPRG among the top regulated genes of pathology-associated clusters. The published effect is a change in the proportion of a state. A seven-fold whole-microglia change is therefore mostly "more Mic.13-like nuclei at high Braak", not "every microglial cell makes seven times more PTPRG". The composition flag tests the size of the microglia fraction, not this. PTPRG is also a 730 kb gene, and long intron-rich genes track nuclear RNA integrity and post-mortem interval, so check that units with and without that adjustment agree. Finally, the disease tab shows PTPRG up with pathologic AD in the same cohorts; that is the same axis, not a second finding.</li>
-      <li><strong>What you may say.</strong> "PTPRG expression in microglia pseudobulks rises with Braak stage in ROSMAP and PsychAD, with the same direction in SEA-AD, MADRC and Fancy2024 (partial conjunction r below 0.05, median about 0.48 log2 per stage), consistent with the expansion of the PTPRG-marked lipid-associated state reported by Green et al. 2024." <strong>What you may not say:</strong> "PTPRG is induced in microglia by tau pathology", "replicated in five independent cohorts", or anything about causation.</li>
-    </ol>
+    {{ help_topic_html('facet-howto') }}
   </details>
 
   <details class="help-section" id="glossary"><summary><h2 class="section-head">Glossary</h2></summary>
     <p>Short definitions of the terms used on the facet, gene and gene set pages. The info balloons on those pages link here.</p>
     <dl class="glossary">
-      <dt id="glossary-facet">Facet</dt>
-      <dd>A donor-level or animal-level variable that anthive has standardised across datasets, such as sex, pathologic AD, Braak stage, APOE e4 carrier status, age or App NL-G-F genotype. Every dataset declares how its own column maps onto the facet. A facet is constant for all cells of one donor, so a facet effect is a difference between donors, not between cells.</dd>
-      <dt id="glossary-replicate-unit">Replicate unit</dt>
-      <dd>The thing that counts as one independent observation in a test: the donor for human cohorts, the host animal for mouse and xenograft studies, the sample for some in vitro data. Cells are never replicates, because thousands of cells from one donor tell you about that donor, not about donors in general.</dd>
-      <dt id="glossary-pseudobulk">Pseudobulk</dt>
-      <dd>All cells of one replicate within one cell type are added up into a single expression profile, as if that donor's microglia had been sequenced in bulk. The test then compares these per-donor profiles. Summing removes cell-to-cell noise and makes the donor the unit of the test.</dd>
-      <dt id="glossary-analysis-level">Analysis level</dt>
-      <dd>Whether a unit was tested on one profile per replicate ("replicate level") or can only be described per cell ("cell-level, descriptive only"). Replicate level needs a replicate column and at least 3 replicates in every group.</dd>
-      <dt id="glossary-descriptive-only">Descriptive only</dt>
-      <dd>A unit that cannot be tested: no replicate column, or fewer than 3 replicates in a group. The numbers describe cells, and no p or q value is given, because treating cells as replicates would make a difference between two donors look highly significant. A unit that was fitted but has fewer replicates than the <a href="#glossary-p-value-floor">p-value floor</a> is labelled "descriptive: below the p-value floor" instead.</dd>
-      <dt id="glossary-limma-voom">limma-voom</dt>
-      <dd>A standard method for testing expression differences in count data with few samples. "voom" converts counts to a log scale and estimates how precise each measurement is; limma then fits a linear model per gene with the facet and covariates. It is the usual choice for pseudobulk single-cell data.</dd>
-      <dt id="glossary-moderated-test">Moderated test (eBayes)</dt>
-      <dd>With a handful of donors, the variance estimated for one gene is unreliable. limma borrows information across all genes to stabilise it, which makes it less likely that a gene looks significant only because its variance happened to be estimated too low. With "robust" moderation, genes with unusually high or low variance are not shrunk too far.</dd>
-      <dt id="glossary-covariates">Covariates (sex, age, PMI, batch)</dt>
-      <dd>Other donor-level variables included in the model so that their effect is not mistaken for the facet effect. They enter only when known for enough donors, and each unit says which were included or left out. A unit without age adjustment can carry age-related genes into a disease or Braak result.</dd>
-      <dt id="glossary-log2-fold-change">log2 fold change</dt>
-      <dd>The size of an effect on a log scale with base 2. A value of 1 means two-fold, 0.14 means about 10 percent, and the sign gives the direction (positive is higher in the first-named group, or increasing per Braak stage or per decade).</dd>
-      <dt id="glossary-fdr">FDR and q value</dt>
-      <dd>The p value is the probability of seeing an effect at least this large if there were none. The q value is the Benjamini-Hochberg adjustment for the thousands of genes tested in one unit: if you take all genes with q below 0.05, about 5 percent of them are expected to be false. A q value is a property of the list, not a probability for the gene.</dd>
-      <dt id="glossary-treat">treat (minimum-effect test)</dt>
-      <dd>A variant of the limma test that asks whether the change is larger than a chosen minimum, here a 10 percent change, instead of larger than zero. A gene with a tiny but very precisely measured change has a small ordinary p value and a large treat p value.</dd>
-      <dt id="glossary-cohort">Cohort</dt>
-      <dd>A set of donors from one brain bank or study. Several datasets can come from one cohort (ROSMAP has four datasets here; SEA-AD has one file per cell class and region), and they share persons, so a cohort counts once in replication. A reanalysis of cells another dataset serves is shown but never counted.</dd>
-      <dt id="glossary-anchor-unit">Anchor unit</dt>
-      <dd>The single dataset and cell type unit that represents a cohort in the replication count for one cell type group. For multi-region cohorts it is a pooled unit (one pseudobulk per donor over the regions). All other units of that cohort are shown but do not count.</dd>
-      <dt id="glossary-pooled-unit">Pooled unit</dt>
-      <dd>A per-donor pseudobulk made by adding a donor's cells over several files of the same cohort (for example SEA-AD MTG plus PFC). It gives the cohort one vote and ignores region differences.</dd>
-      <dt id="glossary-cell-type-group">Cell type group</dt>
-      <dd>Datasets label cell types differently. Each label is placed in a group (microglia, astrocyte, ...) so that replication is counted within comparable cells. Mixed groups (myeloid, glia, immune) never count as evidence for a pure cell type.</dd>
-      <dt id="glossary-scope">Scope</dt>
-      <dd>The kind of system a dataset comes from: human post-mortem (cells from human brain tissue; the replicate is the donor) or human cells in mouse hosts, a xenograft (the replicate is the host animal). Facets are tested, counted and replicated within one scope, so a xenograft result never supports a human post-mortem one, and genes are never merged across scopes. In vitro cultures are listed but not tested; pure mouse datasets are outside the facet analysis.</dd>
-      <dt id="glossary-partial-conjunction">Partial conjunction test</dt>
-      <dd>A test of the statement "this gene changes in the same direction in at least 2 of the m cohorts". It is built so that one very large cohort cannot carry the result alone: the single smallest p value is set aside and the rest are combined with Simes' method, which is valid for positively correlated cohorts (shared pathology, protocols, sometimes brain banks). Only when the second-best cohort is also convincing does the gene pass.</dd>
-      <dt id="glossary-r-value">r-value and "replicated"</dt>
-      <dd>The false discovery rate for the statement "replicated in at least 2 cohorts, same direction", adjusted over all genes of one facet and cell type group. Genes with r below 0.05 form a list in which about 5 percent are expected to be false entries. An r-value is not the probability that this particular gene is real, and it says nothing about the size of the effect.</dd>
-      <dt id="glossary-k-of-m">k of m</dt>
-      <dd>m is the number of cohorts that tested the gene, including small ones that could not detect the effect; k is how many of them individually reached q below 0.05 in the replicated direction. It is descriptive, and k depends strongly on donor numbers.</dd>
-      <dt id="glossary-agreement">Agreement</dt>
-      <dd>The fraction of the m cohorts whose estimate has the replicated sign, significant or not. Descriptive.</dd>
-      <dt id="glossary-effect-filter">Effect filter (at least 10 percent in 2 cohorts)</dt>
-      <dd>A filter on the estimates: at least two counted cohorts show a change of at least 10 percent (log2 fold change at least 0.14; for Braak 0.046 per stage, which is 10 percent over three stages; for age 10 percent per decade) in the replicated direction. It is shown separately from "replicated" and is not part of the error control, so a list passing both conditions can contain somewhat more than 5 percent false entries.</dd>
-      <dt id="glossary-treat-tier">Treat tier (replicated with at least 10 percent change)</dt>
-      <dd>A second, stricter tier: the partial conjunction test repeated on the treat p values, which ask whether the change exceeds 10 percent rather than zero. Genes in this tier are replicated and large enough to matter at an FDR of 5 percent for that statement.</dd>
-      <dt id="glossary-composition">Composition caveat</dt>
-      <dd>The flag means that the fraction of a donor's cells that fall in this cell type changes with the facet. Separately, and not flagged, the mix of states within the cell type (for example more lipid-associated microglia in AD) changes the pseudobulk even if no gene changes within any cell. A whole-cell-type effect can be either.</dd>
-      <dt id="glossary-disease-basis">Disease basis and pathologic AD</dt>
-      <dd>How AD versus control was defined in a dataset: from Braak and CERAD neuropathology (the common definition here), from the NIA-Reagan or ADNC schemes, or from a clinical or author diagnosis. Only pathology-based definitions are combined. "AD" on these pages means pathologic AD; some such donors had no dementia.</dd>
-      <dt id="glossary-donor-overlap">Donor overlap not checked</dt>
-      <dd>Nobody has verified whether this cohort shares persons with another counted cohort. Shared persons make cohorts agree for the wrong reason.</dd>
-      <dt id="glossary-lambda">Lambda (inflation factor)</dt>
-      <dd>The median test statistic of a unit divided by its expected value under no effect. Around 1 means the unit is well calibrated; values above about 1.3 mean many genes shift together, which usually points to a batch, chemistry or composition difference rather than to biology.</dd>
-      <dt id="glossary-p-value-floor">p-value floor</dt>
-      <dd>The number of replicates a unit needs before it reports p, q and confidence intervals: 5 donors per group (10 for a trend such as Braak or age) in human cohorts, 3 animals per group (6 for a trend) in xenograft hosts. Between the fit minimum (3 per group) and the floor the unit is fitted but shown as "descriptive: below the p-value floor": an estimate without p, q or interval, not counted towards replication.</dd>
-      <dt id="glossary-small-cohorts">Small cohorts and "m includes n cohorts below 20 donors"</dt>
-      <dd>Every cohort that tested a gene counts in m, however small, so a very small cohort cannot make a result look better than it is but also cannot detect much. The badge says how many of the m cohorts have fewer than 20 donors, because the result then rests on fewer, larger cohorts than m suggests. A unit with fewer than 5 replicates per group is flagged "small sample".</dd>
-      <dt id="glossary-age-twins">Age: not adjusted and adjusted for pathology</dt>
-      <dd>Age is tested twice: once on its own (which partly re-detects AD pathology, since older donors have more of it) and once with Braak stage, else pathologic AD, in the model. A gene "persists after pathology adjustment" when its age association is still present in the adjusted test. Age is per decade, from 60 years; ROSMAP ages above 90 are recorded as 90.</dd>
-      <dt id="glossary-app-nlgf">App NL-G-F and control basis</dt>
-      <dd>The App NL-G-F knock-in is a mouse model of amyloid pathology. In xenograft studies the host mouse can carry it, and the facet compares those hosts with control hosts. The control basis says what the controls are: the humanised-App host (App hu/hu) carries the human Abeta sequence without the three familial AD mutations, which isolates the mutations; a wild-type host differs in the Abeta sequence as well. The replicate is the animal, strata are formed per grafted line and timepoint, and the test detects large effects only.</dd>
-      <dt id="glossary-host-genotype">Genotype and host genotype</dt>
-      <dd>Two different facets in a xenograft: <code>ant_genotype</code> is the genotype of the sequenced human cells (the grafted line, for example APOE e4/e4 or TREM2 R47H); <code>ant_host_genotype</code> is the genotype of the mouse they grew in (for example App NL-G-F). The tested App NL-G-F facet is derived from the host genotype.</dd>
-      <dt id="glossary-author-cluster">Author cluster (per cell type)</dt>
-      <dd>The authors' own clusters or states inside one cell type of one dataset, kept as published and written dataset/cluster_label. A cluster label is only comparable inside its dataset and cell type, so these facets are a mapping table only: no gene tests, no comparison across datasets.</dd>
-      <dt id="glossary-tissue-umbrella">Tissue umbrella term</dt>
-      <dd>The coarse brain region of a dataset (prefrontal cortex, temporal cortex, hippocampus, white matter, ...) from a fixed table, so that different dissections of the same region fall in one group. The most specific term stays in the plain column tissue_uberon, which is detail and not a facet.</dd>
-      <dt id="glossary-facet-exclusion">Left out of the facet analysis</dt>
-      <dd>Datasets that cannot be analysed by donor and cell type: spatial data, proteomics, metacell sets, pure mouse datasets and sets the curators set aside. They keep their columns for browsing and plotting but have no facet tests and no replication.</dd>
-      <dt id="glossary-gene-class-flags">Gene class flags (MT, ribosomal, lncRNA / clone, sex chromosome, long gene, APOE locus)</dt>
-      <dd>Small labels on a gene for classes that are over-represented among facet hits for technical or locus reasons: mitochondrial genes and ribosomal proteins track cell quality, lncRNAs and clone-named transcripts are poorly annotated, sex-chromosome genes follow sex composition, genes over 500 kb are intron-rich and track nuclear RNA quality and post-mortem interval, and genes near APOE can show allele-linked differences that need not be biology. The flag is a reason to read the result with care, not a verdict.</dd>
-      <dt id="glossary-sex-check">Sex check</dt>
-      <dd>The recorded sex of each donor is checked against XIST and Y-linked expression. "n of m sex labels disagree" means the expression contradicts the label for those donors, so the label or the donor assignment may be wrong.</dd>
-      <dt id="glossary-per-cell-association">Per-cell association (descriptive)</dt>
-      <dd>Statistics such as omega squared or Spearman computed over cells rather than donors. Because all cells of a donor share the donor's facet value, these numbers mostly measure how different donors are from each other. They are not tests.</dd>
+      {{ help_glossary_html() }}
     </dl>
   </details>
 
   <details class="help-section" id="papers"><summary><h2 class="section-head">The paper library</h2></summary>
-    <ul>
-      <li><strong><a href="/library">Library page</a>:</strong> every paper, searchable and filterable by year, cohort, cell type and role.</li>
-      <li><strong>Paper page:</strong> the full record (authors, journal, DOI, PubMed, abstract), a short summary, topics (cell types, tissues, diseases, methods, cohorts), the datasets it is linked to, related papers, the PDF and a BibTeX entry.</li>
-      <li><strong>Who sees the library.</strong> Everyone who can sign in to this site sees every paper and document in it; there are no per-paper restrictions. Text from the library, including passages from papers, may be sent to AI assistants and their providers (see <a href="#ai-practice">privacy</a>).</li>
-      <li><strong>Roles.</strong> Every paper has a role: <em>source</em> (the data in anthive come from this paper), <em>reanalysis</em> (it reanalyses data that are in anthive), <em>method</em> (a method used on anthive data), <em>related</em> (related to a dataset, not its source) or <em>background</em> (of interest to the lab, not linked to any dataset). Background is the default when no role is given.</li>
-      <li><strong>Document types.</strong> Besides journal articles and preprints the library can hold books and chapters, conference papers, theses (PhD or master), reports such as project or grant proposals, technical reports and protocols, and manuscripts in preparation. Project proposals are kept in their own folder.</li>
-      <li><strong>Why a paper is linked.</strong> Datasets point to papers with a role: <em>source</em> (the data come from this paper), <em>reanalysis</em>, <em>method</em> (a protocol or tool used) or <em>related</em> (for example a preprint of the same study). Related papers are also found automatically, and the page says why: same cohort, another version of the same study, shared authors, same cell type, tissue, disease or method, or one cites the other.</li>
-      <li><strong>Drafts.</strong> Summaries and topics marked <em>draft, not yet reviewed</em> were written by a language model from the abstract and methods and still await a curator. Treat them as hints; the PDF and the record are authoritative.</li>
-      <li><strong>Search inside papers.</strong> The full text is indexed by section and page; AI assistants can search it and cite the page (see <a href="#mcp-offers">MCP</a>).</li>
-      <li><strong>Adding papers.</strong> Admins can add papers; see <a href="{{ _docs }}/LIBRARY.md" target="_blank" rel="noopener">the library documentation</a>. If you would like a paper added, ask an admin.</li>
-    </ul>
+    {{ help_topic_html('papers') }}
   </details>
 
   <details class="help-section" id="ai"><summary><h2 class="section-head">Working with AI assistants</h2></summary>
@@ -470,6 +243,7 @@
       <tr><td><code>search_datasets</code></td><td>Search and filter the datasets.</td></tr>
       <tr><td><code>get_dataset_info</code></td><td>Details of one dataset: layers, embeddings, annotation columns.</td></tr>
       <tr><td><code>get_dataset_context</code></td><td>Background before analysing a dataset: metadata, caveats, exact column names, module scores and the source paper's methods.</td></tr>
+      <tr><td><code>explain</code></td><td>The maintainers' plain-language text for a topic or glossary term (facets, replication, scopes, caveats, ...). Assistants are told to call it before explaining these things to you. The same texts are on this page and at <code>/api/help</code>.</td></tr>
       <tr><td><code>search_genes</code></td><td>Find gene names in a dataset (names are case-sensitive).</td></tr>
       <tr><td><code>plot</code></td><td>Make a plot and return it, with its link.</td></tr>
       <tr><td><code>analytics_schema</code></td><td>Show the tables and columns available for queries.</td></tr>

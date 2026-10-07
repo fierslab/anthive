@@ -1,0 +1,15 @@
+id: facet-scopes
+title: 'Scopes: human post-mortem and xenograft'
+summary: A facet scope is the kind of system a dataset comes from (human post-mortem, xenograft of human cells in mouse, in vitro); facets are tested, counted and replicated within one scope and results are never merged across scopes.
+related:
+- facet-counting
+- facet-app-nlgf
+terms:
+- scope
+aliases:
+- scope
+- facet scope
+- human_postmortem
+- xenograft_human_in_mouse
+body_html: |
+  <p>Every facet result belongs to one <a href="#glossary-scope">scope</a>. <strong>Human post-mortem</strong> covers cells from human brain tissue (post-mortem or biopsy), where the replicate is the donor. <strong>Human cells in mouse hosts (xenograft)</strong> covers human cells grafted into mouse brain, where the replicate is the host animal and the gene is the human gene in a mouse environment. The scopes are tested, counted and replicated separately and never mixed. Facet pages have a scope selector, the gene page has one above its facet tabs, and every result block carries its scope label. In vitro cultures are listed but not tested; pure mouse datasets are not part of the facet analysis at all.</p>

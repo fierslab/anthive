@@ -21,6 +21,7 @@ import requests
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from markupsafe import Markup
 from pathlib import Path
 
 # lib/ is one level up from web/
@@ -28,6 +29,7 @@ _lib_dir = Path(__file__).parent.parent / 'lib'
 if str(_lib_dir) not in sys.path:
     sys.path.insert(0, str(_lib_dir))
 from facet_aliases import canonical_facet  # noqa: E402
+import help_content  # noqa: E402
 
 from canonical_columns import is_canonical_column, strip_ant_prefix  # noqa: E402
 
@@ -74,6 +76,20 @@ def _docs_base_url() -> str:
 
 
 templates.env.globals['docs_base_url'] = _docs_base_url
+
+
+def _help_topic_html(topic_id: str) -> Markup:
+    """Body of a help topic (and its child subsections) for the help page."""
+    return Markup(help_content.topic_html(topic_id, _docs_base_url()))
+
+
+def _help_glossary_html() -> Markup:
+    """The glossary entries of ``lib/help_content`` as ``<dt>/<dd>`` pairs."""
+    return Markup(help_content.glossary_html(_docs_base_url()))
+
+
+templates.env.globals['help_topic_html'] = _help_topic_html
+templates.env.globals['help_glossary_html'] = _help_glossary_html
 
 
 # ── Stack version for the top-bar badge ──────────────────────────────────────

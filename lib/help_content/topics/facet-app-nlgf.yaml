@@ -1,0 +1,12 @@
+id: facet-app-nlgf
+title: App NL-G-F
+summary: App NL-G-F is a knock-in mouse genotype facet, tested only in mouse and xenograft host scopes, with the host animal as replicate.
+terms:
+- app-nlgf
+- host-genotype
+aliases:
+- app nl-g-f
+- nlgf
+- app knock-in
+body_html: |
+  <p>In xenograft datasets the facet contrasts App NL-G-F knock-in host mice with control hosts. The host animal is the replicate. The control is stated on every unit (<a href="#glossary-app-nlgf">control basis</a>): the humanised-App host (App hu/hu) isolates the three familial AD mutations, a wild-type host does not. Units are formed per grafted human line and per timepoint where these vary, because the amyloid response grows with age and differs between lines; a unit where genotype cannot be separated from line or timepoint is not tested. These tests detect large effects only (a handful of animals per genotype), and the cells were isolated live, which can itself induce dissociation-response genes (FOS, JUN, heat-shock genes, NFKBIA). Human microglia in mouse hosts and human post-mortem microglia are never combined. The genotype of the grafted cells is a different facet (<a href="#glossary-host-genotype">genotype and host genotype</a>).</p>

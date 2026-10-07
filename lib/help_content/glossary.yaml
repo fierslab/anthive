@@ -1,0 +1,149 @@
+terms:
+- slug: facet
+  term: Facet
+  definition_html: |
+    A donor-level or animal-level variable that anthive has standardised across datasets, such as sex, pathologic AD, Braak stage, APOE e4 carrier status, age or App NL-G-F genotype. Every dataset declares how its own column maps onto the facet. A facet is constant for all cells of one donor, so a facet effect is a difference between donors, not between cells.
+- slug: replicate-unit
+  term: Replicate unit
+  definition_html: |
+    The thing that counts as one independent observation in a test: the donor for human cohorts, the host animal for mouse and xenograft studies, the sample for some in vitro data. Cells are never replicates, because thousands of cells from one donor tell you about that donor, not about donors in general.
+- slug: pseudobulk
+  term: Pseudobulk
+  definition_html: |
+    All cells of one replicate within one cell type are added up into a single expression profile, as if that donor's microglia had been sequenced in bulk. The test then compares these per-donor profiles. Summing removes cell-to-cell noise and makes the donor the unit of the test.
+- slug: analysis-level
+  term: Analysis level
+  definition_html: |
+    Whether a unit was tested on one profile per replicate ("replicate level") or can only be described per cell ("cell-level, descriptive only"). Replicate level needs a replicate column and at least 3 replicates in every group.
+- slug: descriptive-only
+  term: Descriptive only
+  definition_html: |
+    A unit that cannot be tested: no replicate column, or fewer than 3 replicates in a group. The numbers describe cells, and no p or q value is given, because treating cells as replicates would make a difference between two donors look highly significant. A unit that was fitted but has fewer replicates than the <a href="#glossary-p-value-floor">p-value floor</a> is labelled "descriptive: below the p-value floor" instead.
+- slug: limma-voom
+  term: limma-voom
+  definition_html: |
+    A standard method for testing expression differences in count data with few samples. "voom" converts counts to a log scale and estimates how precise each measurement is; limma then fits a linear model per gene with the facet and covariates. It is the usual choice for pseudobulk single-cell data.
+- slug: moderated-test
+  term: Moderated test (eBayes)
+  definition_html: |
+    With a handful of donors, the variance estimated for one gene is unreliable. limma borrows information across all genes to stabilise it, which makes it less likely that a gene looks significant only because its variance happened to be estimated too low. With "robust" moderation, genes with unusually high or low variance are not shrunk too far.
+- slug: covariates
+  term: Covariates (sex, age, PMI, batch)
+  definition_html: |
+    Other donor-level variables included in the model so that their effect is not mistaken for the facet effect. They enter only when known for enough donors, and each unit says which were included or left out. A unit without age adjustment can carry age-related genes into a disease or Braak result.
+- slug: log2-fold-change
+  term: log2 fold change
+  definition_html: |
+    The size of an effect on a log scale with base 2. A value of 1 means two-fold, 0.14 means about 10 percent, and the sign gives the direction (positive is higher in the first-named group, or increasing per Braak stage or per decade).
+- slug: fdr
+  term: FDR and q value
+  definition_html: |
+    The p value is the probability of seeing an effect at least this large if there were none. The q value is the Benjamini-Hochberg adjustment for the thousands of genes tested in one unit: if you take all genes with q below 0.05, about 5 percent of them are expected to be false. A q value is a property of the list, not a probability for the gene.
+- slug: treat
+  term: treat (minimum-effect test)
+  definition_html: |
+    A variant of the limma test that asks whether the change is larger than a chosen minimum, here a 10 percent change, instead of larger than zero. A gene with a tiny but very precisely measured change has a small ordinary p value and a large treat p value.
+- slug: cohort
+  term: Cohort
+  definition_html: |
+    A set of donors from one brain bank or study. Several datasets can come from one cohort (ROSMAP has four datasets here; SEA-AD has one file per cell class and region), and they share persons, so a cohort counts once in replication. A reanalysis of cells another dataset serves is shown but never counted.
+- slug: anchor-unit
+  term: Anchor unit
+  definition_html: |
+    The single dataset and cell type unit that represents a cohort in the replication count for one cell type group. For multi-region cohorts it is a pooled unit (one pseudobulk per donor over the regions). All other units of that cohort are shown but do not count.
+- slug: pooled-unit
+  term: Pooled unit
+  definition_html: |
+    A per-donor pseudobulk made by adding a donor's cells over several files of the same cohort (for example SEA-AD MTG plus PFC). It gives the cohort one vote and ignores region differences.
+- slug: cell-type-group
+  term: Cell type group
+  definition_html: |
+    Datasets label cell types differently. Each label is placed in a group (microglia, astrocyte, ...) so that replication is counted within comparable cells. Mixed groups (myeloid, glia, immune) never count as evidence for a pure cell type.
+- slug: scope
+  term: Scope
+  definition_html: |
+    The kind of system a dataset comes from: human post-mortem (cells from human brain tissue; the replicate is the donor) or human cells in mouse hosts, a xenograft (the replicate is the host animal). Facets are tested, counted and replicated within one scope, so a xenograft result never supports a human post-mortem one, and genes are never merged across scopes. In vitro cultures are listed but not tested; pure mouse datasets are outside the facet analysis.
+- slug: partial-conjunction
+  term: Partial conjunction test
+  definition_html: |
+    A test of the statement "this gene changes in the same direction in at least 2 of the m cohorts". It is built so that one very large cohort cannot carry the result alone: the single smallest p value is set aside and the rest are combined with Simes' method, which is valid for positively correlated cohorts (shared pathology, protocols, sometimes brain banks). Only when the second-best cohort is also convincing does the gene pass.
+- slug: r-value
+  term: r-value and "replicated"
+  definition_html: |
+    The false discovery rate for the statement "replicated in at least 2 cohorts, same direction", adjusted over all genes of one facet and cell type group. Genes with r below 0.05 form a list in which about 5 percent are expected to be false entries. An r-value is not the probability that this particular gene is real, and it says nothing about the size of the effect.
+- slug: k-of-m
+  term: k of m
+  definition_html: |
+    m is the number of cohorts that tested the gene, including small ones that could not detect the effect; k is how many of them individually reached q below 0.05 in the replicated direction. It is descriptive, and k depends strongly on donor numbers.
+- slug: agreement
+  term: Agreement
+  definition_html: |
+    The fraction of the m cohorts whose estimate has the replicated sign, significant or not. Descriptive.
+- slug: effect-filter
+  term: Effect filter (at least 10 percent in 2 cohorts)
+  definition_html: |
+    A filter on the estimates: at least two counted cohorts show a change of at least 10 percent (log2 fold change at least 0.14; for Braak 0.046 per stage, which is 10 percent over three stages; for age 10 percent per decade) in the replicated direction. It is shown separately from "replicated" and is not part of the error control, so a list passing both conditions can contain somewhat more than 5 percent false entries.
+- slug: treat-tier
+  term: Treat tier (replicated with at least 10 percent change)
+  definition_html: |
+    A second, stricter tier: the partial conjunction test repeated on the treat p values, which ask whether the change exceeds 10 percent rather than zero. Genes in this tier are replicated and large enough to matter at an FDR of 5 percent for that statement.
+- slug: composition
+  term: Composition caveat
+  definition_html: |
+    The flag means that the fraction of a donor's cells that fall in this cell type changes with the facet. Separately, and not flagged, the mix of states within the cell type (for example more lipid-associated microglia in AD) changes the pseudobulk even if no gene changes within any cell. A whole-cell-type effect can be either.
+- slug: disease-basis
+  term: Disease basis and pathologic AD
+  definition_html: |
+    How AD versus control was defined in a dataset: from Braak and CERAD neuropathology (the common definition here), from the NIA-Reagan or ADNC schemes, or from a clinical or author diagnosis. Only pathology-based definitions are combined. "AD" on these pages means pathologic AD; some such donors had no dementia.
+- slug: donor-overlap
+  term: Donor overlap not checked
+  definition_html: |
+    Nobody has verified whether this cohort shares persons with another counted cohort. Shared persons make cohorts agree for the wrong reason.
+- slug: lambda
+  term: Lambda (inflation factor)
+  definition_html: |
+    The median test statistic of a unit divided by its expected value under no effect. Around 1 means the unit is well calibrated; values above about 1.3 mean many genes shift together, which usually points to a batch, chemistry or composition difference rather than to biology.
+- slug: p-value-floor
+  term: p-value floor
+  definition_html: |
+    The number of replicates a unit needs before it reports p, q and confidence intervals: 5 donors per group (10 for a trend such as Braak or age) in human cohorts, 3 animals per group (6 for a trend) in xenograft hosts. Between the fit minimum (3 per group) and the floor the unit is fitted but shown as "descriptive: below the p-value floor": an estimate without p, q or interval, not counted towards replication.
+- slug: small-cohorts
+  term: Small cohorts and "m includes n cohorts below 20 donors"
+  definition_html: |
+    Every cohort that tested a gene counts in m, however small, so a very small cohort cannot make a result look better than it is but also cannot detect much. The badge says how many of the m cohorts have fewer than 20 donors, because the result then rests on fewer, larger cohorts than m suggests. A unit with fewer than 5 replicates per group is flagged "small sample".
+- slug: age-twins
+  term: 'Age: not adjusted and adjusted for pathology'
+  definition_html: |
+    Age is tested twice: once on its own (which partly re-detects AD pathology, since older donors have more of it) and once with Braak stage, else pathologic AD, in the model. A gene "persists after pathology adjustment" when its age association is still present in the adjusted test. Age is per decade, from 60 years; ROSMAP ages above 90 are recorded as 90.
+- slug: app-nlgf
+  term: App NL-G-F and control basis
+  definition_html: |
+    The App NL-G-F knock-in is a mouse model of amyloid pathology. In xenograft studies the host mouse can carry it, and the facet compares those hosts with control hosts. The control basis says what the controls are: the humanised-App host (App hu/hu) carries the human Abeta sequence without the three familial AD mutations, which isolates the mutations; a wild-type host differs in the Abeta sequence as well. The replicate is the animal, strata are formed per grafted line and timepoint, and the test detects large effects only.
+- slug: host-genotype
+  term: Genotype and host genotype
+  definition_html: |
+    Two different facets in a xenograft: <code>ant_genotype</code> is the genotype of the sequenced human cells (the grafted line, for example APOE e4/e4 or TREM2 R47H); <code>ant_host_genotype</code> is the genotype of the mouse they grew in (for example App NL-G-F). The tested App NL-G-F facet is derived from the host genotype.
+- slug: author-cluster
+  term: Author cluster (per cell type)
+  definition_html: |
+    The authors' own clusters or states inside one cell type of one dataset, kept as published and written dataset/cluster_label. A cluster label is only comparable inside its dataset and cell type, so these facets are a mapping table only: no gene tests, no comparison across datasets.
+- slug: tissue-umbrella
+  term: Tissue umbrella term
+  definition_html: |
+    The coarse brain region of a dataset (prefrontal cortex, temporal cortex, hippocampus, white matter, ...) from a fixed table, so that different dissections of the same region fall in one group. The most specific term stays in the plain column tissue_uberon, which is detail and not a facet.
+- slug: facet-exclusion
+  term: Left out of the facet analysis
+  definition_html: |
+    Datasets that cannot be analysed by donor and cell type: spatial data, proteomics, metacell sets, pure mouse datasets and sets the curators set aside. They keep their columns for browsing and plotting but have no facet tests and no replication.
+- slug: gene-class-flags
+  term: Gene class flags (MT, ribosomal, lncRNA / clone, sex chromosome, long gene, APOE locus)
+  definition_html: |
+    Small labels on a gene for classes that are over-represented among facet hits for technical or locus reasons: mitochondrial genes and ribosomal proteins track cell quality, lncRNAs and clone-named transcripts are poorly annotated, sex-chromosome genes follow sex composition, genes over 500 kb are intron-rich and track nuclear RNA quality and post-mortem interval, and genes near APOE can show allele-linked differences that need not be biology. The flag is a reason to read the result with care, not a verdict.
+- slug: sex-check
+  term: Sex check
+  definition_html: |
+    The recorded sex of each donor is checked against XIST and Y-linked expression. "n of m sex labels disagree" means the expression contradicts the label for those donors, so the label or the donor assignment may be wrong.
+- slug: per-cell-association
+  term: Per-cell association (descriptive)
+  definition_html: |
+    Statistics such as omega squared or Spearman computed over cells rather than donors. Because all cells of a donor share the donor's facet value, these numbers mostly measure how different donors are from each other. They are not tests.

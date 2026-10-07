@@ -1,0 +1,13 @@
+id: facet-effect-size
+title: 'Effect size: the 10 percent filter and the second tier'
+summary: Replicated genes must also change by at least 10 percent in at least 2 cohorts (the effect gate); the treat tier adds a minimum-effect test.
+terms:
+- effect-filter
+- treat
+aliases:
+- effect filter
+- 10 percent filter
+- treat tier
+- effect gate
+body_html: |
+  <p>Separately from the r-value, a gene is marked "at least 10 percent in 2 cohorts" when at least two counted cohorts show a log2 fold change of at least 0.14 in the replicated direction (for Braak 0.046 per stage, a 10 percent change over three stages; for age 10 percent per decade). This <a href="#glossary-effect-filter">effect filter</a> acts on the estimates and is not part of the error control, so the list of genes that pass both conditions can contain somewhat more than 5 percent false entries. A second, stricter tier, "replicated with at least 10 percent change", repeats the partial conjunction on the treat p values (<a href="#glossary-treat">treat tier</a>). The cohort estimates and confidence intervals are in the forest.</p>

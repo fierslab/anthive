@@ -1,0 +1,17 @@
+id: facet-tested
+title: What was tested
+summary: Which facets are tested, with which model, per dataset and cell type, and how each result row states its model.
+terms:
+- covariates
+- fdr
+- limma-voom
+- pseudobulk
+- treat
+aliases:
+- what was tested
+- model
+- limma-voom
+body_html: |
+  <p>For each dataset and each cell type in it, the facets are tested at the level of the replicate: the donor for human cohorts, the host animal for mouse and xenograft data. The raw counts of a replicate's cells in that cell type are added up into one <a href="#glossary-pseudobulk">pseudobulk</a>; replicates with fewer than 10 such cells are left out. Genes are tested with <a href="#glossary-limma-voom">limma-voom</a> with sample quality weights and robust moderation, adjusting for sex, age and post-mortem interval when these are known for enough donors, and for a batch column when one exists and is not confounded with the facet. Each row says which <a href="#glossary-covariates">covariates</a> were included; a row without age adjustment can carry age-related genes into a disease or Braak result.</p>
+  <p>q values are Benjamini-Hochberg adjusted within one dataset, cell type and facet (<a href="#glossary-fdr">FDR</a>). A second test, limma <a href="#glossary-treat">treat</a>, asks whether the change exceeds a 10 percent minimum; its q is shown next to the ordinary q. Module (gene set) scores are summarised per donor and tested with an ordinary linear model plus permutations of the facet labels across donors (10,000 by default; the model line of each row gives the number used).</p>
+  <p>Every result row states its exact model. Click <em>details</em> next to the model line for the cell type definition, the formula (for example <code>expression ~ braak + sex + age_z + pmi_z</code>), which covariates were left out and why, the donors per group, the multiple-testing scope, and the tool version, seed and run date. Anything the run did not record says "not recorded".</p>

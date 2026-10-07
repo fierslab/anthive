@@ -1,0 +1,14 @@
+id: library-search
+title: Searching the library
+summary: The library's full text is indexed by section and page; search returns passages with a citation, and a paper links to the datasets it is the source of.
+related:
+- papers
+aliases:
+- literature search
+- search literature
+- search_literature
+- citing papers
+- citations
+body_html: |
+  <p>The full text of every paper is indexed by section and page. A search returns passages, each with first author, year, citekey, section and page, so a claim can be cited as [Author Year, p.N]. Plain sentences work; combine a gene symbol with a description, try two or three phrasings and restrict to one paper by citekey to read around a hit.</p>
+  <p>The library is curated and small. No hit means <em>not in this library</em>, not <em>unknown in the field</em>. A paper's record lists the datasets it is the source of, so a claim from the literature can be tested in the data; keep what the literature says separate from what the data show. In an AI assistant this is the <code>search_literature</code> and <code>get_paper</code> tools; over REST it is <code>/api/search/literature</code>.</p>

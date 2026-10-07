@@ -99,7 +99,7 @@ def test_unresolved_only_in_admin_status(site):
 # ── (4) hidden references: REST handlers lifted out of ant-serve ──────────────
 
 _WANTED = {'_library', '_caller_is_admin', '_require_admin', '_csv', 'database_papers', 'library_status',
-           'list_papers', 'database_context', 'get_paper', '_paper_or_404', '_upload_index_snapshot'}
+           'list_papers', 'database_context', 'get_paper', '_paper_or_404', '_upload_index_snapshot', '_with_help'}
 
 
 def _rest_client(site: LibraryService, mode: str, admins=()) -> TestClient:

@@ -504,7 +504,8 @@ def test_mcp_literature_surface_declared():
                 resources.add(dec.args[0].value)
     assert {'search_literature', 'get_paper', 'related_papers', 'get_dataset_context'} <= tools
     assert prompts == {'investigate_dataset', 'literature_in_our_data'}
-    assert resources == {'anthive://guide', 'anthive://dataset/{group_id}/{file_id}/context'}
+    assert resources == {'anthive://guide', 'anthive://dataset/{group_id}/{file_id}/context',
+                         'anthive://help', 'anthive://help/{topic}'}
 
 
 def test_serve_registers_library_routes():

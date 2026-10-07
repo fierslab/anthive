@@ -129,8 +129,40 @@ Library changes in 2.44.0 (no new endpoints):
 - Plain (non-git) libraries are re-read when record files are added, removed or replaced (a fingerprint replaces the git HEAD
   check); a record symlink with a missing target is an `issues.errors` entry instead of a failed load.
 
-Clients to update: pyvark (`scope` on the facet calls, the new replication fields, `by_scope`), vark, the agent
-skills (facet and replication texts), the JupyterLite vendored client and the web UI (scope selector, effect gate,
+Plain-language help (same unreleased version, 2026-10-07; additive):
+
+- **New `help` endpoints** serve the maintainers' own explanations of anthive concepts, the same texts the web help page
+  shows (both read `lib/help_content/`, so they cannot drift). Public like `/version` and `/skill`; responses are cacheable
+  (`Cache-Control: public, max-age=3600`, `ETag`, `If-None-Match` answers 304):
+  - `GET /help`: `{topics: [{id, title, summary}], glossary: [{slug, term}]}`.
+  - `GET /help/{topic}`: `{id, title, summary, body (markdown), children, related, terms, anchor}`. `body` includes the
+    subsection topics listed in `children` unless `include_children=false`; `related` and `terms` (glossary slugs) include
+    the children's. An unknown id is a 404 whose `detail` lists close ids.
+  - `GET /help/glossary` (`?format=markdown|html`, default markdown): `{format, terms: [{slug, term, definition}]}`;
+    `GET /help/glossary/{term}`: one term (`replicate-unit`, `r-value`, ...), 404 with close slugs.
+  - `GET /help/search?q=`: fuzzy match over topic ids, titles, aliases and glossary terms,
+    `{query, matches: [{kind: topic|term, id, title, score}]}`, best first (empty list when nothing is close).
+  - Topic ids: `what`, `finding`, `pages` (children `collection-page`, `dataset-page`, `facets-columns`, `dataset-versions`,
+    `dataset-caveats`, `differential-expression`), `plots`, `genes` (child `module-scores`), `per-cell-per-donor`,
+    `facet-effects` (children `facet-tested`, `facet-replicate-unit`, `facet-replicates-needed`, `facet-contrasts`, `facet-scopes`, `facet-excluded`,
+    `donor-groups`), `facet-counting` (children `facet-replication`, `facet-effect-size`, `facet-not-replicated`,
+    `facet-cell-type-groups`, `facet-pathology-axis`, `facet-age`, `facet-app-nlgf`, `facet-whole-cell-type`,
+    `facet-technical-genes`, `facet-limits`), `facet-howto`, `papers` (child `library-search`). The ids are also the anchors of
+    the help page (`/help#<id>`, `/help#glossary-<slug>`).
+- **`help_topics`** (list of topic ids) is added to the responses of `GET /facets/{facet}/tests`, `/facets/{facet}/effects`,
+  `/facets/{facet}/effects/top`, `GET /genes/{gene}/facet-effects` and `GET /databases/{id}/facet-tests` (`facet-effects`,
+  `facet-counting`, `facet-replicate-unit`, `facet-howto`, `facet-scopes`, `donor-groups`) and `GET /databases/{id}/context`
+  (`dataset-caveats`, `facet-replicate-unit`, `per-cell-per-donor`, `dataset-versions`). Clients may show or fetch them; ignoring
+  the key is safe.
+- **`GET /skill`** now serves a short bootstrap skill (sign-in, discovery, the rule to read `/help` before explaining
+  concepts, the facet and literature workflow) that points at `/openapi.json`, `/help` and the public skills repository,
+  instead of a copy of the endpoint reference that went stale.
+- MCP: new tool `explain(topic_or_term)` (fuzzy match on topic ids and glossary terms; the topic list when nothing matches),
+  resources `anthive://help` and `anthive://help/{topic}`, and an instructions block telling clients to call `explain` before
+  explaining facets, replication, scopes, caveats and similar concepts and to quote it instead of improvising.
+
+Clients to update: pyvark (`scope` on the facet calls, the new replication fields, `by_scope`, `get_help` / `explain`), vark (`help` command), the agent
+skills (facet and replication texts, call `/api/help` or MCP `explain` instead of improvising), the JupyterLite vendored client and the web UI (scope selector, effect gate,
 `small_sample` instead of descriptive-only for small cohorts, age and app_nlgf facet pages).
 
 ## 2.43.0 (2026-10-05)

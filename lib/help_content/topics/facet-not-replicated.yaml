@@ -1,0 +1,8 @@
+id: facet-not-replicated
+title: Reading "no evidence of replication"
+summary: 'Reading no evidence of replication: it means the data do not show a consistent effect, not that there is none; few or small cohorts cannot reach it.'
+aliases:
+- no evidence of replication
+- not replicated
+body_html: |
+  <p>"No evidence of replication" means the data at these donor numbers do not support a shared effect. It does not show that the effect is absent. "Tested in one cohort only" means replication could not be assessed. Cohorts with 9 controls (SEA-AD for pathologic AD) or 17 donors (Fancy2024) rarely contribute. <em>k of m</em> counts the cohorts that individually reach q below 0.05 in the replicated direction; it depends strongly on donor numbers (a 1,000-donor cohort almost always counts, a 17-donor cohort almost never does) and is descriptive.</p>

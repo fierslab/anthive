@@ -453,6 +453,17 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   the glossary" link to `/help#glossary-<term>` in the click bubble. Every slug
   used in a template must exist as `id="glossary-<slug>"` in `help.html`
   (`test_help_glossary_defines_every_term_the_pages_link_to`).
+- **The conceptual help text is not in `help.html`.** The sections what,
+  finding, pages, plots, genes, per-cell-per-donor, the facet sections, papers
+  and the whole glossary are rendered from `lib/help_content/` (`{{
+  help_topic_html('<id>') }}`, `{{ help_glossary_html() }}`), the same files the
+  API (`/api/help`) and the MCP `explain` tool serve. Edit
+  `lib/help_content/topics/<id>.yaml` or `glossary.yaml` (HTML fragments,
+  `{{ docs }}` for the docs base URL, a topic's `children` become its `<h3>`
+  subsections with the same ids), never the rendered section in `help.html`.
+  The quickstart, AI, programmatic access and account sections stay in the
+  template. `test_help_page_renders_every_topic_and_glossary_term_from_help_content`
+  checks that the page and the files agree.
 - **Help → hover `ⓘ`.** Verbose/explanatory prose hides behind a small `ⓘ`
   with a `title=` (the `.info` class is defined sitewide in `base.html`; `title`
   text must contain no `"`). Used in every view; plot.html also has a local

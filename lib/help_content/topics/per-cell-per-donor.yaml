@@ -1,0 +1,19 @@
+id: per-cell-per-donor
+title: Per cell vs per donor
+summary: Facet effects are tested per donor and are the numbers to quote; per-cell associations (omega squared, spearman, spread across cells) are descriptive only because cells of one donor are not independent.
+related:
+- facet-effects
+- facet-replicate-unit
+aliases:
+- pseudoreplication
+- per cell
+- per donor
+- pseudoreplicated
+body_html: |
+  <p>Two kinds of numbers on the site look alike and mean different things.</p>
+  <ul>
+    <li><strong>Facet effects are per donor.</strong> On the <strong>Facets</strong> tab of a dataset, an effect is tested within one cell type, with the donor (or host animal) as the unit of replication. A donor's cells are added up into one profile first, so ten thousand cells from one donor count once. These are the numbers to quote, as exploratory results.</li>
+    <li><strong>A per-cell association (descriptive) is not a test.</strong> The omega&sup2;, spearman and similar values in the Genesets tab, on the gene set pages and in the <a href="/genesets/variability">variability heatmap</a> are computed over individual cells. Cells of one donor are not independent, and every cell carries its donor's facet value, so these numbers mostly measure how different donors are from each other. They help to find candidates and show where a score differs, not whether a difference is real. Columns such as donor or cluster are off in the default view because they explain a lot by construction. The same applies to the <em>spread across cells</em> column on the Genes tab, the standard deviation of the log-normalised expression across cells.</li>
+    <li><strong>Mouse and xenograft datasets.</strong> The replicate there is the host animal, not the human donor of the transplanted cells. Facet tests exist for them too (the App NL-G-F facet in particular), and they are never combined with human post-mortem data.</li>
+  </ul>
+  <p>Facet effects are explained in <a href="#facet-effects">Facets and facet effects</a>, and every term is defined in the <a href="#glossary">glossary</a>.</p>

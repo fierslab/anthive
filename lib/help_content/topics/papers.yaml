@@ -1,0 +1,24 @@
+id: papers
+title: The paper library
+summary: The paper library holds the publications behind the datasets plus background papers, with roles, document types, summaries and full-text search; everyone who can sign in sees all of it.
+related:
+- library-search
+children:
+- library-search
+aliases:
+- library
+- paper library
+- papers
+- literature
+body_html: |
+  <ul>
+    <li><strong><a href="/library">Library page</a>:</strong> every paper, searchable and filterable by year, cohort, cell type and role.</li>
+    <li><strong>Paper page:</strong> the full record (authors, journal, DOI, PubMed, abstract), a short summary, topics (cell types, tissues, diseases, methods, cohorts), the datasets it is linked to, related papers, the PDF and a BibTeX entry.</li>
+    <li><strong>Who sees the library.</strong> Everyone who can sign in to this site sees every paper and document in it; there are no per-paper restrictions. Text from the library, including passages from papers, may be sent to AI assistants and their providers (see <a href="#ai-practice">privacy</a>).</li>
+    <li><strong>Roles.</strong> Every paper has a role: <em>source</em> (the data in anthive come from this paper), <em>reanalysis</em> (it reanalyses data that are in anthive), <em>method</em> (a method used on anthive data), <em>related</em> (related to a dataset, not its source) or <em>background</em> (of interest to the lab, not linked to any dataset). Background is the default when no role is given.</li>
+    <li><strong>Document types.</strong> Besides journal articles and preprints the library can hold books and chapters, conference papers, theses (PhD or master), reports such as project or grant proposals, technical reports and protocols, and manuscripts in preparation. Project proposals are kept in their own folder.</li>
+    <li><strong>Why a paper is linked.</strong> Datasets point to papers with a role: <em>source</em> (the data come from this paper), <em>reanalysis</em>, <em>method</em> (a protocol or tool used) or <em>related</em> (for example a preprint of the same study). Related papers are also found automatically, and the page says why: same cohort, another version of the same study, shared authors, same cell type, tissue, disease or method, or one cites the other.</li>
+    <li><strong>Drafts.</strong> Summaries and topics marked <em>draft, not yet reviewed</em> were written by a language model from the abstract and methods and still await a curator. Treat them as hints; the PDF and the record are authoritative.</li>
+    <li><strong>Search inside papers.</strong> The full text is indexed by section and page; AI assistants can search it and cite the page (see <a href="#mcp-offers">MCP</a>).</li>
+    <li><strong>Adding papers.</strong> Admins can add papers; see <a href="{{ docs }}/LIBRARY.md" target="_blank" rel="noopener">the library documentation</a>. If you would like a paper added, ask an admin.</li>
+  </ul>

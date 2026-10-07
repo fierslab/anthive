@@ -1,0 +1,17 @@
+id: module-scores
+title: Module scores
+summary: A module score summarises a curated gene set per cell (default scanpy score_genes, or UCell); score variation across annotations is a per-cell association, not a donor-level test.
+related:
+- genes
+- per-cell-per-donor
+terms:
+- per-cell-association
+aliases:
+- module score
+- gene set score
+- geneset
+- ucell
+- score_genes
+body_html: |
+  <p>A module score condenses a curated gene set into one number per cell: the mean expression of the set minus the mean of expression-matched control genes. The default method is scanpy <code>score_genes</code>; UCell is the alternative (choose it in Preferences). Scores are precomputed for many datasets and listed on the Genesets tab.</p>
+  <p>How a score varies across annotations (omega squared, spearman) is a <em>per-cell association</em>, which is descriptive and not a test (see <a href="#per-cell-per-donor">Per cell vs per donor</a>). Donor-level tests of module scores are part of the facet tests, where the score is averaged per donor first.</p>

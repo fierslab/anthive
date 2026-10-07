@@ -1,0 +1,19 @@
+id: finding
+title: Finding data
+summary: How to find a dataset on the front page by free-text search, filters, sorting and the table view.
+related:
+- pages
+aliases:
+- search
+- filters
+- find datasets
+body_html: |
+  <p>The <a href="/">front page</a> lists every collection, newest first.</p>
+  <ul>
+    <li><strong>Search box.</strong> Type anything: a paper title, an author, a journal or year, a DOI or PubMed id, a tissue, cell type, disease or method, a collection or dataset code, or the name of a dataset inside a collection. Several words must all match (so <code>microglia prefrontal</code> narrows the list). Case and accents do not matter, and matching words are highlighted.</li>
+    <li><strong>Shortcut and sharing.</strong> Press <code>/</code> anywhere on the page to jump to the search box. The search is kept in the address bar, so you can copy the URL to share exactly the list you see.</li>
+    <li><strong>Filters.</strong> The <em>Filters</em> button opens chips for organism, cell type, tissue, method and disease, with counts. Chips in one group combine as OR, chips in different groups as AND. Filters are also kept in the URL and remembered in your browser.</li>
+    <li><strong>Tags only where it matters.</strong> Each collection shows small tags only for what is unusual in this catalogue (for example <em>mouse</em>, <em>spatial</em>, <em>astrocytes</em>, <em>prefrontal cortex</em>). The common case (human, brain, microglia, single-cell RNA, Alzheimer's) is not repeated on every row. Collections whose access differs from the usual get a small mark (for example <em>public</em>).</li>
+    <li><strong>Sorting.</strong> Recently added, paper year, number of cells, or name.</li>
+    <li><strong>Table view.</strong> The <em>Table view</em> button switches to a classic table with all columns, following the same search and filters.</li>
+  </ul>
