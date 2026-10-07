@@ -29,7 +29,15 @@ the spec drifting away from the running code.
 
 ---
 
-## 2.44.0 (unreleased)
+## 2.44.0 (2026-10-07)
+
+Release summary. Facet engine v3: facet scopes, ordinary-p partial-conjunction replication with an effect filter
+and a strong tier, robust limma, floors, the facets `age`, `age_adjusted`, `app_nlgf`, `braak_threshold` and
+`apoe4_dose`, donor exclusions, `genotype` / `host_genotype`, a tissue umbrella and per-cell-type author clusters.
+A plain-language help API (`/api/help`, the MCP `explain` tool) and much faster facet endpoints. Operations:
+`data.extra_mounts`, hidden unresolved paper links, library fixes, a cron `PATH` example, `ant sync` also syncs
+`_facet_tests`, and the new `ant-restore-obs`. The web UI gains a dataset Facets tab, collapsible docs and a
+glossary. Details below.
 
 Minor bump. Additive (new `scope` parameter, new fields, two new facets), with these changes to existing
 answers:

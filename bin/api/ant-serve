@@ -1924,7 +1924,7 @@ async def lifespan(app: FastAPI):
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
 API_VERSION = "2.44.0"
-API_VERSION_RELEASED = "2026-10-05"
+API_VERSION_RELEASED = "2026-10-07"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
