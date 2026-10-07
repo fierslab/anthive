@@ -780,7 +780,7 @@
 <section class="tab-panel" id="tab-modules" role="tabpanel">
   <h2 class="section-head">Geneset scores
     <span class="muted" style="font-size:12px;font-weight:normal">({{ n_module_scores }} genesets)</span>
-    <span class="info" title="One long list of (geneset × dataset × tag × method), sorted by peer position — how far the geneset sits from its peers on the same (dataset, tag, method). Filter with the dropdowns above.">ⓘ</span>
+    <span class="info" data-glossary="per-cell-association" title="Gene set scores compared with the cell annotation columns, sorted by how far each stands out from its peers.">ⓘ</span>
   </h2>
   <div class="tab-loading plot-loading" data-tab-loading="modules" style="min-height:60px;display:none">
     <span class="spinner-lg"></span>
@@ -794,6 +794,7 @@
 {% if show_facets_tab %}
 {% from "_facet_mapping.html" import facet_mapping_styles %}
 {% from "_facet_effects.html" import fx_styles, fx_intro, fx_script %}
+{% from "_macros.html" import doc_block %}
 <section class="tab-panel" id="tab-facets" role="tabpanel">
   {{ facet_mapping_styles() }}
   {{ fx_styles() }}
@@ -802,7 +803,11 @@
   {% set _fx_extra = [] %}{% set _fx_untested_extra = [] %}{% for col in _fx %}{% if col not in _fx_shown %}{% if _fx[col].tested %}{% set _ = _fx_extra.append(col) %}{% elif _fx[col].untested %}{% set _ = _fx_untested_extra.append(col) %}{% endif %}{% endif %}{% endfor %}
   <div id="ds-facets">
     <h2 class="section-head">Facets <span class="muted">({{ n_facets_total }})</span>
-      <span class="info" title="Standardised ant_ columns of this dataset and where they come from: the author column, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts. Below, when a facet was tested: its donor-level effects per cell type. Click a facet for its definition and the other datasets that carry it.">ⓘ</span></h2>
+      <span class="info" data-glossary="facet" title="Standardised donor-level variables of this dataset and how its own columns map onto them.">ⓘ</span></h2>
+    {% call doc_block('About the facet mappings', id='ds-facets-about') %}
+      <p>Facets are the standardised <code>ant_</code> columns of this dataset. For each one the table shows the author column it comes from, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts.</p>
+      <p>For facets that were tested, the effects section below shows the differences between donors per cell type. Click a facet for its definition and the other datasets that carry it. Terms are explained in the <a href="/help#glossary">glossary</a>.</p>
+    {% endcall %}
     <p class="fx-intro" id="fx-unit-line">
       <span id="fx-replicate">Replicate unit: <strong>{{ replicate.text if replicate and replicate.unit else 'not recorded for this dataset' }}</strong>.</span>
       {% if replicate and replicate.disease_text %}<span id="fx-disease-basis">Disease basis: <strong>{{ replicate.disease_text }}</strong>{% if replicate.disease_basis not in ['braak_cerad', 'nia_reagan', 'adnc'] %} (not pathology based, so not combined with other cohorts){% endif %}.</span>{% endif %}
@@ -844,7 +849,10 @@
     {% else %}
     <h2 class="section-head" id="facets-effects-head">Effects by facet</h2>
     <p class="fx-none" id="fx-not-tested">{% if facet_tests %}No facet tests for this dataset: {{ facet_tests.reason_text }}.{% else %}Facet test results could not be loaded.{% endif %}
-      Facet tests need a human primary dataset with a raw counts layer, at least 6 donors and at least 3 donors in each level of a facet.</p>
+      </p>
+    {% call doc_block('About when facets are tested', id='fx-not-tested-about') %}
+      <p>A dataset is tested when it is primary data (not a reanalysis), has a raw counts layer and a replicate column (donor, or host animal for mouse and xenograft data), and has at least 3 replicates in each group of a facet. With fewer, the numbers can still be shown per cell for orientation, but they carry no p or q value (<a href="/help#facet-effects">how facets are tested</a>).</p>
+    {% endcall %}
     {% endif %}
   </div>
   {{ fx_script() }}

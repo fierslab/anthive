@@ -4706,8 +4706,8 @@ def test_module_view_obs_column_label(client):
     assert '<th class="mv-th-tag" data-sortcol="tag">obs column</th>' in html
     assert 'Values include braak, sex, cluster, disease' not in html
     assert "per-cell association (descriptive)" in html
-    assert ("Per-cell (descriptive): computed over individual cells, which are not replicates, and not within cell type. "
-            "It describes where a score differs, not a tested effect. For replicate-level effects see the Facets tab.") in html
+    assert "Computed over cells, not donors; it shows where a score differs, not a tested effect." in html
+    assert 'id="mv-panel-about"' in html or "-about" in html and "About per-cell associations" in html
     assert "/donor|cluster/i" in html and "mff.tag.setValues(defaultTags)" in html
 
 
@@ -5589,11 +5589,11 @@ def test_geneset_experiment_drilldown_visible_without_overview(client):
     assert 'class="mv-panel"' in html or 'mv-flt-n_cells' in html, (
         "module_view drilldown must be present on experiment page"
     )
-    # The mv-panel must appear after the closing </details> tag so it's outside.
-    details_close = html.rfind("</details>")
-    mv_panel = html.find("mv-panel")
-    assert mv_panel > details_close, (
-        "mv-panel drilldown must appear AFTER the </details> closing tag"
+    # Every <details> opened before the mv-panel is closed again: the panel is outside them.
+    mv_panel = html.find('class="mv-panel"')
+    list_open = html.index('id="gs-list-details"')
+    assert list_open < html.find("</details>", list_open) < mv_panel, (
+        "mv-panel drilldown must not sit inside a collapsible details block"
     )
 
 
@@ -6817,9 +6817,10 @@ def test_dataset_facets_card_shows_effects_per_facet(client):
     # the effects live in the Facets tab, below the mapping table
     assert 'data-tab="facets"' in text and 'Effects by facet' in card
     assert card.index('class="ds-facets"') < card.index('Effects by facet') < card.index('class="ds-facet-fx"')
-    assert 'id="fx-intro"' in card and "exploratory" in card and "donor" in card
+    assert 'id="fx-intro"' in card and "Exploratory" in card and "per donor" in card
     assert "provisional" in card and "datasets that share donors do not count twice" in card
-    assert 'href="/help#facet-effects"' in card
+    assert 'id="fx-about"' in card and 'id="fx-about" open' not in card
+    assert 'href="/help#facet-howto"' in card
     # one effects row under ant_sex, with the unit table and expanding rows
     assert 'class="ds-facet-fx" data-facet="ant_sex"' in card
     assert 'id="fx-table-ant_sex"' in card and 'class="fx-toggle"' in card
@@ -6878,7 +6879,7 @@ def test_dataset_facets_tab_cell_level_unit_has_pill_and_visible_reason(client):
     assert ">replicate level (donor)</span>" in card
     untested = card.split('id="fx-untested-extra"')[1].split("</div></div>")[0]
     assert ">cell-level, descriptive only</span>" in untested and "control=2, AD=19" in untested
-    assert 'id="fx-flag-legend"' in card and "What the flags mean" in card
+    assert 'id="fx-flag-legend"' in card and "About the flags" in card
     assert "Disease definition" not in card.split('data-facet="ant_sex"')[1].split('data-facet="ant_braak"')[0]
 
 
@@ -7010,7 +7011,7 @@ def test_facet_page_effects_across_datasets_renders_first_and_fetches_the_table(
     assert 'id="fx-across-loading"' in section and 'id="fx-table-across"' not in section
     assert "antFxBind" in section
     assert 'id="fx-recurring"' in section and "DRAFT" in section
-    assert 'href="/help#facet-effects"' in section
+    assert 'href="/help#facet-howto"' in section
     # M3: the disease definition is said on the page
     assert 'id="fx-disease-definition"' in section and "pathology-based definition" in section
     assert 'id="fx-disease-definition"' not in client.get("/facets/ant_sex").text
@@ -7092,20 +7093,89 @@ def test_gene_page_has_facet_effects_panel(client):
     for facet in ("sex", "disease", "apoe4_carrier", "braak"):
         assert f'data-facet="{facet}"' in text
     assert "/api/facets/" in text and "renderCard" in text
-    assert "exploratory" in text and 'href="/help#facet-effects"' in text
+    assert "exploratory" in text and 'href="/help#facet-howto"' in text
+    assert 'id="gene-fx-about"' in text and 'id="gene-fx-about" open' not in text
     # multi-gene view: no panel
     assert 'id="gene-facet-effects"' not in client.get("/genes/PTPRG,APOE").text
 
 
+def _help_sections(text, *section_ids):
+    """The HTML of the named help sections (collapsible details elements, never nested)."""
+    return "".join(text.split(f'id="{section_id}"')[1].split("</details>")[0] for section_id in section_ids)
+
+
 def test_help_page_facet_effects_section(client):
     text = client.get("/help").text
-    section = text.split('id="facet-effects"')[1].split("</section>")[0]
-    for phrase in ("sex, disease (AD vs control), APOE e4 carrier status and Braak stage",
-                   "limma-voom", "10,000 by default", "1/(n + 1)", "Descriptive only", "Composition",
-                   "Provisional", "exploratory", "DESIGN_facet_testing.md", "not removed"):
-        assert phrase in section, phrase
+    section = _help_sections(text, "facet-effects")
+    for phrase in ("sex, pathologic AD (disease), APOE e4 carrier status, Braak stage",
+                   "limma-voom", "10,000 by default", "1/(n + 1)", "descriptive only", "Composition",
+                   "Provisional", "exploratory", "DESIGN_facet_testing.md", "umbrella terms", "5 donors per group",
+                   "3 animals per group"):
+        assert phrase in section + _help_sections(text, "facet-counting"), phrase
     assert '<a href="#facet-effects">' in text
-    assert "—" not in section
+    assert "\u2014" not in section
+
+
+def test_help_sections_are_collapsible_and_the_toc_targets_them(client):
+    text = client.get("/help").text
+    assert '<details class="help-section quickstart" id="quickstart" open>' in text
+    assert '<details class="help-section" id="glossary">' in text and '<section class="help-section' not in text
+    for anchor in ("#glossary", "#facet-howto", "#facet-counting", "#facet-effects"):
+        assert f'<a href="{anchor}">' in text
+    assert "openTarget" in text and "help-expand-all" in text
+
+
+def test_help_glossary_defines_every_term_the_pages_link_to(client):
+    help_text = client.get("/help").text
+    template_dir = browser.__file__.replace("browser.py", "templates/")
+    linked = set()
+    for name in ("_facet_effects.html", "facet.html", "facets.html", "dataset.html", "_module_view.html",
+                 "geneset.html", "geneset_experiment.html", "geneset_variability.html", "donor_groups.html"):
+        text = open(template_dir + name, encoding="utf-8").read()
+        linked |= set(re.findall(r'data-glossary="([a-z0-9-]+)"', text))
+        linked |= set(re.findall(r'/help#glossary-([a-z0-9-]+)', text))
+    linked |= {pill[3] for pill in browser._fx_pills({
+        "analysis_level": "cell", "pooled": True, "overlap_unknown": True, "is_secondary": True, "dataset_changed": True,
+        "flags": {"descriptive_only": True, "provisional": True, "composition_flag": True,
+                  "batch_confounded": True, "batch_used": True}})}
+    assert len(linked) > 15
+    for slug in sorted(linked):
+        assert f'id="glossary-{slug}"' in help_text, slug
+    for slug in ("pseudobulk", "replicate-unit", "anchor-unit", "cohort", "fdr", "r-value", "partial-conjunction",
+                 "effect-filter", "treat-tier", "analysis-level", "descriptive-only", "scope", "disease-basis",
+                 "composition", "lambda", "per-cell-association"):
+        assert f'id="glossary-{slug}"' in help_text, slug
+
+
+def test_help_has_the_ptprg_walkthrough(client):
+    section = _help_sections(client.get("/help").text, "facet-howto")
+    for phrase in ("PTPRG", "Braak", "What you may say", "What you may not say", "partial conjunction"):
+        assert phrase in section, phrase
+    assert "proves" not in section and "confirms" not in section
+
+
+def test_doc_block_macro_renders_a_closed_labelled_details_element():
+    template = browser.templates.env.from_string(
+        '{% from "_macros.html" import doc_block %}{% call doc_block("About this", id="x") %}body{% endcall %}'
+        '{% call doc_block("About that", open=True) %}other{% endcall %}')
+    html = template.render()
+    assert '<details class="doc-block" id="x"><summary>&#9432; About this</summary><div class="doc-body">body</div></details>' in html
+    assert '<details class="doc-block" open><summary>&#9432; About that' in html
+
+
+def test_base_has_doc_block_styles_hash_opening_and_remembering(client):
+    text = client.get("/").text
+    for needle in ("details.doc-block", "openTarget", "antDocRestore", "doc.open.", "info-pop-link"):
+        assert needle in text, needle
+
+
+def test_facet_doc_text_is_collapsed_by_default_on_every_facet_view(client):
+    facets_text = client.get("/facets").text
+    assert 'id="facets-about"' in facets_text and 'id="facets-about" open' not in facets_text
+    assert "facets-short" in facets_text
+    dataset_text = client.get("/browse/GroupA/ds1").text
+    assert 'id="ds-facets-about"' in dataset_text and 'id="ds-facets-about" open' not in dataset_text
+    assert 'id="fx-about"' in dataset_text and 'id="fx-about" open' not in dataset_text
 
 
 def test_fx_sex_control_renders_without_q_values():
@@ -7195,11 +7265,12 @@ def test_fx_pills_mark_reanalysis_not_counted():
 
 def test_help_explains_groups_counting_and_ranking(client):
     text = client.get("/help").text
-    section = text.split('id="facet-counting"')[1].split("</section>")[0]
+    section = _help_sections(text, "facet-counting")
     for phrase in ("cell type group", "lib/celltype_groups.yaml", "Bonferroni", "agreement",
                    "median absolute log2 fold change", "reanalysis, not counted", 'href="/donor-groups"'):
         assert phrase in section, phrase
-    assert "—" not in section
+    assert "\u2014" not in section
+    assert "proves" not in section and "confirms" not in section
 
 
 def test_fx_forest_summary_first_by_cell_type_group():
@@ -7214,7 +7285,8 @@ def test_fx_forest_summary_first_by_cell_type_group():
 
 def test_fx_forest_single_cohort_wording_is_not_replication():
     html = str(browser.templates.env.get_template("_facet_effects.html").module.fx_forest_assets())
-    assert "single cohort, " in html and "not replicated" in html
+    assert "tested in one cohort only; replication not assessable" in html
+    assert "no evidence of replication" in html and "not replicated" not in html
 
 
 def test_storage_notice_is_a_bottom_bar_at_every_width(client):
@@ -7249,12 +7321,12 @@ def test_help_mentions_the_facet_rename(client):
 
 def test_help_page_per_cell_vs_per_donor_section(client):
     text = client.get("/help").text
-    section = text.split('id="per-cell-per-donor"')[1].split("</section>")[0]
-    for phrase in ("Per cell vs per donor", "Facets</strong> tab", "per donor", "Per-cell association (descriptive)",
-                   "pseudoreplicated", "the replicate there is the animal", "spread across cells"):
+    section = _help_sections(text, "per-cell-per-donor")
+    for phrase in ("Per cell vs per donor", "Facets</strong> tab", "per donor", "per-cell association (descriptive)",
+                   "not independent", "the replicate there is the host animal", "spread across cells"):
         assert phrase.lower() in section.lower(), phrase
     assert '<a href="#per-cell-per-donor">' in text
-    assert "—" not in section
+    assert "\u2014" not in section
 
 
 def test_module_view_explains_skipped_datasets(client):
@@ -7267,9 +7339,10 @@ def test_fx_assets_show_replication_v2_wording():
     """Badge, anchors, pooled/overlap pills, zero-replicated message, q (>=10% change) column."""
     module = browser.templates.env.get_template("_facet_effects.html").module
     forest = str(module.fx_forest_assets())
-    for phrase in ("replicated (r = ", "not replicated", "significant (q_treat", "Anchors: the unit that counted",
-                   "data-pool", "donor overlap not checked", "with no counted row", "full rule",
-                   "Simes", "fxf-row-model", "q (\u226510% change)"):
+    for phrase in ("replicated (r = ", "no evidence of replication", "individually at q &lt; 0.05", "Anchors: the unit that counted",
+                   "data-pool", "donor overlap not checked", "with no counted row", "About the full rule",
+                   "Simes", "fxf-row-model", "q (\u226510% change)", "About replication", "About this forest",
+                   "fxf-caveat", "effect_gate_passed", "replicated_effect", "below 20 donors"):
         assert phrase in forest, phrase
     assert "table.fxf .fxf-donors-col, table.fxf .fxf-q-col { display: none; }" in forest
     assert ".fxf-reason" in forest and "fxf-reason { display: none" not in forest
@@ -7287,9 +7360,10 @@ def test_info_bubble_script_makes_hover_text_reachable():
 
 def test_help_explains_replication_v2(client):
     text = client.get("/help").text
-    section = text.split('id="facet-effects"')[1].split("</section>")[0]
-    for phrase in ("partial conjunction", "Simes", "r-value", "anchor per cohort", "pool:", "q (&ge;10% change)",
-                   "cell-level, descriptive only", "Replicate unit", "Disease basis", "pathology-based", "per-cell (descriptive)",
-                   "Fisher", "donor overlap not checked"):
+    section = _help_sections(text, "facet-effects", "facet-counting")
+    for phrase in ("partial conjunction", "Simes", "r-value", "anchor per cohort", "pool:",
+                   "cell-level, descriptive only", "Replicate unit", "disease basis", "pathology-based", "per-cell (descriptive)",
+                   "Fisher", "donor overlap not checked", "effect filter", "treat tier", "no evidence of replication",
+                   "about 5 percent"):
         assert phrase in section, phrase
     assert "\u2014" not in section

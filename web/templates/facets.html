@@ -34,23 +34,18 @@
   }
 </style>
 
-{% from "_macros.html" import breadcrumb, experimental_notice %}
+{% from "_macros.html" import breadcrumb, experimental_notice, doc_block %}
 {{ breadcrumb([("facets", None)]) }}
 
 <h1 class="page-title">Facets</h1>
 {{ experimental_notice("facets") }}
 
-<p class="facet-desc">
-  A facet is a standardised <code>ant_*</code> obs column that carries the
-  same meaning across datasets. Sex, disease, APOE e4 carrier status and Braak stage are facets
-  (donor, age and others are too, but hidden for now). Each dataset declares how its own columns map onto a facet (a
-  renamed author column, a value map, or one constant value). Click a row
-  to see the definition, which datasets carry the facet and how their
-  values were translated, and how expression differs with it at the level
-  of donors (effects across datasets). Which datasets share donors, and
-  which are reanalyses that never count twice, is listed under
-  <a href="/donor-groups" id="facets-donor-groups-link">donor groups</a>.
-</p>
+<p class="facet-desc" id="facets-short">A facet is a donor-level (or animal-level) variable that anthive has standardised across datasets, such as sex, pathologic AD or Braak stage. Click a facet to see its definition and how expression differs with it across datasets.</p>
+{% call doc_block('About facets', id='facets-about') %}
+  <p>Each dataset declares how its own columns map onto a facet: a renamed author column, a value map, or one constant value. A facet is the same for all cells of one donor, so a facet effect is a difference between donors, not between cells.</p>
+  <p>A facet page shows the definition, which datasets carry the facet and how their values were translated, and the expression differences (effects) tested at the level of donors. Terms such as pseudobulk, replicate unit and r-value are explained in the <a href="/help#glossary">glossary</a>.</p>
+  <p>Which datasets share donors, and which are reanalyses that never count twice, is listed under <a href="/donor-groups" id="facets-donor-groups-link">donor groups</a>.</p>
+{% endcall %}
 {% if definitions_status and definitions_status.note %}
 <p class="audit-note" id="facet-audit-note"><strong>Definitions under audit.</strong> {{ definitions_status.note }}</p>
 {% endif %}

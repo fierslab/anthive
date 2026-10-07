@@ -31,7 +31,7 @@ URL hash scheme (feature: back-button / shareable filter state):
   When co-existing with a tab anchor (e.g. #tab-modules), the mv= part is
   appended: #tab-modules-mv=...  The JS strips the -mv= suffix before parsing.
 #}
-{% from "_macros.html" import mff_styles, mff_scripts %}
+{% from "_macros.html" import mff_styles, mff_scripts, doc_block %}
 {% set _mv = mv_ctx %}
 {% set _id = _mv.get('id', 'mv-panel') %}
 {# Column count for the empty-state row's colspan. Base = 8 columns
@@ -110,6 +110,11 @@ URL hash scheme (feature: back-button / shareable filter state):
     }
     .mv-panel .mv-cap-badge.mv-cap-visible { display: inline-block; }
   </style>
+  <p class="mv-short" id="{{ _id }}-short" style="font-size:12px;margin:2px 0 4px"><strong>Exploratory.</strong> These are per-cell associations (descriptive), not tests.</p>
+  {% call doc_block('About per-cell associations', id=_id ~ '-about') %}
+    <p>Each value describes how a gene set score differs with a cell annotation column, computed over individual cells rather than donors. Cells of one donor are not independent, and every cell carries its donor's facet value, so these numbers mostly show how different donors are from each other. They help to spot candidates; they are not significance tests.</p>
+    <p>Donor and cluster columns are off by default because they explain a lot by construction. For effects tested per donor use the Facets tab of a dataset (<a href="/help#glossary-per-cell-association">glossary</a>).</p>
+  {% endcall %}
   {# Row 1: dataset · module · facet #}
   <div class="mv-filter-row mv-filter-row-1">
     {% if _mv.scope != 'dataset' %}
@@ -270,7 +275,7 @@ URL hash scheme (feature: back-button / shareable filter state):
         {% if _mv.scope != 'dataset' %}<th data-sortcol="dataset">dataset</th>{% endif %}
         <th class="mv-th-tag" data-sortcol="tag">obs column</th>
         <th data-sortcol="method">method</th>
-        <th data-sortcol="value" style="text-align:right">per-cell association (descriptive) <span class="info" onclick="event.stopPropagation()" title="Per-cell (descriptive): computed over individual cells, which are not replicates, and not within cell type. It describes where a score differs, not a tested effect. For replicate-level effects see the Facets tab.">ⓘ</span></th>
+        <th data-sortcol="value" style="text-align:right">per-cell association (descriptive) <span class="info" data-glossary="per-cell-association" onclick="event.stopPropagation()" title="Computed over cells, not donors; it shows where a score differs, not a tested effect.">ⓘ</span></th>
         <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" onclick="event.stopPropagation()" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). The dot is this row's value on the min–max range across peer modules; red, amber and green mark the low, middle and high third. Click to sort by this column.">ⓘ</span></th>
         <th style="text-align:center;cursor:default">plots</th>
       </tr></thead>

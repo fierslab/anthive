@@ -152,7 +152,8 @@ datasets" on `/facets/{name}` (`#facet-effects`, replaces the per-cell "Top
 variable genesets/genes" cards; `#fx-recurring` lists recurring genes per cell
 type), and the gene page panel `#gene-facet-effects` (single-gene view only).
 Every unit shows its model line with a details disclosure; the help page
-section is `#facet-effects`. `facets_visible` (config, read once in
+sections are `#facet-effects`, `#facet-counting`, `#facet-howto` (PTPRG walkthrough)
+and `#glossary`. `_fx_pills` returns (label, class, tooltip, glossary slug). `facets_visible` (config, read once in
 `_facets_visible`) marks the other facets as not analysed: `/facets` and the
 facet pages hide them (non-admins get a short notice), the dataset Facets tab
 lists them under "Not analysed yet"; the `/facets` index no
@@ -419,6 +420,25 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   card loses its top margin automatically; use `.section-head.first` where a
   wrapper already provides spacing. Headings inside markdown descriptions
   (`.md-body`) stay neutral so sections remain distinct.
+- **Documentation is collapsible, closed by default.** Every explanatory, intro
+  or methods block longer than a line goes in `{% call doc_block('About ...',
+  id='...') %}...{% endcall %}` (`_macros.html`; renders
+  `<details class="doc-block">` with an "ⓘ About ..." summary, CSS and JS in
+  `base.html`). One short essential line stays visible next to it (for
+  example "Exploratory. Effects are tested per donor within one cell type.",
+  "Disease means pathologic AD", the composition one-liner on facet cards).
+  JS-built markup uses the same classes (`docBlock()` in `_facet_effects.html`)
+  and calls `window.antDocRestore(root)` after rendering. Open/closed state is
+  remembered per block in `localStorage` (`doc.open.<path>#<id>`); a `#hash`
+  link opens every closed `<details>` ancestor of its target (also on click of
+  the link already in the hash), which is how the help TOC and glossary links
+  work. `/help` sections are `<details class="help-section">` (quickstart open,
+  expand/collapse-all buttons, the search opens matching sections).
+- **Tooltips link to the glossary.** An `.info` or `.fx-pill` with
+  `data-glossary="<term>"` shows its one-sentence `title` text plus a "More in
+  the glossary" link to `/help#glossary-<term>` in the click bubble. Every slug
+  used in a template must exist as `id="glossary-<slug>"` in `help.html`
+  (`test_help_glossary_defines_every_term_the_pages_link_to`).
 - **Help → hover `ⓘ`.** Verbose/explanatory prose hides behind a small `ⓘ`
   with a `title=` (the `.info` class is defined sitewide in `base.html`; `title`
   text must contain no `"`). Used in every view; plot.html also has a local

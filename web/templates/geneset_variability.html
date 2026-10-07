@@ -46,52 +46,49 @@
   table.mv td.mv-cell:hover { outline: 2px solid #111; outline-offset: -2px; }
 </style>
 
-{% from "_macros.html" import breadcrumb %}
+{% from "_macros.html" import breadcrumb, doc_block %}
 {{ breadcrumb([("gene sets", "/genesets"), ("geneset variability", None)]) }}
 <h1 class="page-title">Geneset variability across the fleet
-  <span class="info" title="Per-cell association (descriptive). For each (geneset × dataset × obs column), a statistic over individual cells of how the geneset score co-varies with the column. Computed over cells, not donors or animals, and not within cell type: describes where a score differs, not a tested effect. For donor-level effects see the Facets tab of a dataset. Rows = genesets, columns = datasets, colour = statistic value.">ⓘ</span></h1>
+  <span class="info" data-glossary="per-cell-association" title="Rows are gene sets, columns are datasets, colour is a per-cell statistic; it is descriptive, not a test.">ⓘ</span></h1>
 
-<p class="mv-intro">Which genesets track a biological axis, and in which datasets. Pick an
-<b>obs column</b> (e.g. braak, sex) and a <b>statistic</b> below; each heat-map cell shows the
-<b>per-cell association (descriptive)</b> between that geneset's score and the column in that dataset.
-It is descriptive, not a tested effect; donor-level effects are on the Facets tab of each dataset.</p>
+<p class="mv-intro">Which gene sets track a biological axis, and in which datasets. Pick a cell annotation column (for example braak or sex) and a statistic; each cell of the map is a <strong>per-cell association (descriptive)</strong>, not a tested effect.</p>
 
-<details class="mv-stats-help">
-  <summary>Which statistic should I pick?</summary>
+{% call doc_block('About this heatmap', id='mv-about') %}
+  <p>Each value compares a gene set score with a cell annotation column across individual cells in one dataset. Because the cells of a donor are not independent and all carry the donor's value, these numbers mostly reflect differences between donors and are only loosely comparable across datasets. Use them to spot candidates, then confirm with a donor-level test on the Facets tab of a dataset (<a href="/help#glossary-per-cell-association">glossary</a>).</p>
+{% endcall %}
+
+{% call doc_block('About the statistics', id='mv-stats-help') %}
   <table class="mv-stats-table">
     <thead><tr><th>statistic</th><th>tag kind</th><th>range</th><th>reads as</th></tr></thead>
     <tbody>
       <tr><td><b>ω²</b> (omega²)</td><td>categorical <span class="muted-2">(sex, disease, cluster, …)</span></td><td>0 .. 1</td>
         <td>fraction of geneset-score variance explained by the categories.
-            <b>Bias-corrected</b> for group-count — prefer over η² when a tag has few groups or the count differs across datasets.</td></tr>
+            <b>Bias-corrected</b> for group count, so prefer it over η² when a tag has few groups or the count differs across datasets.</td></tr>
       <tr><td><b>η²</b> (eta²)</td><td>categorical</td><td>0 .. 1</td>
         <td>uncorrected variance-explained. Cheap, but inflates on small groups. Use only if you specifically want the naive number.</td></tr>
       <tr><td><b>R²</b></td><td>numerical <span class="muted-2">(braak, age, pmi, …)</span></td><td>0 .. 1</td>
-        <td>fraction of variance from a <b>linear</b> fit. Unsigned — high R² can mean either direction.</td></tr>
+        <td>fraction of variance from a <b>linear</b> fit. Unsigned, so high R² can mean either direction.</td></tr>
       <tr><td><b>spearman</b> ρ</td><td>numerical</td><td>−1 .. +1</td>
         <td>rank correlation. <b>Signed</b> (tells you direction) and robust to non-linear-but-monotone shapes (thresholds, plateaus).
-            Pair with R² — see below.</td></tr>
+            Pair with R², see below.</td></tr>
       <tr><td><b>mean_range</b></td><td>categorical</td><td>score units</td>
         <td>max category-mean minus min category-mean. Direction-agnostic effect size in the score's own units.</td></tr>
     </tbody>
   </table>
   <p class="muted" style="font-size:11px;margin:6px 0 0">
-    <b>Reading R² + spearman together</b> — different views of the same numerical axis:
+    <b>Reading R² + spearman together</b> (different views of the same numerical axis):
     high R² + high |ρ| = clean linear association;
     low R² + high |ρ| = monotone but non-linear (threshold, saturation, staircase);
     high R² + low |ρ| = odd, usually a discrete input pretending to be numeric;
     both low = no association.
   </p>
-</details>
+{% endcall %}
 
 <div class="mv-caveat" id="mv-caveat">
-  <span><b>Exploratory.</b> Per-cell association, not a tested effect, and not within cell type. Statistics are per-cell (the donor tag is broadcast to every cell →
-  pseudoreplication), so they’re cell-count-weighted and only loosely comparable across datasets.
-  Spot candidates, don’t quantify effects — confirm with a donor-level test (Facets tab of a dataset). ω² is bias-corrected;
-  F is hidden (meaningless at 10⁵+ cells).</span>
-  <button type="button" id="mv-caveat-ack">Got it — hide for a month</button>
+  <span><b>Exploratory.</b> Per-cell association, not a tested effect, and not within cell type. Spot candidates, do not quantify effects.</span>
+  <button type="button" id="mv-caveat-ack">Got it, hide for a month</button>
 </div>
-<a href="#" class="mv-caveat-mini" id="mv-caveat-mini" style="display:none">ⓘ exploratory — why read with care?</a>
+<a href="#" class="mv-caveat-mini" id="mv-caveat-mini" style="display:none">ⓘ exploratory, why read with care?</a>
 <script>
 (function () {
   var KEY = 'anthive.mv.caveat.ackAt', MONTH = 30 * 24 * 3600 * 1000;
