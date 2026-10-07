@@ -1,0 +1,13 @@
+id: facets-columns
+title: Facets (ant_* columns)
+title_html: Facets (<code>ant_*</code> columns)
+summary: Columns starting with ant_ are the site's standardised annotations, with the same name and values in every dataset that has them; prefer them to compare datasets.
+related:
+- facet-effects
+aliases:
+- ant_ columns
+- ant columns
+- standardised annotations
+body_html: |
+  <p>Columns starting with <code>ant_</code>, such as <code>ant_cell_type</code>, <code>ant_disease</code>, <code>ant_donor</code>, <code>ant_sex</code>, <code>ant_age</code>, <code>ant_braak</code> and <code>ant_apoe</code>, are the site's standardised annotations: same name and same values in every dataset that has them. Prefer them when you group, colour or filter, and when you compare datasets. They are shown in bold with a small <em>facet</em> pill; the tooltip gives the original column name.</p>
+  <p>The facet <code>ant_apoe4_carrier</code> (APOE e4 carrier) was called <code>ant_apoe_carrier</code> until October 2026. The old name still works in URLs, API calls and the facet tests for one release; please switch to the new one.</p>

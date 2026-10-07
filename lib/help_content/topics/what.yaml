@@ -1,0 +1,21 @@
+id: what
+title: What anthive is
+summary: Anthive is a browser for curated single-cell datasets, grouped into collections, linked to the papers they come from, with gene sets, module scores and standardised facets for comparing studies.
+related:
+- pages
+- papers
+- facet-effects
+aliases:
+- what is anthive
+- datasets
+- collections
+- overview
+body_html: |
+  <ul>
+    <li><strong>Datasets</strong> are single-cell (or bulk or spatial) expression matrices with their cell annotations, converted from curated <code>.h5ad</code> files into fast databases. Each has an id such as <code>L26/FMG</code>: the collection code, then the dataset code. A small grey version such as <code>v0.1.4</code> marks the dataset release: a minor bump means the data changed, a patch bump means only the metadata did.</li>
+    <li><strong>Collections</strong> group the datasets that come from one study or source, usually one paper.</li>
+    <li><strong>Papers</strong> live in the <a href="/library">paper library</a>: the publications behind the datasets plus papers kept for background, with their full text searchable.</li>
+    <li><strong>Gene sets and module scores</strong>: curated gene modules, scored per cell in many datasets.</li>
+    <li><strong>Facets</strong>: standardised annotation columns (<code>ant_*</code>) that mean the same thing in every dataset, so you can compare across studies.</li>
+  </ul>
+  <p>The site is maintained by the BADS lab at KU Leuven (Mark Fiers). The software and its documentation are on <a href="https://gitlab.kuleuven.be/bdslab/anthive/anthive4" target="_blank" rel="noopener">GitLab</a>.</p>

@@ -1,0 +1,27 @@
+id: facet-counting
+title: Replication across cohorts and how to read it
+summary: 'How replication across cohorts is counted: one anchor per cohort, a partial conjunction r-value, an effect-size filter and how to read the badges and ranking of replicated genes.'
+related:
+- facet-howto
+- facet-effects
+- scopes
+children:
+- facet-replication
+- facet-effect-size
+- facet-not-replicated
+- facet-cell-type-groups
+- facet-pathology-axis
+- facet-age
+- facet-app-nlgf
+- facet-whole-cell-type
+- facet-technical-genes
+- facet-limits
+aliases:
+- replication
+- replication across cohorts
+- replicated
+- r-value
+- k of m
+body_html: |2+
+
+...

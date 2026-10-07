@@ -1,0 +1,14 @@
+id: dataset-caveats
+title: Dataset caveats
+summary: Caveats are known problems with a dataset (contamination, batch effects, small n, donor overlap, missing QC), each with a severity; read them before drawing conclusions.
+related:
+- dataset-page
+- facet-limits
+aliases:
+- caveat
+- caveats
+- known problems
+- warnings
+body_html: |
+  <p>A caveat is a known problem or quirk of a dataset or a slice of it: contamination, ambient RNA, an integration artefact, a small sample, missing QC, donor overlap with another dataset, a dataset derived from another, or wrong variable names. Each caveat has a severity (<em>low</em>, <em>medium</em> or <em>high</em>), a message and, where known, the cells it applies to.</p>
+  <p>The dataset page shows a <em>Caveats</em> tab and a &#9888; mark in the lists, the context pack of the API and MCP (<code>get_dataset_context</code>) lists them, and they should be read before any result is interpreted. A dataset without caveats has none recorded, which is not a guarantee that it has none.</p>

@@ -34,6 +34,12 @@ curl -n -s https://anthive.example.org/api/skill -o ~/.claude/skills/anthive/SKI
 
 Re-run the curl command any time to update to the latest version.
 
+The served skill is a short bootstrap (sign-in, discovery, and the rule to read
+`/api/help` before explaining facets, replication, scopes or caveats). The endpoint
+reference is `/api/openapi.json`, the concept texts are `/api/help`, and the
+detailed skills are in the public skills repository (`anthive-basics`,
+`anthive-dataset-analysis`, `anthive-literature`).
+
 ## Usage
 
 Inside Claude Code, either:

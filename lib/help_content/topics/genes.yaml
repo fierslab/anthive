@@ -1,0 +1,20 @@
+id: genes
+title: Genes, gene sets and facets
+summary: The gene atlas, how to read the dot columns, gene sets and module scores, and the facets browser.
+related:
+- per-cell-per-donor
+- module-scores
+children:
+- module-scores
+aliases:
+- gene atlas
+- gene sets
+- genesets
+body_html: |
+  <ul>
+    <li><strong>Gene atlas.</strong> Open <a href="/genes">genes</a> in the top bar and type a gene to see it across all datasets; several genes separated by commas give a heatmap. Favourite genes (set in Preferences) are marked.</li>
+    <li><strong>Reading the dots.</strong> In the gene tables (dataset Genes tab, gene atlas) and the gene set variability tables, each value is also drawn as a big dot on a thin grey line. The position is the value on that statistic's range, from the left end (lowest) to the right end (highest); the colour shows the low (red), middle (amber) or high (green) third. Hover a dot for the exact value. Green always means the higher, more notable end, and the position carries the same information for readers who cannot tell the colours apart.</li>
+    <li><strong>Gene sets</strong> (<a href="/genesets">/genesets</a>): browse curated gene sets by study and experiment, open one to see its genes and where its module score varies most, or look up every set containing a gene. The <a href="/genesets/variability">variability heatmap</a> compares modules across datasets; its numbers are <em>per-cell associations (descriptive)</em>, computed over cells and not over donors (see <a href="#per-cell-per-donor">Per cell vs per donor</a>).</li>
+    <li><strong>Module scores</strong> are computed per cell with scanpy (default) or UCell; choose the method in Preferences.</li>
+    <li><strong>Facets browser</strong> (<a href="/facets">/facets</a>, marked <em>EXP</em>): every facet with how many datasets carry it, its definition and its donor-level effects across datasets. Each dataset has a <strong>Facets</strong> tab with the same information for that dataset. It is experimental: numbers and groupings may still change.</li>
+  </ul>

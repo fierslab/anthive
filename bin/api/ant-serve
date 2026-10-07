@@ -46,6 +46,7 @@ import asyncio
 import ctypes
 import ctypes.util
 import gc
+import hashlib
 import json
 import logging
 import logging.handlers
@@ -84,7 +85,7 @@ sys.path.insert(0, str(lib_dir))
 
 from anthive_db import AnthiveDB, install_portable_layer_views, safe_ident
 from canonical_columns import BACKCOMPAT_LEGACY_NAMES  # type: ignore
-from config import get_config
+from config import get_config, get_docs_base_url
 from config import facet_hidden_by_config, get_facet_results_dir, get_facets_visible
 from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
                     get_duckdb_temp_dir, get_library_dir,
@@ -93,6 +94,7 @@ from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
 from library_service import LIBRARY_S3_PREFIX, LibraryService
 from facet_aliases import canonical_facet, is_deprecated_facet_column
 import facet_results as facet_results_lib
+import help_content
 import facet_scopes as facet_scopes_lib
 from facet_results import FacetResults
 import de_storage as lib_de_storage
@@ -4091,6 +4093,16 @@ def _facet_rows_limit(limit: int, fmt: str) -> int:
     return limit
 
 
+_FACET_HELP_TOPICS = ('facet-effects', 'facet-counting', 'facet-replicate-unit', 'facet-howto', 'facet-scopes', 'donor-groups')
+
+
+def _with_help(payload: Any, *topic_ids: str) -> Any:
+    """Add ``help_topics`` (ids for ``GET /help/{topic}``) to a dict response."""
+    if isinstance(payload, dict):
+        return {**payload, 'help_topics': list(topic_ids)}
+    return payload
+
+
 @app.get("/databases/{db_id:path}/facet-tests", tags=["facet-tests"])
 def get_facet_tests(db_id: str):
     """Donor-level facet test results of one dataset: one summary row per
@@ -4185,8 +4197,9 @@ def get_facet_tests(db_id: str):
     """
     group_folder, stem = _facet_results_location(db_id)
     meta = registry.metadata_cache.get(db_id) or {}
-    return _facet_results().summary(db_id, group_folder, stem, current_sha256=meta.get('sha256'),
-                                    disease_basis=meta.get('disease_basis'))
+    return _with_help(_facet_results().summary(db_id, group_folder, stem, current_sha256=meta.get('sha256'),
+                                               disease_basis=meta.get('disease_basis')),
+                      *_FACET_HELP_TOPICS)
 
 
 @app.get("/databases/{db_id:path}/facet-tests/genes", tags=["facet-tests"])
@@ -13285,8 +13298,8 @@ def get_facet_tests_across_datasets(
     overview = _facet_results().facet_overview(test_facet, _facet_test_datasets(), top_genes=top_genes,
                                                exclude_secondary=exclude_secondary,
                                                scope=_scope_param(scope, allow_all=True))
-    return {**overview, 'facet_column': 'ant_' + test_facet,
-            'q_threshold': facet_results_lib.Q_THRESHOLD}
+    return _with_help({**overview, 'facet_column': 'ant_' + test_facet,
+                       'q_threshold': facet_results_lib.Q_THRESHOLD}, *_FACET_HELP_TOPICS)
 
 
 def _tested_facet(facet_name: str) -> str:
@@ -13360,8 +13373,9 @@ def get_facet_recurring_genes(
     their donor overlap checked.
     """
     test_facet = _tested_facet(facet_name)
-    return _facet_results().recurring_genes(test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n,
-                                            exclude_secondary=exclude_secondary, scope=_scope_param(scope))
+    return _with_help(_facet_results().recurring_genes(
+        test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n,
+        exclude_secondary=exclude_secondary, scope=_scope_param(scope)), *_FACET_HELP_TOPICS)
 
 
 
@@ -13405,8 +13419,9 @@ def get_facet_gene_effects(
     """
     facet_name = canonical_facet(facet_name)  # deprecated alias, one release
     test_facet = _tested_facet(facet_name)
-    return _facet_results().gene_effects(test_facet, gene, _facet_test_datasets(), cell_type=cell_type,
-                                         exclude_secondary=exclude_secondary, scope=_scope_param(scope))
+    return _with_help(_facet_results().gene_effects(
+        test_facet, gene, _facet_test_datasets(), cell_type=cell_type,
+        exclude_secondary=exclude_secondary, scope=_scope_param(scope)), *_FACET_HELP_TOPICS)
 
 
 
@@ -13463,7 +13478,7 @@ def get_gene_facet_effects(
                 by_scope.setdefault(facet_scope, {})[facet] = reader.gene_effects(
                     facet, gene, datasets, exclude_secondary=exclude_secondary, scope=facet_scope)
         result['by_scope'] = by_scope
-    return result
+    return _with_help(result, *_FACET_HELP_TOPICS)
 
 
 
@@ -15263,8 +15278,89 @@ def database_context(request: Request, db_id: str,
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     scores = sorted(_score_index_by_db.get(db_id, []))
-    return _library().context(db_id, info, module_scores=scores, level=level,
-                              budget_tokens=budget_tokens)
+    return _with_help(_library().context(db_id, info, module_scores=scores, level=level,
+                                         budget_tokens=budget_tokens),
+                      'dataset-caveats', 'facet-replicate-unit', 'per-cell-per-donor', 'dataset-versions')
+
+
+_HELP_CACHE_HEADERS = {'Cache-Control': 'public, max-age=3600'}
+
+
+def _help_response(request: Request, payload: Dict[str, Any]) -> Response:
+    """JSON response with an ETag over the help files, 304 when unchanged."""
+    body = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    etag = '"' + hashlib.sha256(body.encode('utf-8')).hexdigest()[:20] + '"'
+    headers = {**_HELP_CACHE_HEADERS, 'ETag': etag}
+    if request.headers.get('if-none-match') == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=body, media_type='application/json', headers=headers)
+
+
+def _help_docs_url() -> str:
+    return get_docs_base_url(get_config())
+
+
+@app.get("/help", tags=["help"])
+def help_index(request: Request):
+    """Index of the plain-language help: topics (``id``, ``title``, ``summary``)
+    and glossary terms (``slug``, ``term``).
+
+    The same texts the web help page shows (``lib/help_content``). AI clients
+    should fetch ``/help/{topic}`` before explaining facets, replication,
+    scopes, caveats and similar concepts, and quote it rather than improvise.
+    ``GET /help/search?q=`` fuzzy-matches topic ids, titles and glossary terms.
+    """
+    payload = help_content.index()
+    return _help_response(request, payload)
+
+
+@app.get("/help/search", tags=["help"])
+def help_search(request: Request, q: str = Query(..., min_length=1, description="Topic id, title or glossary term (fuzzy)")):
+    """Fuzzy match ``q`` against topics and glossary terms; best first."""
+    return _help_response(request, {'query': q, 'matches': help_content.find(q, limit=8)})
+
+
+@app.get("/help/glossary", tags=["help"])
+def help_glossary(request: Request, format: str = Query('markdown', pattern='^(markdown|html)$')):
+    """Every glossary term with its definition (markdown, or ``format=html``)."""
+    docs_url = _help_docs_url()
+    terms = [{'slug': term.slug, 'term': term.term,
+              'definition': (help_content.fill(term.definition_html, docs_url) if format == 'html'
+                             else help_content.term_markdown(term.slug, docs_url))}
+             for term in help_content.glossary()]
+    return _help_response(request, {'format': format, 'terms': terms})
+
+
+@app.get("/help/glossary/{term}", tags=["help"])
+def help_glossary_term(request: Request, term: str):
+    """One glossary term by slug (``replicate-unit``); an unknown slug returns 404 with close matches."""
+    entry = help_content.get_term(term)
+    if entry is None:
+        hits = [hit['id'] for hit in help_content.find(term) if hit['kind'] == 'term']
+        raise HTTPException(status_code=404, detail=f"Unknown glossary term '{term}'. Close: {hits}")
+    return _help_response(request, {
+        'slug': entry.slug, 'term': entry.term,
+        'definition': help_content.term_markdown(entry.slug, _help_docs_url()),
+        'anchor': f'/help#glossary-{entry.slug}'})
+
+
+@app.get("/help/{topic}", tags=["help"])
+def help_topic(request: Request, topic: str, include_children: bool = Query(True)):
+    """One help topic: ``title``, ``summary``, ``body`` (markdown), ``children``
+    (subsection topic ids, already appended to ``body`` unless
+    ``include_children=false``), ``related`` topic ids and ``terms`` (glossary
+    slugs, fetch with ``/help/glossary/{slug}``), both including the children's. An unknown id returns 404
+    with close matches."""
+    entry = help_content.get_topic(topic)
+    if entry is None:
+        hits = [hit['id'] for hit in help_content.find(topic) if hit['kind'] == 'topic']
+        raise HTTPException(status_code=404, detail=f"Unknown help topic '{topic}'. Close: {hits}")
+    related, terms = help_content.topic_links(entry.id)
+    return _help_response(request, {
+        'id': entry.id, 'title': entry.title, 'summary': entry.summary,
+        'body': help_content.topic_markdown(entry.id, include_children, _help_docs_url()),
+        'children': entry.children, 'related': related, 'terms': terms,
+        'anchor': f'/help#{entry.id}'})
 
 
 @app.get("/skill", tags=["info"], response_class=Response)

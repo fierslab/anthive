@@ -281,6 +281,56 @@ class AnthiveMCP(FastMCP):
             _current_identity.reset(ctx_token)
 
 
+# ── plain-language help (served by ant-serve, /api/help) ────────────────────────
+
+def format_help_index(index: Dict[str, Any]) -> str:
+    """Markdown list of help topics and glossary terms from ``GET /help``."""
+    lines = ['# Anthive help topics', '']
+    lines += [f"- `{topic['id']}`: {topic['title']}. {topic['summary']}" for topic in index.get('topics', [])]
+    terms = ', '.join(f"`{term['slug']}`" for term in index.get('glossary', []))
+    lines += ['', '## Glossary terms', '', terms or '(none)']
+    return '\n'.join(lines)
+
+
+def format_help_topic(data: Dict[str, Any]) -> str:
+    """Markdown for one topic from ``GET /help/{topic}``: title, summary, body, links."""
+    parts = [f"# {data['title']}", '', data['summary'], '', data['body']]
+    if data.get('related'):
+        parts += ['', 'Related topics: ' + ', '.join(f'`{ident}`' for ident in data['related'])]
+    if data.get('terms'):
+        parts += ['Glossary terms: ' + ', '.join(f'`{slug}`' for slug in data['terms'])]
+    return '\n'.join(parts)
+
+
+async def explain_via_api(get: Any, query: str) -> str:
+    """Answer ``explain(query)``: best matching topic or glossary term as markdown.
+
+    Args:
+        get: Coroutine ``get(path, **params) -> dict`` that calls ant-serve.
+        query: Topic id, title or glossary term (fuzzy); empty lists the topics.
+
+    Returns:
+        The help text, followed by other close matches; the topic list when
+        nothing matches.
+    """
+    query = (query or '').strip()
+    if query:
+        matches = (await get('/help/search', q=query)).get('matches', [])
+        if matches:
+            best = matches[0]
+            if best['kind'] == 'term':
+                data = await get(f"/help/glossary/{best['id']}")
+                text = f"# {data['term']} (glossary)\n\n{data['definition']}"
+            else:
+                text = format_help_topic(await get(f"/help/{best['id']}"))
+            others = [f"{hit['kind']} `{hit['id']}`" for hit in matches[1:]]
+            if others:
+                text += '\n\nOther close matches: ' + ', '.join(others)
+            return text
+    prefix = f"No help topic or glossary term matches '{query}'.\n\n" if query else ''
+    return prefix + format_help_index(await get('/help'))
+
+
 ANTHIVE_GUIDE = """# Using Anthive well
 
 Anthive serves ~190 curated single-cell datasets (mostly human microglia) and
@@ -443,6 +493,15 @@ def main() -> None:
             '  then get_paper to find the datasets a paper is the source of, then test the claim in\n'
             '  our data. Prompts investigate_dataset and literature_in_our_data do this for you;\n'
             '  the resource anthive://guide has the full rules.\n'
+            '\n'
+            'EXPLAINING ANTHIVE (call explain() first)\n'
+            '  explain(topic_or_term) returns the maintainers\' plain-language text (also\n'
+            '  anthive://help and anthive://help/{topic}). Before you explain facets, facet\n'
+            '  effects, replication across cohorts, the replicate unit, scopes, caveats, dataset\n'
+            '  versions, module scores, differential expression, donor groups or any glossary\n'
+            '  term (pseudobulk, FDR, r-value, k of m, ...) to a user, call explain() and quote\n'
+            '  or closely paraphrase it. Do not improvise definitions or thresholds. Tool and\n'
+            '  API results that carry help_topics name the topics worth reading.\n'
             '  Always keep "the literature says" (cite [Author Year, p.N]) separate from "our data\n'
             '  shows", and remember per-cell statistics are pseudoreplicated (aggregate per donor).\n'
             '  Use search_literature throughout, not only when asked: before interpreting a finding,\n'
@@ -2070,6 +2129,26 @@ def main() -> None:
             text += '\n\n(note: the literature index is not loaded on this server, so no paper passages.)'
         return text
 
+    @mcp.tool()
+    async def explain(topic_or_term: str = '') -> str:
+        """Plain-language explanation of an anthive concept, written by the
+        maintainers. Call this BEFORE explaining facets, facet effects,
+        replication, replicate units, scopes, caveats, dataset versions,
+        module scores, differential expression, donor groups, the paper
+        library or any glossary term (pseudobulk, FDR, r-value, k of m, ...)
+        to a user, and quote or closely paraphrase the result instead of
+        improvising.
+
+        Args:
+            topic_or_term: topic id, title or glossary term, matched fuzzily
+                           (e.g. 'facet-counting', 'replicate unit', 'r-value').
+                           Empty or unknown returns the list of topics.
+        """
+        try:
+            return await explain_via_api(_get, topic_or_term)
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+
     # ── adding papers to the library (REST 2.40) ─────────────────────────────────
 
     async def _post_upload(metadata: Any, pdf: Optional[bytes], *, folder: Optional[str],
@@ -2220,6 +2299,16 @@ def main() -> None:
                   mime_type='text/markdown')
     def anthive_guide() -> str:
         return ANTHIVE_GUIDE
+
+    @mcp.resource('anthive://help', name='help-index', title='Anthive help topics',
+                  mime_type='text/markdown')
+    async def help_index_resource() -> str:
+        return format_help_index(await _get('/help'))
+
+    @mcp.resource('anthive://help/{topic}', name='help-topic', title='Anthive help topic',
+                  mime_type='text/markdown')
+    async def help_topic_resource(topic: str) -> str:
+        return await explain_via_api(_get, topic)
 
     @mcp.resource('anthive://dataset/{group_id}/{file_id}/context', name='dataset-context',
                   title='Dataset background pack', mime_type='text/markdown')

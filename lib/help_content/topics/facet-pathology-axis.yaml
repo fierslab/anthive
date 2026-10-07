@@ -1,0 +1,11 @@
+id: facet-pathology-axis
+title: Pathologic AD and Braak are one axis
+summary: Pathologic AD and Braak stage are one pathology axis, not two independent lines of evidence.
+terms:
+- disease-basis
+aliases:
+- pathology axis
+- disease basis
+- braak and disease
+body_html: |
+  <p>In every pathology-based cohort, "AD" is defined from Braak stage and CERAD plaque score (AD is Braak III or higher with moderate or frequent plaques; control is Braak II or lower with no or sparse plaques; other donors are left out). A gene replicated under both Braak and pathologic AD is one observation read twice, not two findings. Some pathologic AD donors had no dementia, so this is not a clinical diagnosis (<a href="#glossary-disease-basis">disease basis</a>).</p>

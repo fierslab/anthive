@@ -59,6 +59,20 @@ and `lib/config.py` (anthive.yaml loader).
 - `analytics_query` runs sandboxed SELECT-only SQL via `lib/analytics.py` —
   see `tests/test_analytics_security.py` before touching the sandbox.
 
+## Help endpoints and `explain`
+
+- `/help`, `/help/{topic}`, `/help/glossary[/{term}]`, `/help/search` serve
+  `lib/help_content/` (the same files render the web help page). Markdown is
+  derived from the HTML fragments by `help_content.html_to_markdown`. Public
+  like `/version`; responses carry an `ETag` and `Cache-Control: public`.
+  Keep the literal `/help/glossary` and `/help/search` routes above
+  `/help/{topic}`.
+- `_with_help(payload, *topic_ids)` adds `help_topics` to facet and context
+  responses; the ids must exist (tested).
+- `ant-mcp` has no `help_content` dependency: `explain`, `anthive://help` and
+  `anthive://help/{topic}` call the REST routes, so the MCP needs no yaml data
+  files. `GET /skill` serves `.claude/skills/anthive/SKILL.md`, a thin bootstrap.
+
 ## Personal MCP links (ant-serve side)
 
 - Token store: `lib/mcp_tokens.py` (`McpLinkStore`), SQLite at

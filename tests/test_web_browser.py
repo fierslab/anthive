@@ -7147,6 +7147,29 @@ def test_help_glossary_defines_every_term_the_pages_link_to(client):
         assert f'id="glossary-{slug}"' in help_text, slug
 
 
+def _squash(html):
+    return re.sub(r"> <", "><", re.sub(r"\s+", " ", html)).strip()
+
+
+def test_help_page_renders_every_topic_and_glossary_term_from_help_content(client):
+    """Web and API read the same files: nothing on the page is typed twice."""
+    import help_content
+
+    page = _squash(client.get("/help").text)
+    docs_url = browser._docs_base_url()
+    child_ids = {child for topic in help_content.topics() for child in topic.children}
+    for topic in help_content.topics():
+        if topic.id in child_ids:
+            assert f'<h3 class="subsection-head" id="{topic.id}">' in page, topic.id
+        else:
+            assert f'<details class="help-section" id="{topic.id}">' in page, topic.id
+            assert _squash(help_content.topic_html(topic.id, docs_url)) in page, topic.id
+    assert _squash(help_content.glossary_html(docs_url)) in page
+    for term in help_content.glossary():
+        assert f'id="glossary-{term.slug}"' in page
+    assert "{{" not in page and "help_topic_html" not in page
+
+
 def test_help_has_the_ptprg_walkthrough(client):
     section = _help_sections(client.get("/help").text, "facet-howto")
     for phrase in ("PTPRG", "Braak", "What you may say", "What you may not say", "partial conjunction"):

@@ -1,0 +1,11 @@
+id: facet-limits
+title: Limits
+summary: The limits of facet testing, such as exploratory status, shared donors between datasets, unmodelled batch and what the method cannot show.
+related:
+- dataset-caveats
+aliases:
+- limits
+- limitations
+body_html: |
+  <p>All of this is exploratory. No hit means "not detected with this many donors", not "no effect". The same donors occur in several datasets (ROSMAP, SEA-AD, MADRC and others), which is why each cohort counts once through its anchor and why overlap that was never checked is flagged. Replication is a statement about which genes change in at least 2 cohorts; there is no pooled effect size across datasets.</p>
+  <p>The full method, thresholds and outputs are described in <a href="{{ docs }}/DESIGN_facet_testing.md" target="_blank" rel="noopener" id="help-facet-design-doc">DESIGN_facet_testing.md</a>; the code is <code>bin/annot/ant-facet-test</code> and <code>bin/annot/ant-facet-test-modules</code> in the anthive4 repository. The results are also available through the API (<code>/api/databases/{id}/facet-tests</code>, <code>/api/facets/{name}/tests</code>) and the MCP tool <code>get_facet_tests</code>.</p>

@@ -1,0 +1,20 @@
+id: facet-howto
+title: 'How to read a facet result: PTPRG in microglia with Braak stage'
+summary: A worked example of reading a facet result, PTPRG in microglia with Braak stage, from the anchors table to what may and may not be said.
+related:
+- facet-counting
+aliases:
+- how to read a facet result
+- worked example
+- ptprg
+body_html: |
+  <p>A worked example of the logic. The numbers are from one saved run and shown per dataset; the live card pools some cohorts, so its exact values differ.</p>
+  <ol>
+    <li><strong>Open the gene page for PTPRG and the Braak tab.</strong> The facet is a trend: the effect is the log2 fold change per Braak stage in microglia pseudobulks, adjusted for sex, and for age and post-mortem interval where the cohort had at least 15 donors with those values.</li>
+    <li><strong>Look at the anchors table first.</strong> One row per cohort. ROSMAP: 413 donors, +0.58 per stage, q 1.1e-16 after the correction for three sibling strata. SEA-AD: 84 donors, +0.48 per stage, q 0.0013. MADRC: about 30 donors, +0.33 to +0.55 in five regions, pooled into one estimate. Lee2026 (PsychAD without its ROSMAP participants): 1,122 donors, +0.43 per stage, q 3e-85. Fancy2024: 17 donors, +0.53 per stage, q 0.12. All five estimates have the same sign; the confidence intervals of the three small cohorts are wide.</li>
+    <li><strong>See how the r-value arises.</strong> The smallest p value (Lee2026) is set aside, because it must not carry the result alone. The remaining four are combined by Simes: the smallest of them (ROSMAP) is multiplied by 4 for the four values, then by 2 for the two directions. Benjamini-Hochberg over the roughly 15,000 microglia genes tested in at least two cohorts leaves r far below 0.05, so the badge reads "replicated (up)" and names ROSMAP and Lee2026 as the two cohorts that carry it. Without ROSMAP the second-best p value would have been SEA-AD's (about 1e-4), and the gene would most likely not have passed. That is what the badge should make visible: this replication rests on two large cohorts plus consistent direction in three small ones.</li>
+    <li><strong>Read k of m and agreement.</strong> k is 3 or 4 of 5 depending on the MADRC pool; agreement is 5 of 5. Fancy2024 is in m although it could not reach significance; it only dilutes the r-value slightly and adds a consistent sign.</li>
+    <li><strong>Check the effect filter.</strong> The per-stage threshold is 0.046 and every cohort is far above it; the median over the anchors is about +0.48 per stage. Over six stages that is a log2 change near 2.9, a seven-fold difference between Braak 0 and VI, which is large for a pseudobulk.</li>
+    <li><strong>Ask what it means biologically before quoting it.</strong> Green et al. 2024 (Nature 633:634) name the lipid-associated, tau-coupled ROSMAP microglial subpopulation "Mic.13 (PTPRG)", and Wachter et al. 2024 (Acta Neuropathol 147:65, the MADRC dataset here, so not independent) list PTPRG among the top regulated genes of pathology-associated clusters. The published effect is a change in the proportion of a state. A seven-fold whole-microglia change is therefore mostly "more Mic.13-like nuclei at high Braak", not "every microglial cell makes seven times more PTPRG". The composition flag tests the size of the microglia fraction, not this. PTPRG is also a 730 kb gene, and long intron-rich genes track nuclear RNA integrity and post-mortem interval, so check that units with and without that adjustment agree. Finally, the disease tab shows PTPRG up with pathologic AD in the same cohorts; that is the same axis, not a second finding.</li>
+    <li><strong>What you may say.</strong> "PTPRG expression in microglia pseudobulks rises with Braak stage in ROSMAP and PsychAD, with the same direction in SEA-AD, MADRC and Fancy2024 (partial conjunction r below 0.05, median about 0.48 log2 per stage), consistent with the expansion of the PTPRG-marked lipid-associated state reported by Green et al. 2024." <strong>What you may not say:</strong> "PTPRG is induced in microglia by tau pathology", "replicated in five independent cohorts", or anything about causation.</li>
+  </ol>

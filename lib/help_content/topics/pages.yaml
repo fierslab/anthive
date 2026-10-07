@@ -1,0 +1,20 @@
+id: pages
+title: Collection and dataset pages
+summary: What the collection page and the dataset page show, which tabs a dataset has, and what the ant_* facet columns are.
+related:
+- what
+- facet-effects
+children:
+- collection-page
+- dataset-page
+- facets-columns
+- dataset-versions
+- dataset-caveats
+- differential-expression
+aliases:
+- dataset page
+- collection page
+- tabs
+body_html: |2+
+
+...

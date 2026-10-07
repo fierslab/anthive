@@ -1,0 +1,9 @@
+id: facet-whole-cell-type
+title: What a whole-cell-type effect can mean
+summary: A whole-cell-type pseudobulk effect can reflect a shift in the mix of cell states inside the cell type rather than every cell changing expression.
+aliases:
+- whole cell type effect
+- state composition
+- composition
+body_html: |
+  <p>A pseudobulk within a cell type does not separate a change inside cells from a change in the mix of states within the cell type. In AD microglia the dominant published effect is a shift toward lipid-associated and MHC-II-high states, so a rise in GPNMB, APOE, SPP1 or PTPRG at the whole-microglia level is at least partly "more cells in that state". Both are real donor-level effects; neither on its own shows that a gene is induced within a cell.</p>

@@ -1,0 +1,23 @@
+id: dataset-page
+title: Dataset page
+summary: The dataset page has the id strip with the database id you need in the API, provenance, and tabs (Overview, Data, Genes, Genesets, Numerical, Categorical, Differential expression, Papers, Downloads, Caveats) that appear only when the dataset has that data.
+aliases:
+- dataset tabs
+body_html: |
+  <p>At the top: the <strong>id strip</strong> with the collection, dataset and database ids (click to select and copy; you need the database id, for example <code>L26/FMG</code>, in the API, vark, pyvark and MCP), provenance (access, source, license, links to the DOI or accession), the title, a short description, context pills and the numbers of cells and genes. The <em>visualize</em> menu (top right) opens the plot builder.</p>
+  <div class="table-wrap">
+  <table>
+    <tr><th>Tab</th><th>What it shows</th></tr>
+    <tr><td>Overview</td><td>The written description of the dataset, when there is one.</td></tr>
+    <tr><td>Data</td><td>Layers, embeddings (UMAP, PCA) and an overview of the cell annotation columns.</td></tr>
+    <tr><td>Genes</td><td>Expression statistics per gene (mean, standard deviation, coefficient of variation, fraction of cells expressing it); search, sort and star favourites.</td></tr>
+    <tr><td>Genesets</td><td>Module scores already computed for curated gene sets, with how strongly they vary across the dataset's annotations.</td></tr>
+    <tr><td>Numerical</td><td>Numeric cell annotations (age, Braak stage, QC metrics, scores) with summaries and quick plots.</td></tr>
+    <tr><td>Categorical</td><td>Categorical annotations (cell type, donor, disease, sex) with value counts and quick plots.</td></tr>
+    <tr><td>Differential expression</td><td>Precomputed differential expression results, when the dataset has them: studies, terms, contrasts and genes, with volcano and MA plots.</td></tr>
+    <tr><td>Papers</td><td>The papers linked to this dataset, with the reason (for example <em>Source of this dataset</em>), a short summary, PDF, DOI, PubMed and BibTeX.</td></tr>
+    <tr><td>Downloads</td><td>The original <code>.h5ad</code> file, the papers' PDFs and any other files that belong to the study.</td></tr>
+    <tr><td>⚠ Caveats</td><td>Known problems with this dataset (contamination, batch effects, missing metadata). Read them before drawing conclusions. A ⚠ in the lists marks datasets that have caveats.</td></tr>
+  </table>
+  </div>
+  <p>Tabs only appear when the dataset has that kind of data.</p>

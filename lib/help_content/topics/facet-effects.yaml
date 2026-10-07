@@ -1,0 +1,22 @@
+id: facet-effects
+title: Facets and facet effects
+summary: A facet is a standardised donor-level or animal-level variable; facet effects are donor-level tests (limma-voom on pseudobulks) per dataset and cell type, shown on the Facets tab and facet pages. Exploratory.
+related:
+- facet-counting
+- facet-howto
+- per-cell-per-donor
+children:
+- facet-tested
+- facet-replicate-unit
+- facet-replicates-needed
+- facet-contrasts
+- scopes
+- donor-groups
+aliases:
+- facets
+- facet
+- facet effect
+- facet tests
+body_html: |
+  <p>A facet is a donor-level (or animal-level) variable that anthive has standardised across datasets: the same name and the same values in every dataset that has it. Each dataset declares how its own columns map onto a facet, and the Facets tab of a dataset shows that mapping value by value. A facet is constant for all cells of one donor, so a facet effect is a difference between donors, not between cells.</p>
+  <p id="facet-effects-visible">The facets that are tested are sex, pathologic AD (disease), APOE e4 carrier status, Braak stage, age (per decade of age, both unadjusted and adjusted for pathology) and, in mouse and xenograft hosts, App NL-G-F genotype. The tissue facet uses umbrella terms (for example cortex) so that datasets with different dissections can be compared. Only the tested facets are shown on the <a href="/facets">facet pages</a> while the audit of the facet definitions is open; the Facets tab of a dataset still lists every facet it has, the others under "Not analysed yet". The other <code>ant_</code> columns stay in the data, the plots, SQL and the API.</p>

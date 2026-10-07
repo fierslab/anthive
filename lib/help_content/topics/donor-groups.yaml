@@ -1,0 +1,17 @@
+id: donor-groups
+title: Donor groups and shared donors
+summary: A donor group names datasets that share donors (splits of one study, or several studies of one cohort); they are never counted as independent replications.
+related:
+- facet-replication
+- facet-counting
+terms:
+- cohort
+- donor-overlap
+aliases:
+- donor group
+- donor overlap
+- shared donors
+- cohort
+body_html: |
+  <p>Datasets often share people: complementary splits of one study (cell classes, regions, libraries) or several studies of one cohort (for example ROSMAP in several datasets). A <em>donor group</em> names such datasets. Cross-dataset counts treat a donor group as one source of evidence, secondary datasets (reanalyses) are listed but not counted, and the distinct donors of a cohort are counted by a donor identifier that is shared across datasets.</p>
+  <p>Datasets whose donor overlap has not been checked are flagged <em>donor overlap not checked</em>. The API lists the groups under <code>/api/donor-groups</code>.</p>

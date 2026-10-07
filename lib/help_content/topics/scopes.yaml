@@ -1,0 +1,16 @@
+id: scopes
+title: Facet scopes
+summary: A facet scope is the kind of system a dataset comes from (human post-mortem, xenograft of human cells in mouse, in vitro); facets are tested, counted and replicated within one scope and results are never merged across scopes.
+related:
+- facet-counting
+- facet-app-nlgf
+terms:
+- scope
+aliases:
+- scope
+- facet scope
+- human_postmortem
+- xenograft_human_in_mouse
+body_html: |
+  <p>A scope is the kind of system a dataset comes from: <code>human_postmortem</code> (donors), <code>xenograft_human_in_mouse</code> (human cells in a mouse host; the replicate is the host animal) or <code>in_vitro</code>. Pure mouse datasets have no scope and are outside the facet layer. Facets are tested, counted and replicated within one scope. Human and mouse gene symbols are never matched, and a xenograft result never supports a human post-mortem one.</p>
+  <p>Each facet is only allowed in some scopes (App NL-G-F only in xenograft hosts). Every API call about facet effects takes a <code>scope</code> argument; the default is <code>human_postmortem</code>, or the first allowed scope for facets that are not tested there. Datasets of spatial or mass spectrometry technology are also outside the facet layer.</p>

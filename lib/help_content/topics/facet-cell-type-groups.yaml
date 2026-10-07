@@ -1,0 +1,20 @@
+id: facet-cell-type-groups
+title: Cell type groups and what counts
+summary: Cell type labels are mapped to Cell Ontology based groups so cohorts with different label sets can be compared, and what is counted per group.
+terms:
+- agreement
+- cell-type-group
+aliases:
+- cell type groups
+- cell type group
+body_html: |
+  <p>Datasets name their cell types differently ("microglial cell", "Microglia", "MG", "Mic P2RY12"). For counting, every label is placed in a <a href="#glossary-cell-type-group">cell type group</a> (microglia, astrocyte, inhibitory neuron, and so on) from the table <code>lib/celltype_groups.yaml</code>; the raw label stays visible in small text next to the group. Mixed populations (myeloid, glia, immune, vascular) have their own groups and never count as evidence for a pure class, and labels without a group are "unmapped" and never count. Neuron groups are coarse and can combine brain regions, so read the raw labels before drawing a biological conclusion.</p>
+  <ul>
+    <li><strong>One anchor per cohort and cell type group.</strong> Each cohort contributes exactly one unit to a group, however many of its datasets were tested: a donor-pooled unit (<code>pool:&lt;id&gt;</code>, marked "pooled") for multi-region cohorts such as MADRC and SEA-AD, otherwise the dataset named as anchor in the DRAFT cohort selection table. Other units of the cohort stay on the card, folded, each with the reason it is not counted.</li>
+    <li><strong>What does not count.</strong> Descriptive-only and cell-level rows, reanalyses (datasets that re-serve cells of another dataset, marked "reanalysis, not counted"), cohorts whose role is a duplicate, supplement or alternative, datasets missing from the cohort table and unmapped labels. For disease, cohorts with a clinical or author diagnosis do not count either.</li>
+    <li><strong>One source per dataset.</strong> Within a dataset and group only the rows with the most direct cell type source count: per-cell <code>ant_cell_type</code> or a dataset constant first, then author cell type columns, then author clusters.</li>
+    <li><strong>Several strata in one group.</strong> When several equal strata of the anchor dataset fall into the same group, they share the cohort's single vote and their p values are multiplied by the number of strata (Bonferroni); the forest shows this as "&times;n" under q.</li>
+    <li><strong>Why Simes.</strong> Cohorts are not independent (shared pathology and cell-state shifts, sometimes shared persons). Fisher's method assumes independence and calls more genes replicated than the data justify.</li>
+    <li><strong>Donor overlap.</strong> Cohorts whose donor independence was never checked are still counted but flagged "donor overlap not checked", because shared donors make agreement look stronger than it is.</li>
+  </ul>
+  <p><strong>Replicated genes</strong> on a facet page are ranked by (1) the r-value, smallest first; (2) k; (3) <a href="#glossary-agreement">agreement</a>; (4) the median absolute log2 fold change over the tested cohorts. Which datasets are primary data and which are reanalyses is listed on the <a href="/donor-groups">donor groups</a> page and shown at the top of each dataset page.</p>
