@@ -471,13 +471,16 @@ class AnthiveClient:
         and other datasets outside the three scopes) and
         ``control_basis`` (for datasets with ``ant_app_nlgf``: what the
         control animal is, ``'wt_host'``, ``'humanised_app_host'`` or
-        ``'other'``). Datasets the curators set aside
-        (``facet_exclude: true`` with a ``facet_exclude_reason`` in the
-        dataset's ``.md``, for example metacell sets) and spatial or
-        proteomics datasets have no facet results and no cohort rows.
-        The server does not return the ``facet_exclude`` flag in
-        ``/databases``; :meth:`get_facet_tests` answers such a dataset
-        with ``status: 'not_tested'`` and the reason.
+        ``'other'``).
+
+        ``facet_exclude`` (bool) and ``facet_exclude_reason`` (REST API
+        2.44.0+) say whether the dataset is outside the facet layer by
+        data type: the dataset's ``.md`` says ``facet_exclude: true``
+        (metacell sets, sets the curators set aside; the reason is
+        ``facet_exclude_reason``), or its technology is spatial or
+        proteomics. Such datasets have no facet results and no cohort
+        rows; :meth:`get_facet_tests` answers them with ``status:
+        'not_tested'`` and the reason.
 
         Args:
             refresh: Force a fresh catalog scan on the server.
@@ -544,7 +547,8 @@ class AnthiveClient:
         (described under :meth:`get_databases`) and the replicate
         fields ``replicate_unit``, ``replicate_column``,
         ``replicate_basis`` and ``disease_basis``, plus (REST API
-        2.44.0+) ``facet_scope`` and ``control_basis`` (described under
+        2.44.0+) ``facet_scope``, ``control_basis``, ``facet_exclude`` and
+        ``facet_exclude_reason`` (described under
         :meth:`get_databases`). ``replicate_unit`` says what the n of a
         test is (donors, animals or samples), ``replicate_basis``
         whether that was declared by the curators or inferred,
@@ -1902,7 +1906,11 @@ class AnthiveClient:
 
         REST API 2.44.0+: the summary and every unit, gene row and
         module row carry ``facet_scope`` (the dataset's scope, see
-        :attr:`FACET_SCOPES`). ``facet`` also takes ``age`` (log2 fold
+        :attr:`FACET_SCOPES`; ``None`` for a dataset in no scope). The
+        summary also carries ``facet_exclude`` and
+        ``facet_exclude_reason`` (see :meth:`get_databases`); a
+        not-tested dataset gives its current ``reason`` (the exclusion
+        reason, else ``no facet scope: ...``). ``facet`` also takes ``age`` (log2 fold
         change per decade of age; the effect includes disease
         prevalence), ``age_adjusted`` (the same with the pathology term
         in the model; ``age`` gene rows then carry
@@ -2358,19 +2366,26 @@ class AnthiveClient:
         Returns ``{facet, cell_type, celltype_group, cl_id, labels,
         scope, scopes, cohorts_in_cell_type, n_replicated,
         n_r_significant, n_effect_gate, n_replicated_effect,
-        n_genes_in_family, donors_in_cell_type,
+        n_replicated_strong, n_genes_in_family, donors_in_cell_type,
         donor_count_definition, cell_types, rows, definition, ranking,
         exclude_secondary, cohort_table_status}``; ``n_replicated``
         counts the replicated genes of the family,
         ``n_r_significant`` the genes with ``r_value < 0.05`` before
         the gate, ``n_effect_gate`` those that also pass it,
         ``n_replicated_effect`` those that replicate at the 10 percent
-        minimum effect (``r_treat``), ``n_genes_in_family`` the genes
+        minimum effect (``r_treat``), ``n_replicated_strong`` those at
+        the 25 percent tier (``r_strong``; null where a run has no
+        strong p values), ``n_genes_in_family`` the genes
         tested in at least 2 cohorts, and ``rows`` is capped at ``n``. Rows:
         ``gene, r_value, p_pc, k, k_treat, m, replicated, direction,
         agreement, median_abs_logFC, median_logFC,
         effect_gate_passed, effect_gate_tau, effect_gate_cohorts,
-        r_cohorts, r_treat, replicated_effect, gene_flags, cohorts,
+        r_cohorts, r_treat, replicated_effect, r_strong,
+        replicated_strong, persists_after_pathology_adjustment (facet
+        ``age`` only: the gene also replicates, same direction, in
+        ``age_adjusted`` of the same scope and cell type group; null
+        for other facets or when there is no such group), gene_flags,
+        cohorts,
         cohorts_tested_labels, overlap_unknown,
         cohorts_overlap_unknown`` (see :meth:`get_facet_gene_effects`
         for the meaning) plus the old
@@ -2391,7 +2406,8 @@ class AnthiveClient:
             format: ``'json'`` or ``'dataframe'`` (the rows, needs
                 pandas; the family counts ``n_replicated``,
                 ``n_genes_in_family``, ``n_r_significant``,
-                ``n_effect_gate`` and ``n_replicated_effect`` go to
+                ``n_effect_gate``, ``n_replicated_effect`` and
+                ``n_replicated_strong`` go to
                 ``df.attrs``).
             scope: Facet scope, one of :attr:`FACET_SCOPES`
                 (``'human_postmortem'``, ``'xenograft_human_in_mouse'``,
@@ -2414,7 +2430,8 @@ class AnthiveClient:
             import pandas as pd
             frame = pd.DataFrame(result.get('rows', []))
             for key in ('n_replicated', 'n_genes_in_family', 'n_r_significant',
-                        'n_effect_gate', 'n_replicated_effect'):
+                        'n_effect_gate', 'n_replicated_effect',
+                        'n_replicated_strong'):
                 if key in result:
                     frame.attrs[key] = result[key]
             return frame
@@ -2422,7 +2439,9 @@ class AnthiveClient:
 
     def get_gene_facet_effects(self, gene: str,
                                exclude_secondary: bool = True,
-                               scope: Optional[str] = None) -> Dict:
+                               scope: Optional[str] = None,
+                               facet: Union[str, Sequence[str], None] = None,
+                               include_units: bool = True) -> Dict:
         """``GET /genes/{gene}/facet-effects``. Result cards of one gene
         for every tested facet (:attr:`TESTED_FACETS`).
 
@@ -2441,6 +2460,17 @@ class AnthiveClient:
         The first call per facet reads every result file on the server
         (a few seconds); later calls are cached.
 
+        The all-facets answer is large (about 5 MB for a gene such as
+        PTPRG, because every card lists every unit). Ask for fewer
+        facets with ``facet`` and/or drop the unit lists with
+        ``include_units=False`` (about 0.5 MB): each card then keeps
+        ``n_units``, ``replication``, ``cell_types`` and ``notes`` but
+        its ``units`` list is empty. Fetch the units of one facet with
+        :meth:`get_facet_gene_effects`. Unit cards also carry
+        ``replicate_unit`` and ``replicate_column`` (what a replicate
+        is in that unit, for example donor or animal, and the obs
+        column that names it).
+
         Args:
             gene: Gene symbol (case-insensitive).
             exclude_secondary: ``False`` lets secondary datasets count.
@@ -2452,12 +2482,23 @@ class AnthiveClient:
                 never mix. Default: every scope, in
                 ``by_scope``. Unknown names give HTTP 400. Sent only
                 when given.
+            facet: One facet or a list of facets from
+                :attr:`TESTED_FACETS` (sent as a comma separated list).
+                Default: all. An untested facet gives HTTP 404;
+                ``strongest_facet`` is chosen among those asked for.
+            include_units: ``False`` empties ``units`` in every card
+                (see above). Sent only when ``False``.
         """
         params: Dict[str, Any] = {}
         if not exclude_secondary:
             params['exclude_secondary'] = 'false'
         if scope is not None:
             params['scope'] = scope
+        if facet is not None:
+            params['facet'] = (facet if isinstance(facet, str)
+                               else ','.join(facet))
+        if not include_units:
+            params['include_units'] = 'false'
         return self._get(f'/genes/{gene}/facet-effects',
                          params=params or None)
 
