@@ -6,6 +6,7 @@ related:
 - facet-howto
 - per-cell-per-donor
 children:
+- facet-overview
 - facet-tested
 - facet-replicate-unit
 - facet-replicates-needed

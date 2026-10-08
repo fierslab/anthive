@@ -1,0 +1,311 @@
+{# The "Gene view" tab of /genes/{gene}: panel 1 (where is it expressed, descriptive),
+   panel 2 (what shifts it: facet effects per scope) and the panel 3 placeholder, plus the
+   "Author DE (as published)" tab body.  Needs _views.html (views_styles, views_core).
+   Data: GET /api/gene_stats_all, /api/genes/{g}/facet-effects (include_units=false), then
+   /api/facets/{f}/effects?gene=&scope=&cell_type= when a cell is opened, and the web route
+   /genes/{g}/author-de.  `view_dbs` is the compact dataset map built by browser.py. #}
+{% from "_macros.html" import doc_block %}
+
+{% macro view_gene_panels(gene) -%}
+<div id="vwg-root" data-gene="{{ gene }}">
+  <div id="vwg-headline"></div>
+  <h2 class="section-head">Where is it expressed <span class="muted">panel 1, descriptive</span></h2>
+  <p class="vw-essential">How much of each cell type expresses {{ gene }}, not whether anything changes. Click a row to see its datasets.</p>
+  <div id="vwg-p1"><p class="vw-loading">Computing {{ gene }} across the catalogue (the first view can take up to a minute, later views are cached)...</p></div>
+
+  <h2 class="section-head">What shifts it: facet effects <span class="muted">panel 2, tested per donor or mouse</span></h2>
+  <p class="vw-essential"><strong>Exploratory.</strong> Effects are tested per donor (per mouse in the xenograft block) within one cell type. Click a cell to see the cohorts behind it.</p>
+  <div class="vw-note blue" id="vwg-composition">A change of a whole cell type can be a shift in the mix of cell states inside it (<a href="/help#glossary-composition">composition</a>), not induction of the gene in every cell. Braak stage and pathologic AD are one pathology axis, so where both replicate it is one finding.</div>
+  {% call doc_block('About this view', id='vwg-about') %}
+    <p>A <a href="/help#glossary-facet">facet</a> is a donor-level property such as sex, Braak stage or age, defined the same way in every dataset. A facet effect is a difference between donors (between host mice in the xenograft block), never between single cells.</p>
+    <p>A cell is <strong>replicated</strong> when the same direction shows in at least 2 cohorts according to a <a href="/help#glossary-partial-conjunction">partial conjunction test</a> at 5 percent FDR (<a href="/help#glossary-r-value">r-value</a> below 0.05). The effect filter (at least a 10 percent change in 2 cohorts, 10 percent over three stages for Braak, per decade for age) is shown separately as a condition on the effect, not as error control. The star marks the strict tier: the minimum-effect r-value is also below 0.05 (<a href="/help#glossary-treat-tier">strict tier</a>). <strong>No evidence</strong> shows the cohorts that are individually significant out of those tested (k/m); it does not mean there is no effect, because few or small cohorts cannot reach one (<a href="/help#glossary-p-value-floor">p-value floor</a>).</p>
+    <p>The post-mortem and the xenograft system are analysed separately and never combined (<a href="/help#glossary-scope">scopes</a>). Cohorts can share a brain bank, protocol or lab, so "cohorts" is not a count of independent confirmations.</p>
+  {% endcall %}
+  <div id="vwg-legend"></div>
+  <div id="vwg-p2"><p class="vw-loading">Loading the facet effects...</p></div>
+
+  <h2 class="section-head">Donor variability <span class="muted">panel 3</span></h2>
+  <div class="vw-placeholder">Coming later. This panel will show how much donors differ within a group.</div>
+</div>
+{%- endmacro %}
+
+{% macro view_gene_author_de(gene) -%}
+<div id="vwa-root" data-gene="{{ gene }}">
+  <p class="vw-essential">As published by the authors and imported unchanged. anthive has not re-analysed or replicated these, the designs differ between datasets, and they are never combined with the facet effects. These are cell-level models: their p values are not comparable with the donor-level results of the Gene view.</p>
+  <div id="vwa-body"><p class="vw-loading">Looking for author differential expression of {{ gene }}...</p></div>
+</div>
+{%- endmacro %}
+
+{% macro view_gene_script(gene, dbs) -%}
+<script>
+(function () {
+  var V = window.antViews;
+  var GENE = {{ gene|tojson }};
+  var DBS = {{ dbs|tojson }};
+  var enc = encodeURIComponent;
+  var state = { stats: null, effects: null, lowDet: {}, p1: null };
+
+  /* ---------- panel 1 ---------- */
+  function bar(pct, lo, hi) {
+    return '<div class="vw-bar-track"><span class="vw-bar-range" style="left:' + lo + '%;width:' + Math.max(1, hi - lo) + '%"></span><span class="vw-bar-med" style="left:calc(' + pct + '% - 1px)"></span></div>';
+  }
+  function modalityTag(modality) {
+    if (!modality) return '';
+    var cls = modality === 'nuclei' ? 'nuclei' : 'cells';
+    return '<span class="vw-modality ' + cls + '" title="' + (modality === 'nuclei' ? 'Single nuclei: detection of long and nuclear-enriched genes is higher, cytoplasmic genes lower.' : 'Whole cells (' + V.esc(modality) + '): not directly comparable with nuclei in detection rate.') + '">' + V.esc(modality) + '</span>';
+  }
+  function topPct(rank) { return rank == null ? 'n/a' : 'top ' + Math.max(1, Math.round((1 - rank) * 100)) + '%'; }
+  function collectRows(stats) {
+    var rows = [];
+    var other = 0;
+    (stats.results || []).forEach(function (result) {
+      var db = DBS[result.db_id];
+      var stat = (result.stats || [])[0];
+      if (!db || result.is_secondary || db.secondary || !stat || stat.pct_nonzero == null || result.n_cells < 50 || !db.human) return;
+      if (db.scope !== 'human_postmortem' && db.scope !== 'xenograft_human_in_mouse') { other += 1; return; }
+      rows.push({ db_id: result.db_id, title: db.title || result.title, scope: db.scope, group: db.group, n_cells: result.n_cells, pct: stat.pct_nonzero, mean: stat.mean,
+                  rank: stat.rank_mean, q10: stat.q10_nonzero, q90: stat.q90_nonzero, modality: db.modality || '' });
+    });
+    return { rows: rows, other: other };
+  }
+  function lowDetection(rows) {
+    var out = {};
+    var buckets = {};
+    rows.forEach(function (row) { if (row.group) (buckets[row.scope + '|' + row.group] = buckets[row.scope + '|' + row.group] || []).push(row.pct); });
+    Object.keys(buckets).forEach(function (key) {
+      var pct = V.median(buckets[key]);
+      if (pct != null && pct < V.LOW_DETECTION_PCT) out[key] = { pct: pct, n: buckets[key].length };
+    });
+    return out;
+  }
+  function renderP1(host, collected) {
+    var rows = collected.rows;
+    if (!rows.length) { host.innerHTML = '<div class="vw-placeholder">' + V.esc(GENE) + ' has no expression summary in the human post-mortem or xenograft datasets.</div>'; return; }
+    var named = rows.filter(function (row) { return V.GROUPS.indexOf(row.group) >= 0; });
+    var mixed = rows.filter(function (row) { return V.GROUPS.indexOf(row.group) < 0; });
+    var html = '<div class="vw-box"><table class="vw-table"><thead><tr><th>Cell type</th><th class="num">Datasets</th><th>% of cells expressing (median, range)</th><th class="num">Mean, log-normalised</th><th class="num">Rank in dataset</th></tr></thead><tbody>';
+    var index = 0;
+    ['human_postmortem', 'xenograft_human_in_mouse'].forEach(function (scope) {
+      var inScope = named.filter(function (row) { return row.scope === scope; });
+      var mixedHere = mixed.filter(function (row) { return row.scope === scope; });
+      if (!inScope.length && !mixedHere.length) return;
+      html += '<tr class="vw-scope-row"><td colspan="5">' + V.esc(V.SCOPES[scope].title) + '</td></tr>';
+      V.GROUPS.forEach(function (group) {
+        var members = inScope.filter(function (row) { return row.group === group; });
+        if (!members.length) return;
+        var pcts = members.map(function (row) { return row.pct; });
+        var med = V.median(pcts), lo = Math.min.apply(null, pcts), hi = Math.max.apply(null, pcts);
+        var counts = {};
+        members.forEach(function (row) { if (row.modality) counts[row.modality] = (counts[row.modality] || 0) + 1; });
+        var mods = Object.keys(counts).map(function (key) { return modalityTag(key) + ' ' + counts[key]; }).join(' ');
+        html += '<tr class="vw-toggle" data-i="' + index + '"><td><span class="caret">&#9656;</span>' + V.esc(V.plain(group)) + '</td><td class="num">' + members.length + (mods ? ' <span class="muted">(' + mods + ')</span>' : '') + '</td><td class="vw-bar-cell">' + bar(med, lo, hi) +
+          '<span class="muted" style="font-size:10.5px">' + V.num(med, 1) + '% (' + V.num(lo, 1) + ' to ' + V.num(hi, 1) + ')</span></td><td class="num">' + V.num(V.median(members.map(function (row) { return row.mean; })), 2) +
+          '</td><td class="num" title="Percentile rank of the gene by mean expression within each dataset, median over datasets. Within-dataset, so robust to nuclei versus cells.">' + topPct(V.median(members.map(function (row) { return row.rank; }))) + '</td></tr>';
+        members.sort(function (a, b) { return b.pct - a.pct; }).forEach(function (row) {
+          html += '<tr class="vw-sub" data-p="' + index + '" hidden><td title="' + V.esc(row.title) + '"><a href="/browse/' + V.esc(row.db_id) + '">' + V.esc(row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span> ' + modalityTag(row.modality) +
+            '</td><td class="num">' + row.n_cells.toLocaleString('en-US') + ' cells</td><td>' + V.num(row.pct, 1) + '% expressing; expressing cells q10 to q90 ' + V.num(row.q10, 2) + ' to ' + V.num(row.q90, 2) + '</td><td class="num">' + V.num(row.mean, 2) + '</td><td class="num">' + topPct(row.rank) + '</td></tr>';
+        });
+        index += 1;
+      });
+      if (mixedHere.length) html += '<tr><td colspan="5" class="muted">Mixed or other cell types: ' + V.plural(mixedHere.length, 'dataset') + ', not summarised here (the cell type of these datasets comes from a dataset-level label, not from each cell).</td></tr>';
+    });
+    html += '</tbody></table></div><p class="vw-fnote"><strong>Detection rates are not comparable between nuclei and cells:</strong> the modality tag of each dataset shows which it is, and the xenograft datasets are sorted live cells. Ranks compare ' + V.esc(GENE) + ' with all other genes within one dataset.' +
+      (collected.other ? ' ' + V.plural(collected.other, 'dataset') + ' from in vitro or unclassified systems are on the Atlas tab and are not summarised here.' : '') + '</p>';
+    host.innerHTML = html;
+    host.querySelectorAll('tr.vw-toggle').forEach(function (tr) {
+      tr.addEventListener('click', function () {
+        var subs = host.querySelectorAll('tr[data-p="' + tr.dataset.i + '"]');
+        var show = subs.length && subs[0].hidden;
+        subs.forEach(function (sub) { sub.hidden = !show; });
+        tr.querySelector('.caret').innerHTML = show ? '&#9662;' : '&#9656;';
+      });
+    });
+  }
+
+  /* ---------- panel 2 model ---------- */
+  function buildBlocks(effects, lowDet) {
+    var byScope = effects.by_scope || {};
+    var blocks = [];
+    var facetsHere = {};
+    ['human_postmortem', 'xenograft_human_in_mouse'].forEach(function (scope) { facetsHere[scope] = {}; });
+    ['human_postmortem', 'xenograft_human_in_mouse'].forEach(function (scope) {
+      var cards = byScope[scope];
+      if (!cards) return;
+      var keys = scope === 'human_postmortem' ? V.HUMAN_FACETS : V.XENO_FACETS;
+      var rows = [], seen = {};
+      keys.forEach(function (facet) {
+        var card = cards[facet];
+        if (!card || (card.scope && card.scope !== scope)) return;
+        var meta = V.facetMeta(scope, facet);
+        var cells = {};
+        (card.replication || []).forEach(function (rep) {
+          var group = rep.celltype_group;
+          if (V.GROUPS.indexOf(group) < 0) return;
+          var cell = V.cellFromRep(rep, lowDet[scope + '|' + group]);
+          if (!cell) return;
+          cells[group] = cell;
+          seen[group] = 1;
+        });
+        facetsHere[scope][facet] = 1;
+        rows.push({ facet: facet, label: meta.label, contrast: meta.contrast, tag: meta.tag, axis: !!meta.axis,
+                    apoeLocus: !!card.apoe_locus, flags: card.gene_flags || [], effectUnit: card.facet && card.facet.effect_unit, cells: cells });
+      });
+      blocks.push({ scope: scope, rows: rows, groups: V.GROUPS.filter(function (g) { return seen[g]; }), notes: [], footer: '' });
+    });
+    blocks.forEach(function (block) {
+      var other = block.scope === 'human_postmortem' ? 'xenograft_human_in_mouse' : 'human_postmortem';
+      var shared = block.rows.filter(function (row) { return facetsHere[other][row.facet]; }).map(function (row) { return row.label; });
+      if (shared.length) block.notes.push('<b>' + V.esc(shared.join(', ')) + '</b> also appears in the other block (' + (block.scope === 'human_postmortem' ? 'xenograft' : 'post-mortem') + '): not directly comparable (different system, ' + (block.scope === 'human_postmortem' ? 'donors vs mice' : 'mice vs donors') + '). The two are never combined.');
+      if (block.scope === 'xenograft_human_in_mouse') block.notes.push('One lab pipeline: the cohorts share iPSC lines, host strain and protocol, and each is pooled over timepoints and grafted lines. Six cohorts are not six independent confirmations.');
+      if (block.rows.some(function (row) { return row.facet === 'age'; })) block.footer = 'Age: donors of 60 years and older. The unadjusted row re-detects part of the pathology signal; ROSMAP ages above 90 are recorded as 90, which flattens the oldest donors (<a href="/help#glossary-age-twins">age twins</a>).';
+      var flaggedApoe = block.rows.some(function (row) { return row.apoeLocus && /apoe4/.test(row.facet); });
+      if (flaggedApoe) block.notes.push('<b>APOE locus gene.</b> APOE, APOC1, TOMM40 and neighbours sit in the e4 locus: allele-linked expression and read-mapping differences can produce an e4 effect that need not be downstream biology.');
+    });
+    return { blocks: blocks };
+  }
+
+  /* ---------- the opened cell ---------- */
+  function sentence(row, group, cell, scope) {
+    var meta = V.facetMeta(scope, row.facet);
+    var side = cell.dir === 'down' ? meta.phrase[1] : meta.phrase[0];
+    var subject = V.esc(GENE);
+    var where = V.esc(V.plain(group));
+    var unit = V.SCOPES[scope].noun;
+    var smallText = cell.nSmall ? ' ' + (cell.nSmall === 1 ? '1 of these cohorts has' : cell.nSmall + ' of these cohorts have') + ' fewer than ' + cell.smallLimit + ' ' + unit + '.' : '';
+    var carried = cell.rCohorts.length ? ', carried by ' + V.esc(cell.rCohorts.slice(0, 2).join(' and ')) : '';
+    if (V.cellKind(cell) === 'rep') {
+      var filter = cell.gate ? ' The effect filter is met: at least ' + V.esc(cell.gateUnit || '10%') + ' in 2 cohorts.' : ' The effect filter (at least ' + V.esc(cell.gateUnit || '10%') + ' in 2 cohorts) is not met.';
+      var strict = cell.strict ? ' The strict minimum-effect test also passes (r = ' + V.pfmt(cell.rTreat) + ').' : '';
+      return '<b>Replicated.</b> ' + subject + ' is ' + side + ' in ' + where + ': the same direction in at least 2 cohorts (<a href="/help#glossary-r-value">r-value</a> ' + V.pfmt(cell.r) + ', FDR 5 percent)' + carried + '. ' + cell.k + ' of ' + cell.m + ' cohorts are individually significant (q &lt; 0.05).' + smallText + filter + strict + ' Median effect ' + V.signed(cell.median) + ' ' + V.esc(row.effectUnit || 'log2 fold change') + '.';
+    }
+    if (V.cellKind(cell) === 'single') return 'Tested in 1 cohort only. Replication needs at least 2. The estimate of that cohort is in the row below.' + smallText;
+    return '<b>No evidence of replication.</b> The data do not show a consistent effect of ' + V.esc(row.label.toLowerCase()) + ' on ' + subject + ' in ' + where + ' across ' + cell.m + ' cohorts (' + cell.k + ' individually significant). This is not evidence that there is none: few or small cohorts cannot reach it (<a href="/help#glossary-p-value-floor">p-value floor</a>).' + smallText;
+  }
+  function unitRows(units, group, scope) {
+    var noun = V.SCOPES[scope].noun;
+    return units.filter(function (u) { return (u.celltype_group || 'unmapped') === group; }).map(function (u) {
+      var replicate = u.analysis_level === 'replicate';
+      var pills = '';
+      if (u.analysis_level === 'below_floor' || u.analysis_level === 'cell') pills += V.pill('descriptive', 'warn', 'Below the p-value floor or cell-level: shown without interval, p or q, and not counted.', 'descriptive-only');
+      if (u.n_donors != null && u.n_donors < 20 && replicate) pills += V.pill('small', '', 'Fewer than 20 ' + noun + ': cannot reach significance for effects of this size.', 'small-cohorts');
+      if (u.inflated) pills += V.pill('inflated, lambda ' + V.num(u.lambda_gc, 1), 'warn', 'Many genes shift together (lambda above 1.3): often a batch, depth or composition difference. Read p values with care.', 'lambda');
+      var cohort = u.cohort_label && u.cohort_label !== 'None' ? u.cohort_label : 'unassigned';
+      return { name: cohort, title: u.title || u.db_id, sub: '<a href="/browse/' + V.esc(u.db_id) + '">' + V.esc(u.db_id) + '</a>', n: u.n_donors, est: u.logFC,
+               lo: replicate ? u.ci_low : null, hi: replicate ? u.ci_high : null, q: replicate ? u.q_value : null, sig: replicate && u.q_value != null && u.q_value < 0.05,
+               counted: !!u.counted, reason: u.not_counted_reason, pills: pills, db_id: u.db_id };
+    }).sort(function (a, b) { return (b.counted - a.counted) || ((b.n || 0) - (a.n || 0)); });
+  }
+  function detailHtml(block, row, group, cell, card) {
+    var scope = block.scope;
+    var rows = unitRows(card.units || [], group, scope);
+    var title = V.esc(GENE) + ', ' + V.esc(row.label) + ', ' + V.esc(V.plain(group));
+    var pills = '';
+    if (cell) {
+      if (V.cellKind(cell) === 'rep') {
+        pills += cell.gate ? V.pill('at least ' + (cell.gateUnit || '10%') + ' in 2 cohorts', 'teal', 'Effect filter: the median change in the replicated direction reaches the threshold in at least 2 cohorts. A condition on the effect size, not error control.', 'effect-filter') : V.pill('effect filter not met', 'warn', 'Replicated in direction, but not with at least a ' + (cell.gateUnit || '10%') + ' change in 2 cohorts.', 'effect-filter');
+        if (cell.strict) pills += V.pill('strict test passed', 'strict', 'The minimum-effect r-value is below 0.05: the effect is shown to exceed the threshold, not only to differ from zero.', 'treat-tier');
+      }
+      pills += V.lowDetectionPill(cell.lowDet);
+      var inflatedCount = rows.filter(function (r) { return r.counted && /inflated/.test(r.pills); }).length;
+      if (inflatedCount) pills += V.pill(inflatedCount + ' of ' + rows.filter(function (r) { return r.counted; }).length + ' cohorts inflated', 'warn', 'Genome-wide inflation (lambda above 1.3) in these counted units: read their p values with care.', 'lambda');
+    }
+    pills += V.geneFlagPills(row.flags);
+    var html = '<div class="vw-detail"><div class="dc-title">' + title + '</div><div class="dc-line">' + (cell ? sentence(row, group, cell, scope) : 'This facet was not tested in this cell type group (too few cohorts or too few replicates).') + '</div>';
+    if (pills) html += '<div class="dc-pills">' + pills + '</div>';
+    if (rows.length) {
+      html += V.forestHtml(rows, { noun: V.SCOPES[scope].noun, unit: row.effectUnit || 'log2 fold change' });
+      var counted = rows.filter(function (r) { return r.counted && r.db_id.indexOf('pool:') !== 0; });
+      if (counted.length) html += '<div class="vw-anchor-chips"><span class="lbl">Anchor datasets</span>' + counted.map(function (r) { return '<a class="vw-cohort-chip" href="/browse/' + V.esc(r.db_id) + '" title="' + V.esc(r.title) + '">' + V.esc(r.db_id) + '</a>'; }).join(' ') + '</div>';
+    }
+    if (row.apoeLocus && /apoe4/.test(row.facet)) html += '<p class="vw-fnote"><b>APOE locus gene.</b> Allele-linked expression and read-mapping differences can produce an e4 effect here; it need not be downstream biology.</p>';
+    if ((row.facet === 'age' || row.facet === 'age_adjusted') && rows.some(function (r) { return r.counted && r.name === 'ROSMAP'; })) html += '<p class="vw-fnote">ROSMAP ages above 90 are recorded as 90, which flattens the slope at the top (<a href="/help#glossary-age-twins">age twins</a>).</p>';
+    return html + '</div>';
+  }
+  function detail(block, row, group, cell) {
+    if (!cell) return Promise.resolve(detailHtml(block, row, group, null, {}));
+    var url = V.API + '/facets/' + enc(row.facet) + '/effects?gene=' + enc(GENE) + '&scope=' + enc(block.scope) + '&cell_type=' + enc(group);
+    return V.cached(url).then(function (card) { return detailHtml(block, row, group, cell, card); });
+  }
+
+  /* ---------- headline ---------- */
+  function headline(model, lowDet) {
+    var parts = [];
+    var tested = 0;
+    model.blocks.forEach(function (block) {
+      var hits = {};
+      block.rows.forEach(function (row) {
+        block.groups.forEach(function (group) {
+          var cell = row.cells[group];
+          if (!cell) return;
+          tested += 1;
+          if (V.cellKind(cell) === 'rep') {
+            var meta = V.facetMeta(block.scope, row.facet);
+            (hits[group] = hits[group] || []).push({ facet: row.facet, text: row.label.replace(/^Age, adjusted/, 'age, adjusted').replace(/^(Sex|Braak|Age|APOE|App)/, function (w) { return w; }) + ' (' + (cell.dir === 'down' ? 'lower' : 'higher') + ')' });
+          }
+        });
+      });
+      Object.keys(hits).forEach(function (group) {
+        var items = hits[group];
+        var axis = items.some(function (x) { return x.facet === 'braak'; }) && items.some(function (x) { return x.facet === 'disease'; });
+        parts.push((model.blocks.length > 1 ? (block.scope === 'human_postmortem' ? 'In post-mortem brain, ' : 'In xenografts, ') : '') + 'replicated in ' + V.esc(V.plain(group)) + ' for ' + items.map(function (x) { return V.esc(x.text); }).join(', ') + (axis ? ' (Braak stage and pathologic AD are one pathology axis)' : ''));
+      });
+    });
+    var html = '';
+    if (parts.length) html += '<p class="vw-lede">' + parts.join('. ') + '.</p>';
+    else if (tested) html += '<p class="vw-lede">No facet effect replicates for ' + V.esc(GENE) + ' in any tested cell type. This is not evidence that there is none: some cell types are tested in only 2 cohorts, which has little power.</p>';
+    var low = ['human_postmortem', 'xenograft_human_in_mouse'].map(function (scope) { return lowDet[scope + '|microglia'] ? { scope: scope, info: lowDet[scope + '|microglia'] } : null; }).filter(Boolean);
+    if (low.length) html += '<p class="vw-lede">' + V.lowDetectionPill(low[0].info) + ' ' + V.esc(GENE) + ' is detected in about ' + Math.round(low[0].info.pct) + ' percent of microglial cells; read facet results for it as fragile.</p>';
+    document.getElementById('vwg-headline').innerHTML = html;
+  }
+
+  /* ---------- mount ---------- */
+  var p1Host = document.getElementById('vwg-p1');
+  var p2Host = document.getElementById('vwg-p2');
+  function renderP2() {
+    if (!state.effects) return;
+    var model = buildBlocks(state.effects, state.lowDet);
+    document.getElementById('vwg-legend').innerHTML = V.legendHtml({});
+    if (!state.preselected) {
+      state.preselected = true;
+      var strongest = state.effects.strongest_facet;
+      if (strongest && strongest.facet && strongest.cell_type && strongest.scope) V.preselect(strongest.scope, strongest.facet, strongest.cell_type);
+    }
+    V.renderPanel2(p2Host, model, { kind: 'gene', subject: GENE, detail: detail, emptyHtml: V.esc(GENE) + ' was not tested for any facet.' });
+    headline(model, state.lowDet);
+  }
+  V.cached(V.API + '/gene_stats_all?genes=' + enc(GENE)).then(function (stats) {
+    state.stats = stats;
+    var collected = collectRows(stats);
+    state.lowDet = lowDetection(collected.rows);
+    renderP1(p1Host, collected);
+    renderP2();
+  }).catch(function () { p1Host.innerHTML = '<div class="vw-error">The expression summary could not be loaded.</div>'; });
+  V.cached(V.API + '/genes/' + enc(GENE) + '/facet-effects?include_units=false').then(function (effects) {
+    state.effects = effects;
+    renderP2();
+  }).catch(function () { p2Host.innerHTML = '<div class="vw-error">The facet effects could not be loaded.</div>'; });
+
+  /* ---------- author DE tab ---------- */
+  var deBody = document.getElementById('vwa-body');
+  var deButton = document.querySelector('[data-vtab="de"]');
+  if (deBody && deButton) {
+    getAuthorDe();
+  }
+  function getAuthorDe() {
+    V.getJson('/genes/' + enc(GENE) + '/author-de').then(function (data) {
+      var rows = data.rows || [];
+      if (!rows.length) { deBody.innerHTML = '<div class="vw-placeholder">No author-provided differential expression for ' + V.esc(GENE) + '.</div>'; return; }
+      deButton.hidden = false;
+      var count = deButton.querySelector('.tab-count');
+      if (count) count.textContent = rows.length;
+      var html = '<div class="vw-box"><table class="vw-table"><thead><tr><th>Source dataset</th><th>Method</th><th>Contrast</th><th class="num">log2 FC</th><th class="num">adj. p</th></tr></thead><tbody>';
+      rows.forEach(function (row) {
+        html += '<tr><td><a href="/browse/' + V.esc(row.db_id) + '">' + V.esc(row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span><br><span class="muted" style="font-size:10.5px">' + V.esc(row.collection || '') + ', study ' + V.esc(row.study) + '</span></td><td>' + V.pill(row.method, 'teal plain', 'How the authors tested: ' + row.method + '. Cell-level or pseudobulk models differ in what they can claim.', '') +
+          '</td><td>' + V.esc(row.label) + '<br><span class="muted" style="font-size:10.5px">' + V.esc(row.term) + ': ' + V.esc(row.contrast) + '</span></td><td class="num">' + V.signed(row.log2fc, 2) + '</td><td class="num">' + (row.padj == null ? 'n/a' : V.pfmt(row.padj)) + '</td></tr>';
+      });
+      deBody.innerHTML = html + '</tbody></table></div><p class="vw-fnote">Cell-level models: p values of 1e-25 are possible with thousands of cells and are not comparable with the donor-level r-values and q values of the Gene view.</p>';
+    }).catch(function () { deBody.innerHTML = '<div class="vw-error">The author differential expression could not be loaded.</div>'; });
+  }
+})();
+</script>
+{%- endmacro %}

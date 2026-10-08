@@ -7145,7 +7145,8 @@ def test_help_glossary_defines_every_term_the_pages_link_to(client):
     template_dir = browser.__file__.replace("browser.py", "templates/")
     linked = set()
     for name in ("_facet_effects.html", "facet.html", "facets.html", "dataset.html", "_module_view.html",
-                 "geneset.html", "geneset_experiment.html", "geneset_variability.html", "donor_groups.html"):
+                 "geneset.html", "geneset_experiment.html", "geneset_variability.html", "donor_groups.html",
+                 "_views.html", "_view_gene.html", "_view_geneset.html", "_view_facet.html"):
         text = open(template_dir + name, encoding="utf-8").read()
         linked |= set(re.findall(r'data-glossary="([a-z0-9-]+)"', text))
         linked |= set(re.findall(r'/help#glossary-([a-z0-9-]+)', text))

@@ -30,6 +30,7 @@ if str(_lib_dir) not in sys.path:
     sys.path.insert(0, str(_lib_dir))
 from facet_aliases import canonical_facet  # noqa: E402
 import help_content  # noqa: E402
+import celltype_groups  # noqa: E402
 
 from canonical_columns import is_canonical_column, strip_ant_prefix  # noqa: E402
 
@@ -3438,7 +3439,25 @@ async def gene_view(request: Request, gene: str):
         "pill_map": pill_map,
         "filter_opts": filter_opts,
         "dataset_annotations": dataset_annotations,
+        "view_dbs": _view_db_map(api_url) if ',' not in gene else {},
     })
+
+
+@router.get("/genes/{gene}/author-de")
+def gene_author_de(request: Request, gene: str):
+    """JSON: the author DE rows of one gene (the "Author DE (as published)" tab).
+
+    Aggregated here because the API serves author DE per dataset only: the datasets with
+    DE are found once (cached for an hour), then each is asked for the gene. Rows carry a
+    plain contrast label; they are never combined with the facet results.
+    """
+    from fastapi.responses import JSONResponse
+    try:
+        rows = _gene_author_de_rows(_api_url(request), gene)
+    except Exception as error:
+        print(f"API error: {error}")
+        return JSONResponse({'gene': gene, 'rows': [], 'error': 'unavailable'}, status_code=502)
+    return {'gene': gene, 'rows': rows}
 
 
 @router.get("/genesets", response_class=HTMLResponse)
@@ -3757,6 +3776,148 @@ def _flatten_annotation_field(value: object) -> str:
     return str(value)
 
 
+
+# ── gene, geneset and facet views (new tabs next to the atlas / geneset / facet pages) ──
+
+def _view_modality(db: Dict[str, Any]) -> str:
+    """Nuclei or cells, for the modality tag of a dataset row in the view panels.
+
+    The API's ``modality`` field wins when it is served. Otherwise it is derived from
+    ``suspension_type``: ``nucleus`` is "nuclei", a xenograft or chimera of ``cell`` is
+    "sorted live cells", any other ``cell`` is "cells". Unknown or ``na`` gives "".
+    """
+    served = str(db.get('modality') or '').strip().lower()
+    if served:
+        return served
+    suspension = str(db.get('suspension_type') or '').strip().lower()
+    if suspension == 'nucleus':
+        return 'nuclei'
+    if suspension == 'cell':
+        system = str(db.get('experimental_system') or '').lower()
+        return 'sorted live cells' if system in ('xenograft', 'chimera') else 'cells'
+    return ''
+
+
+def _view_db_map(api_url: str) -> Dict[str, Dict[str, Any]]:
+    """Compact per-dataset facts the view panels need, keyed by db_id.
+
+    ``scope`` is the facet scope, ``group`` the cell type group of the dataset-level
+    cell type (empty when the dataset is mixed or has several cell types), ``human``
+    whether the organism is human, ``secondary`` the reanalysis flag and ``modality``
+    nuclei versus cells (``_view_modality``). Empty when the API is unreachable.
+    """
+    result: Dict[str, Dict[str, Any]] = {}
+    try:
+        databases = _all_databases(api_url)
+    except Exception as error:
+        print(f"API error: {error}")
+        return result
+    for db in databases:
+        db_id = db.get('id') or ''
+        if not db_id:
+            continue
+        celltype = db.get('celltype')
+        single = celltype if isinstance(celltype, str) else (celltype[0] if isinstance(celltype, list) and len(celltype) == 1 else None)
+        group = celltype_groups.group_of(single) if single else ''
+        if group == celltype_groups.UNMAPPED:
+            group = ''
+        result[db_id] = {
+            'title': db.get('title') or db.get('basename') or db_id,
+            'scope': db.get('facet_scope') or '',
+            'group': group,
+            'human': 'human' in _flatten_annotation_field(db.get('organism')).lower(),
+            'secondary': bool(db.get('is_secondary')),
+            'modality': _view_modality(db),
+        }
+    return result
+
+
+_AUTHOR_DE_TTL = 3600.0
+_author_de_state: Dict[str, Any] = {'at': 0.0, 'studies': {}}
+_author_de_lock = threading.Lock()
+
+
+def _author_de_studies(api_url: str) -> Dict[str, List[Dict[str, Any]]]:
+    """db_id -> DE studies, for every dataset that has author DE (cached for an hour).
+
+    One ``/databases/{id}/de`` call per dataset on the first request, in a small thread
+    pool; later requests reuse the answer, so a gene page never repeats the scan.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    with _author_de_lock:
+        if _author_de_state['studies'] and time.time() - _author_de_state['at'] < _AUTHOR_DE_TTL:
+            return _author_de_state['studies']
+        try:
+            db_ids = [db['id'] for db in _all_databases(api_url) if db.get('id')]
+        except Exception as error:
+            print(f"API error: {error}")
+            return {}
+
+        def studies_of(db_id: str) -> Tuple[str, List[Dict[str, Any]]]:
+            try:
+                path = '/databases/' + '/'.join(url_quote(part, safe='') for part in db_id.split('/')) + '/de'
+                return db_id, _api_get(api_url, path, timeout=20).get('studies') or []
+            except Exception:
+                return db_id, []
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            found = {db_id: studies for db_id, studies in pool.map(studies_of, db_ids) if studies}
+        _author_de_state['studies'] = found
+        _author_de_state['at'] = time.time()
+        return found
+
+
+def _plain_de_label(row: Dict[str, Any], study: Dict[str, Any]) -> str:
+    """A reader's label for one author DE row: what was compared, in plain words."""
+    term = str(row.get('term') or '').replace('_', ' ').strip()
+    contrast = str(row.get('contrast') or '').strip()
+    reference = study.get('reference_type')
+    if ' - ' in contrast:
+        left, right = contrast.split(' - ', 1)
+        return f"{left.strip()} versus {right.strip()} ({term})"
+    if reference == 'vsgrandmean':
+        return f"{contrast} versus the average of all levels ({term})"
+    if reference == 'vsreference':
+        return f"{contrast.replace('_vs_', ' versus ')} ({term})"
+    return f"{term}: {contrast}" if contrast else term
+
+
+def _gene_author_de_rows(api_url: str, gene: str) -> List[Dict[str, Any]]:
+    """Author DE rows of one gene across every dataset that has DE, best adjusted p first."""
+    from concurrent.futures import ThreadPoolExecutor
+    studies_by_db = _author_de_studies(api_url)
+    titles = {}
+    try:
+        for db in _all_databases(api_url):
+            titles[db.get('id')] = db
+    except Exception:
+        pass
+
+    def rows_of(db_id: str) -> List[Dict[str, Any]]:
+        try:
+            path = '/databases/' + '/'.join(url_quote(part, safe='') for part in db_id.split('/')) + '/de/by-gene/' + url_quote(gene, safe='')
+            payload = _api_get(api_url, path, timeout=30)
+        except Exception:
+            return []
+        by_id = {study.get('study_id'): study for study in studies_by_db.get(db_id, [])}
+        db = titles.get(db_id) or {}
+        out = []
+        for row in payload.get('rows') or []:
+            if row.get('term') == 'intercept' or (row.get('padj') is None and row.get('pvalue') is None):
+                continue
+            study = by_id.get(row.get('study_id')) or {}
+            out.append({
+                'db_id': db_id, 'title': db.get('title') or db_id, 'collection': db.get('group') or db.get('group_id') or '',
+                'study': row.get('study_name') or row.get('study_id'), 'method': row.get('method') or study.get('method') or '',
+                'term': row.get('term') or '', 'contrast': row.get('contrast') or '', 'label': _plain_de_label(row, study),
+                'log2fc': row.get('log2fc'), 'padj': row.get('padj'), 'pvalue': row.get('pvalue'),
+            })
+        return out
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        collected = [row for rows in pool.map(rows_of, list(studies_by_db)) for row in rows]
+    collected.sort(key=lambda row: (row['padj'] if row['padj'] is not None else 2.0))
+    return collected[:200]
+
+
 # ── drilldown facet derivation ─────────────────────────────────────────────
 # The old "system" facet conflated assay type (bulk, spatial, sc) with
 # biosample preparation (xenograft, post-mortem, fresh brain). Split into two
@@ -4048,6 +4209,8 @@ async def geneset_view(request: Request, study: str, experiment: str, name: str)
         # Exposed to the outer geneset.html scope so parent_dataset / scored_in
         # chips can render a `(2)` badge for secondary datasets.
         "dataset_annotations": dataset_annotations,
+        "view_dbs": _view_db_map(api_url),
+        "view_payload": {k: payload.get(k) for k in ('scored_in', 'column_name', 'direction', 'n_genes', 'quality_sensitive')},
         "mv_ctx": {
             "scope": "module",
             "module_catalog": catalog,

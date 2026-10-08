@@ -5,6 +5,8 @@ related:
 - per-cell-per-donor
 - module-scores
 children:
+- gene-view
+- geneset-view
 - module-scores
 aliases:
 - gene atlas

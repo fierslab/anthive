@@ -1,0 +1,21 @@
+id: gene-view
+title: The gene view
+summary: The Gene view tab of a gene page shows where the gene is expressed (descriptive) and which facets shift it (tested per donor), one grid per system, with the author's own differential expression on a separate tab.
+related:
+- facet-effects
+- facet-counting
+- facet-pathology-axis
+terms:
+- low-detection
+- modality
+- r-value
+- effect-filter
+- treat-tier
+aliases:
+- gene view
+- gene page
+- gene tab
+body_html: |
+  <p>The <strong>Gene view</strong> tab of a gene page (<a href="/genes">genes</a>, then a gene) sits next to the older Atlas tab. It has three panels. <strong>Where is it expressed</strong> is descriptive: per cell type, the share of cells that express the gene (median and range over datasets), the mean, and the rank of the gene within each dataset. Rows are collapsed; open one to see its datasets with a tag for nuclei or cells, because detection rates are not comparable between the two. <strong>What shifts it</strong> tests facets (sex, pathologic AD, Braak stage, age, APOE e4, App NL-G-F host) per donor, or per mouse in the xenograft block, and shows one grid per system. Panel 3, donor variability, is not built yet.</p>
+  <p>Each cell of the grid is one facet in one cell type. A dark teal cell is <strong>replicated</strong>: the same direction in at least 2 cohorts (<a href="#glossary-r-value">r-value</a> below 0.05). The number is the median effect and the small text says how many cohorts are individually significant out of those tested, with the number of small cohorts. A star marks the strict tier (<a href="#glossary-treat-tier">minimum-effect r-value</a>), and the pill "at least 10% in 2 cohorts" is the separate <a href="#glossary-effect-filter">effect filter</a>. A grey cell shows k/m cohorts and means no evidence, which is not evidence of no effect. A dashed cell is not tested, or tested in one cohort only. Click a cell to see the sentence, the cohorts with their confidence intervals, the datasets behind it and the caveats.</p>
+  <p>A <a href="#glossary-low-detection">low detection</a> label appears on a cell when the gene is seen in fewer than 5 percent of the cells of that cell type. Gene class labels (long gene, lncRNA, sex chromosome, APOE locus, mitochondrial) mark genes that are over-represented among hits for technical reasons. On a wide screen the cells form a grid, on a phone the same results are a list. The Author DE tab, shown when authors provided differential expression for the gene, lists those results as published; they come from cell-level models and are never combined with the facet results.</p>

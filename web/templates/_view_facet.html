@@ -1,0 +1,233 @@
+{# The "Overview" tab of /facets/{name}: a one-sentence answer, one line per cell type, the replicated
+   genes once, replicated gene sets, cohorts with donors and covariates, and the expert details closed.
+   Data: /api/facets/{f}/effects/top (one call per cell type group), /api/facets/{f}/tests, and, when
+   the API serves them, /api/facets/{f}/modules/top.  Needs _views.html. #}
+{% from "_macros.html" import doc_block %}
+
+{% macro view_facet_panel(facet_label) -%}
+<div id="vwf-root">
+  <div id="vwf-variants"></div>
+  <div id="vwf-answer"><p class="vw-loading">Loading the replicated genes per cell type...</p></div>
+  <div id="vwf-caveat"></div>
+  {% call doc_block('About this page', id='vwf-about') %}
+    <p>This page answers one question: which genes and gene sets change with {{ facet_label }}, and where is that finding repeated? A <a href="/help#glossary-facet">facet</a> is a donor-level property defined the same way in every dataset, so an effect is a difference between donors (between host mice in the xenograft scope), not between cells.</p>
+    <p>A gene counts when the same direction appears in at least 2 cohorts according to a <a href="/help#glossary-partial-conjunction">partial conjunction test</a> at 5 percent FDR (<a href="/help#glossary-r-value">r-value</a>) and the change is at least 10 percent in 2 cohorts (<a href="/help#glossary-effect-filter">effect filter</a>, a condition on size, not error control). The strict subset also passes the minimum-effect test (<a href="/help#glossary-treat-tier">strict tier</a>). Cohorts can share a brain bank or protocol, so the count of cohorts is not a count of independent confirmations. A cell type without a hit is not shown as a negative result: with 2 cohorts the test has little power (<a href="/help#glossary-p-value-floor">p-value floor</a>).</p>
+  {% endcall %}
+  <div id="vwf-cards"></div>
+  <h2 class="section-head" id="vwf-genes-head" hidden>Replicated genes <span class="muted" id="vwf-genes-sub"></span></h2>
+  <div id="vwf-genes"></div>
+  <h2 class="section-head" id="vwf-modules-head" hidden>Gene sets that follow {{ facet_label }} <span class="muted" id="vwf-modules-sub"></span></h2>
+  <div id="vwf-modules"></div>
+  <h2 class="section-head" id="vwf-cohorts-head" hidden>Cohorts behind the result</h2>
+  <div id="vwf-cohorts"></div>
+  <div id="vwf-expert"></div>
+</div>
+{%- endmacro %}
+
+{% macro view_facet_script(facet_name, scope, variants) -%}
+<script>
+(function () {
+  var V = window.antViews;
+  var enc = encodeURIComponent;
+  var SCOPE = {{ (scope or 'human_postmortem')|tojson }};
+  var VARIANTS = {{ variants|tojson }};
+  var BASE_NAME = {{ facet_name|tojson }};
+  var PHRASE = { sex: 'differ by sex', disease: 'change with pathologic AD', braak: 'change with Braak stage', age: 'change with age', age_adjusted: 'change with age (pathology held constant)',
+                 apoe4_carrier: 'differ with APOE e4 carrier status', apoe4_dose: 'change with the number of APOE e4 alleles', app_nlgf: 'differ in App NL-G-F hosts' };
+  var CAVEAT = {
+    braak: 'Per-stage straight-line slope. A change of a whole cell type can be a shift in the mix of cell states inside it. Braak stage and pathologic AD are one pathology axis.',
+    disease: 'A change of a whole cell type can be a shift in the mix of cell states inside it. Pathologic AD and Braak stage are one pathology axis.',
+    age: 'Per-decade straight-line slope in donors of 60 years and older, not adjusted for pathology: part of it is the pathology signal. ROSMAP ages above 90 are recorded as 90.',
+    age_adjusted: 'Per-decade straight-line slope in donors of 60 years and older with Braak stage in the model. ROSMAP ages above 90 are recorded as 90.',
+    apoe4_carrier: 'Genes near the APOE locus can differ by allele-linked expression or read mapping, not downstream biology. A change of a whole cell type can be a shift in the mix of states.',
+    apoe4_dose: 'Genes near the APOE locus can differ by allele-linked expression or read mapping, not downstream biology.',
+    sex: 'Sex-chromosome genes dominate sex differences; a change of a whole cell type can also be a shift in the mix of states.',
+    app_nlgf: 'One lab pipeline: the cohorts share iPSC lines, host strain and protocol, and each is pooled over timepoints and lines. Six cohorts are not six independent confirmations. Human neuronal and lymphoid genes in microglia usually point to ambient RNA or read misassignment.'
+  };
+  var current = { name: BASE_NAME };
+
+  function short(name) { return String(name || '').replace(/^ant_/, ''); }
+  function unitNoun() { return V.SCOPES[SCOPE] ? V.SCOPES[SCOPE].noun : 'donors'; }
+  function geneNames(rows, limit) {
+    var names = rows.slice(0, limit).map(function (row) { return '<a href="/genes/' + V.esc(row.gene) + '">' + V.esc(row.gene) + '</a>'; });
+    return names.join(', ') + (rows.length > limit ? ' and ' + (rows.length - limit) + ' more' : '');
+  }
+
+  function load(name) {
+    var key = short(name);
+    var label = (V.FACETS[key] || { label: key }).label;
+    var answer = document.getElementById('vwf-answer');
+    answer.innerHTML = '<p class="vw-loading">Loading the replicated genes per cell type...</p>';
+    ['vwf-cards', 'vwf-genes', 'vwf-modules', 'vwf-cohorts', 'vwf-expert', 'vwf-caveat'].forEach(function (id) { document.getElementById(id).innerHTML = ''; });
+    ['vwf-genes-head', 'vwf-modules-head', 'vwf-cohorts-head'].forEach(function (id) { document.getElementById(id).hidden = true; });
+    var base = V.API + '/facets/' + enc(key) + '/effects/top?scope=' + enc(SCOPE);
+    V.cached(base + '&n=1').then(function (first) {
+      var groups = (first.cell_types || []).filter(function (g) { return V.GROUPS.indexOf(g.celltype_group) >= 0 && g.n_cohorts >= 1; })
+        .sort(function (a, b) { return V.GROUPS.indexOf(a.celltype_group) - V.GROUPS.indexOf(b.celltype_group); });
+      if (!groups.length) { answer.innerHTML = '<div class="vw-placeholder">No cell type of this scope has results for this facet.</div>'; return; }
+      var focus = groups.filter(function (g) { return g.celltype_group === 'microglia' && g.n_cohorts >= 2; })[0] ||
+        groups.slice().sort(function (a, b) { return b.n_cohorts - a.n_cohorts; })[0];
+      var calls = groups.map(function (g) {
+        var n = g.celltype_group === focus.celltype_group ? 500 : 12;
+        return V.cached(base + '&cell_type=' + enc(g.celltype_group) + '&n=' + n).catch(function () { return null; });
+      });
+      var testsCall = V.cached(V.API + '/facets/' + enc(key) + '/tests?scope=' + enc(SCOPE)).catch(function () { return null; });
+      return Promise.all([Promise.all(calls), testsCall]).then(function (results) {
+        render(key, label, groups, focus.celltype_group, results[0], results[1], first);
+      });
+    }).catch(function () { answer.innerHTML = '<div class="vw-error">The facet overview could not be loaded.</div>'; });
+  }
+
+  function render(key, label, groups, focusGroup, tops, tests, first) {
+    var byGroup = {};
+    groups.forEach(function (g, index) { if (tops[index]) byGroup[g.celltype_group] = tops[index]; });
+    var focusTop = byGroup[focusGroup];
+    if (!focusTop) { document.getElementById('vwf-answer').innerHTML = '<div class="vw-error">No result for ' + V.esc(focusGroup) + '.</div>'; return; }
+    var noun = unitNoun();
+    var phrase = PHRASE[key] || 'change with ' + label.toLowerCase();
+    var focusName = V.plain(focusGroup);
+    var rows = focusTop.rows || [];
+    var passing = rows.filter(function (row) { return row.effect_gate_passed; });
+    var strict = rows.filter(function (row) { return row.replicated_effect; });
+    var nGate = focusTop.n_effect_gate != null ? focusTop.n_effect_gate : passing.length;
+    var nStrict = focusTop.n_replicated_effect != null ? focusTop.n_replicated_effect : strict.length;
+    var truncated = (focusTop.n_replicated || 0) > rows.length;
+    var gateUnit = key === 'braak' ? '10 percent change over three stages' : (key === 'age' || key === 'age_adjusted' ? '10 percent change per decade' : '10 percent change');
+    var donors = focusTop.donors_in_cell_type || {};
+    var nDonors = donors.n_donors_distinct != null ? donors.n_donors_distinct : donors.n_donors_sum;
+    var headline;
+    if (nGate > 0) {
+      headline = '<b>' + nGate + ' genes ' + V.esc(phrase) + ' in ' + V.esc(focusName) + '</b> in the same direction in at least 2 cohorts (FDR 5 percent), with at least a ' + gateUnit + ' in 2 cohorts' +
+        (nStrict ? '; ' + nStrict + ' of them also pass the strict minimum-effect test (' + geneNames(strict, 6) + ')' : '; none passes the strict minimum-effect test') + '.';
+    } else {
+      headline = '<b>No gene is shown to ' + V.esc(phrase.replace(/^(change|differ)/, '$1')) + ' in ' + V.esc(focusName) + '</b> in at least 2 cohorts with at least a ' + gateUnit + '. This is not evidence that none does: ' + focusTop.cohorts_in_cell_type + ' cohorts have limited power.';
+    }
+    var lowCount = rows.length ? '' : '';
+    document.getElementById('vwf-answer').innerHTML = '<div class="vw-answer"><div class="big">' + headline + '</div><div class="meta"><span class="fx-scope" data-scope="' + SCOPE + '">' + V.esc(V.SCOPES[SCOPE].title) + '</span> ' +
+      V.pill('Exploratory', 'warn', 'Results are exploratory, not confirmatory.', '') + V.pill(focusTop.cohorts_in_cell_type + ' cohorts' + (nDonors ? ', ' + Number(nDonors).toLocaleString('en-US') + ' ' + noun : ''), 'teal', 'Cohorts and ' + noun + ' behind the ' + focusName + ' result. The count of ' + noun + ' is an upper bound where ids are not shared between cohorts. Cohorts can share a lab, brain bank or protocol.', 'cohort') + '</div></div>';
+    document.getElementById('vwf-caveat').innerHTML = '<p class="vw-essential">' + V.esc(CAVEAT[key] || CAVEAT.sex).replace(/Braak stage and pathologic AD are one pathology axis\./, '<a href="/help#glossary-disease-basis">Braak stage and pathologic AD are one pathology axis</a>.') + '</p>';
+
+    // cards: other cell types with hits, then one merged line for the rest
+    var cards = '';
+    var empty = [];
+    groups.forEach(function (g) {
+      var name = g.celltype_group;
+      var top = byGroup[name];
+      if (!top) return;
+      var passes = (top.rows || []).filter(function (row) { return row.effect_gate_passed; });
+      var n = top.n_effect_gate != null ? top.n_effect_gate : passes.length;
+      if (name === focusGroup) {
+        cards += '<div class="vw-cellcard has"><div class="ct">' + V.esc(V.plain(name)) + ' <span class="muted" style="font-weight:400;font-size:11.5px">' + top.cohorts_in_cell_type + ' cohorts</span></div><div class="one">' +
+          (n ? n + ' genes' + (top.n_replicated_effect ? ' (' + top.n_replicated_effect + ' strict)' : '') + ', listed once in the table below.' : 'No gene meets the criteria.') + '</div></div>';
+      } else if (n > 0) {
+        var up = passes.filter(function (row) { return row.direction === 'up'; }), down = passes.filter(function (row) { return row.direction === 'down'; });
+        var parts = [];
+        if (up.length) parts.push(geneNames(up, 5) + ' up');
+        if (down.length) parts.push(geneNames(down, 5) + ' down');
+        cards += '<div class="vw-cellcard has"><div class="ct">' + V.esc(V.plain(name)) + ' <span class="muted" style="font-weight:400;font-size:11.5px">' + top.cohorts_in_cell_type + ' cohorts</span></div><div class="one">' + n + (n === 1 ? ' gene' : ' genes') + ': ' + parts.join('; ') + '.</div></div>';
+      } else {
+        empty.push({ name: V.plain(name), n: top.cohorts_in_cell_type });
+      }
+    });
+    if (empty.length) {
+      var same = empty.every(function (item) { return item.n === empty[0].n; });
+      cards += '<p class="vw-emptyline">No gene meets the criteria in ' + empty.map(function (item) { return V.esc(item.name) + (same ? '' : ' (' + item.n + ' cohorts)'); }).join(', ') + (same ? ' (' + empty[0].n + ' cohorts each' + (empty[0].n <= 2 ? ', low power' : '') + ')' : '') + '. Few cohorts mean little power; this is not evidence of no effect.</p>';
+    }
+    document.getElementById('vwf-cards').innerHTML = cards;
+
+    // replicated genes of the focus group
+    if (passing.length) {
+      document.getElementById('vwf-genes-head').hidden = false;
+      document.getElementById('vwf-genes-sub').textContent = focusName + ', best r-value first';
+      var shown = 25;
+      var host = document.getElementById('vwf-genes');
+      var draw = function (limit) {
+        var body = passing.slice(0, limit).map(function (row) {
+          var flags = V.geneFlagPills((row.gene_flags || []).concat(row.apoe_locus && (row.gene_flags || []).indexOf('apoe_locus') < 0 ? ['apoe_locus'] : []));
+          return '<tr><td><a href="/genes/' + V.esc(row.gene) + '">' + V.esc(row.gene) + '</a>' + (row.replicated_effect ? ' <span title="Strict tier: minimum-effect r-value below 0.05">&#9733;</span>' : '') + '</td><td>' + V.arrow(row.direction) + ' ' + (row.direction || '') + '</td><td class="num">' + V.signed(row.median_logFC, 2) + '</td><td class="num">' + row.k + ' of ' + row.m + '</td><td>' + V.esc((row.r_cohorts || []).slice(0, 2).join(', ')) + '</td><td>' + flags + '</td></tr>';
+        }).join('');
+        host.innerHTML = '<div class="vw-box"><table class="vw-table"><thead><tr><th>Gene</th><th>Direction</th><th class="num">Effect (log2 fold change)</th><th class="num">Cohorts significant</th><th>Carried by</th><th>Flags</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
+          '<p class="vw-fnote">' + (limit < passing.length ? '<button type="button" class="vw-more-units" id="vwf-allgenes">show all ' + passing.length + ' listed genes</button> ' : '') + 'Genes that replicate and meet the effect filter' + (truncated ? '. The list holds the first 500 replicated genes by r-value; ' + nGate + ' meet the filter in all' : '') + '. &#9733; marks the strict tier. Cohorts significant = individually q &lt; 0.05 in the same direction, of those tested.</p>';
+        var more = document.getElementById('vwf-allgenes');
+        if (more) more.addEventListener('click', function () { draw(passing.length); });
+      };
+      draw(shown);
+    }
+
+    // modules (API 2.45; the section stays hidden when the API does not serve them)
+    V.cached(V.API + '/facets/' + enc(key) + '/modules/top?scope=' + enc(SCOPE) + '&cell_type=' + enc(focusGroup) + '&n=15').then(function (payload) {
+      var modules = (payload.rows || []).filter(function (m) { return m.replicated; });
+      if (!modules.length) return;
+      var total = payload.n_matching != null ? payload.n_matching : modules.length;
+      document.getElementById('vwf-modules-head').hidden = false;
+      document.getElementById('vwf-modules-sub').textContent = focusName + ', ' + total + ' replicated';
+      var body = modules.map(function (m) {
+        var flags = (m.quality_sensitive ? V.pill('quality-sensitive', 'warn', 'Most member genes are mitochondrial or ribosomal: the score tracks RNA quality, not regulation.', 'gene-class-flags') : '') +
+          (m.ab && m.ab.disagree ? V.pill('pseudobulk and cell mean disagree', 'warn', 'The donor-level pseudobulk and the mean of per-cell scores point in different directions and one is replicated, or both reach 0.2 SD.', 'pseudobulk') : '') +
+          (m.directionless ? V.pill('no expected direction', 'warn', 'A set of loci has no expected direction; a mean score is not well suited to it.', '') : '');
+        return '<tr><td><a href="/genesets/' + V.esc(m.geneset_id || ((m.catalog || '') + '/' + m.module)) + '">' + V.esc(m.module) + '</a> <span class="muted">' + V.esc(m.catalog || '') + '</span>' + (m.n_genes ? ' <span class="muted">' + m.n_genes + ' genes</span>' : '') + '</td><td>' + V.arrow(m.r_direction) + ' ' + (m.r_direction || '') + '</td><td class="num">' + V.signed(m.median_std_effect, 2) + '</td><td class="num">' + (m.k != null ? m.k + ' of ' + m.m : '') + '</td><td>' + (m.gate ? 'yes' : 'no') + '</td><td>' + flags + '</td></tr>';
+      }).join('');
+      document.getElementById('vwf-modules').innerHTML = '<div class="vw-box"><table class="vw-table"><thead><tr><th>Gene set</th><th>Direction</th><th class="num">Standardised effect (SD)</th><th class="num">Cohorts significant</th><th>At least 0.2 SD in 2 cohorts</th><th>Flags</th></tr></thead><tbody>' + body + '</tbody></table></div><p class="vw-fnote">Same partial conjunction rule as for genes, on permutation p values of the mean module score per donor, Benjamini-Hochberg over the modules of one family. Pseudobulk where counts exist, else the mean of per-cell scores. Showing the best ' + modules.length + ' of ' + total + '.</p>';
+    }).catch(function () { /* not served by this API version: the section stays hidden */ });
+
+    // cohorts and expert details
+    var testRows = ((tests && tests.rows) || []).filter(function (row) { return row.celltype_group === focusGroup && !row.is_secondary; });
+    var anchored = testRows.some(function (row) { return row.anchor === true; });
+    var counted = testRows.filter(function (row) { return anchored ? row.anchor === true : row.counted; });
+    var perCohort = {};
+    counted.forEach(function (row) {
+      var name = row.cohort_label && row.cohort_label !== 'None' ? row.cohort_label : 'unassigned';
+      if (!perCohort[name] || (row.n_donors || 0) > (perCohort[name].n_donors || 0)) perCohort[name] = row;
+    });
+    var tested = {};
+    rows.forEach(function (row) { (row.cohorts_tested_labels || []).forEach(function (label) { tested[label] = 1; }); });
+    var names = Object.keys(perCohort).filter(function (name) { return !Object.keys(tested).length || tested[name]; });
+    if (names.length) {
+      document.getElementById('vwf-cohorts-head').hidden = false;
+      document.getElementById('vwf-cohorts').innerHTML = '<div class="vw-cohort-chips">' + names.map(function (name) {
+        var row = perCohort[name];
+        var cov = (row.covariates || []);
+        var covText = cov.length ? cov.join(', ') + (cov.length === 1 ? ' only' : '') : 'no covariates';
+        var inflated = row.inflated ? ' ' + V.pill('inflated', 'warn', 'Genome-wide inflation (lambda above 1.3).', 'lambda') : '';
+        return '<span class="vw-cohort-chip">' + V.esc(name) + ', ' + (row.n_donors || '?') + ' ' + noun + ' <span class="cov">' + V.esc(covText) + '</span>' + inflated + '</span>';
+      }).join('') + '</div><p class="vw-fnote">Donors per cohort and the covariates of its model. A cohort without age is not adjusted for age.</p>';
+    }
+    var tierRows = groups.map(function (g) {
+      var top = byGroup[g.celltype_group];
+      if (!top) return '';
+      return '<tr><td>' + V.esc(V.plain(g.celltype_group)) + '</td><td class="num">' + top.cohorts_in_cell_type + '</td><td class="num">' + Number(top.n_genes_in_family || 0).toLocaleString('en-US') + '</td><td class="num">' + (top.n_r_significant != null ? top.n_r_significant : top.n_replicated) + '</td><td class="num">' + (top.n_effect_gate != null ? top.n_effect_gate : '') + '</td><td class="num">' + (top.n_replicated_effect != null ? top.n_replicated_effect : '') + '</td><td class="num">' + (top.n_replicated_strong != null ? top.n_replicated_strong : '') + '</td></tr>';
+    }).join('');
+    var hasLambda = testRows.some(function (row) { return row.lambda_gc != null; });
+    var ordered = ((tests && tests.rows) || []).filter(function (row) { return row.celltype_group === focusGroup; })
+      .sort(function (a, b) { return (b.counted - a.counted) || ((b.n_donors || 0) - (a.n_donors || 0)); });
+    var cohortRows = ordered.map(function (row) {
+      var cohort = row.cohort_label && row.cohort_label !== 'None' ? row.cohort_label : 'unassigned';
+      return '<tr class="' + (row.counted ? '' : 'vw-grey') + '"><td>' + V.esc(cohort) + '</td><td>' + V.esc(row.db_id) + '</td><td class="num">' + (row.n_donors || '') + '</td><td>' + V.esc((row.covariates || []).join(', ') || 'none') + '</td><td>' + (row.pooled ? 'pooled' : '') + '</td><td>' + V.esc(row.disease_basis || '') + '</td>' +
+        (hasLambda ? '<td class="num">' + (row.lambda_gc != null ? V.num(row.lambda_gc, 2) : '') + '</td>' : '') + '<td class="num">' + (row.genes ? row.genes.n_q05 + ' of ' + row.genes.n_tested : '') + '</td><td>' + (row.counted ? 'counted' : V.esc(row.not_counted_reason || 'not counted')) + '</td></tr>';
+    }).join('');
+    document.getElementById('vwf-expert').innerHTML = V.docBlock('Details for experts', 'vwf-expert-block',
+      '<div class="vw-expert"><h3 class="subsection-head">Tiers per cell type group</h3><div class="vw-box"><table class="vw-table"><thead><tr><th>Cell type group</th><th class="num">Cohorts</th><th class="num">Genes in family</th><th class="num">r-value &lt; 0.05</th><th class="num">Effect filter met</th><th class="num">Strict tier</th><th class="num">At least 25%</th></tr></thead><tbody>' + tierRows + '</tbody></table></div>' +
+      '<p class="vw-fnote">The family is all genes tested in at least 2 cohorts of this scope and cell type group; Benjamini-Hochberg runs over that family. The strict tier repeats the partial conjunction on minimum-effect p values (<a href="/help#glossary-treat-tier">glossary</a>). Counts are not capped; the table above lists at most the first 500.</p>' +
+      '<h3 class="subsection-head">Cohort table, ' + V.esc(focusName) + '</h3><div class="vw-box"><table class="vw-table"><thead><tr><th>Cohort</th><th>Dataset</th><th class="num">' + V.esc(noun) + '</th><th>Covariates</th><th></th><th>Disease basis</th>' + (hasLambda ? '<th class="num">lambda</th>' : '') + '<th class="num">Genes q &lt; 0.05</th><th>Status</th></tr></thead><tbody>' + cohortRows + '</tbody></table></div>' +
+      '<p class="vw-fnote">Counted rows first; grey rows are listed but not counted (supplementary units, reanalyses, descriptive only). The cohort table is a draft. A cohort named "unassigned" is not in the cohort table.</p>' +
+      '<h3 class="subsection-head">Full replication rule</h3><p class="vw-essential">' + V.esc(first.definition || '') + '</p></div>');
+    V.afterRender(document.getElementById('vwf-root'));
+  }
+
+  var variantHost = document.getElementById('vwf-variants');
+  if (VARIANTS.length > 1) {
+    variantHost.innerHTML = '<div class="vw-seg" role="tablist">' + VARIANTS.map(function (variant, index) { return '<a href="#" data-variant="' + V.esc(variant.name) + '" class="' + (index === 0 ? 'on' : '') + '">' + V.esc(variant.label) + '</a>'; }).join('') + '</div>';
+    variantHost.querySelectorAll('a').forEach(function (link) {
+      link.addEventListener('click', function (event) {
+        event.preventDefault();
+        variantHost.querySelectorAll('a').forEach(function (other) { other.className = other === link ? 'on' : ''; });
+        load(link.dataset.variant);
+      });
+    });
+    load(VARIANTS[0].name);
+  } else {
+    load(BASE_NAME);
+  }
+})();
+</script>
+{%- endmacro %}

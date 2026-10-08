@@ -1,0 +1,534 @@
+{# Shared pieces of the gene, gene set and facet "views" (new tabs next to the
+   atlas, geneset and facet pages).  Import with:
+       {% from "_views.html" import views_styles, views_core %}
+   views_styles() emits the CSS, views_core() the shared JS (window.antViews):
+   formatting, pills, call logic, the facet grid (variant A, wide screens) and
+   list (variant B, narrow screens), the forest, and the tab switcher.  The page
+   specific mounts live in _view_gene.html, _view_geneset.html, _view_facet.html.
+   Every fetched field that the API may not serve yet is guarded: a missing field
+   hides its element, it never breaks the view. #}
+
+{% macro views_styles() -%}
+<style>
+  /* ---- layout helpers ---- */
+  .vw-lede { font-size: 13px; color: #374151; max-width: 860px; margin: 2px 0 8px; }
+  .vw-essential { font-size: 12.5px; color: #374151; margin: 2px 0 6px; max-width: 900px; }
+  .vw-fnote { font-size: 11px; color: var(--text-muted); margin: 4px 0 0; max-width: 880px; }
+  .vw-note { font-size: 11.5px; color: #7a4b0c; background: #fdf3e1; border: 1px solid #f0d3a1; border-radius: 4px; padding: 3px 8px; margin: 4px 0 6px; max-width: 900px; }
+  .vw-note.blue { color: #1f3b4d; background: #f4f8fb; border-color: #cddbe8; }
+  .vw-loading { color: var(--text-muted); font-size: 12.5px; padding: 8px 0; }
+  .vw-error { color: #9E2A2B; font-size: 12.5px; padding: 8px 0; }
+  .vw-placeholder { border: 1px dashed #c9ced4; border-radius: 5px; padding: 10px 14px; color: #7b838c; font-size: 12.5px; background: #fbfcfd; max-width: 900px; }
+  .vw-new { font-size: 9px; background: #FFF3B0; color: #6b5a1c; border-radius: 3px; padding: 0 4px; margin-left: 5px; text-transform: uppercase; }
+  .vw-tabs-bar .tab-btn.vw-old { color: #8a9199; }
+  .vw-panel > h2.section-head:first-child { margin-top: 4px; }
+  .vw-pill { display: inline-block; padding: 0 7px; margin: 1px 4px 1px 0; font-size: 10.5px; line-height: 1.6; border-radius: 9px;
+             border: 1px solid #e5e7eb; background: #f3f4f6; color: #374151; white-space: nowrap; cursor: help; }
+  .vw-pill.warn { background: #fdf3e1; border-color: #f0d3a1; color: #7a4b0c; }
+  .vw-pill.teal { background: #e8f0f1; border-color: #c4d8db; color: #254850; }
+  .vw-pill.strict { background: #335C67; border-color: #335C67; color: #fff; }
+  .vw-pill.plain { cursor: default; }
+  .vw-modality { display: inline-block; padding: 0 6px; font-size: 10px; line-height: 1.5; border-radius: 3px; background: #eef2f5; color: #475569; border: 1px solid #cbd5e1; white-space: nowrap; }
+  .vw-modality.nuclei { background: #eef3fb; color: #2a4a7a; border-color: #c9d6ec; }
+  .vw-modality.cells { background: #f6efe6; color: #6b4a1c; border-color: #e6d3b6; }
+
+  /* ---- panel 1 ---- */
+  .vw-bar-track { position: relative; height: 10px; background: #e2e5e8; border-radius: 5px; min-width: 120px; }
+  .vw-bar-range { position: absolute; top: 3px; height: 4px; background: #9fb8bd; border-radius: 2px; }
+  .vw-bar-med { position: absolute; top: -1px; width: 3px; height: 12px; background: #335C67; border-radius: 1px; }
+  .vw-bar-cell { min-width: 170px; }
+  table.vw-table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4; }
+  table.vw-table th { text-align: left; padding: 5px 8px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-weight: 500;
+                      font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
+  table.vw-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-light); vertical-align: middle; }
+  table.vw-table td.num, table.vw-table th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .vw-box { border: 1px solid var(--border); border-radius: 5px; background: #fff; overflow-x: auto; }
+  tr.vw-toggle { cursor: pointer; }
+  tr.vw-toggle:hover td { background: var(--hover); }
+  tr.vw-toggle .caret { display: inline-block; width: 12px; color: #9aa1a9; font-size: 10px; }
+  tr.vw-sub td { background: #fbfcfd; font-size: 11.5px; }
+  tr.vw-sub td:first-child { padding-left: 28px; }
+  tr.vw-scope-row td { background: #f7f9fa; font-weight: 500; font-size: 11.5px; color: #4b5563; }
+
+  /* ---- panel 2: scope blocks ---- */
+  .vw-scope-block { margin: 10px 0 18px; }
+  .vw-scope-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 3px; }
+  .vw-scope-head h3 { font-size: 14px; font-weight: 600; color: var(--text); }
+  .vw-scope-head .unit { font-size: 11.5px; color: var(--text-muted); }
+  .vw-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11.5px; color: #374151; margin: 6px 0 8px; align-items: center; }
+  .vw-legend .swatch { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: -3px; margin-right: 4px; }
+  .vw-legend .swatch.rep { background: #335C67; }
+  .vw-legend .swatch.none { background: #eef0f2; }
+  .vw-legend .swatch.nt { background: #fff; border: 1px dashed #c9ced4; }
+  .vw-cell { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; min-width: 76px; padding: 3px 4px; font-family: var(--font);
+             border-radius: 4px; border: 1px solid transparent; cursor: pointer; line-height: 1.2; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .vw-cell .sub { font-size: 10px; opacity: .9; }
+  .vw-cell .star { font-size: 10px; margin-left: 2px; }
+  .vw-cell.rep { background: #335C67; color: #fff; font-weight: 500; }
+  .vw-cell.none { background: #eef0f2; color: #6b737c; }
+  .vw-cell.nt { background: #fff; color: #7b838c; border: 1px dashed #c9ced4; }
+  .vw-cell.nt.empty { cursor: default; color: #a2a8af; }
+  .vw-cell.sel { outline: 2px solid #E09F3E; outline-offset: 1px; }
+  .vw-cell .lowdet { font-size: 9.5px; margin-top: 1px; padding: 0 5px; border-radius: 6px; background: #fdf3e1; color: #7a4b0c; }
+  .vw-cell .gn { font-size: 9.5px; margin-top: 1px; padding: 0 5px; border-radius: 6px; background: rgba(255,255,255,.8); color: #254850; }
+  .vw-cell.none .gn, .vw-cell.nt .gn { background: rgba(0,0,0,.06); }
+  .vw-cell .flag { color: #f6c5c6; font-size: 11px; margin-left: 2px; }
+  .vw-cell.none .flag, .vw-cell.nt .flag { color: #9E2A2B; }
+  table.vw-grid { table-layout: fixed; min-width: 780px; width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.vw-grid th { text-align: center; font-size: 9.5px; padding: 5px 2px; vertical-align: bottom; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: .3px; border-bottom: 2px solid var(--border); }
+  table.vw-grid th.fh { text-align: left; width: 200px; padding-left: 10px; }
+  table.vw-grid td { text-align: center; padding: 3px 2px; border-bottom: 1px solid var(--border-light); }
+  table.vw-grid td.fh { text-align: left; padding-left: 10px; position: sticky; left: 0; background: #fff; z-index: 1; border-right: 1px solid var(--border-light); }
+  table.vw-grid td.fh .fl { font-size: 12.5px; font-weight: 500; }
+  table.vw-grid td.fh .fc { font-size: 10.5px; color: var(--text-muted); }
+  table.vw-grid td.fh .ft { font-size: 10px; color: #7a4b0c; }
+  table.vw-grid tr.axis-top td.fh { border-left: 3px solid #E09F3E; }
+  table.vw-grid tr.axis-mid td.fh { border-left: 3px solid #E09F3E; }
+  table.vw-grid tr.axis-tag td.fh .axis-label { display: inline-block; font-size: 9.5px; color: #7a4b0c; background: #fdf3e1; border: 1px solid #f0d3a1; border-radius: 3px; padding: 0 4px; margin-top: 2px; }
+  table.vw-grid tr.vw-detail-row > td { padding: 0; background: #fbfcfd; text-align: left; }
+  .vw-detail-wrap { position: sticky; left: 0; width: min(920px, calc(100vw - 52px)); }
+  .vw-apoe { font-size: 10px; color: #7a4b0c; background: #fdf3e1; border: 1px solid #f0d3a1; border-radius: 3px; padding: 0 4px; margin-left: 4px; cursor: help; }
+
+  /* variant B */
+  .vw-clist { border: 1px solid var(--border); border-radius: 5px; background: #fff; }
+  .vw-crow { padding: 7px 10px; border-bottom: 1px solid var(--border-light); }
+  .vw-crow:last-child { border-bottom: none; }
+  .vw-crow .chead { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .vw-crow .fl { font-size: 13px; font-weight: 500; }
+  .vw-crow .fc { font-size: 11px; color: var(--text-muted); }
+  .vw-crow .ft { font-size: 10px; color: #7a4b0c; }
+  .vw-crow .cchips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; align-items: center; }
+  .vw-chip { display: inline-flex; gap: 6px; align-items: baseline; padding: 2px 9px; border-radius: 12px; font-size: 12px; cursor: pointer; font-family: var(--font);
+             border: 1px solid transparent; font-variant-numeric: tabular-nums; background: #335C67; color: #fff; font-weight: 500; }
+  .vw-chip .k { font-size: 10.5px; opacity: .9; }
+  .vw-chip.sel { outline: 2px solid #E09F3E; outline-offset: 1px; }
+  .vw-chip.one { background: #fff; color: #335C67; border-color: #c4d8db; font-weight: 400; }
+  .vw-crow .rest { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
+  .vw-crow .rest b { font-weight: 500; color: #4b5563; }
+  .vw-crow .genes-line { font-size: 11.5px; color: #254850; margin-top: 3px; }
+  .vw-crow .genes-line .g { display: inline-block; background: #e8f0f1; border: 1px solid #c4d8db; border-radius: 10px; padding: 0 7px; margin: 1px 3px 1px 0; font-size: 11px; }
+  .vw-crow-group { border-left: 3px solid #E09F3E; background: #fffdf8; }
+  .vw-crow-group .gcap { font-size: 10.5px; color: #7a4b0c; padding: 4px 10px 0; }
+  .vw-crow-group .vw-crow { border-bottom: 1px solid var(--border-light); }
+
+  /* detail card, forest */
+  .vw-detail { padding: 10px 14px 12px; border-left: 3px solid #E09F3E; background: #fbfcfd; }
+  .vw-detail .dc-title { font-size: 13px; font-weight: 600; }
+  .vw-detail .dc-line { font-size: 12.5px; color: #374151; margin: 2px 0 6px; max-width: 860px; }
+  .vw-detail .dc-pills { margin: 3px 0 5px; }
+  .vw-forest { border: 1px solid var(--border-light); background: #fff; border-radius: 4px; padding: 4px 8px; max-width: 900px; }
+  .vw-frow { display: grid; grid-template-columns: minmax(130px, 230px) 44px minmax(120px, 1fr) 58px 58px; gap: 8px; align-items: center;
+             padding: 3px 0; border-bottom: 1px solid var(--border-light); font-size: 11.5px; }
+  .vw-frow:last-child { border-bottom: none; }
+  .vw-frow.head { font-size: 9.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
+  .vw-frow.uncounted { color: #8a9199; }
+  .vw-frow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vw-frow .nm small { color: var(--text-muted); display: block; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
+  .vw-frow .nm .vw-pill { font-size: 9.5px; padding: 0 5px; margin: 0 0 0 3px; }
+  .vw-frow .n, .vw-frow .e, .vw-frow .q { text-align: right; font-variant-numeric: tabular-nums; }
+  .vw-fplot { position: relative; height: 18px; }
+  .vw-fplot .zero { position: absolute; top: 0; bottom: 0; width: 1px; background: #9aa1a9; left: 50%; }
+  .vw-fplot .ci { position: absolute; top: 8px; height: 2px; background: #6b8a91; }
+  .vw-fplot .dot { position: absolute; top: 4px; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; background: #335C67; }
+  .vw-fplot .dot.ns { background: #fff; border: 2px solid #6b8a91; }
+  .vw-fplot .dot.b { width: 8px; height: 8px; margin-left: -4px; top: 5px; border-radius: 1px; background: #fff; border: 2px solid #E09F3E; }
+  .vw-frow.uncounted .dot { opacity: .55; }
+  .vw-more-units { background: none; border: none; color: var(--link); cursor: pointer; font: inherit; font-size: 11.5px; padding: 3px 0; }
+  .vw-mcg { margin-top: 6px; font-size: 12px; }
+  .vw-mcg .g { display: inline-block; background: #e8f0f1; border: 1px solid #c4d8db; color: #254850; border-radius: 10px; padding: 0 7px; margin: 1px 3px 1px 0; font-size: 11.5px; }
+  .vw-anchor-chips { margin: 6px 0 0; font-size: 11.5px; }
+  .vw-anchor-chips .lbl { color: var(--text-muted); margin-right: 4px; }
+
+  /* facet overview */
+  .vw-answer { border: 1px solid var(--border); border-left: 4px solid #335C67; border-radius: 5px; padding: 10px 14px; background: #fff; margin: 8px 0 10px; max-width: 980px; }
+  .vw-answer .big { font-size: 15px; line-height: 1.45; }
+  .vw-answer .meta { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
+  .vw-cellcard { border: 1px solid var(--border); border-radius: 5px; padding: 8px 12px; margin: 6px 0; background: #fff; max-width: 980px; }
+  .vw-cellcard.has { border-left: 4px solid #335C67; }
+  .vw-cellcard .ct { font-weight: 600; font-size: 13px; }
+  .vw-cellcard .one { font-size: 13px; color: #1f2937; margin-top: 1px; }
+  .vw-cellcard .meta { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+  .vw-emptyline { font-size: 12.5px; color: #4b5563; margin: 6px 0; max-width: 980px; }
+  .vw-gchips { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 0 2px; }
+  .vw-gchip { display: inline-flex; gap: 5px; align-items: baseline; padding: 1px 9px; border-radius: 12px; background: #e8f0f1; border: 1px solid #c4d8db; color: #254850; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .vw-gchip .k { font-size: 10px; opacity: .8; }
+  .vw-cohort-chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 4px 0; }
+  .vw-cohort-chip { font-size: 11.5px; border: 1px solid var(--border); border-radius: 10px; padding: 1px 9px; background: #f7f9fa; }
+  .vw-cohort-chip .cov { color: var(--text-muted); font-size: 10.5px; }
+  .vw-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; margin: 4px 0 8px; }
+  .vw-seg a, .vw-seg span { padding: 3px 12px; font-size: 12px; background: #f7f9fa; color: #4b5563; border-right: 1px solid var(--border); text-decoration: none; }
+  .vw-seg .on { background: #335C67; color: #fff; }
+  .vw-seg .off { color: #b0b6bd; cursor: not-allowed; }
+  tr.vw-grey td { color: #8a9199; }
+  .vw-expert td, .vw-expert th { font-size: 11.5px; }
+
+  @media (max-width: 640px) {
+    .vw-frow { grid-template-columns: minmax(64px, 1fr) 30px 62px 40px 44px; gap: 4px; font-size: 10.5px; }
+    .vw-frow .nm .vw-pill { display: none; }
+    .vw-forest { padding: 4px 4px; }
+    .vw-detail { padding: 8px 8px 10px; overflow-x: auto; }
+    .vw-legend { font-size: 11px; }
+    .vw-answer .big { font-size: 14px; }
+  }
+</style>
+{%- endmacro %}
+
+{% macro views_core() -%}
+<script>
+window.antViews = window.antViews || (function () {
+  'use strict';
+  var API = '/api';
+  var GROUPS = ['microglia', 'astrocyte', 'oligodendrocyte', 'oligodendrocyte precursor cell', 'endothelial cell',
+                'excitatory neuron', 'inhibitory neuron', 'perivascular macrophage'];
+  var SHORT = { 'oligodendrocyte precursor cell': 'OPC', 'oligodendrocyte': 'oligodendro-cyte', 'perivascular macrophage': 'perivascular macrophage' };
+  var SCOPES = {
+    human_postmortem: { title: 'Human brain (post-mortem)', unit: 'The replicate is the donor.', noun: 'donors', nounOne: 'donor' },
+    xenograft_human_in_mouse: { title: 'Human microglia in mouse hosts (xenograft)', unit: 'The replicate is the host mouse.', noun: 'mice', nounOne: 'mouse' }
+  };
+  var HUMAN_FACETS = ['sex', 'disease', 'braak', 'age', 'age_adjusted', 'apoe4_carrier', 'apoe4_dose'];
+  var XENO_FACETS = ['app_nlgf', 'sex'];
+  var FACETS = {
+    sex: { label: 'Sex', contrast: 'male vs female', phrase: ['higher in males', 'higher in females'] },
+    disease: { label: 'Disease (pathologic AD)', contrast: 'pathologic AD vs no AD pathology', phrase: ['higher with AD pathology', 'lower with AD pathology'], axis: true },
+    braak: { label: 'Braak stage', contrast: 'linear trend per Braak stage', phrase: ['higher with Braak stage', 'lower with Braak stage'], axis: true },
+    age: { label: 'Age', contrast: 'linear trend per decade, donors 60 and older', phrase: ['higher with age', 'lower with age'], tag: 'not adjusted for pathology' },
+    age_adjusted: { label: 'Age, adjusted for pathology', contrast: 'per decade, Braak stage in the model', phrase: ['higher with age (pathology held constant)', 'lower with age (pathology held constant)'], tag: 'Braak in the model' },
+    apoe4_carrier: { label: 'APOE e4 carrier', contrast: 'carrier vs non-carrier', phrase: ['higher in APOE e4 carriers', 'lower in APOE e4 carriers'] },
+    apoe4_dose: { label: 'APOE e4 dose', contrast: 'per e4 allele (0, 1, 2)', phrase: ['higher with more e4 alleles', 'lower with more e4 alleles'] },
+    app_nlgf: { label: 'App NL-G-F host model', contrast: 'knock-in host vs control host', phrase: ['higher in App NL-G-F hosts', 'lower in App NL-G-F hosts'] }
+  };
+  var XENO_SEX = { label: 'Sex of host', contrast: 'male vs female host', phrase: ['higher in male hosts', 'higher in female hosts'] };
+  var GENE_FLAGS = {
+    mitochondrial: ['MT', 'Mitochondrial gene: tracks nuclear RNA quality and cell damage, not regulation.'],
+    ribosomal: ['ribosomal', 'Ribosomal protein gene: tracks library quality and cell state.'],
+    lncrna_or_clone: ['lncRNA / clone', 'Non-coding or clone-named transcript: often technical and poorly annotated.'],
+    sex_chromosome: ['sex chromosome', 'X or Y linked: sex composition can move it.'],
+    long_gene: ['long gene', 'Gene span above 500 kb: intron-rich, tracks nuclear RNA quality and post-mortem interval.'],
+    apoe_locus: ['APOE locus', 'Allele-linked expression and read-mapping differences near APOE can produce an e4 effect that need not be biology.'],
+    neuronal_in_microglia: ['neuronal gene', 'A neuronal gene seen in microglia: usually ambient RNA or read misassignment, not microglial expression.'],
+    lymphoid_in_microglia: ['lymphoid gene', 'A lymphoid gene seen in microglia: usually contamination or misassignment, not microglial expression.']
+  };
+  var LOW_DETECTION_PCT = 5;
+
+  function esc(value) { return String(value == null ? '' : value).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function num(value, digits) { return value == null || isNaN(value) ? 'n/a' : Number(value).toFixed(digits == null ? 2 : digits); }
+  function signed(value, digits) { return value == null || isNaN(value) ? 'n/a' : (value > 0 ? '+' : '') + Number(value).toFixed(digits == null ? 2 : digits); }
+  function pfmt(value) {
+    if (value == null || isNaN(value)) return 'n/a';
+    if (value === 0) return '< 1e-300';
+    if (value < 0.001) return Number(value).toExponential(1);
+    return Number(value).toFixed(value < 0.01 ? 4 : 3);
+  }
+  function plural(count, word) { return count + ' ' + word + (count === 1 ? '' : 's'); }
+  function arrow(direction) { return direction === 'up' ? '&#9650;' : direction === 'down' ? '&#9660;' : ''; }
+  function plain(group) { return group === 'oligodendrocyte precursor cell' ? 'OPC' : group; }
+  function median(values) {
+    var sorted = values.filter(function (v) { return v != null && !isNaN(v); }).sort(function (a, b) { return a - b; });
+    if (!sorted.length) return null;
+    var mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  function gl(slug, text) { return '<a href="/help#glossary-' + slug + '">' + esc(text) + '</a>'; }
+  function pill(text, cls, title, slug) {
+    return '<span class="fx-pill vw-pill ' + (cls || '') + '"' + (slug ? ' data-glossary="' + slug + '"' : '') + ' tabindex="0" role="button" title="' + esc(title || '') + '">' + esc(text) + '</span>';
+  }
+  function getJson(url) {
+    return fetch(url, { credentials: 'same-origin' }).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.json();
+    });
+  }
+  var memo = {};
+  function cached(url) {
+    if (!memo[url]) memo[url] = getJson(url).catch(function (error) { delete memo[url]; throw error; });
+    return memo[url];
+  }
+  function docBlock(title, id, bodyHtml) {
+    return '<details class="doc-block"' + (id ? ' id="' + id + '"' : '') + '><summary>&#9432; ' + title + '</summary><div class="doc-body">' + bodyHtml + '</div></details>';
+  }
+  function afterRender(root) { if (window.antDocRestore) window.antDocRestore(root); }
+  function facetMeta(scope, facet) {
+    if (scope === 'xenograft_human_in_mouse' && facet === 'sex') return XENO_SEX;
+    return FACETS[facet] || { label: facet, contrast: '', phrase: ['higher', 'lower'] };
+  }
+  function geneFlagPills(flags) {
+    return (flags || []).map(function (flag) {
+      var info = GENE_FLAGS[flag] || [String(flag).replace(/_/g, ' '), 'Gene class flag.'];
+      return pill(info[0], 'warn', info[1], 'gene-class-flags');
+    }).join('');
+  }
+  function lowDetectionPill(info) {
+    if (!info) return '';
+    return pill('low detection, ' + Math.round(info.pct) + '%', 'warn', 'Detected in only ' + num(info.pct, 1) + ' percent of cells of this cell type (median over ' + plural(info.n, 'dataset') + ', panel 1). Results for barely detected genes are fragile.', 'low-detection');
+  }
+
+  /* ---------- call logic ---------- */
+  // A replication record (gene) or module record -> the cell model of the grid.
+  function cellFromRep(rep, lowDet) {
+    if (!rep) return null;
+    var m = rep.m != null ? rep.m : (rep.cohorts_tested || 0);
+    if (!m) return null;
+    var k = rep.k != null ? rep.k : (rep.cohorts_sig_same_sign || 0);
+    var r = rep.r_value;
+    var replicated = m >= 2 && r != null && r < 0.05;
+    var direction = rep.r_direction || rep.direction || (rep.median_logFC > 0 ? 'up' : rep.median_logFC < 0 ? 'down' : null);
+    return {
+      m: m, k: k, r: r, rTreat: rep.r_treat, replicated: replicated,
+      gate: rep.effect_gate_passed === true, gateUnit: rep.effect_gate_unit,
+      strict: m >= 2 && rep.r_treat != null && rep.r_treat < 0.05,
+      dir: direction, median: rep.median_logFC, nSmall: rep.n_small || 0, smallLimit: rep.small_cohort_replicates || 20,
+      rCohorts: rep.r_cohorts || [], lowDet: lowDet || null, disagree: 0, genes: null, rep: rep
+    };
+  }
+  function cellKind(cell) {
+    if (!cell) return 'empty';
+    if (cell.onlyGenes) return 'genes';
+    if (cell.m < 2) return 'single';
+    return cell.replicated ? 'rep' : 'none';
+  }
+
+  /* ---------- the cell and the chip ---------- */
+  function cellHtml(cell, ctx) {
+    var kind = cellKind(cell);
+    var attrs = ' data-scope="' + ctx.scope + '" data-facet="' + esc(ctx.facet) + '" data-group="' + esc(ctx.group) + '"';
+    var sel = ctx.selected ? ' sel' : '';
+    if (kind === 'empty') return '<span class="vw-cell nt empty" title="Not tested in this cell type group (too few replicates, or no cohort has it)">not tested</span>';
+    var genes = cell.genes && cell.genes.n > 0 ? '<span class="gn" title="Member genes that replicate on their own for this facet and cell type">' + cell.genes.n + (cell.genes.more ? '+' : '') + (cell.genes.n === 1 ? ' gene' : ' genes') + '</span>' : '';
+    var flag = cell.disagree ? '<span class="flag" title="Pseudobulk (A) and cell mean (B) disagree in at least one cohort">&#9888;</span>' : '';
+    var low = cell.lowDet ? '<span class="lowdet" title="Detected in only ' + num(cell.lowDet.pct, 1) + ' percent of cells of this cell type">low det. ' + Math.round(cell.lowDet.pct) + '%</span>' : '';
+    if (kind === 'genes') return '<button type="button" class="vw-cell nt' + sel + '"' + attrs + ' title="The module score was not tested here (fewer than 2 cohorts). Member genes replicate on their own.">module not tested' + genes + '</button>';
+    if (kind === 'single') return '<button type="button" class="vw-cell nt' + sel + '"' + attrs + ' title="Tested in 1 cohort only; replication needs at least 2. Click for the estimate.">1 cohort' + genes + low + '</button>';
+    if (kind === 'none') return '<button type="button" class="vw-cell none' + sel + '"' + attrs + ' title="No evidence of replication: ' + cell.k + ' of ' + cell.m + ' cohorts individually significant (q &lt; 0.05, same direction)"><span>' + cell.k + '/' + cell.m + '</span>' + flag + genes + low + '</button>';
+    var small = cell.nSmall ? ', ' + cell.nSmall + ' small' : '';
+    return '<button type="button" class="vw-cell rep' + sel + '"' + attrs + ' title="Replicated: the same direction in at least 2 cohorts (r &lt; 0.05)' + (cell.strict ? '; strict minimum-effect test also passed' : '') + '"><span>' + arrow(cell.dir) + ' ' + signed(cell.median, 2) + (cell.strict ? '<span class="star" title="Strict tier: minimum-effect r-value &lt; 0.05">&#9733;</span>' : '') + flag + '</span><span class="sub">' + cell.k + '/' + cell.m + ' cohorts' + small + '</span>' + genes + low + '</button>';
+  }
+
+  /* ---------- forest (rows are normalised: name, sub, n, est, lo, hi, q, sig, counted, reason, pills) ---------- */
+  function forestHtml(rows, opts) {
+    opts = opts || {};
+    var extent = 0.2;
+    rows.forEach(function (row) { [row.est, row.lo, row.hi, row.estB].forEach(function (v) { if (v != null && !isNaN(v)) extent = Math.max(extent, Math.abs(v)); }); });
+    extent *= 1.08;
+    function pos(value) { return Math.max(1, Math.min(99, 50 + (value / extent) * 48)); }
+    var counted = rows.filter(function (row) { return row.counted; });
+    var rest = rows.filter(function (row) { return !row.counted; });
+    function line(row) {
+      var plot = '<div class="vw-fplot"><span class="zero"></span>';
+      if (row.lo != null && row.hi != null) plot += '<span class="ci" style="left:' + pos(row.lo) + '%;width:' + (pos(row.hi) - pos(row.lo)) + '%"></span>';
+      if (row.est != null) plot += '<span class="dot ' + (row.sig ? 'sig' : 'ns') + '" style="left:' + pos(row.est) + '%"></span>';
+      if (row.estB != null) plot += '<span class="dot b" title="Cell-mean estimate (B): ' + signed(row.estB) + '" style="left:' + pos(row.estB) + '%"></span>';
+      plot += '</div>';
+      var reason = row.reason ? '<small>not counted: ' + esc(row.reason) + '</small>' : '<small>' + (row.sub || '') + '</small>';
+      return '<div class="vw-frow' + (row.counted ? '' : ' uncounted') + '"><div class="nm" title="' + esc(row.title || row.name) + '">' + esc(row.name) + (row.pills || '') + reason + '</div><div class="n">' + (row.n == null ? '' : row.n) + '</div>' + plot +
+        '<div class="e">' + (row.est == null ? 'n/a' : signed(row.est, 2)) + '</div><div class="q">' + (row.q == null ? 'n/a' : pfmt(row.q)) + '</div></div>';
+    }
+    var html = '<div class="vw-forest"><div class="vw-frow head"><div>Cohort and dataset</div><div class="n">' + esc(opts.noun || 'donors') + '</div><div>' + esc(opts.unit || 'log2 fold change') + '</div><div class="e">estimate</div><div class="q">q</div></div>';
+    html += counted.map(line).join('');
+    if (rest.length) {
+      html += '<div class="vw-uncounted-wrap"><button type="button" class="vw-more-units" data-n="' + rest.length + '">+ ' + plural(rest.length, 'more unit') + ' (not counted)</button><div class="vw-uncounted" hidden>' + rest.map(line).join('') + '</div></div>';
+    }
+    html += '</div>';
+    html += '<p class="vw-fnote">' + (opts.note || 'Filled dot: the cohort alone has q &lt; 0.05. Bars are 95% confidence intervals from the model; a unit below the p-value floor has none. Cohorts under 20 ' + esc(opts.noun || 'donors') + ' cannot reach significance for effects of this size.') + '</p>';
+    return html;
+  }
+  function bindForest(root) {
+    root.querySelectorAll('.vw-more-units').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var box = button.parentNode.querySelector('.vw-uncounted');
+        box.hidden = !box.hidden;
+        button.textContent = box.hidden ? '+ ' + plural(Number(button.dataset.n), 'more unit') + ' (not counted)' : 'hide the ' + plural(Number(button.dataset.n), 'unit') + ' not counted';
+      });
+    });
+  }
+
+  /* ---------- panel 2 grid and list ---------- */
+  // model.blocks: [{scope, rows: [{facet, label, contrast, tag, axis, apoeLocus, cells: {group: cell}}], groups: [...], notes: [html], footer}]
+  // ctx: {kind, subject, detail(scope, row, group, cell) -> Promise<html>}
+  var selection = null;
+  var detailCache = {};
+  function blockHeader(block, model) {
+    var meta = SCOPES[block.scope];
+    var html = '<div class="vw-scope-head"><h3>' + esc(meta.title) + '</h3><span class="unit">' + esc(meta.unit) + ' ' + gl('scope', 'About scopes') + '</span></div>';
+    (block.notes || []).forEach(function (note) { html += '<div class="vw-note">' + note + '</div>'; });
+    return html;
+  }
+  function rowHeader(row) {
+    return '<div class="fl">' + esc(row.label) + (row.apoeLocus && /apoe4/.test(row.facet) ? '<span class="vw-apoe" title="APOE locus gene: an e4 effect here can come from allele-linked expression or read mapping">APOE locus</span>' : '') + '</div><div class="fc">' + esc(row.contrast) + '</div>' +
+      (row.tag ? '<div class="ft">' + esc(row.tag) + '</div>' : '');
+  }
+  function gridA(block, model, ctx) {
+    var html = '<div class="vw-box"><table class="vw-grid"><thead><tr><th class="fh">Facet</th>' + block.groups.map(function (g) { return '<th>' + esc(SHORT[g] || g) + '</th>'; }).join('') + '</tr></thead><tbody>';
+    var rows = block.rows;
+    rows.forEach(function (row, index) {
+      var open = selection && selection.scope === block.scope && selection.facet === row.facet;
+      var cls = '';
+      if (row.axis) {
+        var prevAxis = index > 0 && rows[index - 1].axis, nextAxis = index < rows.length - 1 && rows[index + 1].axis;
+        cls = prevAxis ? 'axis-mid' : (nextAxis ? 'axis-top axis-tag' : '');
+        if (!prevAxis && nextAxis) cls = 'axis-top axis-tag';
+      }
+      var header = rowHeader(row);
+      if (cls.indexOf('axis-tag') >= 0) header += '<span class="axis-label" title="Braak stage and pathologic AD are the same pathology axis read two ways: where both replicate it is one finding, not two.">one pathology axis</span>';
+      html += '<tr class="' + cls + '"><td class="fh">' + header + '</td>';
+      block.groups.forEach(function (group) {
+        html += '<td>' + cellHtml(row.cells[group] || null, { scope: block.scope, facet: row.facet, group: group, selected: open && selection.group === group }) + '</td>';
+      });
+      html += '</tr>';
+      if (open) html += '<tr class="vw-detail-row"><td colspan="' + (block.groups.length + 1) + '"><div class="vw-detail-wrap" data-detail="' + block.scope + '|' + row.facet + '|' + esc(selection.group) + '"><div class="vw-loading">Loading the cohorts...</div></div></td></tr>';
+    });
+    return html + '</tbody></table></div>';
+  }
+  function listB(block, model, ctx) {
+    var html = '<div class="vw-clist">';
+    var index = 0;
+    function rowHtml(row) {
+      var open = selection && selection.scope === block.scope && selection.facet === row.facet;
+      var evidence = [], none = [], nt = [];
+      block.groups.forEach(function (group) {
+        var cell = row.cells[group];
+        var kind = cellKind(cell);
+        if (kind === 'empty') nt.push(group);
+        else if (kind === 'none') none.push(group);
+        else evidence.push(group);
+      });
+      var out = '<div class="vw-crow"><div class="chead"><span class="fl">' + esc(row.label) + (row.apoeLocus && /apoe4/.test(row.facet) ? '<span class="vw-apoe" title="APOE locus gene">APOE locus</span>' : '') + '</span><span class="fc">' + esc(row.contrast) + '</span>' + (row.tag ? '<span class="ft">' + esc(row.tag) + '</span>' : '') + '</div><div class="cchips">';
+      evidence.forEach(function (group) {
+        var cell = row.cells[group];
+        var selected = open && selection.group === group;
+        var attrs = ' data-scope="' + block.scope + '" data-facet="' + esc(row.facet) + '" data-group="' + esc(group) + '"';
+        if (cellKind(cell) === 'genes') {
+          out += '<button type="button" class="vw-chip one' + (selected ? ' sel' : '') + '"' + attrs + ' title="The module score was not tested here; member genes replicate on their own"><span>' + esc(plain(group)) + '</span><span class="k">module not tested</span></button>';
+        } else if (cellKind(cell) === 'single') {
+          out += '<button type="button" class="vw-chip one' + (selected ? ' sel' : '') + '"' + attrs + ' title="Tested in 1 cohort only; replication needs at least 2"><span>' + esc(plain(group)) + '</span><span class="k">1 cohort</span></button>';
+        } else {
+          out += '<button type="button" class="vw-chip' + (selected ? ' sel' : '') + '"' + attrs + ' title="Replicated (r &lt; 0.05)' + (cell.strict ? ', strict test passed' : '') + '"><span>' + esc(plain(group)) + '</span><span>' + arrow(cell.dir) + ' ' + signed(cell.median, 2) + (cell.strict ? ' &#9733;' : '') + '</span><span class="k">' + cell.k + '/' + cell.m + ' cohorts' + (cell.nSmall ? ', ' + cell.nSmall + ' small' : '') + (cell.disagree ? ' &#9888;' : '') + '</span>' + (cell.lowDet ? '<span class="k">low det. ' + Math.round(cell.lowDet.pct) + '%</span>' : '') + '</button>';
+        }
+      });
+      if (!evidence.length) out += '<span class="rest"><b>No evidence in any tested cell type</b></span>';
+      var bits = [];
+      if (evidence.length && none.length) bits.push('No evidence in <b>' + none.length + '</b> other: ' + none.map(function (g) { var c = row.cells[g]; return plain(g) + ' ' + c.k + '/' + c.m; }).join(', '));
+      if (!evidence.length && none.length) bits.push('tested in ' + none.map(function (g) { var c = row.cells[g]; return plain(g) + ' ' + c.k + '/' + c.m; }).join(', '));
+      if (nt.length) bits.push('not tested: ' + nt.map(plain).join(', '));
+      out += '</div><div class="rest">' + bits.join('. ') + '</div>';
+      var geneParts = block.groups.filter(function (g) { return row.cells[g] && row.cells[g].genes && row.cells[g].genes.n > 0; }).map(function (g) {
+        var info = row.cells[g].genes;
+        var names = info.n <= 3 && info.genes ? ' (' + info.genes.map(function (x) { return esc(x.gene); }).join(', ') + ')' : '';
+        return plain(g) + ' ' + info.n + (info.more ? '+' : '') + names;
+      });
+      if (ctx.kind === 'module' && row.hasGenes) out += '<div class="genes-line">' + (geneParts.length ? 'Member genes that replicate: ' + geneParts.join(', ') : '<span class="muted">No member gene replicates for this facet.</span>') + '</div>';
+      if (open) out += '<div data-detail="' + block.scope + '|' + row.facet + '|' + esc(selection.group) + '"><div class="vw-loading">Loading the cohorts...</div></div>';
+      return out + '</div>';
+    }
+    var rows = block.rows;
+    while (index < rows.length) {
+      var row = rows[index];
+      if (row.axis && index + 1 < rows.length && rows[index + 1].axis) {
+        html += '<div class="vw-crow-group"><div class="gcap">One pathology axis: Braak stage and pathologic AD are the same pathology read two ways.</div>' + rowHtml(row) + rowHtml(rows[index + 1]) + '</div>';
+        index += 2;
+      } else {
+        html += rowHtml(row);
+        index += 1;
+      }
+    }
+    return html + '</div>';
+  }
+  function legendHtml(ctx) {
+    return '<div class="vw-legend"><span><span class="swatch rep"></span>Replicated (same direction in at least 2 cohorts, r &lt; 0.05)</span>' +
+      '<span>&#9733; strict test also passed</span>' +
+      '<span><span class="swatch none"></span>No evidence (k/m cohorts individually significant)</span>' +
+      '<span><span class="swatch nt"></span>Not tested, or 1 cohort</span>' +
+      '<span class="muted">&#9650; up, &#9660; down. The number is the median effect; colour shows the call, never the p value or the direction.</span></div>';
+  }
+  function renderPanel2(host, model, ctx) {
+    var wide = window.matchMedia('(min-width: 900px)').matches;
+    var html = '';
+    model.blocks.forEach(function (block) {
+      if (!block.rows.length) return;
+      html += '<div class="vw-scope-block" id="vw-scope-' + block.scope + '">' + blockHeader(block, model);
+      html += wide ? gridA(block, model, ctx) : listB(block, model, ctx);
+      if (block.footer) html += '<p class="vw-fnote">' + block.footer + '</p>';
+      html += '</div>';
+    });
+    if (!html) html = '<div class="vw-placeholder">' + (ctx.emptyHtml || 'No facet result is available for this subject.') + '</div>';
+    host.innerHTML = html;
+    host.querySelectorAll('[data-scope][data-facet]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var next = { scope: el.dataset.scope, facet: el.dataset.facet, group: el.dataset.group };
+        selection = selection && selection.scope === next.scope && selection.facet === next.facet && selection.group === next.group ? null : next;
+        renderPanel2(host, model, ctx);
+      });
+    });
+    var slot = host.querySelector('[data-detail]');
+    if (slot && selection) {
+      var block = model.blocks.filter(function (b) { return b.scope === selection.scope; })[0];
+      var row = block && block.rows.filter(function (r) { return r.facet === selection.facet; })[0];
+      var cell = row && row.cells[selection.group];
+      var key = [ctx.subject, selection.scope, selection.facet, selection.group].join('|');
+      var show = function (html2) { slot.innerHTML = html2; bindForest(slot); afterRender(slot); };
+      if (detailCache[key]) show(detailCache[key]);
+      else Promise.resolve(ctx.detail(block, row, selection.group, cell)).then(function (html2) { detailCache[key] = html2; if (slot.isConnected) show(html2); })
+        .catch(function () { slot.innerHTML = '<div class="vw-error">The cohorts could not be loaded. Reload the page to try again.</div>'; });
+    }
+    if (!host._vwBound) {
+      host._vwBound = true;
+      var query = window.matchMedia('(min-width: 900px)');
+      var rerender = function () { renderPanel2(host, model, ctx); };
+      if (query.addEventListener) query.addEventListener('change', rerender); else if (query.addListener) query.addListener(rerender);
+    }
+  }
+  function preselect(scope, facet, group) { selection = { scope: scope, facet: facet, group: group }; }
+
+  /* ---------- tabs ---------- */
+  // bar: element holding buttons[data-vtab][data-hash]; panels are #vt-<name>. The first load reads the hash
+  // (a "&gv=..." tail, used by the atlas filters, is kept untouched).
+  function hashParts() {
+    var raw = (location.hash || '').replace(/^#/, '');
+    var at = raw.indexOf('&gv=');
+    if (at >= 0) return { prefix: raw.slice(0, at), rest: raw.slice(at) };
+    if (raw.indexOf('gv=') === 0) return { prefix: '', rest: '&' + raw };
+    return { prefix: raw, rest: '' };
+  }
+  function initTabs(bar, defaultTab, onShow) {
+    var buttons = Array.prototype.slice.call(bar.querySelectorAll('[data-vtab]'));
+    function show(name, push) {
+      var visible = buttons.filter(function (b) { return !b.hidden && b.dataset.vtab === name; })[0];
+      if (!visible) name = defaultTab;
+      buttons.forEach(function (b) {
+        b.classList.toggle('active', b.dataset.vtab === name);
+        b.setAttribute('aria-selected', b.dataset.vtab === name ? 'true' : 'false');
+        var panel = document.getElementById('vt-' + b.dataset.vtab);
+        if (panel) panel.classList.toggle('active', b.dataset.vtab === name);
+      });
+      var shown = buttons.filter(function (b) { return b.dataset.vtab === name; })[0];
+      if (push && shown && shown.dataset.hash && history.replaceState) history.replaceState(null, '', '#' + shown.dataset.hash + hashParts().rest);
+      if (onShow) onShow(name);
+    }
+    buttons.forEach(function (button) { button.addEventListener('click', function () { show(button.dataset.vtab, true); }); });
+    var wanted = hashParts().prefix;
+    var initial = defaultTab;
+    function panelOfTarget(id) {
+      var target = id ? document.getElementById(id) : null;
+      var panel = target && target.closest ? target.closest('[id^="vt-"]') : null;
+      return panel ? panel.id.replace(/^vt-/, '') : null;
+    }
+    buttons.forEach(function (b) { if (b.dataset.hash === wanted) initial = b.dataset.vtab; });
+    var holder = panelOfTarget(wanted);
+    if (holder) initial = holder;
+    show(initial, false);
+    window.addEventListener('hashchange', function () {
+      var inner = panelOfTarget(hashParts().prefix);
+      if (inner) show(inner, false);
+    });
+    return { show: show };
+  }
+
+  return {
+    API: API, GROUPS: GROUPS, SHORT: SHORT, SCOPES: SCOPES, HUMAN_FACETS: HUMAN_FACETS, XENO_FACETS: XENO_FACETS, FACETS: FACETS,
+    LOW_DETECTION_PCT: LOW_DETECTION_PCT, esc: esc, num: num, signed: signed, pfmt: pfmt, plural: plural, arrow: arrow, plain: plain, median: median,
+    gl: gl, pill: pill, getJson: getJson, cached: cached, docBlock: docBlock, afterRender: afterRender, facetMeta: facetMeta, geneFlagPills: geneFlagPills,
+    lowDetectionPill: lowDetectionPill, cellFromRep: cellFromRep, cellKind: cellKind, cellHtml: cellHtml, forestHtml: forestHtml, bindForest: bindForest,
+    renderPanel2: renderPanel2, legendHtml: legendHtml, preselect: preselect, initTabs: initTabs
+  };
+})();
+</script>
+{%- endmacro %}

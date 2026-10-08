@@ -163,6 +163,24 @@
 })();
 </script>
 
+{% set _single = gene and ',' not in gene %}
+{% if _single %}
+{% from "_views.html" import views_styles, views_core %}
+{% from "_view_gene.html" import view_gene_panels, view_gene_author_de, view_gene_script %}
+{{ views_styles() }}
+{{ views_core() }}
+<div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
+  <button type="button" class="tab-btn" data-vtab="gene" data-hash="gene-view" role="tab">Gene view<span class="vw-new">new</span></button>
+  <button type="button" class="tab-btn vw-old" data-vtab="atlas" data-hash="atlas" role="tab" title="The current atlas page: one row per dataset">Atlas (current)</button>
+  <button type="button" class="tab-btn" data-vtab="de" data-hash="author-de" role="tab" hidden>Author DE (as published)<span class="tab-count"></span></button>
+</div>
+<div class="tab-panel vw-panel" id="vt-gene">{{ view_gene_panels(gene) }}</div>
+<div class="tab-panel vw-panel" id="vt-de">{{ view_gene_author_de(gene) }}</div>
+<div id="vt-atlas" class="tab-panel">
+{% else %}
+<div id="vt-atlas">
+{% endif %}
+
 {# ── Row 1: %expr threshold · organism · (multi-gene: metric picker) ── #}
 <div class="gv-filter-row">
   <div>
@@ -299,6 +317,11 @@
 {% if ',' not in gene %}
 {% from "_facet_effects.html" import fx_gene_panel %}
 {{ fx_gene_panel(gene) }}
+{% endif %}
+</div>
+{% if _single %}
+{{ view_gene_script(gene, view_dbs or {}) }}
+<script>window.antViews.initTabs(document.getElementById('vw-tabs'), 'gene');</script>
 {% endif %}
 
 <script>

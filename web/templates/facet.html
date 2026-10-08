@@ -150,6 +150,20 @@
 {% endif %}
 
 {% if facet_effects_pending %}
+{% from "_views.html" import views_styles, views_core %}
+{% from "_view_facet.html" import view_facet_panel, view_facet_script %}
+{{ views_styles() }}
+{{ views_core() }}
+<div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
+  <button type="button" class="tab-btn" data-vtab="overview" data-hash="overview" role="tab">Overview<span class="vw-new">new</span></button>
+  <button type="button" class="tab-btn vw-old" data-vtab="detail" data-hash="detail" role="tab" title="The current facet page: effects per dataset and cell type, value distribution, datasets">Detail (current)</button>
+</div>
+<div class="tab-panel vw-panel" id="vt-overview">{{ view_facet_panel(facet_name[4:] if facet_name.startswith('ant_') else facet_name) }}</div>
+<div class="tab-panel" id="vt-detail">
+{% else %}
+<div id="vt-detail">
+{% endif %}
+{% if facet_effects_pending %}
 {% from "_facet_effects.html" import fx_styles, fx_intro, fx_methods_box, fx_script, fx_recurring %}
 {{ fx_styles() }}
 <div class="card" id="facet-effects">
@@ -359,6 +373,11 @@
   {% endif %}
 </div>
 
+</div>
+{% if facet_effects_pending %}
+{{ view_facet_script(facet_name, facet_scope, facet_variants) }}
+<script>window.antViews.initTabs(document.getElementById('vw-tabs'), 'overview');</script>
+{% endif %}
 {% endif %}
 
 {% endblock %}

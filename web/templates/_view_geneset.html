@@ -1,0 +1,255 @@
+{# The "Geneset view" tab of /genesets/{study}/{experiment}/{name}: panel 1 (module score per cell type
+   and dataset, descriptive), panel 2 (what shifts the module score, plus the member genes that replicate on
+   their own) and the panel 3 placeholder.  Needs _views.html.
+   Data: the geneset payload (scored_in, column_name), /api/databases/{id}/module_scores per scored dataset,
+   and the module facet effect cards of the API (guarded: when the API does not serve them the panel says so). #}
+{% from "_macros.html" import doc_block %}
+
+{% macro view_geneset_panels(name) -%}
+<div id="vws-root">
+  <div id="vws-headline"></div>
+  <h2 class="section-head">Where is it expressed <span class="muted">panel 1, descriptive</span></h2>
+  <p class="vw-essential">Module score per cell type and dataset: how strongly cells score for this set, not whether anything changes. Scores exist only in the datasets listed here, and the facet results below come from donor-level scores of the datasets they were tested in.</p>
+  <div id="vws-p1"><p class="vw-loading">Loading the module scores...</p></div>
+
+  <h2 class="section-head">What shifts it: facet effects <span class="muted">panel 2, tested per donor or mouse</span></h2>
+  <p class="vw-essential"><strong>Exploratory.</strong> The module result tests the mean score of the whole set per donor. The member genes below it show how many genes of the set replicate on their own.</p>
+  <div class="vw-note blue">A change of a whole cell type can be a shift in the mix of cell states inside it (<a href="/help#glossary-composition">composition</a>). Braak stage and pathologic AD are one pathology axis, so where both replicate it is one finding.</div>
+  <div id="vws-direction"></div>
+  {% call doc_block('About this view', id='vws-about') %}
+    <p>The module result tests the <strong>mean score of the whole gene set</strong> per donor against each facet, separately in every cohort, and combines the cohorts with the same partial conjunction test as for single genes (<a href="/help#glossary-partial-conjunction">r-value</a> below 0.05, Benjamini-Hochberg over the modules of one family). The colour means the same as in the gene view. The effect filter for modules is a standardised effect of at least 0.2 standard deviations in 2 cohorts; there is no strict tier.</p>
+    <p>Where counts exist, the result of the donor-level <strong>pseudobulk of the member genes (B)</strong> is shown; otherwise the mean of the per-cell scores per donor (<strong>A</strong>), and the cell says which. A warning marks cohorts where A and B disagree in a way that matters (one is replicated, or both reach 0.2 SD with opposite signs). A flat module result can hide member genes that replicate on their own, and the other way round (<a href="/help#glossary-pseudobulk">pseudobulk</a>).</p>
+    <p>The post-mortem and the xenograft system are analysed separately and never combined (<a href="/help#glossary-scope">scopes</a>).</p>
+  {% endcall %}
+  <div id="vws-legend"></div>
+  <div id="vws-p2"><p class="vw-loading">Loading the facet effects...</p></div>
+
+  <h2 class="section-head">Donor variability <span class="muted">panel 3</span></h2>
+  <div class="vw-placeholder">Coming later. This panel will show how much donors differ within a group.</div>
+</div>
+{%- endmacro %}
+
+{% macro view_geneset_script(study, experiment, name, payload, dbs) -%}
+<script>
+(function () {
+  var V = window.antViews;
+  var enc = encodeURIComponent;
+  var STUDY = {{ study|tojson }}, EXPERIMENT = {{ experiment|tojson }}, NAME = {{ name|tojson }};
+  var CATALOG = STUDY + '/' + EXPERIMENT;
+  var PAYLOAD = {{ payload|tojson }};
+  var DBS = {{ dbs|tojson }};
+  var MODULE_FACETS_HUMAN = ['sex', 'disease', 'braak', 'age', 'age_adjusted', 'apoe4_carrier', 'apoe4_dose'];
+  var MODULE_FACETS_XENO = ['app_nlgf', 'sex'];
+  var state = { effects: null, preselected: false };
+
+  function modalityTag(modality) {
+    if (!modality) return '';
+    return '<span class="vw-modality ' + (modality === 'nuclei' ? 'nuclei' : 'cells') + '">' + V.esc(modality) + '</span>';
+  }
+  function bar(pct, lo, hi) {
+    return '<div class="vw-bar-track"><span class="vw-bar-range" style="left:' + lo + '%;width:' + Math.max(1, hi - lo) + '%"></span><span class="vw-bar-med" style="left:calc(' + pct + '% - 1px)"></span></div>';
+  }
+
+  /* ---------- panel 1 ---------- */
+  function renderP1(host, rows) {
+    var scored = (PAYLOAD.scored_in || []);
+    if (!rows.length) {
+      host.innerHTML = '<div class="vw-placeholder">This set has not been scored per cell in any dataset (' + (scored.length ? 'the scores could not be read' : 'no pre-computed score exists') + '), so there is no descriptive panel. The facet results below come from scoring done at test time.</div>';
+      return;
+    }
+    var buckets = {};
+    rows.forEach(function (row) { (buckets[row.scope + '|' + row.group] = buckets[row.scope + '|' + row.group] || []).push(row); });
+    var all = rows.map(function (row) { return row.mean; });
+    var hi = Math.max.apply(null, all) * 1.05 || 1;
+    var html = '<div class="vw-box"><table class="vw-table"><thead><tr><th>Cell type</th><th class="num">Datasets</th><th>Mean module score (median, range over datasets)</th><th class="num">Cell-to-cell SD</th></tr></thead><tbody>';
+    var index = 0;
+    ['human_postmortem', 'xenograft_human_in_mouse', ''].forEach(function (scope) {
+      var keys = Object.keys(buckets).filter(function (key) { return key.split('|')[0] === scope; });
+      if (!keys.length) return;
+      html += '<tr class="vw-scope-row"><td colspan="4">' + V.esc(scope ? V.SCOPES[scope].title : 'Other systems') + '</td></tr>';
+      keys.sort(function (a, b) { return V.GROUPS.indexOf(a.split('|')[1]) - V.GROUPS.indexOf(b.split('|')[1]); }).forEach(function (key) {
+        var list = buckets[key];
+        var means = list.map(function (row) { return row.mean; });
+        var groupName = key.split('|')[1];
+        html += '<tr class="vw-toggle" data-i="' + index + '"><td><span class="caret">&#9656;</span>' + V.esc(groupName ? V.plain(groupName) : 'mixed or other (not summarised)') + '</td><td class="num">' + list.length + '</td><td class="vw-bar-cell">' + bar(V.median(means) / hi * 100, Math.min.apply(null, means) / hi * 100, Math.max.apply(null, means) / hi * 100) +
+          '<span class="muted" style="font-size:10.5px">median ' + V.num(V.median(means), 3) + '</span></td><td class="num">' + V.num(V.median(list.map(function (row) { return row.sd; })), 3) + '</td></tr>';
+        list.forEach(function (row) {
+          html += '<tr class="vw-sub" data-p="' + index + '" hidden><td title="' + V.esc(row.title) + '"><a href="/browse/' + V.esc(row.db_id) + '">' + V.esc(row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span> ' + modalityTag(row.modality) +
+            '</td><td class="num">' + row.n_cells.toLocaleString('en-US') + ' cells</td><td>mean ' + V.num(row.mean, 3) + ', median ' + V.num(row.median, 3) + '</td><td class="num">' + V.num(row.sd, 3) + '</td></tr>';
+        });
+        index += 1;
+      });
+    });
+    html += '</tbody></table></div><p class="vw-fnote">Scored in ' + V.plural(rows.length, 'dataset') + ' (' + rows.map(function (row) { return V.esc(row.db_id); }).join(', ') + '). Scores are per cell (UCell rank score); means and SDs are descriptive, taken over the cells of one dataset, and say nothing about differences between donors. Scores of different sets are not on one scale, so they are not ranked against each other.</p>';
+    host.innerHTML = html;
+    host.querySelectorAll('tr.vw-toggle').forEach(function (tr) {
+      tr.addEventListener('click', function () {
+        var subs = host.querySelectorAll('tr[data-p="' + tr.dataset.i + '"]');
+        var show = subs.length && subs[0].hidden;
+        subs.forEach(function (sub) { sub.hidden = !show; });
+        tr.querySelector('.caret').innerHTML = show ? '&#9662;' : '&#9656;';
+      });
+    });
+  }
+  function loadScores() {
+    var ids = PAYLOAD.scored_in || [];
+    var column = PAYLOAD.column_name;
+    return Promise.all(ids.map(function (dbId) {
+      var db = DBS[dbId] || {};
+      return V.cached(V.API + '/databases/' + dbId.split('/').map(enc).join('/') + '/module_scores').then(function (data) {
+        var hit = (data.scored_genesets || []).filter(function (item) { return item.column_name === column; })[0];
+        if (!hit || !hit.stats || db.secondary) return null;
+        return { db_id: dbId, title: db.title || dbId, scope: db.scope || '', group: db.group || '', modality: db.modality || '', n_cells: hit.stats.n, mean: hit.stats.mean, sd: hit.stats.std, median: hit.stats.median };
+      }).catch(function () { return null; });
+    })).then(function (list) { return list.filter(Boolean); });
+  }
+
+  /* ---------- panel 2: the module result cards ---------- */
+  // One module card (facet, scope) -> the grid cells. The served entry per cell type group carries the
+  // preferred variant (pseudobulk B, else cell mean A) with the same fields as a gene replication record.
+  function moduleCell(entry) {
+    if (!entry) return null;
+    var variants = entry.variants || [];
+    var primary = entry.primary || {};
+    var variant = variants.filter(function (v) { return v.method === primary.method && v.source === primary.source; })[0] || variants[0];
+    if (!variant) return null;
+    var cell = V.cellFromRep({ m: variant.m, k: variant.k, r_value: variant.r_value, r_direction: variant.r_direction, median_logFC: variant.median_std_effect,
+      effect_gate_passed: variant.effect_gate_passed === true || variant.gate === true, effect_gate_unit: variant.effect_gate_unit, r_cohorts: variant.r_cohorts, n_small: variant.n_small, r_treat: null }, null);
+    if (!cell) return null;
+    cell.strict = false;
+    cell.variant = variant;
+    cell.label = primary.label || variant.label || '';
+    cell.disagree = entry.ab ? 1 : 0;
+    cell.ab = entry.ab || null;
+    cell.entry = entry;
+    return cell;
+  }
+  function memberCounts(members, group) {
+    var info = members && members.groups ? members.groups[group] : null;
+    if (!info) return null;
+    var genes = (info.genes || []).map(function (g) { return { gene: g.gene, direction: g.direction, median_logFC: g.median_logFC }; });
+    return { n: info.n_replicated || 0, nGate: info.n_effect_gate || 0, nStrict: info.n_strict || 0, nTested: info.n_tested, nMembers: info.n_members, more: false, genes: genes };
+  }
+  function buildBlocks(effects) {
+    var blocks = [];
+    var byScope = effects.by_scope || {};
+    ['human_postmortem', 'xenograft_human_in_mouse'].forEach(function (scope) {
+      var cards = byScope[scope] || {};
+      var keys = scope === 'human_postmortem' ? MODULE_FACETS_HUMAN : MODULE_FACETS_XENO;
+      var rows = [], seen = {};
+      keys.forEach(function (facet) {
+        var card = cards[facet];
+        if (!card || (!card.module && !card.members)) return;
+        var meta = V.facetMeta(scope, facet);
+        var cells = {};
+        var replication = (card.module && card.module.replication) || [];
+        replication.forEach(function (entry) {
+          var group = entry.celltype_group;
+          if (V.GROUPS.indexOf(group) < 0) return;
+          var cell = moduleCell(entry);
+          if (!cell) return;
+          cell.genes = memberCounts(card.members, group);
+          cells[group] = cell;
+          seen[group] = 1;
+        });
+        // member genes can replicate where the module itself was not tested: show those cells as the gene count only
+        var memberGroups = (card.members && card.members.groups) || {};
+        Object.keys(memberGroups).forEach(function (group) {
+          if (V.GROUPS.indexOf(group) < 0 || cells[group] || !memberGroups[group].n_replicated) return;
+          cells[group] = { m: 0, k: 0, replicated: false, dir: null, median: null, nSmall: 0, rCohorts: [], lowDet: null, disagree: 0, genes: memberCounts(card.members, group), onlyGenes: true };
+          seen[group] = 1;
+        });
+        rows.push({ facet: facet, label: meta.label, contrast: meta.contrast, tag: meta.tag, axis: !!meta.axis, apoeLocus: false, hasGenes: !!card.members, cells: cells, card: card, effectUnit: 'standardised effect (SD of the donor score)' });
+      });
+      if (rows.length) blocks.push({ scope: scope, rows: rows, groups: V.GROUPS.filter(function (g) { return seen[g]; }), notes: [], footer: '' });
+    });
+    blocks.forEach(function (block) {
+      if (block.scope === 'xenograft_human_in_mouse') block.notes.push('One lab pipeline: the cohorts share iPSC lines, host strain and protocol, and each is pooled over timepoints and grafted lines.');
+      if (block.rows.some(function (row) { return row.facet === 'age'; })) block.footer = 'Age: donors of 60 years and older; ROSMAP ages above 90 are recorded as 90.';
+      if (blocks.length > 1 && block.rows.some(function (row) { return row.facet === 'sex'; })) block.notes.push('<b>Sex</b> also appears in the other block: not directly comparable (different system, donors vs mice). The two are never combined.');
+    });
+    return { blocks: blocks };
+  }
+  function forestRowsOf(cell) {
+    var variant = cell.variant;
+    if (!variant) return [];
+    var rows = [];
+    (variant.forest || []).forEach(function (entry) {
+      var all = [entry.anchor].concat(entry.more_units || []).filter(Boolean);
+      all.forEach(function (point, index) {
+        var scale = point.estimate && point.std_effect ? point.estimate / point.std_effect : null;
+        var replicate = !point.descriptive_only;
+        rows.push({ name: entry.cohort_display || 'unassigned', title: point.title || point.db_id, sub: '<a href="/browse/' + V.esc(point.db_id) + '">' + V.esc(point.db_id) + '</a> <span class="muted">' + V.esc(variant.basis === 'pseudobulk' ? 'pseudobulk' : 'cell mean') + '</span>',
+          n: point.n_donors, est: point.std_effect, lo: replicate && scale ? point.ci_low / scale : null, hi: replicate && scale ? point.ci_high / scale : null,
+          q: replicate ? (point.q_perm != null ? point.q_perm : point.q_param) : null, sig: replicate && (point.q_perm != null ? point.q_perm : point.q_param) < 0.05,
+          counted: index === 0 && !!point.anchor_counted, reason: point.not_counted_reason, db_id: point.db_id,
+          pills: (point.small_sample ? V.pill('small', '', 'Fewer than 20 donors: cannot reach significance for effects of this size.', 'small-cohorts') : '') });
+      });
+    });
+    return rows.sort(function (a, b) { return (b.counted - a.counted) || ((b.n || 0) - (a.n || 0)); });
+  }
+  function sentence(row, group, cell, scope) {
+    var meta = V.facetMeta(scope, row.facet);
+    var side = cell.dir === 'down' ? meta.phrase[1] : meta.phrase[0];
+    var basis = '<span class="muted">(' + V.esc(cell.label) + ')</span>';
+    var carried = cell.rCohorts.length ? ', carried by ' + V.esc(cell.rCohorts.slice(0, 2).join(' and ')) : '';
+    if (V.cellKind(cell) === 'genes') return 'The mean score of the set was not tested in this cell type (fewer than 2 cohorts have a module result). The member genes below replicate on their own.';
+    if (V.cellKind(cell) === 'rep') {
+      return '<b>Replicated.</b> The mean score of ' + V.esc(NAME) + ' is ' + side + ' in ' + V.esc(V.plain(group)) + ': the same direction in at least 2 cohorts (<a href="/help#glossary-r-value">r-value</a> ' + V.pfmt(cell.r) + ', FDR 5 percent)' + carried + '. ' + cell.k + ' of ' + cell.m + ' cohorts are individually significant. ' +
+        (cell.gate ? 'The effect filter is met: at least 0.2 SD in 2 cohorts.' : 'The effect filter (at least 0.2 SD in 2 cohorts) is not met.') + ' Median standardised effect ' + V.signed(cell.median) + ' SD ' + basis + '.';
+    }
+    if (V.cellKind(cell) === 'single') return 'Only 1 cohort has a module result. Replication needs at least 2.';
+    return '<b>No evidence of replication.</b> The mean score does not show a consistent effect in ' + cell.m + ' cohorts (' + cell.k + ' individually significant) ' + basis + '. This is not evidence that there is none: few or small cohorts cannot reach it.';
+  }
+  function detail(block, row, group, cell) {
+    var scope = block.scope;
+    var html = '<div class="vw-detail"><div class="dc-title">' + V.esc(NAME) + ', ' + V.esc(row.label) + ', ' + V.esc(V.plain(group)) + '</div>';
+    if (!cell) return Promise.resolve(html + '<div class="dc-line">This facet was not tested for this set in this cell type group.</div></div>');
+    html += '<div class="dc-line">' + sentence(row, group, cell, scope) + '</div><div class="dc-pills">';
+    if (V.cellKind(cell) === 'rep') html += cell.gate ? V.pill('at least 0.2 SD in 2 cohorts', 'teal', 'Effect filter for module scores: a standardised effect of at least 0.2 in at least 2 cohorts. A condition on size, not error control.', 'effect-filter') : V.pill('effect filter not met', 'warn', 'Replicated in direction, but not with at least 0.2 SD in 2 cohorts.', 'effect-filter');
+    if (cell.ab) html += V.pill('pseudobulk and cell mean disagree', 'warn', 'The donor-level pseudobulk (B) and the mean of per-cell scores (A) point in different directions and one is replicated, or both reach 0.2 SD with opposite signs.', 'pseudobulk');
+    if (state.effects && state.effects.quality && state.effects.quality.quality_sensitive) html += V.pill('quality-sensitive', 'warn', 'Most member genes are mitochondrial or ribosomal: the score tracks RNA quality and cell damage, not regulation.', 'gene-class-flags');
+    html += '</div>';
+    var rows = forestRowsOf(cell);
+    if (rows.length) {
+      html += V.forestHtml(rows, { noun: V.SCOPES[scope].noun, unit: 'standardised effect (SD of the donor-level score)', note: 'Filled dot: the cohort alone has q &lt; 0.05 (permutation p, Benjamini-Hochberg over the modules of the family). Bars are the 95% interval of the mean-score difference expressed in SD. Pseudobulk (B) is used where counts exist, else the mean of per-cell scores (A).' });
+      var anchors = rows.filter(function (r) { return r.counted && r.db_id.indexOf('pool:') !== 0; });
+      if (anchors.length) html += '<div class="vw-anchor-chips"><span class="lbl">Anchor datasets</span>' + anchors.map(function (r) { return '<a class="vw-cohort-chip" href="/browse/' + V.esc(r.db_id) + '">' + V.esc(r.db_id) + '</a>'; }).join(' ') + '</div>';
+    }
+    if (cell.genes) {
+      html += '<div class="vw-mcg"><b>' + (cell.genes.n === 0 ? 'No member gene replicates' : cell.genes.n + (cell.genes.more ? '+' : '') + ' member ' + (cell.genes.n === 1 ? 'gene replicates' : 'genes replicate')) + '</b> for ' + V.esc(row.label) + ' in ' + V.esc(V.plain(group)) + ' (gene level, same rule as the gene view)' + (cell.genes.genes.length ? ': ' + cell.genes.genes.map(function (g) { return '<a class="g" href="/genes/' + V.esc(g.gene) + '">' + V.esc(g.gene) + ' ' + V.arrow(g.direction || g.dir) + ' ' + V.signed(g.median_logFC != null ? g.median_logFC : g.lfc, 2) + '</a>'; }).join('') : '.') + '</div>';
+    }
+    return Promise.resolve(html + '</div>');
+  }
+
+  /* ---------- mount ---------- */
+  var p1 = document.getElementById('vws-p1');
+  var p2 = document.getElementById('vws-p2');
+  loadScores().then(function (rows) { renderP1(p1, rows); });
+  V.cached(V.API + '/genesets/' + enc(STUDY) + '/' + enc(EXPERIMENT) + '/' + enc(NAME) + '/facet-effects').then(function (effects) {
+    state.effects = effects;
+    var model = buildBlocks(effects);
+    document.getElementById('vws-legend').innerHTML = model.blocks.length ? V.legendHtml({}) : '';
+    var note = '';
+    if (effects.directionless) note += '<div class="vw-note"><b>A mean score is not well suited to this set.</b> ' + V.esc(effects.directionless_note || 'The set has no expected direction: its genes can go up and down together, so a flat mean score is uninformative. Read the member-gene counts instead.') + '</div>';
+    if (effects.quality && effects.quality.quality_sensitive) note += '<div class="vw-note"><b>Quality-sensitive set.</b> Mitochondrial or ribosomal genes make up much of this set, so its score tracks RNA quality and cell damage as much as biology.</div>';
+    var tested = effects.scored_in || [];
+    if (tested.length) note += '<p class="vw-fnote">The module result comes from ' + V.plural(tested.length, 'dataset') + ' where the set was scored at test time: ' + tested.map(function (d) { return '<a href="/browse/' + V.esc(d.db_id) + '">' + V.esc(d.db_id) + '</a>' + (d.modality ? ' ' + modalityTag(d.modality) : ''); }).join(', ') + '. The member-gene counts come from all cohorts of the gene-level tests.</p>';
+    else note += '<p class="vw-fnote">No dataset has module results for this set; only member genes are counted.</p>';
+    document.getElementById('vws-direction').innerHTML = note;
+    if (!state.preselected) {
+      state.preselected = true;
+      var best = null;
+      model.blocks.forEach(function (block) { block.rows.forEach(function (row) { Object.keys(row.cells).forEach(function (group) {
+        var cell = row.cells[group];
+        var kind = V.cellKind(cell);
+        var score = kind === 'rep' ? cell.r : (kind === 'genes' ? 2 - Math.min(1, (cell.genes ? cell.genes.n : 0) / 1000) : null);
+        if (score != null && (!best || score < best.score)) best = { scope: block.scope, facet: row.facet, group: group, score: score };
+      }); }); });
+      if (best) V.preselect(best.scope, best.facet, best.group);
+    }
+    V.renderPanel2(p2, model, { kind: 'module', subject: NAME, detail: detail, emptyHtml: 'No facet result exists for this set: it has no module results across cohorts and none of its member genes is tested.' });
+  }).catch(function () { p2.innerHTML = '<div class="vw-placeholder">The facet effects of this set are not available from this API version.</div>'; });
+})();
+</script>
+{%- endmacro %}

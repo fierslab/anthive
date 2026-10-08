@@ -18,6 +18,17 @@
 <p class="muted">{{ payload.description }}</p>
 {% endif %}
 
+{% from "_views.html" import views_styles, views_core %}
+{% from "_view_geneset.html" import view_geneset_panels, view_geneset_script %}
+{{ views_styles() }}
+{{ views_core() }}
+<div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
+  <button type="button" class="tab-btn" data-vtab="geneset" data-hash="geneset-view" role="tab">Geneset view<span class="vw-new">new</span></button>
+  <button type="button" class="tab-btn vw-old" data-vtab="page" data-hash="page" role="tab" title="The current geneset page: members, where the score varies most">Geneset page (current)</button>
+</div>
+<div class="tab-panel vw-panel" id="vt-geneset">{{ view_geneset_panels(name) }}</div>
+<div class="tab-panel" id="vt-page">
+
 <div class="two-col" style="margin:8px 0 12px">
     <div>
         <div><span class="mk">format</span> {{ payload.format }}</div>
@@ -114,4 +125,7 @@
 </dl>
 {% endif %}
 </details>
+</div>
+{{ view_geneset_script(study, experiment, name, view_payload or {}, view_dbs or {}) }}
+<script>window.antViews.initTabs(document.getElementById('vw-tabs'), 'geneset');</script>
 {% endblock %}
