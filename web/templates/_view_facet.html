@@ -68,8 +68,10 @@
       var focus = groups.filter(function (g) { return g.celltype_group === 'microglia' && g.n_cohorts >= 2; })[0] ||
         groups.slice().sort(function (a, b) { return b.n_cohorts - a.n_cohorts; })[0];
       var calls = groups.map(function (g) {
-        var n = g.celltype_group === focus.celltype_group ? 500 : 12;
-        return V.cached(base + '&cell_type=' + enc(g.celltype_group) + '&n=' + n).catch(function () { return null; });
+        var isFocus = g.celltype_group === focus.celltype_group;
+        // API 2.45 has no row cap and an effect_gate filter (it answers with a headline); older versions cap n at 500
+        var query = isFocus ? (first.headline ? '&n=3000&effect_gate=true' : '&n=500') : '&n=12';
+        return V.cached(base + '&cell_type=' + enc(g.celltype_group) + query).catch(function () { return null; });
       });
       var testsCall = V.cached(V.API + '/facets/' + enc(key) + '/tests?scope=' + enc(SCOPE)).catch(function () { return null; });
       return Promise.all([Promise.all(calls), testsCall]).then(function (results) {
@@ -89,9 +91,10 @@
     var rows = focusTop.rows || [];
     var passing = rows.filter(function (row) { return row.effect_gate_passed; });
     var strict = rows.filter(function (row) { return row.replicated_effect; });
+    if (focusTop.headline && focusTop.headline.strict_genes) strict = focusTop.headline.strict_genes.map(function (name) { return { gene: name }; });
     var nGate = focusTop.n_effect_gate != null ? focusTop.n_effect_gate : passing.length;
     var nStrict = focusTop.n_replicated_effect != null ? focusTop.n_replicated_effect : strict.length;
-    var truncated = (focusTop.n_replicated || 0) > rows.length;
+    var truncated = focusTop.has_more === true || (focusTop.has_more === undefined && (focusTop.n_replicated || 0) > rows.length && rows.length >= 500);
     var gateUnit = key === 'braak' ? '10 percent change over three stages' : (key === 'age' || key === 'age_adjusted' ? '10 percent change per decade' : '10 percent change');
     var donors = focusTop.donors_in_cell_type || {};
     var nDonors = donors.n_donors_distinct != null ? donors.n_donors_distinct : donors.n_donors_sum;

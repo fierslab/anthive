@@ -206,9 +206,29 @@
       return row;
     }).sort(function (a, b) { return (b.counted - a.counted) || (b.anchor - a.anchor) || ((b.n || 0) - (a.n || 0)); });
   }
+  // API 2.45: every replication entry carries `forest` (one row per cohort: its counted anchor and the other units under more_units).
+  function pointRow(point, entry, noun, isAnchor) {
+    var replicate = point.analysis_level == null || point.analysis_level === 'replicate';
+    var pills = '';
+    if (!replicate) pills += V.pill('descriptive', 'warn', 'Below the p-value floor or cell-level: shown without interval, p or q, and not counted.', 'descriptive-only');
+    if (point.small_sample) pills += V.pill('small', '', 'Fewer than 20 ' + noun + ': cannot reach significance for effects of this size.', 'small-cohorts');
+    if (point.inflated) pills += V.pill('inflated, lambda ' + V.num(point.lambda_gc, 1), 'warn', 'Many genes shift together (lambda above 1.3): often a batch, depth or composition difference. Read p values with care.', 'lambda');
+    var name = (entry.cohort_display || entry.cohort_label || 'unassigned').replace(/^Xenograft:\s*/, '');
+    return { name: name, title: point.title || point.db_id, sub: '<a href="/browse/' + V.esc(point.db_id) + '">' + V.esc(point.db_id) + '</a>', n: point.n_donors, est: point.logFC,
+             lo: replicate ? point.ci_low : null, hi: replicate ? point.ci_high : null, q: replicate ? point.q_value : null, sig: replicate && point.q_value != null && point.q_value < 0.05,
+             counted: isAnchor && !!(point.anchor_counted != null ? point.anchor_counted : entry.counted), anchor: isAnchor, reason: point.not_counted_reason, pills: pills, db_id: point.db_id };
+  }
+  function forestRowsFromServed(forest, noun) {
+    var rows = [];
+    forest.forEach(function (entry) {
+      if (entry.anchor) rows.push(pointRow(entry.anchor, entry, noun, true));
+      (entry.more_units || []).forEach(function (point) { rows.push(pointRow(point, entry, noun, false)); });
+    });
+    return rows.sort(function (a, b) { return (b.counted - a.counted) || (b.anchor - a.anchor) || ((b.n || 0) - (a.n || 0)); });
+  }
   function detailHtml(block, row, group, cell, card) {
     var scope = block.scope;
-    var rows = unitRows(card.units || [], group, scope);
+    var rows = card.rows || unitRows(card.units || [], group, scope);
     var title = V.esc(GENE) + ', ' + V.esc(row.label) + ', ' + V.esc(V.plain(group));
     var pills = '';
     if (cell) {
@@ -234,6 +254,7 @@
   }
   function detail(block, row, group, cell) {
     if (!cell) return Promise.resolve(detailHtml(block, row, group, null, {}));
+    if (cell.rep && cell.rep.forest && cell.rep.forest.length) return Promise.resolve(detailHtml(block, row, group, cell, { rows: forestRowsFromServed(cell.rep.forest, V.SCOPES[block.scope].noun) }));
     var url = V.API + '/facets/' + enc(row.facet) + '/effects?gene=' + enc(GENE) + '&scope=' + enc(block.scope) + '&cell_type=' + enc(group);
     return V.cached(url).then(function (card) { return detailHtml(block, row, group, cell, card); });
   }
