@@ -236,7 +236,7 @@ def test_help_has_the_view_topics_and_glossary_terms():
         topic = help_content.get_topic(topic_id)
         assert topic is not None and topic.body_html.strip()
         assert "—" not in topic.body_html
-    for slug in ("low-detection", "detection-modality"):
+    for slug in ("low-detection", "modality"):
         assert help_content.get_term(slug) is not None
     assert "gene-view" in help_content.get_topic("genes").children
     assert "facet-overview" in help_content.get_topic("facet-effects").children

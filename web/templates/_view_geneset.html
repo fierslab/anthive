@@ -248,7 +248,8 @@
       model.blocks.forEach(function (block) { block.rows.forEach(function (row) { Object.keys(row.cells).forEach(function (group) {
         var cell = row.cells[group];
         var kind = V.cellKind(cell);
-        var score = kind === 'rep' ? cell.r : (kind === 'genes' ? 2 - Math.min(1, (cell.genes ? cell.genes.n : 0) / 1000) - (block.scope === 'human_postmortem' ? 0.5 : 0) : null);
+        var n = cell && cell.genes ? cell.genes.n : 0;
+        var score = kind === 'rep' ? cell.r : (n > 0 ? 1 - Math.min(0.9, n / 200) + (block.scope === 'human_postmortem' ? 0 : 5) - (group === 'microglia' ? 0.05 : 0) : null);
         if (score != null && (!best || score < best.score)) best = { scope: block.scope, facet: row.facet, group: group, score: score };
       }); }); });
       if (best) V.preselect(best.scope, best.facet, best.group);
