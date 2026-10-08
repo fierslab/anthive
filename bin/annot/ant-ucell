@@ -34,6 +34,16 @@ Differences from ant-aucell:
   - Chunking: same strategy (cells > _CHUNK_THRESHOLD → batches of _CHUNK_SIZE).
   - min_n gate, Ensembl autodetect, status semantics: identical to ant-aucell.
 
+Cell type scope (2026-10-08): a module is scored only on the cells whose cell
+type belongs to the module's ``celltypes`` group (``lib/celltype_scope.py``:
+``group_of`` of the dataset's ``ant_cell_type`` per cell against
+``lib/celltype_groups.yaml``); ``celltypes: [all]`` and ``role: markers``
+modules are scored on every cell. Cells outside the scope get no row (NULL).
+UCell ranks the genes within each cell, so a cell's score does not depend on
+which other cells are scored (no control-gene sampling as in scanpy). An
+experiment with no matching cell in the dataset is not scored and its stale
+``ucell`` sidecar rows are removed.
+
 Scores are written to the dataset's ``<basename>.scores.parquet`` sidecar with
 source='ucell' so they coexist with aucell, geneset, and starcat scores.
 
@@ -91,7 +101,8 @@ from geneset import (                  # type: ignore
 )
 from h5adstore import H5adEntry, find_h5ad   # type: ignore
 from metadata import parse_md_file           # type: ignore
-from scores_parquet import read_scores, upsert_scores  # type: ignore
+from celltype_scope import cell_type_groups, group_summary, module_scope  # type: ignore
+from scores_parquet import delete_scores, read_scores, upsert_scores  # type: ignore
 
 TOOL_VERSION = 'ant-ucell/0.1'
 
@@ -397,6 +408,7 @@ def _ucell_one_experiment(
     min_n: int,
     verbose: bool,
     dry_run: bool,
+    cells: pd.DataFrame,
 ) -> Dict:
     """Score one experiment on ``adata`` with UCell, write to parquet.
 
@@ -408,6 +420,9 @@ def _ucell_one_experiment(
         min_n: minimum gene overlap required to score a module.
         verbose: if True, print per-module stats.
         dry_run: if True, score but do not write to disk.
+        cells: per-cell frame (cell_id, cell_name, group) from
+            ``celltype_scope.cell_type_groups``; a module is scored on the cells
+            of its cell type scope only.
 
     Returns:
         Result dict with keys ``catalog``, ``status`` (``ok``, ``dry-run``,
@@ -442,55 +457,67 @@ def _ucell_one_experiment(
         }
 
     t_score = time.time()
-    try:
-        scores_df = _run_ucell(adata, gene_sets_dict)
-    except Exception as exc:
-        message = str(exc).strip() or repr(exc)
-        error = f'{type(exc).__name__}: {message}'
-        print(f'  ERROR: UCell scoring failed — {error}', file=sys.stderr)
+    scope_of_module = {gs.name: module_scope(gs) for gs in genesets if gs.name in gene_sets_dict}
+    by_scope: Dict[tuple, List[str]] = {}
+    for name, scope in scope_of_module.items():
+        by_scope.setdefault(scope.key(), []).append(name)
+    long_parts: List[pd.DataFrame] = []
+    for scope_key, names in by_scope.items():
+        scope = scope_of_module[names[0]]
+        scoped_cells = cells[scope.cell_mask(cells['group']).to_numpy()]
+        if scoped_cells.empty:
+            print(f'  - {len(names)} module(s) ({"/".join(scope.celltypes)}): no cell of that '
+                  f'cell type group, not scored')
+            continue
+        label = 'all cells' if scope.groups is None else f'groups {sorted(scope.groups)}'
+        print(f'  scope {label}: {len(scoped_cells):,} cells, {len(names)} module(s)')
+        in_scope = adata.obs_names.isin(scoped_cells['cell_name'])
+        try:
+            scores_df = _run_ucell(adata[in_scope], {name: gene_sets_dict[name] for name in names})
+        except Exception as exc:
+            message = str(exc).strip() or repr(exc)
+            error = f'{type(exc).__name__}: {message}'
+            print(f'  ERROR: UCell scoring failed: {error}', file=sys.stderr)
+            return {
+                'catalog': catalog_id,
+                'status': 'error',
+                'error': error,
+                'n_rows': 0,
+            }
+        if verbose:
+            for col in scores_df.columns:
+                vals = scores_df[col].dropna()
+                if len(vals) == 0:
+                    print(f'    {col}: all-NaN')
+                    continue
+                print(
+                    f'    {col}: n={len(vals)}  '
+                    f'range=[{vals.min():.3f}, {vals.max():.3f}]  '
+                    f'mean={vals.mean():.3f}'
+                )
+        else:
+            print(f'  Scored {len(scores_df.columns)} modules × {len(scores_df):,} cells')
+        scores_reset = scores_df.reset_index()
+        first_col = scores_reset.columns[0]
+        scores_reset = scores_reset.rename(columns={first_col: 'cell_name'})
+        long_parts.append(scores_reset.melt(id_vars='cell_name', var_name='module', value_name='score'))
+    print(f'  UCell finished in {time.time() - t_score:.1f}s')
+
+    if not long_parts:
+        if not dry_run:
+            removed = delete_scores(entry.duckdb_path, 'ucell', catalog_id)
+            if removed:
+                print(f'  removed {removed} stale rows of source=ucell catalog={catalog_id}')
         return {
             'catalog': catalog_id,
             'status': 'error',
-            'error': error,
+            'error': 'no cell of the dataset belongs to the cell type scope of the catalog',
             'n_rows': 0,
         }
-    elapsed = time.time() - t_score
-    print(f'  UCell finished in {elapsed:.1f}s')
-
-    if verbose:
-        for col in scores_df.columns:
-            vals = scores_df[col].dropna()
-            if len(vals) == 0:
-                print(f'    {col}: all-NaN')
-                continue
-            print(
-                f'    {col}: n={len(vals)}  '
-                f'range=[{vals.min():.3f}, {vals.max():.3f}]  '
-                f'mean={vals.mean():.3f}'
-            )
-    else:
-        print(f'  Scored {len(scores_df.columns)} modules × {len(scores_df):,} cells')
-
-    # Melt to long format. The reset index becomes 'cell_name'.
-    scores_reset = scores_df.reset_index()
-    first_col = scores_reset.columns[0]
-    scores_reset = scores_reset.rename(columns={first_col: 'cell_name'})
-    long_df = scores_reset.melt(
-        id_vars='cell_name',
-        var_name='module',
-        value_name='score',
-    )
-    long_df = long_df.dropna(subset=['score'])
-
-    # Map cell_name → cell_id via the duckdb __cells table.
-    conn = duckdb.connect(str(entry.duckdb_path), read_only=True)
-    try:
-        cellmap = conn.execute('SELECT cell_id, cell_name FROM __cells').df()
-    finally:
-        conn.close()
+    long_df = pd.concat(long_parts, ignore_index=True).dropna(subset=['score'])
 
     n_before = len(long_df)
-    long_df = long_df.merge(cellmap, on='cell_name', how='inner')
+    long_df = long_df.merge(cells[['cell_id', 'cell_name']], on='cell_name', how='inner')
     n_dropped = n_before - len(long_df)
     if n_dropped:
         print(
@@ -645,6 +672,9 @@ def main() -> int:
         )
         return 1
 
+    cells = cell_type_groups(entry, h5ad_root)
+    print(f'  cell type groups: {group_summary(cells)}')
+
     all_results = []
     for exp_id, genesets in by_experiment.items():
         experiment = experiments_by_id[exp_id]
@@ -656,6 +686,7 @@ def main() -> int:
             min_n=args.min_n,
             verbose=args.verbose,
             dry_run=args.dry_run,
+            cells=cells,
         )
         all_results.append(result)
 

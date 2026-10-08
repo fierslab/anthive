@@ -159,6 +159,53 @@ def upsert_scores(
     return len(fresh)
 
 
+def delete_scores(duckdb_path: Path, source: str, catalog: str) -> int:
+    """Remove every (source, catalog) row from the sidecar (no-op without a sidecar).
+
+    Used when a catalog no longer applies to a dataset (no cell of the dataset
+    belongs to the catalog's cell type scope), so stale rows do not stay behind.
+    Same all-or-nothing, flock protected rewrite as :func:`upsert_scores`; a
+    sidecar left without any row is removed.
+
+    Returns:
+        Number of rows removed.
+    """
+    sidecar = scores_path(duckdb_path)
+    if not sidecar.exists():
+        return 0
+    tmp = sidecar.with_name(f'{sidecar.name}.{os.getpid()}.tmp')
+    with open(_lock_path(sidecar), 'a') as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            conn = duckdb.connect(':memory:')
+            try:
+                removed = conn.execute(
+                    "SELECT COUNT(*) FROM read_parquet(?) WHERE source = ? AND catalog = ?",
+                    [str(sidecar), source, catalog]).fetchone()[0]
+                if removed:
+                    remaining = conn.execute(
+                        "SELECT COUNT(*) FROM read_parquet(?) WHERE NOT (source = ? AND catalog = ?)",
+                        [str(sidecar), source, catalog]).fetchone()[0]
+                    if remaining:
+                        conn.execute(
+                            "CREATE TABLE kept AS SELECT cell_id, source, catalog, module, score "
+                            "FROM read_parquet(?) WHERE NOT (source = ? AND catalog = ?)",
+                            [str(sidecar), source, catalog])
+                        conn.execute(
+                            "COPY kept TO ? (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)",
+                            [str(tmp)])
+                        os.replace(tmp, sidecar)
+                    else:
+                        sidecar.unlink()
+            finally:
+                conn.close()
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    return int(removed)
+
+
 def _lock_path(sidecar: Path) -> Path:
     """Advisory lock file serialising writers of one sidecar."""
     return sidecar.with_name(sidecar.name + '.lock')

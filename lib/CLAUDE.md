@@ -21,7 +21,8 @@ After the 2026-06 reorgs, the consumers live under:
 | `anthive_db.py` | DuckDB query layer (`AnthiveDB`) + `AnnotationWriter` + pending-state helpers |
 | `h5adstore.py` | resolve a `db_id` (`group/file`) to files on disk (`find_h5ad`, `H5adEntry`) |
 | `h5ad_utils.py` | `load_h5ad`, dtype/layer inspection |
-| `geneset.py` | genesetstore parsing/registry (`Experiment`, `Geneset`, `GenesetRegistry`) |
+| `geneset.py` | genesetstore parsing/registry (`Experiment`, `Geneset`, `GenesetRegistry`); `celltypes` (labels or `all`) is required per experiment, `role: markers` and a per-geneset override of both are optional (`celltypes_problems`, `role_problems`) |
+| `celltype_scope.py` | cell type scope of a module (`ModuleScope`, `module_scope`) and the per-cell cell type groups of a dataset (`cell_type_groups`); who may score / be facet-tested on which cells. Used by `ant-score`, `ant-score-ext`, `ant-ucell`, `ant-score-fleet`, `ant-facet-test-modules` |
 | `analytics.py` | SELECT-only SQL sandbox for ant-serve's analytics endpoint |
 | `facet_mapping.py` | how a dataset's `.md` `api:` section projects author columns onto `ant_*` facets (renamed / derived / template / join / constant / native / computed, value translation, redaction of `obs_hidden` sources, gap hints). Mirrors `anthive_db.build_obs_view_sql`; keep the two in step |
 | `obscol_tags.py` + `obscol_tags_vocab.yaml` | obs-column tag vocab; the `facet:` blocks are the single source of the facet definitions shown in the UI and API (`facet_definition`) |
@@ -41,6 +42,7 @@ After the 2026-06 reorgs, the consumers live under:
 | `tissue_groups.py` + `tissue_groups.yaml` | coarse tissue groups of the `ant_tissue` facet (umbrella terms such as prefrontal cortex) and the specific UBERON labels and ids behind the plain columns `tissue_uberon` / `tissue_uberon_id`; the group list is the registry's `controlled_values` for `tissue` (tested) |
 | `help_content/` | **single source of the plain-language help**: `topics/<id>.yaml` (id = anchor on the help page, `summary`, `body_html`, `related`, `terms`, `children` rendered as `<h3>` subsections, `aliases`) and `glossary.yaml`. `web/templates/help.html` renders sections from it (`help_topic_html`, `help_glossary_html`), `ant-serve` serves it (`/help`, `/help/{topic}`, `/help/glossary[/{term}]`, `/help/search`) with markdown derived by `html_to_markdown`, and `ant-mcp` `explain` / `anthive://help` read it through the API. Edit the YAML, never the section text in `help.html`; `tests/test_help_content.py` and the parity test in `test_web_browser.py` guard it |
 | `ingest_check/` | `ant ingest-check` package: registry of 33 checks with frozen ids (`checks_files/meta/layers/facets/donors/cells/design/access.py`), `CheckContext` (lazy sha256, backed h5ad, scratch convert, published `ant_*` views via `DatasetView`), report model and redaction (`report.py`: counts and digests only, crosswalk tokens scrubbed), obs `profile.py`, overlap index reader/writer (`overlap_index.py`), `thresholds.py`. Read-only on its input (`tests/test_ingest_check_no_destructive.py`) |
+| `scores_parquet.py` | per-cell score sidecar `<stem>.scores.parquet` (`upsert_scores`, `delete_scores`, `read_scores`, `summarize`); flock-serialised atomic writers, a module has rows for its cell type scope only |
 | `layer_stats.py`, `plotting.py`, `checksum.py`, `md_check.py` | layer stats, server-side plots, file hashing, `.md` sanity checks |
 
 ## DuckDB schema model (know this before touching anthive_db)

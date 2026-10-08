@@ -1,0 +1,387 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=1.0.0",
+#   "pandas>=2.0.0",
+#   "numpy>=1.24.0",
+#   "scipy>=1.10.0",
+#   "pyarrow>=14.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-score-fleet: score every dataset with every module catalog that applies to its cell types.
+
+A catalog applies to a dataset when the geneset-store organism is one of the
+dataset's organisms and at least one cell of the dataset belongs to the cell
+type group of one of the catalog's modules (``lib/celltype_scope.py``;
+``celltypes: [all]`` and ``role: markers`` catalogs apply to every dataset).
+Scope of the fleet: the facet-eligible datasets (the gate of
+``ant-facet-test-modules``) plus every dataset that already has a scores
+sidecar. Per dataset the tool runs ``ant-score-ext`` (scanpy ``score_genes``,
+source ``geneset``) and ``ant-ucell`` (source ``ucell``) on the applicable
+catalogs; each of them scores a module on the cells of its cell type scope
+only. Sidecar rows of catalogs that no longer apply are removed.
+
+Both tools write only the ``<stem>.scores.parquet`` sidecar (atomic replace
+under a flock; the duckdb is only read), so ant-serve is neither released nor
+restarted.
+
+Running politely: the fleet lowers its own priority (nice 19, ioice idle when
+available), pins each worker to a CPU range, marks its processes as first
+choice of the OOM killer, starts a dataset only while the load of OTHER users
+(1 minute load minus 4 per busy worker) is at most ``--max-other-load`` and
+the free memory is at least ``--min-free-gb``, and keeps a JSONL state file so
+a stopped run resumes.
+
+Usage::
+
+  ant-score-fleet [--only ID,ID] plan [--out plan.tsv]
+  ant-score-fleet [--only ID,ID] run [--max-cells N] [--min-cells N] [--workers 2]
+                      [--cpus 4-11] [--state state.jsonl] [--log run.log] [--force]
+"""
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import pandas as pd
+
+script_dir = Path(__file__).parent.resolve()
+repo_root = script_dir.parent.parent
+sys.path.insert(0, str(repo_root / 'lib'))
+
+from celltype_scope import cell_type_groups, group_summary, module_scope  # type: ignore  # noqa: E402
+from geneset import GenesetRegistry  # type: ignore  # noqa: E402
+from h5adstore import iter_h5adstore  # type: ignore  # noqa: E402
+from scores_parquet import delete_scores, scores_path, summarize  # type: ignore  # noqa: E402
+import mus  # type: ignore  # noqa: E402
+
+SOURCES = ('geneset', 'ucell')
+CPUS_PER_WORKER = 4
+
+
+def _load_gene_tool():
+    """Import the sibling ``ant-facet-test`` script (hyphenated, not a package)."""
+    loader = importlib.machinery.SourceFileLoader('ant_facet_test', str(script_dir / 'ant-facet-test'))
+    spec = importlib.util.spec_from_loader('ant_facet_test', loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules['ant_facet_test'] = module
+    loader.exec_module(module)
+    return module
+
+
+def store_roots(args: argparse.Namespace) -> Tuple[Path, Path]:
+    """(h5adstore root, genesetstore root) from the options, else the configured stores."""
+    from config import get_config  # type: ignore  # noqa: PLC0415
+    config = get_config()
+    h5ad_root = Path(args.h5adstore_root or config.get('h5ad_store') or 'data/h5adstore')
+    geneset_root = Path(args.genesetstore_root or config.get('geneset_store') or 'data/genesetstore')
+    resolve = lambda path: path if path.is_absolute() and path.exists() else (repo_root / path).resolve()  # noqa: E731
+    return resolve(h5ad_root), resolve(geneset_root)
+
+
+def plan_dataset(entry: Any, registry: GenesetRegistry, h5ad_root: Path, aft: Any) -> Dict[str, Any]:
+    """What the fleet does for one dataset.
+
+    Returns:
+        Dict with db_id, n_cells, groups, skip_reason (None when the dataset is in the fleet),
+        experiments (applicable experiment ids), stale (sidecar catalogs of the fleet sources
+        that no longer apply) and per experiment the number of modules / cells scored.
+    """
+    record: Dict[str, Any] = {'db_id': entry.db_id, 'readable_id': entry.readable_id, 'skip_reason': None,
+                              'experiments': [], 'stale': [], 'n_cells': None, 'groups': {}, 'detail': {}}
+    if entry.md_path.with_suffix('.inactive').exists() or (entry.md_path.parent / f'{entry.stem}.inactive').exists():
+        record['skip_reason'] = 'inactive'
+        return record
+    if not entry.duckdb_path.exists():
+        record['skip_reason'] = 'no .duckdb'
+        return record
+    md_yaml, _ = aft.parse_md_file(entry.md_path)
+    annotation = mus.resolve_annotation(entry.h5ad_path, root=h5ad_root)
+    api_config = aft.get_api_config(md_yaml)
+    eligible, reason = aft.dataset_eligibility(entry, md_yaml, annotation, api_config, require_counts=False)
+    sidecar = scores_path(entry.duckdb_path)
+    existing = summarize(entry.duckdb_path) if sidecar.exists() else pd.DataFrame(columns=['source', 'catalog'])
+    existing = existing[existing['source'].isin(SOURCES)] if len(existing) else existing
+    if not eligible and not len(existing):
+        record['skip_reason'] = f'not facet-eligible and no scores yet ({reason})'
+        return record
+    if md_yaml.get('has_lognorm') is False:
+        record['skip_reason'] = 'has_lognorm: false (no log-normalised layer)'
+        return record
+    cells = cell_type_groups(entry, h5ad_root)
+    record['n_cells'] = int(len(cells))
+    record['groups'] = group_summary(cells)
+    organisms = {str(o).lower() for o in (annotation.get('organism') if isinstance(annotation.get('organism'), list)
+                                          else [annotation.get('organism')] if annotation.get('organism') else [])}
+    if not organisms and entry.db_id in aft.ASSUME_HUMAN_DB_IDS:
+        organisms = {'human'}
+    for experiment in registry.list_experiments():
+        if experiment.organism.lower() not in organisms:
+            continue
+        members = [g for g in registry.list_genesets() if g.experiment.experiment_id == experiment.experiment_id]
+        scored_cells = 0
+        n_modules = 0
+        for geneset in members:
+            n_cells_in_scope = int(module_scope(geneset).cell_mask(cells['group']).sum()) \
+                if len(cells) else 0
+            if n_cells_in_scope:
+                n_modules += 1
+                scored_cells = max(scored_cells, n_cells_in_scope)
+        if n_modules:
+            record['experiments'].append(experiment.experiment_id)
+            record['detail'][experiment.experiment_id] = {'modules': n_modules, 'of': len(members),
+                                                         'cells': scored_cells}
+    if len(existing):
+        planned = set(record['experiments'])
+        record['stale'] = sorted({f'{r.source}::{r.catalog}' for r in existing.itertuples()
+                                  if r.catalog not in planned})
+    if not record['experiments']:
+        record['skip_reason'] = 'no catalog applies (no cell type of the dataset matches)'
+    return record
+
+
+def build_plan(args: argparse.Namespace) -> List[Dict[str, Any]]:
+    """Plan of every dataset (``--only`` restricts), smallest first."""
+    h5ad_root, geneset_root = store_roots(args)
+    registry = GenesetRegistry(geneset_root)
+    registry.scan()
+    if registry.errors:
+        for error in registry.errors:
+            print(f'store error: {error}', file=sys.stderr)
+        sys.exit('ERROR: geneset store has unresolved errors; fix with `ant geneset validate`')
+    aft = _load_gene_tool()
+    only = {x.strip() for x in args.only.split(',')} if args.only else None
+    plan: List[Dict[str, Any]] = []
+    for entry in iter_h5adstore(h5ad_root):
+        if any(part.startswith('_') for part in entry.md_path.relative_to(h5ad_root).parts):
+            continue
+        if only and entry.db_id not in only and entry.readable_id not in only:
+            continue
+        try:
+            record = plan_dataset(entry, registry, h5ad_root, aft)
+        except Exception as exc:   # one broken dataset must not stop the plan
+            record = {'db_id': entry.db_id, 'readable_id': entry.readable_id, 'n_cells': None, 'groups': {},
+                      'experiments': [], 'stale': [], 'detail': {},
+                      'skip_reason': f'plan failed: {type(exc).__name__}: {exc}'}
+        record['has_h5ad'] = entry.h5ad_path.exists()
+        plan.append(record)
+    plan.sort(key=lambda r: (r['n_cells'] is None, r['n_cells'] or 0, r['db_id']))
+    return plan
+
+
+def print_plan(plan: List[Dict[str, Any]], out: Optional[str]) -> None:
+    """Print a plan summary and optionally write it as TSV."""
+    rows = []
+    for record in plan:
+        rows.append({'db_id': record['db_id'], 'dataset': record['readable_id'], 'n_cells': record['n_cells'],
+                     'groups': json.dumps(record['groups']), 'status': record['skip_reason'] or 'score',
+                     'experiments': ','.join(record['experiments']), 'stale_catalogs': ','.join(record['stale']),
+                     'has_h5ad': record.get('has_h5ad')})
+    frame = pd.DataFrame(rows)
+    if out:
+        frame.to_csv(out, sep='\t', index=False)
+    in_fleet = frame[frame['status'] == 'score']
+    print(f'{len(frame)} datasets: {len(in_fleet)} in the fleet, {len(frame) - len(in_fleet)} skipped')
+    print(frame['status'].where(frame['status'] == 'score', frame['status'].str.slice(0, 60)).value_counts().to_string())
+
+
+def _proc_load_other(busy_workers: int) -> float:
+    """1 minute load average minus the load this fleet contributes (CPUS_PER_WORKER per busy worker)."""
+    return float(open('/proc/loadavg').read().split()[0]) - CPUS_PER_WORKER * busy_workers
+
+
+def _mem_available_gb() -> float:
+    for line in open('/proc/meminfo'):
+        if line.startswith('MemAvailable:'):
+            return int(line.split()[1]) / 1024 / 1024
+    return 0.0
+
+
+class Fleet:
+    """Runs the planned datasets with a few polite workers and a resumable state file."""
+
+    def __init__(self, args: argparse.Namespace, h5ad_root: Path, geneset_root: Path) -> None:
+        self.args, self.h5ad_root, self.geneset_root = args, h5ad_root, geneset_root
+        self.lock = threading.Lock()
+        self.busy = 0
+        self.log_handle = open(args.log, 'a', buffering=1) if args.log else None
+        self.cpu_ranges = self._split_cpus(args.cpus, args.workers)
+        self.free_ranges = list(self.cpu_ranges)
+
+    @staticmethod
+    def _split_cpus(cpus: str, workers: int) -> List[str]:
+        """Split a CPU range ``4-11`` into ``workers`` contiguous ranges."""
+        first, last = (int(x) for x in cpus.split('-'))
+        total = last - first + 1
+        size = max(total // workers, 1)
+        ranges = []
+        for index in range(workers):
+            start = first + index * size
+            stop = last if index == workers - 1 else min(start + size - 1, last)
+            ranges.append(f'{start}-{stop}')
+        return ranges
+
+    def log(self, message: str) -> None:
+        line = f'{time.strftime("%Y-%m-%d %H:%M:%S")} {message}'
+        with self.lock:
+            print(line, flush=True)
+            if self.log_handle:
+                self.log_handle.write(line + '\n')
+
+    def wait_for_room(self) -> None:
+        """Block while other users load the machine or memory is short."""
+        warned = 0.0
+        while True:
+            with self.lock:
+                busy = self.busy
+            other = _proc_load_other(busy)
+            free = _mem_available_gb()
+            if other <= self.args.max_other_load and free >= self.args.min_free_gb:
+                return
+            if time.time() - warned > 600:
+                self.log(f'  paused: other load {other:.1f} (max {self.args.max_other_load}), '
+                         f'free memory {free:.0f} GB (min {self.args.min_free_gb})')
+                warned = time.time()
+            time.sleep(60)
+
+    def run_tool(self, tool: str, arguments: List[str], cpus: str) -> Tuple[int, float]:
+        """Run one ant tool at idle priority on ``cpus``; returns (exit code, seconds)."""
+        command = ['nice', '-n', '19']
+        if subprocess.run(['which', 'ionice'], capture_output=True).returncode == 0:
+            command += ['ionice', '-c3']
+        command += ['taskset', '-c', cpus, str(script_dir / tool), *arguments]
+        environment = dict(os.environ, OMP_NUM_THREADS='2', OPENBLAS_NUM_THREADS='2', MKL_NUM_THREADS='2',
+                           PYTHONUNBUFFERED='1')
+        started = time.time()
+        with open(self.args.log or os.devnull, 'a') as handle:
+            handle.write(f'$ {" ".join(command)}\n')
+            handle.flush()
+            result = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, env=environment,
+                                    preexec_fn=lambda: open('/proc/self/oom_score_adj', 'w').write('1000'))
+        return result.returncode, time.time() - started
+
+    def process(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Score one dataset (worker body)."""
+        self.wait_for_room()
+        with self.lock:
+            cpus = self.free_ranges.pop(0)
+            self.busy += 1
+        started = time.time()
+        outcome: Dict[str, Any] = {'db_id': record['db_id'], 'n_cells': record['n_cells'],
+                                   'experiments': record['experiments']}
+        try:
+            self.log(f'start {record["db_id"]} ({record["readable_id"]}, {record["n_cells"]:,} cells, '
+                     f'{len(record["experiments"])} catalogs) on cpus {cpus}')
+            common = ['--h5adstore-root', str(self.h5ad_root), '--genesetstore-root', str(self.geneset_root)]
+            code_scanpy, seconds_scanpy = self.run_tool('ant-score-ext', [record['db_id'], *record['experiments'], *common], cpus)
+            outcome.update(scanpy_exit=code_scanpy, scanpy_seconds=round(seconds_scanpy, 1))
+            if record.get('has_h5ad'):
+                code_ucell, seconds_ucell = self.run_tool('ant-ucell', [record['db_id'], *record['experiments'], '--overwrite'], cpus)
+            else:
+                code_ucell, seconds_ucell = 'no h5ad', 0.0
+            outcome.update(ucell_exit=code_ucell, ucell_seconds=round(seconds_ucell, 1))
+            succeeded = code_scanpy == 0 and code_ucell in (0, 'no h5ad')
+            entry_duckdb = self._duckdb_of(record)
+            planned = set(record['experiments'])
+            removed = 0
+            if succeeded and entry_duckdb is not None:       # stale catalogs only go once the new rows are in
+                for token in record['stale']:
+                    source, catalog = token.split('::', 1)
+                    if catalog not in planned:
+                        removed += delete_scores(entry_duckdb, source, catalog)
+            outcome['stale_rows_removed'] = removed
+            outcome['status'] = 'done' if succeeded else 'failed'
+        except Exception as exc:
+            outcome.update(status='failed', error=f'{type(exc).__name__}: {exc}')
+        finally:
+            with self.lock:
+                self.busy -= 1
+                self.free_ranges.append(cpus)
+        outcome['seconds'] = round(time.time() - started, 1)
+        self.log(f'{outcome["status"]} {record["db_id"]} in {outcome["seconds"]:.0f}s '
+                 f'(scanpy {outcome.get("scanpy_exit")}, ucell {outcome.get("ucell_exit")}, '
+                 f'stale rows removed {outcome.get("stale_rows_removed")})')
+        return outcome
+
+    def _duckdb_of(self, record: Dict[str, Any]) -> Optional[Path]:
+        from h5adstore import find_h5ad  # type: ignore  # noqa: PLC0415
+        entry = find_h5ad(self.h5ad_root, record['db_id'])
+        return entry.duckdb_path if entry else None
+
+
+def command_run(args: argparse.Namespace) -> int:
+    """``run``: score the planned datasets, resuming from the state file."""
+    h5ad_root, geneset_root = store_roots(args)
+    plan = [r for r in build_plan(args) if r['skip_reason'] is None]
+    if args.min_cells is not None:
+        plan = [r for r in plan if r['n_cells'] >= args.min_cells]
+    if args.max_cells is not None:
+        plan = [r for r in plan if r['n_cells'] <= args.max_cells]
+    done = set()
+    state_path = Path(args.state)
+    if state_path.exists() and not args.force:
+        done = {json.loads(line)['db_id'] for line in state_path.read_text().splitlines()
+                if line.strip() and json.loads(line).get('status') == 'done'}
+    todo = [r for r in plan if r['db_id'] not in done]
+    if args.limit:
+        todo = todo[:args.limit]
+    fleet = Fleet(args, h5ad_root, geneset_root)
+    fleet.log(f'fleet: {len(todo)} datasets to score ({len(plan) - len(todo)} already done), '
+              f'{args.workers} workers on cpus {fleet.cpu_ranges}')
+    started = time.time()
+    failed = 0
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        for index, outcome in enumerate(pool.map(fleet.process, todo), start=1):
+            with open(state_path, 'a') as handle:
+                handle.write(json.dumps(outcome) + '\n')
+            failed += outcome['status'] != 'done'
+            elapsed = time.time() - started
+            remaining_cells = sum(r['n_cells'] for r in todo[index:])
+            done_cells = sum(r['n_cells'] for r in todo[:index])
+            eta = elapsed / done_cells * remaining_cells if done_cells else float('nan')
+            fleet.log(f'progress {index}/{len(todo)}  elapsed {elapsed / 60:.0f} min  '
+                      f'eta (by cells) {eta / 60:.0f} min  failed {failed}')
+    return 1 if failed else 0
+
+
+def main() -> int:
+    """CLI entry point."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--h5adstore-root', default=None)
+    parser.add_argument('--genesetstore-root', default=None)
+    parser.add_argument('--only', default=None, help='comma separated db_ids')
+    sub = parser.add_subparsers(dest='command', required=True)
+    plan_parser = sub.add_parser('plan', help='print what would be scored')
+    plan_parser.add_argument('--out', default=None, help='write the plan as TSV')
+    run_parser = sub.add_parser('run', help='score the fleet')
+    run_parser.add_argument('--workers', type=int, default=2)
+    run_parser.add_argument('--cpus', default='4-11', help='CPU range shared by the workers (default 4-11)')
+    run_parser.add_argument('--max-other-load', type=float, default=8.0,
+                            help='start a dataset only while the load of other users is at most this (default 8: ~12 total)')
+    run_parser.add_argument('--min-free-gb', type=float, default=40.0)
+    run_parser.add_argument('--min-cells', type=int, default=None)
+    run_parser.add_argument('--max-cells', type=int, default=None)
+    run_parser.add_argument('--limit', type=int, default=None, help='score at most this many datasets')
+    run_parser.add_argument('--state', default='ant-score-fleet.state.jsonl')
+    run_parser.add_argument('--log', default=None)
+    run_parser.add_argument('--force', action='store_true', help='ignore the state file')
+    args = parser.parse_args()
+    if args.command == 'plan':
+        print_plan(build_plan(args), args.out)
+        return 0
+    return command_run(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

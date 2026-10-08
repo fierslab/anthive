@@ -8,11 +8,22 @@
 # ///
 """ant-score-ext — external module scoring → <basename>.scores.parquet sidecar.
 
-Same maths as ``ant score`` (uses ``db.score_module`` which reads the
-precomputed ``__gene_bins`` table) but writes to the parquet sidecar
-next to the .duckdb instead of ALTER-TABLE-ing into ``__obsnum``. No
-lock coordination with ant-serve needed — this is read-only against
-the duckdb.
+Same maths as ``ant score`` (uses ``db.score_module``) but writes to the
+parquet sidecar next to the .duckdb instead of ALTER-TABLE-ing into
+``__obsnum``. No lock coordination with ant-serve is needed, this is read-only
+against the duckdb.
+
+Cell type scope (2026-10-08): a module is scored only on the cells whose cell
+type belongs to the module's ``celltypes`` group (``lib/celltype_scope.py``:
+``group_of`` of the dataset's ``ant_cell_type`` per cell against
+``lib/celltype_groups.yaml``). ``celltypes: [all]`` and ``role: markers``
+modules are scored on every cell. Cells outside the scope get no row (NULL).
+scanpy ``score_genes`` draws its control genes from the expression of the
+cells it scores, so a module scored on a subset gets expression bins rebuilt
+from those cells (``score_module(cell_ids=...)``); all-cells modules use the
+stored ``__gene_bins`` (or bins built from all cells when the table is missing).
+An experiment with no matching cell in the dataset is not scored and its stale
+sidecar rows (``source=geneset``) are removed.
 
 Usage:
   ant-score-ext <db_id> <experiment_id_or_geneset_id> [<id>...] [options]
@@ -43,7 +54,8 @@ from anthive_db import AnthiveDB  # noqa: E402
 from geneset import GenesetRegistry  # noqa: E402
 from h5adstore import find_h5ad  # noqa: E402
 from metadata import parse_md_file  # noqa: E402
-from scores_parquet import summarize, upsert_scores  # noqa: E402
+from celltype_scope import cell_type_groups, group_summary, module_scope  # noqa: E402
+from scores_parquet import delete_scores, summarize, upsert_scores  # noqa: E402
 
 
 def main() -> int:
@@ -73,6 +85,11 @@ def main() -> int:
 
     registry = GenesetRegistry(Path(args.genesetstore_root).resolve())
     registry.scan()
+    if registry.errors:
+        for error in registry.errors:
+            print(f"  store error: {error}", file=sys.stderr)
+        print("ERROR: geneset store has unresolved errors; fix with `ant geneset validate`", file=sys.stderr)
+        return 1
 
     # Expand experiment ids to their child genesets; leave explicit geneset ids alone.
     genesets = []
@@ -114,49 +131,72 @@ def main() -> int:
     print(f"[ant-score-ext] {entry.db_id} — {len(genesets)} geneset(s) "
           f"across {len(by_exp)} experiment(s) — layer={layer!r}")
 
+    cells = cell_type_groups(entry, root)
+    print(f"  cell type groups: {group_summary(cells)}")
+
     with AnthiveDB(str(entry.duckdb_path)) as db:
-        db.require_gene_bins()
-        cell_map = db._conn.execute(
-            "SELECT cell_id, cell_name FROM __cells"
-        ).df().set_index('cell_name')['cell_id']
+        try:
+            db.require_gene_bins()
+            have_bins = True
+        except ValueError:
+            have_bins = False   # all-cells modules then get bins built from every cell
+        cell_map = cells.set_index('cell_name')['cell_id']
 
         for experiment_id, group in by_exp.items():
             catalog = experiment_id
             rows = []
             t0 = time.time()
+            # modules with the same scope are scored on the same cells
+            by_scope: dict[tuple, list] = {}
             for gs in group:
-                genes = gs.genes
-                try:
-                    scores_df, meta = db.score_module(
-                        module_genes=genes,
-                        layer=layer,
-                        n_control=args.n_control,
-                        seed=args.seed,
-                    )
-                except ValueError as exc:
-                    print(f"  ✗ {gs.name}: {exc}", file=sys.stderr)
+                by_scope.setdefault(module_scope(gs).key(), []).append(gs)
+            for scope_key, members in by_scope.items():
+                scope = module_scope(members[0])
+                scored_ids = scope.cell_mask(cells['group'])
+                scored_ids = cells.loc[scored_ids, 'cell_id'].to_numpy()
+                if len(scored_ids) == 0:
+                    print(f"  - {len(members)} module(s) of {catalog} ({'/'.join(scope.celltypes)}): "
+                          f"no cell of that cell type group, not scored")
                     continue
-                # Join cell_name → cell_id
-                merged = scores_df.merge(
-                    cell_map.rename('cell_id'), left_on='cell_name',
-                    right_index=True, how='inner')
-                merged = merged.rename(columns={'module_score': 'score'})
-                merged['module'] = gs.name
-                rows.append(merged[['cell_id', 'module', 'score']])
-                print(f"  {gs.name:38s}  n_cells={len(merged):>7d}  "
-                      f"genes_found={len(meta['genes_found'])}/{len(genes)}  "
-                      f"n_control={meta['n_control_genes']}")
+                subset = None if (scope.groups is None and have_bins) else scored_ids
+                label = 'all cells' if scope.groups is None else f"{len(scored_ids)} cells, groups {sorted(scope.groups)}"
+                print(f"  scope {label}")
+                for gs in members:
+                    genes = gs.genes
+                    try:
+                        scores_df, meta = db.score_module(
+                            module_genes=genes,
+                            layer=layer,
+                            n_control=args.n_control,
+                            seed=args.seed,
+                            cell_ids=subset,
+                        )
+                    except ValueError as exc:
+                        print(f"  ✗ {gs.name}: {exc}", file=sys.stderr)
+                        continue
+                    merged = scores_df.merge(
+                        cell_map.rename('cell_id'), left_on='cell_name',
+                        right_index=True, how='inner')
+                    merged = merged.rename(columns={'module_score': 'score'})
+                    merged['module'] = gs.name
+                    rows.append(merged[['cell_id', 'module', 'score']])
+                    print(f"  {gs.name:38s}  n_cells={len(merged):>7d}  "
+                          f"genes_found={len(meta['genes_found'])}/{len(genes)}  "
+                          f"n_control={meta['n_control_genes']}")
 
             if not rows:
                 print(f"  (no scorable modules for {catalog})", file=sys.stderr)
+                if not args.dry_run:
+                    removed = delete_scores(entry.duckdb_path, 'geneset', catalog)
+                    if removed:
+                        print(f"  removed {removed} stale rows of source=geneset catalog={catalog}")
                 continue
 
             import pandas as pd
             all_rows = pd.concat(rows, ignore_index=True)
             if args.dry_run:
                 print(f"  [dry-run] would upsert {len(all_rows)} rows "
-                      f"({len(group)} modules × {len(all_rows) // max(len(group), 1)} cells) "
-                      f"→ source=geneset catalog={catalog}")
+                      f"({len(rows)} modules) → source=geneset catalog={catalog}")
             else:
                 n = upsert_scores(
                     duckdb_path=entry.duckdb_path,

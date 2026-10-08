@@ -606,6 +606,24 @@ unit of replication is again the donor. Eligibility is the gene-test scope
 without the counts requirement (a scores sidecar is required instead); datasets
 without a served raw-counts layer run variant A only and carry `no_counts` true.
 
+### Cell type scope of modules (2026-10-08)
+
+Module scores exist only for the cells of the module's cell type scope. The genesetstore declares
+`celltypes` per experiment (Cell Ontology labels of the `.h5ad.mus` `cell_type` vocabulary, or the explicit
+value `all`; a per-geneset `.md` may override it) and optionally `role: markers` for QC marker panels.
+`ant-score-ext`, `ant-ucell` and `ant-score` score a module on the cells whose `ant_cell_type` belongs to the
+same group of `lib/celltype_groups.yaml` as one of the module's labels (`lib/celltype_scope.py`); `all` and
+`markers` modules are scored on every cell. The other cells have no row in the sidecar (NULL). The scanpy
+control genes are drawn from the expression of the scored cells, so the bins are rebuilt from them
+(`AnthiveDB.score_module(cell_ids=...)`); UCell ranks within a cell and needs no such step.
+
+This tool tests a module only in strata whose cell type group (`group_of` of the stratum label, the
+`group_pool` label being the group itself) matches the module's scope; `all` modules are tested in every
+stratum, `markers` modules never. The BH family of a (dataset, stratum, facet, method) is therefore the set
+of modules in scope for that stratum. Strata with an unmapped label (and the single `none` stratum) only
+receive `all` modules. Per unit the manifest records `n_modules_in_scope` and `n_modules_out_of_scope`.
+This tool has no donor-pooled units, so the `--pool` runs of `ant-facet-test` have no module counterpart.
+
 ### Variants (column `method`)
 
 | Variant | `method` | Per-donor module score | Needs |

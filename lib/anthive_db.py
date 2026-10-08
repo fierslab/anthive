@@ -5,6 +5,7 @@ Provides a clean interface to query DuckDB databases created by ant-convert
 """
 
 import copy
+import hashlib
 import fcntl
 import json
 import logging
@@ -17,7 +18,7 @@ import urllib.request
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Literal
+from typing import List, Dict, Any, Optional, Sequence, Tuple, Literal
 import duckdb
 import numpy as np
 import pandas as pd
@@ -690,6 +691,7 @@ class AnthiveDB:
         if self.conn and self._owns_conn:
             self._conn.close()
             self.conn = None
+            self.__dict__.pop('_subset_tables', None)   # TEMP tables of score_module(cell_ids=...) die with the connection
 
     def get_info(self) -> Dict[str, Any]:
         """
@@ -2178,12 +2180,50 @@ class AnthiveDB:
                 found[original] = hit
         return found, f'varcat:{symbol_column}'
 
+    def _scored_cell_tables(self, cell_ids: Sequence[int], layer_source: str) -> Tuple[str, str]:
+        """TEMP tables for scoring a cell subset: (expression bins table, cells source SQL).
+
+        The bins are ``__gene_bins`` rebuilt from the subset only (per gene the
+        mean over the subset cells that express it, 25 ``NTILE`` bins; ties
+        broken by gene_id so the bins are reproducible). Cached per subset and
+        layer source for the life of the connection, so a catalog of modules
+        scored on one subset builds them once.
+        """
+        ids = np.unique(np.asarray(cell_ids, dtype='int64'))
+        digest = hashlib.sha1(ids.tobytes() + layer_source.encode()).hexdigest()[:16]
+        cache = self.__dict__.setdefault('_subset_tables', {})
+        if digest not in cache:
+            cells_table, bins_table = f'__score_cells_{digest}', f'__score_bins_{digest}'
+            self._conn.register(f'{cells_table}_df', pd.DataFrame({'cell_id': ids}))
+            self._conn.execute(f'CREATE OR REPLACE TEMP TABLE {cells_table} AS SELECT * FROM {cells_table}_df')
+            self._conn.unregister(f'{cells_table}_df')
+            self._conn.execute(f"""
+                CREATE OR REPLACE TEMP TABLE {bins_table} AS
+                WITH gene_means AS (
+                    SELECT g.gene_id, COALESCE(AVG(l.value), 0.0) AS mean_expr
+                    FROM __genes g
+                    LEFT JOIN (
+                        SELECT v.gene_id, v.value FROM {layer_source} v
+                        JOIN {cells_table} sc ON v.cell_id = sc.cell_id
+                    ) l USING (gene_id)
+                    GROUP BY g.gene_id
+                )
+                SELECT gene_id, mean_expr,
+                       NTILE(25) OVER (ORDER BY mean_expr, gene_id) AS expr_bin
+                FROM gene_means
+            """)
+            cache[digest] = (bins_table,
+                             f'(SELECT c.cell_id, c.cell_name FROM __cells c JOIN {cells_table} s '
+                             f'ON c.cell_id = s.cell_id)')
+        return cache[digest]
+
     def score_module(
         self,
         module_genes: List[str],
         layer: str = 'X',
         n_control: int = 100,
         seed: int = 42,
+        cell_ids: Optional[Sequence[int]] = None,
     ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """Compute per-cell module scores (Scanpy score_genes equivalent).
 
@@ -2201,6 +2241,13 @@ class AnthiveDB:
             layer: Expression layer (default 'X'). Must be log-normalized.
             n_control: Control genes sampled per expression bin (default 100).
             seed: Integer seed for reproducible control gene selection.
+            cell_ids: Score only these cells (``__cells.cell_id``). scanpy
+                ``score_genes`` draws its control genes from the expression of
+                the cells it scores, so the expression bins are then rebuilt
+                from these cells (same definition as ``__gene_bins``: mean over
+                the cells that express the gene, ``NTILE(25)``) instead of
+                read from the stored whole-dataset ``__gene_bins``. ``None``
+                (default) scores every cell with the stored bins.
 
         Returns:
             Tuple of (scores_df, meta_dict). ``scores_df`` has columns
@@ -2211,7 +2258,10 @@ class AnthiveDB:
         Raises:
             ValueError: If no module genes can be resolved to gene_ids.
         """
-        self.require_gene_bins()
+        if cell_ids is None:
+            self.require_gene_bins()
+        elif len(cell_ids) == 0:
+            raise ValueError("cell_ids is empty: no cell to score")
 
         found_map, resolution = self._resolve_symbols_to_gene_ids(module_genes)
         genes_found = [g for g in module_genes if g in found_map]
@@ -2226,6 +2276,11 @@ class AnthiveDB:
         # score_module is always a gene-centric query (filter by gene_id) so
         # we use the by-gene view for Parquet-backed datasets.
         layer_source = self._layer_source_for_gene_filter(layer)
+        if cell_ids is None:
+            bins_table = '__gene_bins'
+            cells_source = '__cells'
+        else:
+            bins_table, cells_source = self._scored_cell_tables(cell_ids, layer_source)
 
         # Count control genes that will be selected
         n_control_genes = self._conn.execute(f"""
@@ -2235,9 +2290,9 @@ class AnthiveDB:
                            PARTITION BY gb.expr_bin
                            ORDER BY md5(CAST(gb.gene_id AS VARCHAR) || CAST({seed} AS VARCHAR))
                        ) AS rn
-                FROM __gene_bins gb
+                FROM {bins_table} gb
                 WHERE gb.expr_bin IN (
-                    SELECT DISTINCT expr_bin FROM __gene_bins
+                    SELECT DISTINCT expr_bin FROM {bins_table}
                     WHERE gene_id IN ({gene_id_list})
                 )
                 AND gb.gene_id NOT IN ({gene_id_list})
@@ -2254,10 +2309,10 @@ class AnthiveDB:
                             PARTITION BY gb.expr_bin
                             ORDER BY md5(CAST(gb.gene_id AS VARCHAR) || CAST({seed} AS VARCHAR))
                         ) AS rn
-                    FROM __gene_bins gb
+                    FROM {bins_table} gb
                     WHERE gb.expr_bin IN (
                         SELECT DISTINCT expr_bin
-                        FROM __gene_bins
+                        FROM {bins_table}
                         WHERE gene_id IN ({gene_id_list})
                     )
                     AND gb.gene_id NOT IN ({gene_id_list})
@@ -2282,12 +2337,12 @@ class AnthiveDB:
                 WHERE gene_id IN (SELECT gene_id FROM control)
                 GROUP BY cell_id
             )
-            -- Every cell gets a score: a cell with no nonzero module or
+            -- Every scored cell gets a score: a cell with no nonzero module or
             -- control expression scores 0 - 0 = 0 (sparse storage omits zeros).
             SELECT
                 cl.cell_name,
                 COALESCE(ma.m, 0.0) - COALESCE(ca.c, 0.0) AS module_score
-            FROM __cells cl
+            FROM {cells_source} cl
             LEFT JOIN module_avg  ma ON cl.cell_id = ma.cell_id
             LEFT JOIN control_avg ca ON cl.cell_id = ca.cell_id
             ORDER BY cl.cell_id

@@ -175,7 +175,8 @@ PLANT_SCORE_SHIFT = 0.8
 
 
 def make_module_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, with_counts: bool = True,
-                        seed: int = 11, extra_md: str = ''):
+                        seed: int = 11, extra_md: str = '', experiment_scope: str = 'celltypes:\n- all\n',
+                        celltype_names=('T1', 'T2')):
     """Synthetic human dataset with counts, a scores sidecar and a genesetstore.
 
     Module PLANT (GENE0..9) is up in males in T1 (counts and scores). Modules
@@ -201,11 +202,11 @@ def make_module_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, with_count
     cell_id = 0
     for donor_index, (donor, sex) in enumerate(zip(donors, sexes)):
         donor_factor = np.exp(rng.normal(0, 0.15))
-        for cell_type, n_cells in (('T1', 30), ('T2', 4)):
+        for cell_type, n_cells in ((celltype_names[0], 30), (celltype_names[1], 4)):
             for _ in range(n_cells):
                 rows.append((cell_id, f'{donor}_c{cell_id}', donor, sex, cell_type))
                 mean_vector = base_mean * donor_factor
-                male_t1 = sex == 'M' and cell_type == 'T1'
+                male_t1 = sex == 'M' and cell_type == celltype_names[0]
                 if male_t1:
                     mean_vector = mean_vector.copy()
                     mean_vector[PLANT_GENES] *= 2 ** PLANT_LOG2_FC
@@ -250,7 +251,8 @@ def make_module_dataset(tmp_path: Path, n_f: int = 10, n_m: int = 10, with_count
     experiment_dir = geneset_root / 'SynStudy' / 'Exp'
     experiment_dir.mkdir(parents=True)
     (experiment_dir / 'index.md').write_text(
-        '---\nstudy: SynStudy\nexperiment: Exp\norganism: human\nmethod: manual\ngene_id_type: symbol\n---\n')
+        '---\nstudy: SynStudy\nexperiment: Exp\norganism: human\nmethod: manual\ngene_id_type: symbol\n'
+        + experiment_scope + '---\n')
     (experiment_dir / 'PLANT.grp').write_text('\n'.join(f'GENE{g}' for g in PLANT_GENES) + '\n')
     for name, gene_ids in null_sets.items():
         (experiment_dir / f'{name}.grp').write_text('\n'.join(f'GENE{g}' for g in gene_ids) + '\n')
@@ -394,3 +396,76 @@ def test_unsupported_datasets_are_skipped(tmp_path):
     (store / 'Syn2026' / 'Syn_mod.scores.parquet').unlink()
     manifest, _ = _run(tmp_path, entry, store, geneset_root)
     assert manifest['status'] == 'skipped' and 'scores' in manifest['reason']
+
+
+# ---------------------------------------------------------------------------
+# Cell type scope of modules (2026-10-08)
+# ---------------------------------------------------------------------------
+
+def _scoped_run(tmp_path, experiment_scope, overrides=None, label='Microglia'):
+    """Run the synthetic dataset whose strata are called ``label`` (a microglia label) and ``Other``."""
+    store, geneset_root, entry = make_module_dataset(tmp_path, experiment_scope=experiment_scope,
+                                                     celltype_names=(label, 'Other'))
+    for name, text in (overrides or {}).items():
+        (geneset_root / 'SynStudy' / 'Exp' / f'{name}.md').write_text(text)
+    manifest, out_root = _run(tmp_path, entry, store, geneset_root)
+    result = out_root / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet'
+    if not result.exists():                       # no module of the dataset is in scope of any stratum
+        return manifest, pd.DataFrame(columns=['module', 'method'])
+    table = pd.read_parquet(result)
+    return manifest, table[(table['facet'] == 'sex') & (table['cell_type'] == label)]
+
+
+@pytest.mark.parametrize('experiment_scope', ['celltypes:\n- microglial cell\n', 'celltypes:\n- all\n'])
+def test_module_is_tested_in_a_stratum_of_its_cell_type_group_and_all_everywhere(tmp_path, experiment_scope):
+    manifest, sex_stratum = _scoped_run(tmp_path, experiment_scope)
+    assert len(sex_stratum[sex_stratum['method'] == 'cell_mean']) == 6
+    assert len(sex_stratum[sex_stratum['method'] == 'pseudobulk']) == 6
+
+
+def test_module_of_another_cell_type_group_is_not_tested_and_leaves_the_bh_family(tmp_path):
+    manifest, sex_stratum = _scoped_run(tmp_path, 'celltypes:\n- astrocyte\n')
+    assert sex_stratum.empty                                   # no module of the catalog is in scope
+    manifest, sex_stratum = _scoped_run(
+        tmp_path / 'override', 'celltypes:\n- microglial cell\n',
+        overrides={'PLANT': '---\ncelltypes:\n- astrocyte\n---\n'})
+    assert set(sex_stratum['module']) == {f'NULL{i}' for i in range(1, 6)}
+    assert (sex_stratum.groupby('method').size() == 5).all()     # BH family of 5, PLANT is out of scope
+    unit = next(u for u in manifest['units'] if u['facet'] == 'sex' and u['cell_type'] == 'Microglia')
+    assert unit['n_modules_in_scope'] == 5 and unit['n_modules_out_of_scope'] == 1
+
+
+def test_markers_role_module_is_never_tested(tmp_path):
+    manifest, sex_stratum = _scoped_run(
+        tmp_path, 'celltypes:\n- all\n', overrides={'PLANT': '---\nrole: markers\n---\n'})
+    assert 'PLANT' not in set(sex_stratum['module'])
+    assert (sex_stratum.groupby('method').size() == 5).all()
+
+
+def test_unmapped_stratum_label_gets_only_all_scope_modules(tmp_path):
+    _, sex_stratum = _scoped_run(tmp_path, 'celltypes:\n- microglial cell\n', label='T1')
+    assert sex_stratum.empty
+    _, sex_stratum = _scoped_run(tmp_path / 'all', 'celltypes:\n- all\n', label='T1')
+    assert len(sex_stratum[sex_stratum['method'] == 'cell_mean']) == 6
+
+
+def test_module_in_stratum_rules(tmp_path):
+    geneset_root = tmp_path / 'genesetstore'
+    for experiment, scope in (('Micro', 'celltypes:\n- microglial cell\n'), ('Everywhere', 'celltypes:\n- all\n'),
+                              ('Panel', 'celltypes:\n- all\nrole: markers\n')):
+        folder = geneset_root / 'S' / experiment
+        folder.mkdir(parents=True)
+        (folder / 'index.md').write_text(f'---\norganism: human\nmethod: manual\n{scope}---\n')
+        (folder / 'm.grp').write_text('A\nB\nC\n')
+    registry = mod.GenesetRegistry(geneset_root)
+    registry.scan()
+    assert not registry.errors, registry.errors
+    assert mod.module_in_stratum(registry, 'S/Micro', 'm', 'microglial cell')
+    assert mod.module_in_stratum(registry, 'S/Micro', 'm', 'Mic P2RY12')           # prefix of the microglia group
+    assert mod.module_in_stratum(registry, 'S/Micro', 'm', 'microglia')            # the group_pool label
+    assert not mod.module_in_stratum(registry, 'S/Micro', 'm', 'astrocyte')
+    assert not mod.module_in_stratum(registry, 'S/Micro', 'm', 'all')              # the single "none" stratum
+    assert mod.module_in_stratum(registry, 'S/Everywhere', 'm', 'all')
+    assert mod.module_in_stratum(registry, 'S/Everywhere', 'm', 'anything at all')
+    assert not mod.module_in_stratum(registry, 'S/Panel', 'm', 'microglial cell')  # markers: never
+    assert mod.module_in_stratum(registry, 'Unknown/Catalog', 'm', 'astrocyte')    # no declared scope

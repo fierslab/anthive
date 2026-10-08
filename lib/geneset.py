@@ -25,8 +25,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 try:
+    import mus
+    from celltype_groups import UNMAPPED, group_of
     from metadata import parse_md_file
 except ImportError:  # when imported as `lib.geneset` from packages that set up paths
+    from lib import mus  # type: ignore[no-redef]
+    from lib.celltype_groups import UNMAPPED, group_of  # type: ignore[no-redef]
     from lib.metadata import parse_md_file  # type: ignore[no-redef]
 
 
@@ -34,6 +38,12 @@ METHOD_VALUES = {'WGCNA', 'cNMF', 'DGE', 'GSEA', 'manual', 'other'}
 GENE_ID_TYPES = {'symbol', 'ensembl', 'entrez'}
 DIRECTION_VALUES = {'up', 'down', 'bidirectional'}
 GENESET_EXTENSIONS = {'.grp', '.rnk'}
+
+# `celltypes: [all]` marks a catalog meant for datasets with every cell type mixed.
+CELLTYPES_ALL = 'all'
+# `role: markers` marks a QC marker panel: scored on all cells, never facet-tested.
+ROLE_MARKERS = 'markers'
+ROLE_VALUES = {ROLE_MARKERS}
 
 # Separator used by ant-score when writing module-score columns:
 #     <study>::<experiment>::<geneset_name>
@@ -148,6 +158,48 @@ def parse_rnk(path: Path) -> List[Tuple[str, float]]:
     return rows
 
 
+def _as_label_list(raw: Any) -> List[str]:
+    """A ``celltypes`` value (list, or comma separated string) as a list of stripped labels."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [part.strip() for part in raw.split(',') if part.strip()]
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def celltypes_problems(labels: List[str]) -> List[str]:
+    """Why a ``celltypes`` list is not acceptable (empty list when it is).
+
+    A list is acceptable when it is exactly ``['all']`` or holds only labels of
+    the controlled ``cell_type`` vocabulary (lib/_mus_vocab.yaml) that map to a
+    cell type group of lib/celltype_groups.yaml (otherwise a module could never
+    be scored or tested anywhere).
+    """
+    if not labels:
+        return ["'celltypes' is empty: list Cell Ontology labels or the single value 'all'"]
+    lowered = [label.lower() for label in labels]
+    if CELLTYPES_ALL in lowered:
+        if len(labels) > 1:
+            return [f"'celltypes' mixes 'all' with {[l for l in labels if l.lower() != CELLTYPES_ALL]}"]
+        return [] if labels == [CELLTYPES_ALL] else ["'celltypes' value must be spelled 'all' (lower case)"]
+    problems: List[str] = []
+    for label in labels:
+        if not mus.validate_value('cell_type', label):
+            problems.append(f"celltypes label {label!r} is not in the cell_type vocabulary (lib/_mus_vocab.yaml)")
+        elif group_of(label) == UNMAPPED:
+            problems.append(f"celltypes label {label!r} maps to no cell type group (lib/celltype_groups.yaml)")
+    return problems
+
+
+def role_problems(value: Any) -> List[str]:
+    """Why a ``role`` value is not acceptable (empty list when absent or valid)."""
+    if value is None or value == '':
+        return []
+    if str(value).strip() not in ROLE_VALUES:
+        return [f"role {value!r} is not one of {sorted(ROLE_VALUES)}"]
+    return []
+
+
 # ---------- dataclasses ----------
 
 @dataclass
@@ -183,20 +235,21 @@ class Experiment:
     def celltypes(self) -> List[str]:
         """Cell type(s) this experiment's genesets are relevant to.
 
-        Empty when the experiment declares no cell-type applicability (treat
-        as: applies broadly / not yet tagged). Consumers (ant-score, the
-        Genes tab filter) match against a dataset's `cell_type` field.
-
-        Values should use the same vocabulary as `.h5ad.mus` `cell_type=`
-        (e.g. "microglial cell", "astrocyte", "excitatory neuron"). See
-        lib/_mus_vocab.yaml → cell_type.
+        REQUIRED in every experiment ``index.md`` (the registry scan rejects an
+        experiment without it): Cell Ontology labels of the same vocabulary as
+        `.h5ad.mus` `cell_type=` (lib/_mus_vocab.yaml, cell_type), or the single
+        value ``all``. The property returns ``[]`` only for an experiment that
+        failed that check. Consumers (ant-score, ant-score-ext, ant-ucell,
+        ant-facet-test-modules) read the resolved scope through
+        ``lib/celltype_scope.py``.
         """
-        raw = self.metadata.get('celltypes') or self.metadata.get('cell_type')
-        if raw is None:
-            return []
-        if isinstance(raw, str):
-            return [x.strip() for x in raw.split(',') if x.strip()]
-        return list(raw)
+        return _as_label_list(self.metadata.get('celltypes') or self.metadata.get('cell_type'))
+
+    @property
+    def role(self) -> Optional[str]:
+        """``markers`` for a QC marker panel (scored on all cells, never facet-tested), else None."""
+        value = self.metadata.get('role')
+        return str(value).strip() if value else None
 
 
 @dataclass
@@ -219,6 +272,18 @@ class Geneset:
     @property
     def organism(self) -> str:
         return self.experiment.organism
+
+    @property
+    def celltypes(self) -> List[str]:
+        """Cell types of this geneset: its own ``.md`` ``celltypes`` when set, else the experiment's."""
+        own = self.metadata.get('celltypes')
+        return _as_label_list(own) if own else self.experiment.celltypes
+
+    @property
+    def role(self) -> Optional[str]:
+        """Role of this geneset: its own ``.md`` ``role`` when set, else the experiment's."""
+        own = self.metadata.get('role')
+        return str(own).strip() if own else self.experiment.role
 
     def load(self) -> None:
         """Parse the .grp or .rnk file. Idempotent."""
@@ -263,7 +328,8 @@ class Geneset:
             'organism': self.organism,
             'method': self.experiment.method,
             'parent_dataset': self.experiment.parent_dataset,
-            'celltypes': self.experiment.celltypes,
+            'celltypes': self.celltypes,
+            'role': self.role,
             'direction': self.metadata.get('direction'),
         }
 
@@ -361,6 +427,9 @@ class GenesetRegistry:
         if not metadata.get('method'):
             self.errors.append(f"{index_path}: missing required field 'method'")
             return
+        for problem in self._experiment_problems(metadata):
+            self.errors.append(f"{index_path}: {problem}")
+            return
 
         experiment = Experiment(
             study=study,
@@ -400,6 +469,22 @@ class GenesetRegistry:
                 continue
             self._scan_geneset(experiment, child)
 
+    @staticmethod
+    def _experiment_problems(metadata: Dict[str, Any]) -> List[str]:
+        """Problems of the cell type scope (``celltypes`` required, ``role`` optional) of an experiment index."""
+        raw = metadata.get('celltypes', metadata.get('cell_type'))
+        if raw is None:
+            return ["missing required field 'celltypes' (Cell Ontology labels, or 'all')"]
+        return celltypes_problems(_as_label_list(raw)) + role_problems(metadata.get('role'))
+
+    @staticmethod
+    def _geneset_problems(metadata: Dict[str, Any]) -> List[str]:
+        """Problems of the optional ``celltypes`` / ``role`` override of a geneset ``.md``."""
+        problems = role_problems(metadata.get('role'))
+        if metadata.get('celltypes'):
+            problems += celltypes_problems(_as_label_list(metadata['celltypes']))
+        return problems
+
     def _scan_geneset(self, experiment: Experiment, file_path: Path) -> None:
         format_name = file_path.suffix.lstrip('.')
         name = file_path.stem
@@ -412,6 +497,9 @@ class GenesetRegistry:
                 metadata, body = parse_md_file(md_path)
             except Exception as error:
                 self.errors.append(f"{md_path}: failed to parse: {error}")
+                return
+            for problem in self._geneset_problems(metadata):
+                self.errors.append(f"{md_path}: {problem}")
                 return
             md_format = metadata.get('format')
             if md_format and md_format != format_name:

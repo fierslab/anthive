@@ -25,6 +25,16 @@ DEFAULT (fast path):
   and the columns are tracked in __pending_cols. Run `ant-merge-h5ad` later
   to sync them back into the .h5ad.
 
+CELL TYPE SCOPE (2026-10-08):
+  A geneset is scored only on the cells whose cell type belongs to the
+  geneset's `celltypes` group (lib/celltype_scope.py: group_of of the dataset's
+  ant_cell_type per cell, lib/celltype_groups.yaml); `celltypes: [all]` and
+  `role: markers` genesets are scored on every cell. The other cells get NULL.
+  scanpy score_genes draws its control genes from the expression of the cells
+  it scores, so a geneset with a restricted scope is scored on a copy of
+  adata holding the matching cells only (never on all cells and then masked).
+  A geneset no cell matches is skipped.
+
 LEGACY (--rebuild):
   Writes the entire .h5ad atomically and then runs ant-convert to rebuild
   the .duckdb. Slow (often >30 min for large datasets) — use only when you
@@ -91,6 +101,7 @@ from config import get_config            # type: ignore
 from geneset import (                    # type: ignore
     Experiment, Geneset, GenesetRegistry,
 )
+from celltype_scope import cell_type_groups, module_scope   # type: ignore
 from h5adstore import H5adEntry, find_h5ad   # type: ignore
 from metadata import parse_md_file, write_md_file   # type: ignore
 import mus                                            # type: ignore
@@ -179,11 +190,16 @@ def _column_name(experiment: Experiment, geneset: Geneset) -> str:
 
 def _score_one(adata, geneset: Geneset, column: str,
                ctrl_size: int, n_bins: int, seed: int,
-               layer: Optional[str], use_raw: bool, verbose: bool
+               layer: Optional[str], use_raw: bool, verbose: bool,
+               scored_mask: Optional[np.ndarray] = None
                ) -> Dict[str, object]:
     """
     Run scanpy.tl.score_genes for one geneset. Mutates adata.obs.
-    Returns a per-geneset provenance dict.
+
+    With ``scored_mask`` (boolean over adata cells) only those cells are
+    scored: scanpy runs on a copy holding them alone, so the control genes
+    come from their expression, and the other cells get NaN (NULL in the
+    duckdb). Returns a per-geneset provenance dict.
     """
     if geneset.format != 'grp':
         raise RuntimeError(
@@ -210,8 +226,13 @@ def _score_one(adata, geneset: Geneset, column: str,
             f"(need >= 3 for a meaningful score)"
         )
 
+    if scored_mask is None or scored_mask.all():
+        scored_mask = None
+        target = adata
+    else:
+        target = adata[scored_mask].copy()
     sc.tl.score_genes(
-        adata,
+        target,
         gene_list=found,
         ctrl_size=ctrl_size,
         n_bins=n_bins,
@@ -221,14 +242,19 @@ def _score_one(adata, geneset: Geneset, column: str,
         use_raw=use_raw,
         copy=False,
     )
-
-    scores = np.asarray(adata.obs[column].values, dtype=float)
+    scores = np.asarray(target.obs[column].values, dtype=float)
+    if scored_mask is not None:
+        full = np.full(adata.n_obs, np.nan)
+        full[scored_mask] = scores
+        adata.obs[column] = full
+        del target
     summary = {
         'mean':   float(np.mean(scores)),
         'std':    float(np.std(scores)),
         'min':    float(np.min(scores)),
         'max':    float(np.max(scores)),
         'median': float(np.median(scores)),
+        'n_scored': int(len(scores)),
     }
 
     if verbose:
@@ -254,10 +280,15 @@ def _score_one(adata, geneset: Geneset, column: str,
 
 
 def _score_experiment(adata, experiment: Experiment, genesets: List[Geneset],
-                      genesetstore_root: Path, args: argparse.Namespace
+                      genesetstore_root: Path, args: argparse.Namespace,
+                      cell_groups=None
                       ) -> Dict[str, object]:
     """
     Score one experiment's worth of genesets onto adata. Mutates adata.
+
+    ``cell_groups``: per-cell cell type group aligned to ``adata.obs_names``
+    (a pandas Series); each geneset is scored on the cells of its cell type
+    scope only (``lib/celltype_scope.py``). None scores every cell.
 
     Raises on any failure — caller is responsible for not writing back if so.
     """
@@ -280,6 +311,16 @@ def _score_experiment(adata, experiment: Experiment, genesets: List[Geneset],
     per_geneset = []
     skipped = []
     for geneset, column in plan:
+        scored_mask = None
+        if cell_groups is not None:
+            scope = module_scope(geneset)
+            scored_mask = scope.cell_mask(cell_groups).to_numpy()
+            if not scored_mask.any():
+                print(f"    SKIP {geneset.geneset_id}: no cell of the cell type scope "
+                      f"{'/'.join(scope.celltypes)}", file=sys.stderr)
+                skipped.append({'geneset_id': geneset.geneset_id,
+                                'reason': 'no cell in the cell type scope'})
+                continue
         try:
             per_geneset.append(_score_one(
                 adata, geneset, column,
@@ -289,6 +330,7 @@ def _score_experiment(adata, experiment: Experiment, genesets: List[Geneset],
                 layer=args.layer,
                 use_raw=args.use_raw,
                 verbose=args.verbose,
+                scored_mask=scored_mask,
             ))
         except GenesetSkipped as exc:
             print(f"    SKIP {geneset.geneset_id}: {exc}", file=sys.stderr)
@@ -428,6 +470,12 @@ def _process_one_h5ad(entry: H5adEntry,
     elif md_organism is not None:
         md_organism = str(md_organism).lower()
 
+    # Per-cell cell type group (aligned to adata.obs_names) for the cell type scope of each geneset.
+    cells = cell_type_groups(entry, h5adstore_root)
+    cell_groups = pd.Series(cells['group'].to_numpy(), index=cells['cell_name'].to_numpy()) \
+        .reindex(adata.obs_names)
+    cell_groups.index = adata.obs_names
+
     summaries = []
     for experiment, genesets in experiments:
         print(f"\n  Experiment: {experiment.experiment_id}  "
@@ -450,6 +498,7 @@ def _process_one_h5ad(entry: H5adEntry,
                 )
         record = _score_experiment(
             adata, experiment, genesets, genesetstore_root, args,
+            cell_groups=cell_groups,
         )
         summaries.append(record)
 
@@ -542,7 +591,7 @@ def _writeback_via_writer(adata, entry: H5adEntry,
                             f"ERROR: expected column '{col}' missing from "
                             f"adata.obs after scoring."
                         )
-                    series = adata.obs[col].astype('float64')
+                    series = adata.obs[col].astype('float64').dropna()   # cells outside the scope stay NULL
                     writer.add_numerical(
                         col, series,
                         source_hash=source_hash,
@@ -729,7 +778,8 @@ def main() -> int:
                         help='one or more experiment_id or geneset_id values, e.g. '
                              'Sierksma2025/WGCNA  or  Sierksma2025/WGCNA/Brown_Lysosome. '
                              'When omitted, auto-picks every experiment whose '
-                             '`celltypes:` matches the dataset\'s cell_type and whose '
+                             '`celltypes:` scope contains at least one cell of the dataset '
+                             '(same cell type group) and whose '
                              '`organism:` matches the dataset\'s organism.')
     parser.add_argument('--ctrl-size', type=int, default=50)
     parser.add_argument('--n-bins',    type=int, default=25)
@@ -771,11 +821,10 @@ def main() -> int:
     if entry is None:
         sys.exit(f"ERROR: dataset {args.db_id!r} not found in h5adstore ({h5ad_root})")
 
-    # Auto-pick mode: when the caller omits `genesets`, look at the dataset's
-    # cell_type + organism (from .h5ad.mus / .env cascade) and match every
-    # experiment in the registry whose `celltypes:` list includes this cell
-    # type AND whose organism matches. Empty `celltypes:` on an experiment
-    # is treated as "applies broadly" — included.
+    # Auto-pick mode: when the caller omits `genesets`, pick every experiment
+    # whose cell type scope (`celltypes:`, `all` = every cell) contains at least
+    # one cell of the dataset (same cell type group) AND whose organism matches
+    # the dataset's organism (from the .h5ad.mus / .env cascade).
     if not args.genesets:
         h5adstore_root_early = _h5adstore_root()
         mus_ann = mus.resolve_annotation(entry.h5ad_path, root=h5adstore_root_early)
@@ -793,15 +842,12 @@ def main() -> int:
             ds_organisms = {str(ds_organism_raw).lower()}
         else:
             ds_organisms = set()
-        if not ds_celltypes:
-            sys.exit(f"ERROR: dataset {args.db_id!r} has no cell_type in its "
-                     f".h5ad.mus / .env cascade — cannot auto-pick experiments. "
-                     f"Pass explicit experiment_ids instead.")
         picked: List[str] = []
+        dataset_cells = cell_type_groups(entry, h5adstore_root_early)
         for exp in registry.list_experiments():
-            exp_ct = {c.lower() for c in exp.celltypes}
-            # empty celltypes = "applies broadly" (kept)
-            if exp_ct and not (exp_ct & ds_celltypes):
+            # a catalog applies when any cell of the dataset is inside the scope of one of its modules
+            members = [g for g in registry.list_genesets() if g.experiment.experiment_id == exp.experiment_id]
+            if not any(module_scope(g).cell_mask(dataset_cells['group']).any() for g in members):
                 continue
             # organism gate — same rule as the later loop applies here.
             if exp.organism and ds_organisms and exp.organism.lower() not in ds_organisms:

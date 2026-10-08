@@ -6,6 +6,8 @@ the `.h5ad`).
 | Tool | Role |
 | --- | --- |
 | `ant-score` | Scanpy module scores from the **genesetstore** (`data/genesetstore/`) → one numerical obs column per geneset. Default: writes to duckdb via `AnnotationWriter`. `--rebuild` does the legacy h5ad rewrite. |
+| `ant-score-ext` / `ant-ucell` | The module scores the facet tests and the Genesets tab use: scanpy-style `score_genes` computed from the duckdb (`ant-score-ext`, sidecar source `geneset`) and UCell (`ant-ucell`, source `ucell`), both written to `<stem>.scores.parquet` (read-only on the duckdb, no ant-serve coordination). Per-cell-type scope, see below. |
+| `ant-score-fleet` | `plan` / `run`: score every facet-eligible dataset (and every dataset that already has a sidecar) with each catalog whose cell type scope contains at least one of its cells, via `ant-score-ext` + `ant-ucell`; removes stale catalogs; nice 19, pinned CPUs, resumable state file, pauses on other users' load. Supersedes the two older `ant-score-*-fleet` scripts for scoring (the microglia one also runs starCAT). |
 | `ant-starcat` | Project a dataset onto the `MICROGLIA_V1` starCAT catalog → 43 `starcat__MICROGLIA_V1__*` obs columns. Human-only; needs raw integer counts (not SCT). |
 | `ant-annotate` | Load obs columns from a TSV. `status` shows what's pending, `rollback --run-id` reverts a batch. |
 | `ant-facet-test` | Replicate-level facet tests (sex, AD vs control, APOE e4, Braak, age per decade, App NL-G-F vs control) by pseudobulk limma-voom per cell type and facet scope (human post-mortem, human xenograft in mouse; pure mouse datasets have no facet layer); exploratory. Output only under `<h5adstore>/_facet_tests/`. See `doc/DESIGN_facet_testing.md`. |
@@ -34,6 +36,28 @@ the member files of a cohort (`run --pool ID`, cohort table column `pool_members
 `replicate_column` as the pseudobulk unit and records `replicate_unit` / `analysis_level` per unit;
 `ant-facet-test summarize --out-dir DIR --genes ...` writes the replication tables.
 `ant-facet-test-modules` records the same replicate fields and gates hits on `|std_effect| >= 0.2`.
+
+## Module scores are per cell type (2026-10-08)
+
+`celltypes` is REQUIRED in every genesetstore experiment `index.md` (Cell Ontology labels of the `.h5ad.mus`
+`cell_type` vocabulary, or `all`; `lib/geneset.py` refuses an experiment without it and `ant geneset validate`
+reports it). A per-geneset `.md` may override `celltypes` and `role`. `role: markers` marks QC marker panels
+(`LuChen2025/nbb_celltypes`, `PanglaoDB2019/*_markers`): scored on all cells, never facet-tested.
+
+- `lib/celltype_scope.py` resolves the scope: a label scope matches the cells whose `ant_cell_type` has the same
+  `group_of` group (`lib/celltype_groups.yaml`); `all` and markers match every cell. The per-cell label is read through
+  the obs views of the current `.md` (as the facet tools do), with the `.h5ad.mus` `cell_type` as fallback. A dataset
+  without any cell type information only receives `all` and markers modules; a label outside the group table is
+  `unmapped` and does the same.
+- Cells outside a module's scope get NO row in the sidecar (NULL, never zero). A catalog with no matching cell is not
+  scored and its stale `(source, catalog)` rows are removed (`scores_parquet.delete_scores`).
+- scanpy `score_genes` takes its control genes from the expression of the cells it scores, so a restricted module is scored
+  with bins rebuilt from the matching cells only (`AnthiveDB.score_module(cell_ids=...)`; `ant-score` scores a copy of
+  the matching cells). All-cells modules use the stored `__gene_bins`. UCell ranks genes within a cell, so its scores do not
+  depend on which other cells are scored.
+- `ant-facet-test-modules` tests a module only in strata of a matching group (all: every stratum, markers: never); the BH
+  family is the set of in-scope modules of the stratum. No donor-pooled module units exist.
+- `ant-aucell` is not scoped (no `aucell` rows exist in the store).
 
 ## Write path (the shared contract)
 

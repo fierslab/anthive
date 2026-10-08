@@ -53,6 +53,17 @@ permutation p values. Units with n_lt5 are descriptive only (estimates and SE
 kept, p / q / t / CI NULL). A vs B effect-estimate correlation per unit is
 written to the manifest (calibration check).
 
+Cell type scope (2026-10-08): a module is tested only in strata whose cell
+type group (``lib/celltype_groups.yaml``, ``group_of`` of the stratum label)
+belongs to the group of the module's ``celltypes`` (geneset store; per-geneset
+``.md`` override allowed); ``celltypes: [all]`` modules are tested in every
+stratum and ``role: markers`` QC panels are never tested. The Benjamini-Hochberg
+family of a (dataset, stratum, facet, method) is the set of modules in scope for
+that stratum. The scores of a module exist only for the cells of its scope
+(``ant-score-ext`` / ``ant-ucell``), so the donor means are taken over those cells.
+There are no donor-pooled units in this tool, so the pooled (``--pool``) runs of
+``ant-facet-test`` have no module counterpart.
+
 Inputs: the h5adstore (read only: .md, .h5ad.mus, .duckdb, scores sidecar,
 counts by_gene sidecar) and the genesetstore (module gene lists).
 Outputs: only <h5adstore>/_facet_tests/<group>/<file>.facet_module_tests.parquet
@@ -109,6 +120,7 @@ import facet_results  # type: ignore  # noqa: E402
 import facet_scopes  # type: ignore  # noqa: E402
 import replication  # type: ignore  # noqa: E402
 from celltype_groups import group_of  # type: ignore  # noqa: E402
+from celltype_scope import module_scope  # type: ignore  # noqa: E402
 from geneset import GenesetRegistry  # type: ignore  # noqa: E402
 from scores_parquet import scores_path  # type: ignore  # noqa: E402
 
@@ -482,6 +494,19 @@ def load_module_genes(registry: GenesetRegistry, modules: pd.DataFrame, symbols:
     return indices, counts
 
 
+def module_in_stratum(registry: GenesetRegistry, catalog: str, module: str, stratum_label: str) -> bool:
+    """Whether a module is tested in a stratum (cell type scope rule of the module docstring).
+
+    A module the registry does not know (no ``.grp`` in the store) has no declared scope and is
+    tested everywhere; a ``role: markers`` module is never tested.
+    """
+    geneset = registry.genesets.get(f'{catalog}/{module}')
+    if geneset is None:
+        return True
+    scope = module_scope(geneset)
+    return (not scope.is_markers) and scope.matches_label(stratum_label)
+
+
 def default_geneset_store() -> Path:
     from config import get_config  # type: ignore
     value = get_config().get('geneset_store') or 'data/genesetstore'
@@ -552,7 +577,10 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             'n_permutations': n_permutations, 'permutation': 'facet labels shuffled across donors, '
             'covariates fixed, statistic = t of the full model, two-sided, p = (1+k)/(1+B)',
             'unit_seed': 'numpy default_rng([base seed, crc32 of "dataset|stratum|facet"])',
-            'bh_family': '(dataset, stratum, facet, method) over modules, parametric and permutation separately',
+            'bh_family': '(dataset, stratum, facet, method) over the modules in the cell type scope of the stratum, '
+                         'parametric and permutation separately',
+            'celltype_scope': 'module tested only in strata of a matching cell type group (celltypes of the geneset store, '
+                              'all = every stratum); role markers never tested',
             'n_bins': N_BINS, 'ctrl_size': CTRL_SIZE, 'min_module_genes': MIN_MODULE_GENES,
             'pseudobulk_expression': 'log2(CPM + 1), library size = all-gene count sum',
             'control_seed': 'default_rng([base seed, crc32 of "stratum|source|catalog|module"])',
@@ -731,8 +759,13 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 long_counts = long_counts[long_counts['gene_id'].notna()].astype({'gene_id': int})
                 for stratum, frame in keep.groupby('stratum'):
                     ids = frame['sample_idx'].to_numpy()
+                    label = str(frame['label'].iloc[0])
+                    in_scope = {key: genes for key, genes in module_genes.items()
+                                if module_in_stratum(registry, key[1], key[2], label)}
+                    if not in_scope:
+                        continue
                     log_cpm = counts_to_log_cpm(pseudobulk_dense(long_counts, ids, len(gene_order)))
-                    scores_b, n_ctrl = background_matched_scores(log_cpm, module_genes, str(stratum))
+                    scores_b, n_ctrl = background_matched_scores(log_cpm, in_scope, str(stratum))
                     scores_b.index = ids
                     background_scores[str(stratum)] = scores_b
                     control_counts[str(stratum)] = n_ctrl
@@ -792,8 +825,14 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             if len(mean_scores):
                 a_values = mean_scores.reindex(sample_ids).reset_index(drop=True)
                 low_cov = coverage.reindex(sample_ids).min(axis=0)
+                in_scope_columns = np.array([module_in_stratum(registry, catalog, module, job['label'])
+                                             for _source, catalog, module in a_values.columns])
+                record['n_modules_in_scope'] = int(in_scope_columns.sum())
+                record['n_modules_out_of_scope'] = int((~in_scope_columns).sum())
                 for source in sorted(set(a_values.columns.get_level_values('source'))):
-                    sub = a_values.loc[:, a_values.columns.get_level_values('source') == source]
+                    sub = a_values.loc[:, (a_values.columns.get_level_values('source') == source) & in_scope_columns]
+                    if sub.shape[1] == 0:
+                        continue
                     try:
                         a_frame = fit_modules(sub, design, job['batch_used'], below_floor,
                                               unit_key, n_permutations)
