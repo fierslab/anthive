@@ -36,7 +36,7 @@ a stopped run resumes.
 Usage::
 
   ant-score-fleet [--only ID,ID] plan [--out plan.tsv]
-  ant-score-fleet [--only ID,ID] run [--max-cells N] [--min-cells N] [--workers 2]
+  ant-score-fleet [--only ID,ID] [--catalogs Study/Experiment,...] run [--max-cells N] [--min-cells N] [--workers 2]
                       [--cpus 4-11] [--state state.jsonl] [--log run.log] [--force]
 """
 from __future__ import annotations
@@ -60,7 +60,7 @@ script_dir = Path(__file__).parent.resolve()
 repo_root = script_dir.parent.parent
 sys.path.insert(0, str(repo_root / 'lib'))
 
-from celltype_scope import cell_type_groups, group_summary, module_scope  # type: ignore  # noqa: E402
+from celltype_scope import applicable_experiments, cell_type_groups, group_summary  # type: ignore  # noqa: E402
 from geneset import GenesetRegistry  # type: ignore  # noqa: E402
 from h5adstore import iter_h5adstore  # type: ignore  # noqa: E402
 from scores_parquet import delete_scores, scores_path, summarize  # type: ignore  # noqa: E402
@@ -126,22 +126,8 @@ def plan_dataset(entry: Any, registry: GenesetRegistry, h5ad_root: Path, aft: An
                                           else [annotation.get('organism')] if annotation.get('organism') else [])}
     if not organisms and entry.db_id in aft.ASSUME_HUMAN_DB_IDS:
         organisms = {'human'}
-    for experiment in registry.list_experiments():
-        if experiment.organism.lower() not in organisms:
-            continue
-        members = [g for g in registry.list_genesets() if g.experiment.experiment_id == experiment.experiment_id]
-        scored_cells = 0
-        n_modules = 0
-        for geneset in members:
-            n_cells_in_scope = int(module_scope(geneset).cell_mask(cells['group']).sum()) \
-                if len(cells) else 0
-            if n_cells_in_scope:
-                n_modules += 1
-                scored_cells = max(scored_cells, n_cells_in_scope)
-        if n_modules:
-            record['experiments'].append(experiment.experiment_id)
-            record['detail'][experiment.experiment_id] = {'modules': n_modules, 'of': len(members),
-                                                         'cells': scored_cells}
+    record['detail'] = applicable_experiments(registry, cells['group'], organisms)
+    record['experiments'] = sorted(record['detail'])
     if len(existing):
         planned = set(record['experiments'])
         record['stale'] = sorted({f'{r.source}::{r.catalog}' for r in existing.itertuples()
@@ -162,6 +148,7 @@ def build_plan(args: argparse.Namespace) -> List[Dict[str, Any]]:
         sys.exit('ERROR: geneset store has unresolved errors; fix with `ant geneset validate`')
     aft = _load_gene_tool()
     only = {x.strip() for x in args.only.split(',')} if args.only else None
+    wanted_catalogs = {x.strip() for x in args.catalogs.split(',')} if args.catalogs else None
     plan: List[Dict[str, Any]] = []
     for entry in iter_h5adstore(h5ad_root):
         if any(part.startswith('_') for part in entry.md_path.relative_to(h5ad_root).parts):
@@ -175,6 +162,11 @@ def build_plan(args: argparse.Namespace) -> List[Dict[str, Any]]:
                       'experiments': [], 'stale': [], 'detail': {},
                       'skip_reason': f'plan failed: {type(exc).__name__}: {exc}'}
         record['has_h5ad'] = entry.h5ad_path.exists()
+        if wanted_catalogs is not None and record['skip_reason'] is None:
+            record['experiments'] = [e for e in record['experiments'] if e in wanted_catalogs]
+            record['stale'] = []
+            if not record['experiments']:
+                record['skip_reason'] = 'none of the requested catalogs applies'
         plan.append(record)
     plan.sort(key=lambda r: (r['n_cells'] is None, r['n_cells'] or 0, r['db_id']))
     return plan
@@ -361,6 +353,9 @@ def main() -> int:
     parser.add_argument('--h5adstore-root', default=None)
     parser.add_argument('--genesetstore-root', default=None)
     parser.add_argument('--only', default=None, help='comma separated db_ids')
+    parser.add_argument('--catalogs', default=None,
+                        help='comma separated experiment ids: rescore only these catalogs (a genesetstore '
+                             'experiment was added or changed); stale catalogs are left alone')
     sub = parser.add_subparsers(dest='command', required=True)
     plan_parser = sub.add_parser('plan', help='print what would be scored')
     plan_parser.add_argument('--out', default=None, help='write the plan as TSV')

@@ -223,7 +223,7 @@ Estimates for the downstream steps, to be measured on RX4/ALL in a throwaway sto
 | Step | Estimate for 400k cells |
 | --- | --- |
 | ant-score over the default geneset collections | 10 to 40 min. scanpy `score_genes` per geneset; it scales with geneset count. |
-| ucell / aucell (if enabled) | 20 to 60 min (the heaviest) |
+| UCell (part of the default `score` step; AUCell is not used, see `bin/annot/CLAUDE.md`) | 20 to 60 min (the heaviest) |
 | gene stats and variance precompute | 5 to 15 min |
 | module variability | 5 to 20 min |
 | facet tests (gene + modules) | 1 to 5 min |
@@ -339,6 +339,7 @@ No admin tools (approve, reviewed, send-back, retire, reject). Admin actions are
 | `access.level` | mus `access` | `internal` or `public` | missing = error; `public` = held unless `datasets_auto_publish_public: true` |
 | `access.controlled` | new mus/md field `data_use: open|controlled` (section 9), plus cohort hints from the crosswalk (worker) | | `controlled` = held; join-form cohort flagged controlled in the crosswalk while `data_use: open` = held |
 | `access.licence` | mus `license` | SPDX-like id (CC-BY-4.0, CC0-1.0, ...) or `in-house` | missing or `unknown` = held |
+| `scores.modules_complete` | duckdb, scores sidecar, geneset store | facet-eligible datasets only (the metadata gate of `ant-facet-test`); `celltype_scope.applicable_experiments` lists the catalogs with at least one cell in the scope of one of their modules, and the sidecar must hold `geneset` (scanpy) and `ucell` rows for each | missing sidecar or score sets = warn (scoring is an automatic build step after the conversion, not a curator input; the fix is `ant-score-fleet run --only <db_id>`); not facet-eligible or no applicable catalog = skip |
 
 `publish` is `auto` only when there are no errors and no held reasons.
 
@@ -545,7 +546,8 @@ Rule kept: nothing hard-codes repo paths for runtime writes. Every path comes fr
   5. S3 `CopyObject` from `_incoming/...h5ad` to `<Group>/<basename>.h5ad`, then delete the incoming object.
   6. `git commit` of `.md` / `.mus` / `index.md` in the store checkout, author = curator.
   7. State -> `live` (unreviewed).
-- Job `post`, stage 2: for each `datasets_post_steps` entry, wrap writers in release/restore as ant-score does today: `ant score <db> <collections>`, `ant-gene-stats-precompute`, `ant-gene-variance-precompute`, `ant-module-variability`, `ant-facet-test <db>`, `ant-facet-test-modules <db>` (results uncounted until an admin adds the dataset to the cohort selection), and optionally `ant-de-pseudobulk`. Then `ant-ingest-index build --only <db>`, `ant-sync push '<Group>/<basename>*'` throttled, and a final `/admin/rescan`. A failure in one step is recorded and the rest continue; it is shown as a warning on the admin list.
+- Job `post`, stage 2: for each `datasets_post_steps` entry, wrap writers in release/restore as ant-score does today: `ant-score-fleet run --only <db>` (the `score` step: scanpy `score_genes` via `ant-score-ext` plus UCell via `ant-ucell` for every genesetstore catalog whose cell type scope contains a cell of the dataset, automatic after the conversion; AUCell is not used), `ant-gene-stats-precompute`, `ant-gene-variance-precompute`, `ant-module-variability`, `ant-facet-test <db>`, `ant-facet-test-modules <db>` (results uncounted until an admin adds the dataset to the cohort selection), and optionally `ant-de-pseudobulk`. Then `ant-ingest-index build --only <db>`, `ant-sync push '<Group>/<basename>*'` throttled, and a final `/admin/rescan`. A failure in one step is recorded and the rest continue; it is shown as a warning on the admin list.
+- Job `rescore` (genesetstore hook): the worker remembers the genesetstore git HEAD of the last full scoring. When it differs (an experiment was added or a `celltypes` / `role` / gene list changed), `git diff --name-only <old> <new>` names the touched experiments and the worker runs `ant-score-fleet --catalogs <experiment,...> run` over the datasets they apply to (the fleet plan lists them), then `ant-facet-test-modules run --all --force` for the affected datasets, `ant-module-variability --workers 2 --no-prune`, the scores index rebuild, a rescan and a throttled `ant-sync push`. A changed `celltypes` can also remove a catalog from a dataset: run the fleet without `--catalogs` for that case (it deletes stale catalogs). The `scores.modules_complete` check is the audit of this hook.
 - Job `retire`: `ant inactive <db_id>` semantics, then rescan, then a git commit.
 - Job `pull_rescan` (after a remote build): `ant sync pull --include-duckdb '<Group>/<basename>*'`, then rescan.
 - Antomaton vs a simple queue: use the api-owned SQLite queue with a polling worker. It has no new dependency and works for HPC through HTTP, and the job vocabulary is small. Antomaton (codeberg.org/mfiers/antomaton) can later replace the worker as a client of the same `/internal/ingest/jobs` protocol. Its design note was not found in Basic Memory, so it was not evaluated. Open decision D3.
@@ -630,7 +632,7 @@ Rule kept: nothing hard-codes repo paths for runtime writes. Every path comes fr
 - **D2 Auto-approval:** a pass is published automatically for `access=internal`. `access=public` **always waits for an admin** (`datasets_auto_publish_public: false`).
 - **D3 Build runner:** a simple api-owned queue (SQLite) with a polling worker. Not antomaton. Antomaton can later become a client of the same `/internal/ingest/jobs` protocol.
 - **D4 Quotas:** 200 GB per user, 50 GB per upload, 3 open submissions per user, 30 days incoming retention (`datasets_upload_quota_gb_per_user`, `datasets_upload_max_gb`, `datasets_upload_max_open_per_user`, `datasets_incoming_retention_days`).
-- **D5 Post steps on ingest:** standard geneset scores, gene stats and facet tests. ucell / aucell and DE pseudobulk are **off** by default (`datasets_post_steps` without them, `datasets_de_pseudobulk: false`).
+- **D5 Post steps on ingest:** standard geneset scores, gene stats and facet tests. The `score` step is scanpy `score_genes` plus UCell, per cell type scope (decision 2026-10-08, replaces "ucell / aucell off"; AUCell is not part of the defaults). DE pseudobulk is **off** by default (`datasets_de_pseudobulk: false`).
 - **D6 Missing raw counts:** allowed with a stated reason (`counts_unavailable: <reason>` in the `.md`), shown on the dataset page. Without the reason it is an error (check `layers.counts`).
 - **D7 Controlled flag source:** both. A new mus field `data_use` (`open` or `controlled`) and the optional `controlled` column of `donor_crosswalk.tsv`.
 - **D8 Store git push:** the worker commits locally and Mark pushes (`datasets_store_git_push: false`).
@@ -659,7 +661,7 @@ Rule kept: nothing hard-codes repo paths for runtime writes. Every path comes fr
 
 ## 20. P1 as implemented (2026-10-05)
 
-Delivered: `bin/ingest/ant-ingest-check`, `bin/ingest/ant-ingest-index`, `lib/ingest_check/` (33 checks, frozen ids
+Delivered: `bin/ingest/ant-ingest-check`, `bin/ingest/ant-ingest-index`, `lib/ingest_check/` (34 checks, frozen ids
 in `lib/ingest_check/checks_*.py`, listed by `ant ingest-check --list-checks`), `lib/facet_rules.py` (the facet test
 thresholds, now imported by `bin/annot/ant-facet-test`), `config.get_ingest_state_dir / get_ingest_index_dir /
 get_ingest_scratch_dir / get_dataset_ingest_settings`, `doc/DATASET_INGESTION.md` (what each check means), tests

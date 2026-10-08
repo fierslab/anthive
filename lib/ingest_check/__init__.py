@@ -131,7 +131,7 @@ def tool_version() -> str:
 def _load_modules() -> None:
     """Import the check modules (registration order is the report order)."""
     from . import (checks_files, checks_meta, checks_layers, checks_facets,  # noqa: F401, PLC0415
-                   checks_donors, checks_cells, checks_design, checks_access)  # registration by import
+                   checks_donors, checks_cells, checks_design, checks_access, checks_scores)  # registration by import
 
 
 def all_checks() -> List[Check]:

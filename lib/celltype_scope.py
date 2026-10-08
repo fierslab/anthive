@@ -177,6 +177,49 @@ def scope_cell_ids(scope: ModuleScope, cells: pd.DataFrame) -> pd.Series:
     return cells.loc[cells['group'].isin(scope.groups), 'cell_id']
 
 
+def applicable_experiments(registry: Any, cell_groups: pd.Series, organisms: Iterable[str]) -> Dict[str, Dict[str, int]]:
+    """Catalogs of the genesetstore that apply to a dataset.
+
+    A catalog applies when its organism is one of the dataset's ``organisms`` and
+    at least one cell of the dataset is inside the scope of one of its modules.
+
+    Args:
+        registry: scanned ``GenesetRegistry``.
+        cell_groups: per-cell group series (``cell_type_groups(...)['group']``).
+        organisms: lower case organisms of the dataset.
+
+    Returns:
+        ``{experiment_id: {'modules': modules with at least one cell in scope,
+        'of': modules of the catalog, 'cells': largest number of cells of any module}}``.
+    """
+    organism_set = {str(organism).lower() for organism in organisms}
+    members_of: Dict[str, List[Geneset]] = {}
+    for geneset in registry.list_genesets():
+        members_of.setdefault(geneset.experiment.experiment_id, []).append(geneset)
+    applicable: Dict[str, Dict[str, int]] = {}
+    for experiment in registry.list_experiments():
+        if experiment.organism.lower() not in organism_set:
+            continue
+        members = members_of.get(experiment.experiment_id, [])
+        cells_in_scope = [int(module_scope(geneset).cell_mask(cell_groups).sum()) for geneset in members]
+        n_modules = sum(1 for count in cells_in_scope if count)
+        if n_modules:
+            applicable[experiment.experiment_id] = {'modules': n_modules, 'of': len(members),
+                                                    'cells': max(cells_in_scope)}
+    return applicable
+
+
+def default_registry() -> Any:
+    """Scanned ``GenesetRegistry`` of the configured ``geneset_store`` (relative paths resolve in the repo root)."""
+    from config import get_config  # noqa: PLC0415
+    from geneset import GenesetRegistry  # noqa: PLC0415
+
+    value = get_config().get('geneset_store') or 'data/genesetstore'
+    registry = GenesetRegistry((Path(__file__).resolve().parent.parent / value).resolve())
+    registry.scan()
+    return registry
+
+
 def group_summary(cells: pd.DataFrame) -> Dict[str, int]:
     """Cells per group (``none`` for cells without cell type information)."""
     return {('none' if key is None or (isinstance(key, float) and pd.isna(key)) else str(key)): int(count)
@@ -184,4 +227,4 @@ def group_summary(cells: pd.DataFrame) -> Dict[str, int]:
 
 
 __all__ = ['ModuleScope', 'UNMAPPED', 'cell_type_groups', 'cell_type_labels', 'group_summary',
-           'module_scope', 'scope_cell_ids', 'scope_from_labels']
+           'applicable_experiments', 'module_scope', 'scope_cell_ids', 'scope_from_labels']

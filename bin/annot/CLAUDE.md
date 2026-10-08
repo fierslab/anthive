@@ -57,7 +57,16 @@ reports it). A per-geneset `.md` may override `celltypes` and `role`. `role: mar
   depend on which other cells are scored.
 - `ant-facet-test-modules` tests a module only in strata of a matching group (all: every stratum, markers: never); the BH
   family is the set of in-scope modules of the stratum. No donor-pooled module units exist.
-- `ant-aucell` is not scoped (no `aucell` rows exist in the store).
+- `ant-aucell` is not scoped and not part of the defaults (no `aucell` rows exist in the store).
+
+Default build steps of a dataset (decision 2026-10-08): scanpy `score_genes` (`ant-score-ext`, source `geneset`) plus ONE
+rank scorer, UCell (`ant-ucell`, source `ucell`), both per cell type scope, automatically after `ant-convert`
+(`ant-score-fleet run --only <db_id>`; design in `doc/DESIGN_dataset_ingestion.md`). `ant-facet-test-modules` tests exactly
+these two sources (`DEFAULT_SOURCES`), fleet-wide. Why UCell and not AUCell (benchmark 2026-10-08, same modules
+`Sierksma2025/WGCNA` + `Mancuso2024/Cell_states`, `--dry-run`, 4 CPUs, nice 19): on G24/MMG (40k cells) UCell took 1:35 wall
+and 14 GB, AUCell (pyscenic, single thread) 13:44 and 45 GB (8.7 times slower); on L26/PSY (289k cells, 252k microglia) UCell
+took 10:01 and 40 GB, AUCell was not run (it scales to well over 100 GB, 45 GB at 40k cells). `ant-ucell` ranks the cells of a
+scope once for all catalogs of the call (ranking dominates the cost), so pass every catalog in one call.
 
 ## Write path (the shared contract)
 

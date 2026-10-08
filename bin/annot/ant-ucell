@@ -82,7 +82,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LIB_DIR = SCRIPT_DIR.parent.parent / 'lib'
@@ -410,12 +410,28 @@ def _ucell_one_experiment(
     dry_run: bool,
     cells: pd.DataFrame,
 ) -> Dict:
-    """Score one experiment on ``adata`` with UCell, write to parquet.
+    """Score one experiment (see :func:`_ucell_experiments`) and return its result dict."""
+    return _ucell_experiments(adata, [(experiment, genesets)], entry, min_n, verbose, dry_run, cells)[0]
+
+
+def _ucell_experiments(
+    adata: ad.AnnData,
+    experiments: List[Tuple[Experiment, List[Geneset]]],
+    entry: H5adEntry,
+    min_n: int,
+    verbose: bool,
+    dry_run: bool,
+    cells: pd.DataFrame,
+) -> List[Dict]:
+    """Score several experiments on ``adata`` with UCell and write one sidecar catalog each.
+
+    The expensive step is ranking the genes of every cell, so the modules of
+    all experiments that share a cell type scope are scored together: the cells
+    of the scope are ranked once, however many catalogs apply.
 
     Args:
         adata: loaded AnnData (var_names already remapped to symbols if needed).
-        experiment: Experiment metadata from the geneset registry.
-        genesets: list of Geneset objects belonging to this experiment.
+        experiments: (Experiment, its Geneset list) pairs.
         entry: H5adEntry for the target dataset (carries duckdb_path etc.).
         min_n: minimum gene overlap required to score a module.
         verbose: if True, print per-module stats.
@@ -425,129 +441,104 @@ def _ucell_one_experiment(
             of its cell type scope only.
 
     Returns:
-        Result dict with keys ``catalog``, ``status`` (``ok``, ``dry-run``,
-        ``error``), ``n_rows``, and (on error) ``error``.
+        One result dict per experiment with keys ``catalog``, ``status`` (``ok``,
+        ``dry-run``, ``error``), ``n_rows``, and (on error) ``error``.
     """
-    catalog_id = experiment.experiment_id
-    print(f'\n  Experiment: {catalog_id}')
-
+    results: Dict[str, Dict] = {}
     var_names = set(adata.var_names)
-    gene_sets_dict, module_gene_counts, skipped_modules = _build_gene_sets_dict(
-        genesets, var_names, min_n
-    )
-    n_pairs = sum(len(genes) for genes in gene_sets_dict.values())
-    print(
-        f'  Network: {len(genesets)} modules '
-        f'({len(gene_sets_dict)} scoreable), {n_pairs:,} (module, gene) pairs'
-    )
-
-    if skipped_modules:
-        print(
-            f'  WARNING: {len(skipped_modules)} modules have <{min_n} genes in '
-            f'var_names and will be absent from UCell output: {skipped_modules}',
-            file=sys.stderr,
-        )
-
-    if not gene_sets_dict:
-        return {
-            'catalog': catalog_id,
-            'status': 'error',
-            'error': f'no scoreable modules (all below min_n={min_n})',
-            'n_rows': 0,
-        }
+    # unit key -> (experiment id, module name, genes, scope)
+    units: Dict[str, Tuple[str, str, List[str], Any]] = {}
+    for experiment, genesets in experiments:
+        catalog_id = experiment.experiment_id
+        print(f'\n  Experiment: {catalog_id}')
+        gene_sets_dict, _counts, skipped_modules = _build_gene_sets_dict(genesets, var_names, min_n)
+        n_pairs = sum(len(genes) for genes in gene_sets_dict.values())
+        print(f'  Network: {len(genesets)} modules ({len(gene_sets_dict)} scoreable), '
+              f'{n_pairs:,} (module, gene) pairs')
+        if skipped_modules:
+            print(f'  WARNING: {len(skipped_modules)} modules have <{min_n} genes in '
+                  f'var_names and will be absent from UCell output: {skipped_modules}', file=sys.stderr)
+        if not gene_sets_dict:
+            results[catalog_id] = {'catalog': catalog_id, 'status': 'error', 'n_rows': 0,
+                                   'error': f'no scoreable modules (all below min_n={min_n})'}
+            continue
+        for geneset in genesets:
+            if geneset.name in gene_sets_dict:
+                units[f'u{len(units)}'] = (catalog_id, geneset.name, gene_sets_dict[geneset.name],
+                                           module_scope(geneset))
 
     t_score = time.time()
-    scope_of_module = {gs.name: module_scope(gs) for gs in genesets if gs.name in gene_sets_dict}
     by_scope: Dict[tuple, List[str]] = {}
-    for name, scope in scope_of_module.items():
-        by_scope.setdefault(scope.key(), []).append(name)
-    long_parts: List[pd.DataFrame] = []
-    for scope_key, names in by_scope.items():
-        scope = scope_of_module[names[0]]
+    for unit_key, (_cat, _mod, _genes, scope) in units.items():
+        by_scope.setdefault(scope.key(), []).append(unit_key)
+    long_parts: Dict[str, List[pd.DataFrame]] = {}
+    failed: Dict[str, str] = {}
+    for scope_key, unit_keys in by_scope.items():
+        scope = units[unit_keys[0]][3]
         scoped_cells = cells[scope.cell_mask(cells['group']).to_numpy()]
+        label = 'all cells' if scope.groups is None else f'groups {sorted(scope.groups)}'
         if scoped_cells.empty:
-            print(f'  - {len(names)} module(s) ({"/".join(scope.celltypes)}): no cell of that '
+            print(f'  - {len(unit_keys)} module(s) ({"/".join(scope.celltypes)}): no cell of that '
                   f'cell type group, not scored')
             continue
-        label = 'all cells' if scope.groups is None else f'groups {sorted(scope.groups)}'
-        print(f'  scope {label}: {len(scoped_cells):,} cells, {len(names)} module(s)')
+        print(f'  scope {label}: {len(scoped_cells):,} cells, {len(unit_keys)} module(s) of '
+              f'{len({units[k][0] for k in unit_keys})} catalog(s)')
         in_scope = adata.obs_names.isin(scoped_cells['cell_name'])
         try:
-            scores_df = _run_ucell(adata[in_scope], {name: gene_sets_dict[name] for name in names})
+            scores_df = _run_ucell(adata[in_scope], {key: units[key][2] for key in unit_keys})
         except Exception as exc:
             message = str(exc).strip() or repr(exc)
             error = f'{type(exc).__name__}: {message}'
             print(f'  ERROR: UCell scoring failed: {error}', file=sys.stderr)
-            return {
-                'catalog': catalog_id,
-                'status': 'error',
-                'error': error,
-                'n_rows': 0,
-            }
+            for key in unit_keys:
+                failed[units[key][0]] = error
+            continue
         if verbose:
-            for col in scores_df.columns:
-                vals = scores_df[col].dropna()
-                if len(vals) == 0:
-                    print(f'    {col}: all-NaN')
-                    continue
-                print(
-                    f'    {col}: n={len(vals)}  '
-                    f'range=[{vals.min():.3f}, {vals.max():.3f}]  '
-                    f'mean={vals.mean():.3f}'
-                )
-        else:
-            print(f'  Scored {len(scores_df.columns)} modules × {len(scores_df):,} cells')
+            for key in scores_df.columns:
+                values = scores_df[key].dropna()
+                print(f'    {units[key][0]}/{units[key][1]}: n={len(values)}  '
+                      + (f'range=[{values.min():.3f}, {values.max():.3f}]  mean={values.mean():.3f}'
+                         if len(values) else 'all-NaN'))
         scores_reset = scores_df.reset_index()
-        first_col = scores_reset.columns[0]
-        scores_reset = scores_reset.rename(columns={first_col: 'cell_name'})
-        long_parts.append(scores_reset.melt(id_vars='cell_name', var_name='module', value_name='score'))
+        scores_reset = scores_reset.rename(columns={scores_reset.columns[0]: 'cell_name'})
+        long = scores_reset.melt(id_vars='cell_name', var_name='unit', value_name='score').dropna(subset=['score'])
+        long['catalog'] = long['unit'].map(lambda key: units[key][0])
+        long['module'] = long['unit'].map(lambda key: units[key][1])
+        for catalog_id, part in long.groupby('catalog'):
+            long_parts.setdefault(str(catalog_id), []).append(part[['cell_name', 'module', 'score']])
     print(f'  UCell finished in {time.time() - t_score:.1f}s')
 
-    if not long_parts:
-        if not dry_run:
-            removed = delete_scores(entry.duckdb_path, 'ucell', catalog_id)
-            if removed:
-                print(f'  removed {removed} stale rows of source=ucell catalog={catalog_id}')
-        return {
-            'catalog': catalog_id,
-            'status': 'error',
-            'error': 'no cell of the dataset belongs to the cell type scope of the catalog',
-            'n_rows': 0,
-        }
-    long_df = pd.concat(long_parts, ignore_index=True).dropna(subset=['score'])
-
-    n_before = len(long_df)
-    long_df = long_df.merge(cells[['cell_id', 'cell_name']], on='cell_name', how='inner')
-    n_dropped = n_before - len(long_df)
-    if n_dropped:
-        print(
-            f'  WARNING: {n_dropped} rows dropped in cell_name→cell_id join '
-            f'(obs_names / __cells mismatch)',
-            file=sys.stderr,
-        )
-
-    long_df = long_df[['cell_id', 'module', 'score']]
-
-    if dry_run:
-        print(f'  (dry-run) would write {len(long_df):,} rows for {catalog_id}')
-        return {
-            'catalog': catalog_id,
-            'status': 'dry-run',
-            'n_rows': len(long_df),
-        }
-
-    n_written = upsert_scores(
-        duckdb_path=entry.duckdb_path,
-        source='ucell',
-        catalog=catalog_id,
-        rows=long_df,
-    )
-    print(f'  Wrote {n_written:,} rows → source=ucell catalog={catalog_id}')
-    return {
-        'catalog': catalog_id,
-        'status': 'ok',
-        'n_rows': n_written,
-    }
+    for experiment, _genesets in experiments:
+        catalog_id = experiment.experiment_id
+        if catalog_id in results:
+            continue
+        if catalog_id in failed:
+            results[catalog_id] = {'catalog': catalog_id, 'status': 'error', 'error': failed[catalog_id],
+                                   'n_rows': 0}
+            continue
+        if catalog_id not in long_parts:
+            if not dry_run:
+                removed = delete_scores(entry.duckdb_path, 'ucell', catalog_id)
+                if removed:
+                    print(f'  removed {removed} stale rows of source=ucell catalog={catalog_id}')
+            results[catalog_id] = {'catalog': catalog_id, 'status': 'error', 'n_rows': 0,
+                                   'error': 'no cell of the dataset belongs to the cell type scope of the catalog'}
+            continue
+        long_df = pd.concat(long_parts[catalog_id], ignore_index=True)
+        n_before = len(long_df)
+        long_df = long_df.merge(cells[['cell_id', 'cell_name']], on='cell_name', how='inner')
+        if n_before - len(long_df):
+            print(f'  WARNING: {n_before - len(long_df)} rows dropped in cell_name→cell_id join '
+                  f'(obs_names / __cells mismatch)', file=sys.stderr)
+        long_df = long_df[['cell_id', 'module', 'score']]
+        if dry_run:
+            print(f'  (dry-run) would write {len(long_df):,} rows for {catalog_id}')
+            results[catalog_id] = {'catalog': catalog_id, 'status': 'dry-run', 'n_rows': len(long_df)}
+            continue
+        n_written = upsert_scores(duckdb_path=entry.duckdb_path, source='ucell', catalog=catalog_id, rows=long_df)
+        print(f'  Wrote {n_written:,} rows → source=ucell catalog={catalog_id}')
+        results[catalog_id] = {'catalog': catalog_id, 'status': 'ok', 'n_rows': n_written}
+    return [results[experiment.experiment_id] for experiment, _ in experiments]
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -675,20 +666,11 @@ def main() -> int:
     cells = cell_type_groups(entry, h5ad_root)
     print(f'  cell type groups: {group_summary(cells)}')
 
-    all_results = []
-    for exp_id, genesets in by_experiment.items():
-        experiment = experiments_by_id[exp_id]
-        result = _ucell_one_experiment(
-            adata=adata,
-            experiment=experiment,
-            genesets=genesets,
-            entry=entry,
-            min_n=args.min_n,
-            verbose=args.verbose,
-            dry_run=args.dry_run,
-            cells=cells,
-        )
-        all_results.append(result)
+    all_results = _ucell_experiments(
+        adata=adata,
+        experiments=[(experiments_by_id[exp_id], genesets) for exp_id, genesets in by_experiment.items()],
+        entry=entry, min_n=args.min_n, verbose=args.verbose, dry_run=args.dry_run, cells=cells,
+    )
 
     # Summary
     print(f'\n[summary for {entry.db_id}]')

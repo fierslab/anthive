@@ -19,12 +19,13 @@ FROZEN_IDS = [
     'cells.overlap',
     'design.designation', 'design.replicate_unit', 'design.replicates_per_group', 'design.disease_basis',
     'access.level', 'access.controlled', 'access.licence',
+    'scores.modules_complete',
 ]
 
 
 def test_check_ids_are_frozen():
     assert sorted(ingest_check.check_ids()) == sorted(FROZEN_IDS)
-    assert len(set(FROZEN_IDS)) == 33
+    assert len(set(FROZEN_IDS)) == 34
 
 
 def test_every_check_has_a_docstring_and_a_family():

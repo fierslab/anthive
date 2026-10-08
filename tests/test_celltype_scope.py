@@ -451,3 +451,104 @@ def test_fleet_cpu_split_and_plan(tmp_path):
     assert sorted(record['experiments']) == ['Syn/Everywhere', 'Syn/Micro', 'Syn/Panel']
     assert record['detail']['Syn/Micro']['cells'] == 20 and record['detail']['Syn/Everywhere']['cells'] == 40
     assert record['groups'] == {'microglia': 20, 'astrocyte': 10, 'unmapped': 10}
+
+
+# ---------------------------------------------------------------------------
+# ant-facet-test-modules defaults, fleet catalogs filter, ingest check
+# ---------------------------------------------------------------------------
+
+def test_module_facet_tests_default_to_scanpy_and_ucell():
+    assert load_tool('ant-facet-test-modules').DEFAULT_SOURCES == ('geneset', 'ucell')
+
+
+def test_applicable_experiments_counts_modules_and_cells(tmp_path):
+    store, entry, _, _ = build_dataset(tmp_path)
+    registry = scan(build_genesetstore(tmp_path))
+    cells = celltype_scope.cell_type_groups(entry, store)
+    applicable = celltype_scope.applicable_experiments(registry, cells['group'], ['human'])
+    assert applicable == {'Syn/Micro': {'modules': 1, 'of': 1, 'cells': 20},
+                          'Syn/Everywhere': {'modules': 1, 'of': 1, 'cells': 40},
+                          'Syn/Panel': {'modules': 1, 'of': 1, 'cells': 40}}
+    assert celltype_scope.applicable_experiments(registry, cells['group'], ['mouse']) == {}
+    only_astro = celltype_scope.applicable_experiments(registry, pd.Series(['astrocyte'] * 5), ['human'])
+    assert set(only_astro) == {'Syn/Everywhere', 'Syn/Panel'}
+
+
+def test_fleet_catalogs_filter_limits_the_plan(tmp_path, monkeypatch):
+    fleet = load_tool('ant-score-fleet')
+    store, entry, _, _ = build_dataset(tmp_path)
+    (entry.md_path.parent / 'Syn.h5ad.mus').write_text('organism=human\nexperimental_system=post_mortem_tissue\n')
+    geneset_root = build_genesetstore(tmp_path)
+    arguments = SimpleNamespace(h5adstore_root=str(store), genesetstore_root=str(geneset_root), only='SY1/SYN',
+                                catalogs='Syn/Micro')
+    plan = fleet.build_plan(arguments)
+    assert [record['experiments'] for record in plan] == [['Syn/Micro']] and plan[0]['stale'] == []
+    arguments.catalogs = 'Other/Catalog'
+    assert fleet.build_plan(arguments)[0]['skip_reason'] == 'none of the requested catalogs applies'
+
+
+def make_check_context(entry, store, **overrides):
+    values = dict(md={}, annotation={'organism': 'human', 'experimental_system': 'post_mortem_tissue'}, api={},
+                  db_id=entry.db_id, duckdb=entry.duckdb_path, md_path=entry.md_path, h5ad_path=entry.h5ad_path,
+                  group_dir=entry.md_path.parent, group_id=entry.group_id, file_id=entry.file_id,
+                  basename=entry.stem, store_root=store)
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_scores_check_reports_missing_sets_and_passes_when_complete(tmp_path, monkeypatch):
+    from ingest_check import PASS, SKIP, WARN
+    from ingest_check import checks_scores
+    store, entry, _, _ = build_dataset(tmp_path)
+    registry = scan(build_genesetstore(tmp_path))
+    monkeypatch.setattr(celltype_scope, 'default_registry', lambda: registry)
+    ctx = make_check_context(entry, store)
+    outcome = checks_scores.scores_modules_complete(ctx)
+    assert outcome.status == WARN and 'no scores sidecar' in outcome.summary
+    for source in ('geneset', 'ucell'):
+        for catalog in ('Syn/Micro', 'Syn/Everywhere'):
+            upsert_scores(entry.duckdb_path, source, catalog, sidecar_rows(catalog, source))
+    outcome = checks_scores.scores_modules_complete(ctx)
+    assert outcome.status == WARN and set(outcome.details['missing']) == {'geneset::Syn/Panel', 'ucell::Syn/Panel'}
+    for source in ('geneset', 'ucell'):
+        upsert_scores(entry.duckdb_path, source, 'Syn/Panel', sidecar_rows('Syn/Panel', source))
+    assert checks_scores.scores_modules_complete(ctx).status == PASS
+    secondary = make_check_context(entry, store, md={'is_secondary': True})
+    assert checks_scores.scores_modules_complete(secondary).status == SKIP
+    mouse = make_check_context(entry, store, annotation={'organism': 'mouse'})
+    assert checks_scores.scores_modules_complete(mouse).status == SKIP
+
+
+def test_missing_scores_lists_source_catalog_pairs():
+    from ingest_check import checks_scores
+    applicable = {'A/B': {'modules': 1, 'of': 1, 'cells': 3}, 'C/D': {'modules': 1, 'of': 1, 'cells': 3}}
+    present = {('geneset', 'A/B'), ('ucell', 'A/B'), ('geneset', 'C/D')}
+    assert checks_scores.missing_scores(applicable, present) == ['ucell::C/D']
+    assert checks_scores.missing_scores(applicable, present, sources=('geneset',)) == []
+
+
+def test_ant_ucell_ranks_the_cells_of_a_scope_once_for_all_catalogs(tmp_path, monkeypatch):
+    """Ranking dominates the cost: catalogs sharing a scope are scored in one pass, with the same values."""
+    anndata = pytest.importorskip('anndata')
+    tool = load_tool('ant-ucell')
+    store, entry, cell_names, expression = build_dataset(tmp_path)
+    registry = scan(build_genesetstore(tmp_path))
+    cells = celltype_scope.cell_type_groups(entry, store)
+    adata = anndata.AnnData(X=expression.astype('float32'), obs=pd.DataFrame(index=cell_names),
+                            var=pd.DataFrame(index=[f'GENE{i}' for i in range(N_GENES)]))
+    pairs = [(registry.get_experiment(name), [g for g in registry.list_genesets() if g.experiment.experiment_id == name])
+             for name in ('Syn/Micro', 'Syn/Everywhere', 'Syn/Panel')]
+    calls = []
+    original = tool._run_ucell
+    monkeypatch.setattr(tool, '_run_ucell', lambda data, sets: calls.append((data.n_obs, len(sets))) or original(data, sets))
+    results = tool._ucell_experiments(adata, pairs, entry, 3, False, False, cells)
+    assert [r['status'] for r in results] == ['ok', 'ok', 'ok']
+    assert sorted(calls) == [(20, 1), (40, 2)]            # microglia once; all cells once for Everywhere + Panel
+    joint = read_scores(entry.duckdb_path, source='ucell')
+    for name in ('Syn/Micro', 'Syn/Everywhere', 'Syn/Panel'):
+        alone = original(adata[celltype_scope.module_scope(
+            registry.genesets[f'{name}/mod']).cell_mask(cells['group']).to_numpy()],
+            {'mod': [f'GENE{g}' for g in range({'Syn/Micro': 0, 'Syn/Everywhere': 10, 'Syn/Panel': 20}[name],
+                                                {'Syn/Micro': 6, 'Syn/Everywhere': 16, 'Syn/Panel': 26}[name])]})
+        stored = joint[joint['catalog'] == name].sort_values('cell_id')['score'].to_numpy()
+        np.testing.assert_allclose(stored, alone['mod'].to_numpy())
