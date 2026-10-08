@@ -194,6 +194,11 @@ class GeneStatsIndex:
             return None
         return _row_to_stats(state.df.iloc[idx], gene)
 
+    def frame(self) -> Optional[pd.DataFrame]:
+        """The loaded frame (``dataset``, ``gene``, ``n_cells``, ``pct_nonzero``, ...), None when no file is
+        loaded. The object changes on every ``load``, so ``id(frame)`` identifies a snapshot. Do not modify."""
+        return self._state.df
+
     def is_fresh(self, db_id: str) -> bool:
         """Whether ``db_id``'s rows still match its source files."""
         return self._state.freshness.is_fresh(db_id)

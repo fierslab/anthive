@@ -1,0 +1,16 @@
+id: facet-low-detection
+title: Low detection
+summary: A gene found in fewer than 5 percent of the cells of a cell type gets a low-detection pill, because its effects are fragile.
+related:
+- facet-modality
+- facet-technical-genes
+terms:
+- low-detection
+aliases:
+- low detection
+- detection
+- dropout
+- percent of cells expressing
+body_html: |
+  <p>When a gene has a count in only a few cells, a donor's pseudobulk value rests on very few molecules. Effects on such genes are noisy, depend on dropout and ambient RNA, and are the first to change when the data are processed differently. The views flag a gene as <a href="#glossary-low-detection">low detection</a> when, in the cell type and scope of the result, a median of fewer than 5 percent of the cells carry a count.</p>
+  <p>The number comes from the same gene statistics as the expression panel: for each facet scope and cell type group, the median of the percent of cells expressing the gene over the datasets that contain that cell type only (mixed datasets are not summarised, reanalyses are left out). It is a property of the gene in that cell type, not of one cohort. The pill does not mean the effect is wrong, only that it deserves a second look; nuclei data detect fewer cytoplasmic transcripts than cell data, so read the pill together with the modality.</p>

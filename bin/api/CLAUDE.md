@@ -159,6 +159,15 @@ and `lib/config.py` (anthive.yaml loader).
   `by_scope`; `/facets/{f}` and `/module-variability` filter by scope. Replication fields: `effect_gate_passed`, `median_logFC`,
   `effect_gate_tau`, `r_significant`, `k_treat`. Never pool values, cells or genes across scopes in a new endpoint (`_facet_scope_of`).
 
+- **Views API** (2.45, `doc/DESIGN_facet_testing.md` "Views API"): `lib/facet_module_results.py` (`ModuleResults`, composition over
+  the shared `FacetResults`, same single flight and cache bounds; warmed after the gene families in `_warm_facet_results`)
+  serves `/facets/{f}/modules/top` and `/genesets/{study}/{experiment}/{name}/facet-effects`; `/facets/{f}/effects/overview`,
+  `/genes/{g}/detection`, the forest, calls and paging live on the gene routes. Keep these cheap: the module tables are one
+  pass over the small module parquets, the detection table is one groupby over `gene_stats_index` (`_detection_tables`,
+  rebuilt per index snapshot, never a live scan), and the context flags read the geneset registry and the MGI ortholog table
+  (`_gene_context`, cleared by `_build_score_index`). Gene cards are shared cached objects: add per-request fields on a copy
+  (`_with_gene_context`). Modality is derived on the fly (`lib/modality.py`), not stored in the metadata cache.
+
 - **Lineage and secondaries** (unreleased): dataset metadata carries
   `designation`, `reanalysis_of`, `donor_group`, `has_donor_uid`
   (`_lineage_fields`); `GET /donor-groups` lists the groups. Pooled or

@@ -1,0 +1,16 @@
+id: facet-modality
+title: Nuclei and cells
+summary: Single-nucleus and single-cell datasets detect genes differently, so each dataset row says which it is; xenograft microglia are sorted live cells.
+related:
+- facet-low-detection
+terms:
+- modality
+aliases:
+- modality
+- nuclei
+- single nucleus
+- single cell
+- snRNA-seq
+body_html: |
+  <p>Most post-mortem brain datasets here are single-nucleus (nuclei) data; many cell-based datasets, and most xenograft microglia, are single-cell (whole cells). Nuclei carry more nuclear and intronic transcripts and fewer mitochondrial and cytoplasmic ones, and whole cells lose stress-sensitive cell types in dissociation. A difference in how often a gene is detected between a nuclei dataset and a cells dataset is therefore often technical and should not be read as biology.</p>
+  <p>Every dataset row carries a modality tag taken from the dataset annotation (<code>suspension_type</code>, or the technology name when that is missing): nuclei, cells or not recorded. Human microglia in a mouse host are mostly isolated as sorted live cells, so a xenograft dataset recorded as cells is marked that way, and the xenograft block is never combined with the post-mortem block.</p>

@@ -3,6 +3,7 @@ title: Replication across cohorts
 summary: A gene counts as replicated when its effect shows in the same direction in at least 2 independent cohorts according to a partial conjunction test (r-value below 0.05) and the effect-size gate passes.
 terms:
 - anchor-unit
+- forest-plot
 - k-of-m
 - partial-conjunction
 - r-value
@@ -13,3 +14,5 @@ aliases:
 body_html: |
   <p>A gene is called <strong>replicated</strong> for one facet and cell type group when its <a href="#glossary-r-value">r-value</a> is below 0.05. The r-value comes from a <a href="#glossary-partial-conjunction">partial conjunction test</a> of "changes in the same direction in at least 2 of the m cohorts" (Benjamini and Heller 2008): the smallest cohort p value is set aside, the remaining ones are combined by Simes' method, the result is doubled for the two directions and adjusted over all genes of the group. Each cohort contributes one <a href="#glossary-anchor-unit">anchor unit</a>, so datasets that share donors cannot count twice. Replication is only counted within one <a href="#glossary-scope">scope</a>: human post-mortem and xenograft results are never combined.</p>
   <p>r below 0.05 means that among all genes listed as replicated about 5 percent are expected to be false entries. It is a statement about the list, not a probability for one gene, and it does not say how large the effect is. The badge names the two cohorts that carry the result. <a href="#glossary-k-of-m">m</a> counts every cohort that tested the gene, including small ones that could not detect the effect, and the badge says how many of them have fewer than 20 donors.</p>
+  <p>The <a href="#glossary-forest-plot">forest</a> of a result shows one row per cohort, the counted anchor unit, with its estimate and a 95 percent confidence interval from the same model (the interval is stored by the test, not reconstructed). Other units of the cohort, such as single regions, are folded under "more units" and marked "not counted"; a dataset outside the cohort table sits in a group called unassigned and does not count. The rows you see as counted are exactly the cohorts behind m. A cohort whose model looks inflated (lambda above 1.3) says so on its row. There is no separate "small effect" call: a result is either replicated or it is not, and the size of the change is shown by the effect filter.</p>
+  <p>The anchor of a cohort is the unit with the most direct cell type definition and, for cohorts that sequenced several regions, a pooled unit over the regions. When the anchor is a nuclei dataset and another cohort used whole cells, the forest names the modality of each row: nuclei and cells detect genes differently (see <a href="#facet-modality">Nuclei and cells</a>).</p>

@@ -17,14 +17,20 @@ import threading
 import time
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import pytest
 
 import config
 import facet_results as fr
+import facet_rules
 import facet_scopes
+import gene_classes
+import gene_detection
+from facet_module_results import (DIRECTIONLESS_NOTE, ModuleResults, directionless_reason, module_card_forest,
+                                  quality_flags)
+from modality import modality_of_metadata
 from facet_aliases import canonical_facet
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -626,13 +632,43 @@ _SERVE_WANTED = {
     'get_facet_tests_across_datasets', '_tested_facet', '_facet_test_datasets',
     'get_facet_recurring_genes', 'get_facet_gene_effects', 'get_gene_facet_effects', 'get_facet_cohorts',
     '_scope_param', '_facet_scope_of', '_SCOPE_QUERY_DESC', '_with_help', '_FACET_HELP_TOPICS', '_no_scope_reason',
+    # 2.45: gene detection, modality, module and gene set views
+    '_module_results_instance', '_module_results', '_DETECTION_STATE', '_DETECTION_BUILD_LOCK', '_detection_tables',
+    '_detection_lookup', '_with_gene_context', '_gene_context', '_context_gene_flags', '_GENE_CONTEXT_STATE', '_forest_mode', '_FOREST_QUERY_DESC', 'get_gene_detection', 'get_facet_effects_overview',
+    'get_facet_top_modules', '_MODULE_INFO_CACHE', '_module_info', 'get_geneset_facet_effects',
 }
 
 
+class _FakeStatsCache:
+    @staticmethod
+    def fingerprint(sha: Optional[str], mtime: float) -> Optional[str]:
+        return f'{sha}:{mtime}' if sha else None
+
+
+class _FakeStatsIndex:
+    """Stand-in for ``GeneStatsIndex``: a frame (``dataset``, ``gene``, ``n_cells``, ``pct_nonzero``)."""
+
+    def __init__(self, rows: Optional[List[Dict[str, Any]]] = None):
+        self._frame = pd.DataFrame(rows) if rows else None
+
+    def frame(self):
+        return self._frame
+
+    def is_fresh(self, db_id: str) -> bool:
+        return True
+
+    def lookup(self, db_id: str, gene: str, case_sensitive: bool = False):
+        if self._frame is None:
+            return None
+        hit = self._frame[(self._frame['dataset'] == db_id) & (self._frame['gene'].str.lower() == gene.lower())]
+        return None if hit.empty else {'gene': gene, 'n_cells': int(hit.iloc[0]['n_cells']),
+                                       'pct_nonzero': float(hit.iloc[0]['pct_nonzero'])}
+
+
 class _FakeRegistry:
-    def __init__(self, store: Path):
+    def __init__(self, store: Path, extra_databases: Sequence[str] = ()):
         self.data_folder = store.resolve()
-        self.databases = {'G1/ds1': 'x', 'G2/ds2': 'x', 'G3/ds3': 'x', 'M1/mus': 'x'}
+        self.databases = {'G1/ds1': 'x', 'G2/ds2': 'x', 'G3/ds3': 'x', 'M1/mus': 'x', **{db: 'x' for db in extra_databases}}
         self._db_md_bases = {}
         for db_id in self.databases:
             group, stem = db_id.split('/')
@@ -641,18 +677,28 @@ class _FakeRegistry:
             md.write_text('---\nid: x\n---\n')
             self._db_md_bases[db_id] = md
         self._db_extra = {}
+        self.gene_stats_index = _FakeStatsIndex()
+        self.gene_stats_cache = type('Cache', (), {'get': staticmethod(lambda *args: None)})()
         self.metadata_cache = {'G1/ds1': {'title': 'Dataset one', 'sha256': 'abc123'},
                                'G2/ds2': {'title': 'Dataset two'},
                                'M1/mus': {'title': 'Mouse dataset', 'facet_scope': 'xenograft_human_in_mouse'}}
 
 
-@pytest.fixture
-def serve(results):
+def build_serve(results: Path, geneset_registry: Any = None, stats_rows: Optional[List[Dict[str, Any]]] = None,
+                metadata: Optional[Dict[str, Dict[str, Any]]] = None, extra_databases: Sequence[str] = ()):
+    """A TestClient over the facet routes extracted from ant-serve (see ``_SERVE_WANTED``), with a fake registry.
+
+    ``geneset_registry`` stands in for the geneset store, ``stats_rows`` for the gene statistics index (dicts with
+    ``dataset``, ``gene``, ``n_cells``, ``pct_nonzero``), ``metadata`` is merged into the registry metadata cache.
+    """
     from fastapi import FastAPI, HTTPException, Query, Response
     from fastapi.testclient import TestClient
 
     store = results.parent
-    registry = _FakeRegistry(store)
+    registry = _FakeRegistry(store, extra_databases)
+    registry.gene_stats_index = _FakeStatsIndex(stats_rows)
+    for db_id, extra in (metadata or {}).items():
+        registry.metadata_cache.setdefault(db_id, {}).update(extra)
     tree = ast.parse(SERVE_PATH.read_text())
     body = []
     for node in tree.body:
@@ -667,14 +713,23 @@ def serve(results):
         'app': app, 'registry': registry, 'FacetResults': fr.FacetResults, 'facet_results_lib': fr,
         'get_config': lambda: {}, 'get_facet_results_dir': config.get_facet_results_dir, 'os': os,
         'log': logging.getLogger('test-facet-results'), 'Lock': Lock, 'Path': Path, 'pd': pd,
-        'facet_scopes_lib': facet_scopes,
+        'facet_scopes_lib': facet_scopes, 'gene_detection_lib': gene_detection, 'gene_classes_lib': gene_classes, 'facet_rules_lib': facet_rules,
+        'ModuleResults': ModuleResults, 'quality_flags': quality_flags, 'module_card_forest': module_card_forest, 'DIRECTIONLESS_NOTE': DIRECTIONLESS_NOTE,
+        'directionless_reason': directionless_reason, 'modality_of_metadata': modality_of_metadata,
+        'GeneStatsCache': _FakeStatsCache, 'geneset_registry': geneset_registry, 'threading': threading,
         'canonical_facet': canonical_facet, 'Response': Response, 'HTTPException': HTTPException, 'Query': Query,
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     client = TestClient(app)
     client.registry = registry
+    client.namespace = namespace
     return client
+
+
+@pytest.fixture
+def serve(results):
+    return build_serve(results)
 
 
 def test_serve_registers_routes_in_a_safe_order():

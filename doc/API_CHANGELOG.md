@@ -29,6 +29,92 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.45.0 (unreleased)
+
+Release summary. The data behind the new gene, gene set and facet views: forest rows with limma intervals and the
+calls a view draws, module (gene set) replication across cohorts with the member-gene counts next to it, an
+uncapped and paged top list, a one-call facet overview, the low-detection pill and the modality (nuclei or cells) of
+every dataset. Minor bump, additive; the facet statistics are unchanged.
+
+New endpoints:
+
+- `GET /genesets/{study}/{experiment}/{name}/facet-effects` (`facet` comma list, `scope`, `cell_type`,
+  `exclude_secondary`, `include_units`, `forest`): the module result of one gene set per facet and scope next to the member genes
+  that replicate for the same facet. Shape: `{geneset_id, catalog, module, display_name, description, organism, n_genes,
+  celltypes, role, direction, quality: {mt_fraction, ribosomal_fraction, mt_dominated, ribosomal_dominated,
+  quality_sensitive}, directionless, directionless_reason, directionless_note, member_match, scored_in: [{db_id, title,
+  facet_scope, cohort_label, cell_types, groups, variants, facets, has_counts, counted, modality, n_donors}], scope,
+  facets: {facet: {facet, scope, module, members}}, by_scope (only without `scope`), effect_gate: {std_effect: 0.2},
+  help_topics}`. `module` is `{catalog, module, module_key, facet, scope, cell_type, replication: [{celltype_group,
+  cl_id, labels, primary: {method, source, label}, variants: [variant], ab: {disagree, reason} | null}], n_units, units}`;
+  a `variant` is `{method, source, label, basis, forest, r_value, p_pc, k, m, r_direction, replicated, call, nt_label,
+  gate, effect_gate_passed, effect_gate_cohorts, n_cohorts_ge_gate, median_std_effect, median_estimate, agreement,
+  r_cohorts, n_small, small_cohorts, k_over_m, cohorts_label, strict: null}`. `members` is `{facet, scope, scopes,
+  n_members, groups: {celltype_group: {n_members, n_in_data, n_tested, n_replicated, n_up, n_down, n_effect_gate,
+  n_strict, genes_up, genes_down, genes_gate, genes: [{gene, r_value, direction, median_logFC, k, m,
+  effect_gate_passed, strict}]}}}`, never truncated; null when the geneset store has no such set. Module
+  replication uses the same partial conjunction as genes (Simes, u = 2) on the permutation p values of the donor-level
+  scores, BH over the modules of one (scope, facet, cell type group, method, source) family; the effect filter is a
+  signed standardised effect of at least 0.2 in 2 cohorts; there is no strict tier (`strict` null). The view variant
+  is the pseudobulk of counts (B) where the module has one, else the mean of per-cell scores (A: UCell, then
+  score_genes); `ab.disagree` is true only for opposite directions with one variant replicated or both effects at
+  least 0.2. `include_units` (default false) adds the flat unit list. A variant `forest` row has the cohort row fields of a gene forest
+  with `estimate`, `ci_low`, `ci_high`, `std_effect`, `p_param`, `q_param`, `p_perm`, `q_perm` and `has_counts` in place of the
+  log fold change fields; `forest` (`full` | `anchors` | `none`, default `anchors` here) sets the detail as for genes.
+- `GET /facets/{facet}/modules/top` (`cell_type`, `n`, `offset`, `effect_gate`, `include_not_replicated`, `catalog`,
+  `exclude_secondary`, `scope`): modules ranked by r-value, then k, agreement and the standardised effect. Shape
+  `{facet, scope, scopes, cell_type, celltype_group, labels, cohorts_in_cell_type, n_modules_in_family, n_replicated,
+  n_effect_gate, offset, n_matching, n_returned, has_more, cell_types: [{celltype_group, n_cohorts, n_modules_in_family,
+  n_replicated, n_effect_gate, ...}], rows, effect_gate, help_topics}`; a row is the variant fields above plus
+  `geneset_id, catalog, module, variant_label, other_variants, ab, quality_sensitive, directionless, n_genes`.
+- `GET /facets/{facet}/effects/overview` (`n`, `scope`, `exclude_secondary`): the simplified facet view in one call.
+  `{facet, scope, scopes, headline: {celltype_group, cohorts, n_genes_in_family, n_replicated, n_effect_gate, n_strict,
+  strict_genes, effect_gate_unit}, cell_types: [{celltype_group, cl_id, n_cohorts, n_genes_in_family, n_replicated,
+  n_effect_gate, n_strict, n_assigned, genes: [{gene, r_value, direction, median_logFC, k, m, effect_gate_passed,
+  strict, also_in, detection, low_detection}]}], quiet_groups: [{celltype_group, n_cohorts, counts, low_power}],
+  n_genes_unique}`. A gene replicated in several groups is listed once, in the group where it is strongest.
+- `GET /genes/{gene}/detection`: `{gene, low_detection_pct: 5, min_cells: 50, n_candidates, n_missing, partial,
+  summary: [{scope, celltype_group, n_datasets, pct_median, pct_min, pct_max, n_cells, low_detection}], datasets:
+  [{db_id, title, scope, celltype_group, cell_type, n_cells, pct, modality, modality_note, technology, mean, median_nonzero, q10_nonzero, q90_nonzero, rank_mean}]}` from the
+  precomputed gene statistics and the per-gene cache (never a live scan).
+
+Changed (additive):
+
+- Gene cards (`/facets/{facet}/effects`, `/genes/{gene}/facet-effects`): every replication entry adds `forest`
+  (one row per cohort: `{cohort, cohort_label, cohort_display, counted, in_m, small, anchor, more_units, n_more_units}`;
+  `anchor` is a slim row `{cohort_label, db_id, title, cell_type, celltype_source, pooled, anchor_counted, n_donors,
+  n_donors_ref, n_donors_test, small_sample, logFC, ci_low, ci_high (limma, 5 decimals), p_value, q_value, lambda_gc,
+  inflated, analysis_level, replicate_unit, modality, modality_note, not_counted_reason}` and `more_units` holds folded
+  units as `{db_id, title, cell_type, celltype_source, anchor_counted, n_donors, logFC, ci_low, ci_high, q_value,
+  modality, not_counted_reason}`; counted cohorts first, the rest (secondary datasets, datasets outside the cohort table,
+  shown as `unassigned`) after; the counted rows are the cohorts behind `m`), the calls `call` (`replicated` |
+  `not_replicated` | `not_tested`), `nt_label` (`1 cohort` or `not tested`), `gate`, `strict`, `k_over_m`, `cohorts_label`
+  (`3/4 cohorts, 1 small`), `small_cohorts`, `detection` (`{pct_median, n_datasets, low_detection}` or null) with
+  `low_detection`, and `gene_flags` (the card's flags plus `foreign_lineage_marker` where the gene is a marker of a
+  non-microglial panel and the group is myeloid; the card's own `gene_flags` add `no_mouse_ortholog` for a xenograft
+  scope). Both context flags are informational. New `forest` query parameter (`full` | `anchors` | `none`): `/facets/{facet}/effects`
+  defaults to `full`, `/genes/{gene}/facet-effects` (the all-facets payload) to `anchors` (folded units left out,
+  `n_more_units` kept). `anchors` rows keep the 2.44 fields and add `ci_low`, `ci_high`, `lambda_gc`, `inflated`,
+  `small_sample`, `modality`. Unit cards add `anchor_counted`, `cohort_display`, `modality`, `modality_note`,
+  `small_sample`. The word "small" is not a call.
+- `GET /facets/{facet}/effects/top`: `n` has no practical cap (was 500; up to 100000), new `offset`, `effect_gate`
+  and `strict` filters (rows also carry `gene_flags` with the context flags); the response adds `headline` (`n_replicated`, `n_effect_gate`, `n_strict`, `strict_genes`,
+  `n_genes_in_family`, `cohorts`, `effect_gate_unit`), `offset`, `n_matching`, `n_returned`, `has_more`; rows add
+  `n_small`, `small_cohorts`, `detection`, `low_detection`; every entry of `cell_types` adds `n_genes_in_family`,
+  `n_replicated`, `n_effect_gate`, `n_strict`.
+- `GET /facets/{facet}/tests` rows add `modality`, `modality_note`, `cohort_display`; `GET /gene_stats_all` entries add
+  `modality`, `modality_note`, `suspension_type`, `technology`, `facet_scope`, `cell_type`.
+- Lambda per unit (`lambda_gc`, `inflated` above 1.3) was already served on unit cards; it is now also on every forest
+  row and anchor.
+- MCP: `facet_effects` prints the call, the forest with intervals, inflation, modality and the low-detection warning;
+  `facet_top_genes` takes `offset`, `effect_gate`, `strict` and has no row cap; new tools `module_facet_effects` (one
+  gene set across facets, with member-gene counts) and `facet_top_modules`.
+- Help: new topics `module-replication`, `facet-low-detection`, `facet-modality` (children of `facet-counting`), glossary
+  terms `forest-plot`, `low-detection`, `modality`; `facet-replication`, `facet-effect-size` and `facet-technical-genes`
+  describe the forest rows, the marks and the pill.
+- Caches: module tables and families are built single flight like the gene tables (`FAMILY_CACHE_ENTRIES` bound) and
+  warmed at start together with the detection table.
+
 ## 2.44.0 (2026-10-07)
 
 Release summary. Facet engine v3: facet scopes, ordinary-p partial-conjunction replication with an effect filter

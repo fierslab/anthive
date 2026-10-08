@@ -2,4 +2,4 @@
 Anthive shared library modules
 """
 
-__version__ = "2.44.0"  # keep equal to API_VERSION in bin/api/ant-serve (tests/test_version_sync.py)
+__version__ = "2.45.0"  # keep equal to API_VERSION in bin/api/ant-serve (tests/test_version_sync.py)

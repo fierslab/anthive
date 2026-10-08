@@ -1,0 +1,20 @@
+id: module-replication
+title: Gene sets (modules) across cohorts
+summary: A module replicates when its donor-level score changes in the same direction in at least 2 cohorts (r-value below 0.05), shown next to how many of its member genes replicate.
+related:
+- module-scores
+- facet-replication
+terms:
+- r-value
+- anchor-unit
+- forest-plot
+aliases:
+- module replication
+- gene set replication
+- geneset effects
+- module facet effects
+body_html: |
+  <p>A gene set (module) is tested the way a gene is. The module score of each cell is averaged per donor (the cell mean, variant A) or computed on the pseudobulk of raw counts (variant B, where the dataset has counts), and the donor scores are compared across the facet. Each dataset and cell type gives a p value from 10,000 label permutations. Across cohorts the same rule as for genes applies: one <a href="#glossary-anchor-unit">anchor unit</a> per cohort and cell type group, a partial conjunction of "changes in the same direction in at least 2 cohorts" (Simes), adjusted over the modules of one facet, cell type group, scope and variant. A module is <strong>replicated</strong> when its <a href="#glossary-r-value">r-value</a> is below 0.05.</p>
+  <p>The effect filter is separate and counts standardised effects: at least 2 cohorts with a change of 0.2 standard deviations of the donor-level score in the replicated direction. There is no strict tier for modules. The view shows the pseudobulk result where the module has one and the cell mean otherwise, and says which. It warns when the two point in opposite directions and one of them is replicated or both effects reach 0.2.</p>
+  <p>Next to the module result the gene set page counts the member genes that replicate for the same facet (r below 0.05 in the gene tests), with names and the subset that also passes the 10 percent filter. That count comes from the gene tests and does not depend on the module score, so a set can replicate as a module while few members do, or the reverse. Lists of associated genes (GWAS or MAGMA sets) are not programs that move together: a mean score is not suited to them and only the member counts are meaningful. Sets dominated by mitochondrial or ribosomal genes follow cell quality and are marked quality sensitive.</p>
+  <p>The page also says in which datasets the module was tested. A module is only scored and tested in cell types it is meant for, so a microglia set is absent from astrocyte results.</p>

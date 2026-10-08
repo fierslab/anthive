@@ -97,7 +97,13 @@ from facet_aliases import canonical_facet, is_deprecated_facet_column
 import facet_results as facet_results_lib
 import help_content
 import facet_scopes as facet_scopes_lib
+import gene_classes as gene_classes_lib
+import gene_detection as gene_detection_lib
+from facet_module_results import (DIRECTIONLESS_NOTE, ModuleResults, directionless_reason, module_card_forest,
+                                  quality_flags)
+import facet_rules as facet_rules_lib
 from facet_results import FacetResults
+from modality import modality_of_metadata
 import de_storage as lib_de_storage
 from geneset import (
     GenesetRegistry,
@@ -1923,7 +1929,7 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.44.0"
+API_VERSION = "2.45.0"
 API_VERSION_RELEASED = "2026-10-07"
 API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
 
@@ -4057,6 +4063,19 @@ def _facet_results() -> FacetResults:
         return _facet_results_reader
 
 
+_module_results_instance: Optional[ModuleResults] = None
+
+
+def _module_results() -> ModuleResults:
+    """The shared module replication layer over ``_facet_results()`` (its tables and families are cached there)."""
+    global _module_results_instance
+    reader = _facet_results()
+    with _facet_results_lock:
+        if _module_results_instance is None or _module_results_instance.reader is not reader:
+            _module_results_instance = ModuleResults(reader)
+        return _module_results_instance
+
+
 def _no_scope_reason(db_id: str, meta: Dict[str, Any]) -> Optional[str]:
     """Why a served dataset has no facet scope (``facet_scopes.no_scope_reason``), None when it has one."""
     if 'facet_scope' not in meta or meta.get('facet_scope') is not None:
@@ -4076,8 +4095,15 @@ def _warm_facet_results() -> None:
         pass
     started = time.monotonic()
     try:
-        built = _facet_results().warm(_facet_test_datasets())
+        datasets = _facet_test_datasets()
+        built = _facet_results().warm(datasets)
         log.info("facet results warm-up: %d replication families in %.1f s", built, time.monotonic() - started)
+        started = time.monotonic()
+        built = _module_results().warm(datasets)
+        log.info("module results warm-up: %d (facet, scope) families in %.1f s", built, time.monotonic() - started)
+        started = time.monotonic()
+        _detection_tables()
+        log.info("gene detection table warm-up in %.1f s", time.monotonic() - started)
     except Exception as exc:  # noqa: BLE001
         log.warning("facet results warm-up failed: %s", exc)
 
@@ -4792,6 +4818,12 @@ async def get_gene_stats_all(
             'is_secondary': meta.get('is_secondary') is True,
             'layer': layer,
             'served_from': served_from,
+            'facet_scope': meta.get('facet_scope'),
+            'cell_type': meta.get('cell_type'),
+            'suspension_type': meta.get('suspension_type'),
+            'technology': meta.get('technology'),
+            'modality': modality_of_metadata(meta)['modality'],
+            'modality_note': modality_of_metadata(meta)['note'],
             'stats': ordered,
         }
         return entry, hits, misses, writes, parquet_hits
@@ -12531,6 +12563,8 @@ def _build_score_index() -> None:
     <study>::<experiment>::<geneset> in obsnum, and build the bidirectional
     index. Cheap (one information_schema query per db).
     """
+    _MODULE_INFO_CACHE.clear()
+    _GENE_CONTEXT_STATE.clear()
     global _score_index_by_db, _score_index_by_geneset, _score_columns
     new_by_db: Dict[str, List[str]] = {}
     new_by_geneset: Dict[str, List[str]] = {}
@@ -13373,12 +13407,14 @@ def _facet_test_datasets() -> List[Dict[str, Any]]:
         except HTTPException:
             continue
         meta = registry.metadata_cache.get(db_id) or {}
+        tag = modality_of_metadata(meta)
         datasets.append({'db_id': db_id, 'group_folder': group_folder, 'stem': stem,
                          'title': meta.get('title') or db_id,
                          'group': (meta.get('collection') or {}).get('group') or group_folder,
                          'sha256': meta.get('sha256'),
                          'disease_basis': meta.get('disease_basis'),
                          'facet_scope': meta.get('facet_scope'),
+                         'modality': tag['modality'], 'modality_note': tag['note'],
                          'is_secondary': meta.get('is_secondary') is True})
     return datasets
 
@@ -13386,15 +13422,336 @@ def _facet_test_datasets() -> List[Dict[str, Any]]:
 
 
 
+# ── Gene detection (low-detection pill), modality, gene set views (2.45) ─────
+
+_DETECTION_STATE: Dict[str, Any] = {}
+_DETECTION_BUILD_LOCK = Lock()
+
+
+def _detection_tables() -> Dict[Tuple[str, str], "pd.DataFrame"]:
+    """Detection of every gene per (facet scope, cell type group) from the gene statistics index.
+
+    Built once per index snapshot (``lib/gene_detection.py``: median percent of cells expressing, over the
+    datasets whose whole content is that cell type); concurrent callers share one build. Empty when no index is loaded.
+    """
+    index = registry.gene_stats_index
+    frame = index.frame()
+    if frame is None:
+        return {}
+    candidates = gene_detection_lib.candidate_datasets(registry.metadata_cache)
+    signature = (id(frame), tuple(sorted((db_id, info['scope'], str(info['group']), info['n_cells'])
+                                         for db_id, info in candidates.items())))
+    cached = _DETECTION_STATE.get('value')
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    with _DETECTION_BUILD_LOCK:
+        cached = _DETECTION_STATE.get('value')
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+        tables = gene_detection_lib.detection_table(frame, candidates, index.is_fresh)
+        _DETECTION_STATE['value'] = (signature, tables)
+        return tables
+
+
+def _detection_lookup(db_id: str, gene: str) -> Optional[Dict[str, Any]]:
+    """Gene statistics of one (dataset, gene) from the precomputed index, else the per-gene cache; never a live query."""
+    hit = registry.gene_stats_index.lookup(db_id, gene)
+    if hit is not None:
+        return hit
+    meta = registry.metadata_cache.get(db_id) or {}
+    layer = meta.get('default_layer')
+    db_url = registry.databases.get(db_id, '')
+    if not layer or not db_url:
+        return None
+    mtime = 0.0
+    if not db_url.startswith('s3://'):
+        try:
+            mtime = Path(db_url).stat().st_mtime
+        except OSError:
+            mtime = 0.0
+    fingerprint = GeneStatsCache.fingerprint(str(meta.get('sha256') or '').strip() or None, mtime)
+    if not fingerprint:
+        return None
+    return registry.gene_stats_cache.get(db_id, gene, False, layer, fingerprint)
+
+
+_FOREST_QUERY_DESC = ("Forest detail of every replication entry: `full` (counted anchors and the folded `more_units`), "
+                      "`anchors` (counted anchors with their limma intervals; `n_more_units` says how many are folded) "
+                      "or `none`.")
+
+
+def _forest_mode(mode: str) -> str:
+    """Validate a ``forest`` query value (``facet_results.FOREST_MODES``); 400 for another one."""
+    if mode not in facet_results_lib.FOREST_MODES:
+        raise HTTPException(status_code=400, detail=f"forest must be one of {', '.join(facet_results_lib.FOREST_MODES)}")
+    return mode
+
+
+_GENE_CONTEXT_STATE: Dict[str, Any] = {}
+
+
+def _gene_context() -> Tuple[Optional[frozenset], Optional[frozenset]]:
+    """The sources of the context gene flags: (symbols of non-microglial marker panels, human symbols with a mouse
+    ortholog). Each is None when its source is missing (no geneset store, no ortholog table): the flag is then not raised.
+    The panel set is rebuilt after a geneset rescan; the ortholog table is cached by file mtime."""
+    store = geneset_registry
+    if store is None:
+        return None, None
+    signature = (id(store), len(store.genesets))
+    cached = _GENE_CONTEXT_STATE.get('foreign')
+    if cached is None or cached[0] != signature:
+        cached = (signature, gene_classes_lib.foreign_lineage_symbols(store.genesets.values()))
+        _GENE_CONTEXT_STATE['foreign'] = cached
+    return cached[1], gene_classes_lib.human_orthologs(Path(store.root) / gene_classes_lib.ORTHOLOG_FILE)
+
+
+def _context_gene_flags(symbol: str, group: Optional[str], scope: Optional[str],
+                        base: Optional[List[str]] = None) -> List[str]:
+    """``base`` (or the name based flags of the symbol) plus ``foreign_lineage_marker`` and ``no_mouse_ortholog``
+    where they apply to this cell type group and facet scope (``gene_classes.context_flags``)."""
+    flags = list(gene_classes_lib.flags(symbol) if base is None else base)
+    foreign, orthologs = _gene_context()
+    return flags + [flag for flag in gene_classes_lib.context_flags(symbol, group, scope, foreign, orthologs)
+                    if flag not in flags]
+
+
+def _with_gene_context(card: Dict[str, Any], gene: str, tables: Dict[Tuple[str, str], "pd.DataFrame"],
+                       forest: str = 'full') -> Dict[str, Any]:
+    """A gene card whose replication entries carry ``detection`` (``{pct_median, n_datasets, low_detection}`` or
+    null), ``low_detection`` and ``gene_flags`` (the card's flags plus the context flags of that cell type group);
+    the card's own ``gene_flags`` add ``no_mouse_ortholog`` for a xenograft scope; ``forest`` sets the forest detail
+    (``facet_results.forest_view``). A copy: the cached card is shared between callers."""
+    scope = card.get('scope')
+    base = list(card.get('gene_flags') or [])
+    entries = []
+    for entry in card.get('replication') or []:
+        group = entry.get('celltype_group')
+        pill = gene_detection_lib.pill(tables.get((scope, group)), gene)
+        entries.append({**entry, 'detection': pill, 'low_detection': None if pill is None else pill['low_detection'],
+                        'gene_flags': _context_gene_flags(gene, group, scope, base),
+                        'forest': facet_results_lib.forest_view(entry.get('forest') or [], forest)})
+    return {**card, 'gene_flags': _context_gene_flags(gene, None, scope, base), 'replication': entries}
+
+
+@app.get("/genes/{gene}/detection", tags=["facet-tests"])
+def get_gene_detection(gene: str):
+    """How well one gene is detected, per dataset and per facet scope and cell type group (the expression panel
+    of the gene view and the low-detection pill).
+
+    ``datasets`` lists every dataset with a statistic (``pct``: percent of cells with a count, ``n_cells``,
+    ``modality`` nuclei / cells / unknown with ``modality_note`` ``sorted live cells`` for xenografts, ``scope``,
+    ``celltype_group``; mixed datasets read ``mixed / other`` and are not summarised). ``summary`` has one row
+    per scope and cell type group: ``n_datasets``, ``pct_median``, ``pct_min``, ``pct_max`` and ``low_detection``
+    (median below ``low_detection_pct`` = 5). Nuclei and cells detect genes differently: read the pill with the
+    modality. Secondary datasets and datasets below ``min_cells`` are left out. Numbers come from the precomputed
+    gene statistics and the per-gene cache only (never a live scan); ``n_missing`` counts datasets without one.
+    """
+    candidates = gene_detection_lib.candidate_datasets(registry.metadata_cache)
+    result = gene_detection_lib.gene_detection(gene.strip(), candidates, _detection_lookup)
+    return {**result, 'partial': result['n_missing'] > 0}
+
+
+@app.get("/facets/{facet_name}/effects/overview", tags=["facet-tests"])
+def get_facet_effects_overview(
+    facet_name: str,
+    n: int = Query(10, ge=1, le=1000, description="Genes listed per cell type group"),
+    exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC),
+):
+    """The data of the simplified facet view in one call: a headline and one card per cell type group, every gene shown once.
+
+    ``headline`` has the counts of the group with the most cohorts: ``n_replicated`` (r < 0.05, same direction in at
+    least 2 cohorts), ``n_effect_gate`` (also a change of at least ``effect_gate_unit`` in 2 cohorts), ``n_strict``
+    (also pass the strict minimum-effect test) and ``strict_genes`` (named). ``cell_types`` are the groups with
+    replicated genes: counts, ``n_assigned`` and ``genes`` (``gene, r_value, direction, median_logFC, k, m,
+    strict, also_in``, plus ``detection`` and ``low_detection``). A gene replicated in several groups sits in the
+    one where it is strongest and names the others in ``also_in``. ``quiet_groups`` are groups without a
+    replicated gene (``low_power``: at most 2 cohorts), for one summary line.
+    """
+    test_facet = _tested_facet(facet_name)
+    result = _facet_results().effects_overview(
+        test_facet, _facet_test_datasets(), exclude_secondary=exclude_secondary,
+        scope=_scope_param(scope), n_per_group=n)
+    tables = _detection_tables()
+    for card in result['cell_types']:
+        table = tables.get((result['scope'], card['celltype_group']))
+        for entry in card['genes']:
+            pill = gene_detection_lib.pill(table, entry['gene'])
+            entry['detection'] = pill
+            entry['low_detection'] = None if pill is None else pill['low_detection']
+            entry['gene_flags'] = _context_gene_flags(entry['gene'], card['celltype_group'], result['scope'])
+    return _with_help(result, *_FACET_HELP_TOPICS)
+
+
+@app.get("/facets/{facet_name}/modules/top", tags=["facet-tests"])
+def get_facet_top_modules(
+    facet_name: str,
+    cell_type: Optional[str] = Query(None, description="Cell type group (e.g. 'microglia') or a raw stratum label; default: the group with most cohorts"),
+    n: int = Query(50, ge=1, le=100000, description="Rows returned (no practical cap; page with offset)"),
+    offset: int = Query(0, ge=0, description="Ranked rows to skip"),
+    effect_gate: bool = Query(False, description="Only modules with at least 2 cohorts at |std_effect| >= 0.2 in the replicated direction"),
+    include_not_replicated: bool = Query(False, description="Also list modules with r >= 0.05 (the whole family, ranked)"),
+    catalog: Optional[str] = Query(None, description="Only modules of this catalog, e.g. Mancuso2024/Cell_states"),
+    exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC),
+):
+    """Modules (gene sets) whose score changes with a facet in at least 2 cohorts, for one scope and cell type group.
+
+    The module counterpart of ``/facets/{facet}/effects/top``: the same partial-conjunction r-value (Simes, u = 2,
+    one anchor unit per cohort and cell type group), computed on the permutation p values of the donor-level module
+    scores, Benjamini-Hochberg over the modules of one (scope, facet, cell type group, method, source) family.
+    ``replicated`` is r < 0.05 and direction-consistent. The effect filter is separate: at least 2 cohorts with a
+    signed standardised effect (``std_effect``) of 0.2 or more (``effect_gate_passed``); there is no strict tier for
+    modules (``strict`` is null). Each row is the pseudobulk-of-counts result (B) where the module has one, else the
+    cell-mean result (A), named in ``method`` / ``source`` / ``variant_label``; ``other_variants`` summarise the others
+    and ``ab.disagree`` is true when A and B point in opposite directions and either is replicated or both reach the
+    gate. Rows: ``geneset_id, catalog, module, r_value, p_pc, k, m, r_direction, call, gate, median_std_effect,
+    median_estimate, r_cohorts, effect_gate_cohorts, n_small, small_cohorts, k_over_m, cohorts_label``, plus
+    ``quality_sensitive`` (mitochondrial or ribosomal genes dominate the set) and ``directionless``. ``n_matching`` is the
+    number of rows the filters keep; ``cell_types`` lists the groups with their counts. Exploratory.
+    """
+    test_facet = _tested_facet(facet_name)
+    result = _module_results().top_modules(
+        test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n, offset=offset,
+        exclude_secondary=exclude_secondary, scope=_scope_param(scope), effect_gate=effect_gate,
+        include_not_replicated=include_not_replicated, catalog=catalog)
+    for row in result['rows']:
+        info = _module_info(row['geneset_id'])
+        row['quality_sensitive'] = bool(info and info['quality']['quality_sensitive'])
+        row['directionless'] = bool(info and info['directionless'])
+        row['n_genes'] = info['n_genes'] if info else None
+    return _with_help(result, *_FACET_HELP_TOPICS, 'module-replication')
+
+
+_MODULE_INFO_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
+
+
+def _module_info(geneset_id: str) -> Optional[Dict[str, Any]]:
+    """Registry facts of one gene set for the module views (None when the set is not in the geneset store).
+
+    ``genes`` are the member symbols, ``quality`` the quality sensitivity (``quality_flags``), ``directionless``
+    whether a mean score of the set is not suited (``directionless_reason``) and ``celltypes`` its cell type scope.
+    Cached until the geneset store is rescanned.
+    """
+    if geneset_id in _MODULE_INFO_CACHE:
+        return _MODULE_INFO_CACHE[geneset_id]
+    info: Optional[Dict[str, Any]] = None
+    geneset = geneset_registry.get(geneset_id) if geneset_registry is not None else None
+    if geneset is not None:
+        genes = geneset.genes
+        reason = directionless_reason(geneset.experiment.study, geneset.experiment.method,
+                                      geneset.metadata.get('direction'), geneset.experiment.metadata.get('software'))
+        info = {'geneset_id': geneset_id, 'study': geneset.experiment.study, 'experiment': geneset.experiment.name,
+                'name': geneset.name, 'display_name': geneset.metadata.get('name', geneset.name),
+                'description': geneset.metadata.get('description', ''), 'organism': geneset.organism,
+                'method': geneset.experiment.method, 'n_genes': len(genes), 'genes': genes,
+                'celltypes': geneset.celltypes, 'role': geneset.role, 'direction': geneset.metadata.get('direction'),
+                'quality': quality_flags(genes), 'directionless': reason is not None,
+                'directionless_reason': reason, 'directionless_note': DIRECTIONLESS_NOTE if reason else None}
+    _MODULE_INFO_CACHE[geneset_id] = info
+    return info
+
+
+@app.get("/genesets/{study}/{experiment}/{name}/facet-effects", tags=["facet-tests"])
+def get_geneset_facet_effects(
+    study: str, experiment: str, name: str,
+    facet: Optional[str] = Query(None, description="Comma-separated facets to answer (sex, disease, apoe4_carrier, apoe4_dose, braak, braak_threshold, age, age_adjusted, app_nlgf); default all"),
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC + " Without `scope`, `facets` holds each facet's default scope and `by_scope` every scope separately."),
+    cell_type: Optional[str] = Query(None, description="Restrict the module cards to one cell type group (e.g. 'microglia') or raw stratum label"),
+    exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
+    include_units: bool = Query(False, description="true: every module card also lists its units flat (`units`); `replication[].variants[].forest` already holds one row per cohort"),
+    forest: str = Query('anchors', description=_FOREST_QUERY_DESC),
+):
+    """Facet effects of one gene set (module): the module result next to the gene-level result of its members.
+
+    Per facet and scope, ``module`` answers like ``/genes/{gene}/facet-effects`` does for a gene:
+    ``replication[]`` per cell type group with ``primary`` (the variant to show: pseudobulk of counts where the
+    module has one, else the mean of per-cell scores), ``variants[]`` (each with ``r_value``, ``call``, ``gate``,
+    ``median_std_effect``, ``k_over_m``, ``cohorts_label``, ``r_cohorts`` and a ``forest`` of one row per cohort with
+    ``estimate``, ``ci_low``, ``ci_high``, ``std_effect``, ``p_perm``, ``more_units``) and ``ab`` (A and B contradict:
+    ``disagree``). ``members`` gives, per cell type group, how many member genes replicate for the same facet
+    (plain r < 0.05 counts, the effect-gate subset, the strict subset) and names them (``genes_up``, ``genes_down``,
+    ``genes``), never truncated. The card also carries ``scored_in`` (datasets with module results),
+    ``quality`` (``quality_sensitive`` when mitochondrial or ribosomal genes dominate), ``directionless`` with
+    ``directionless_note`` (a mean score is not suited to GWAS-like sets; read the member counts) and the gene set's
+    ``celltypes`` scope. Exploratory; scopes are never mixed.
+    """
+    forest = _forest_mode(forest)
+    geneset_id = f"{study}/{experiment}/{name}"
+    info = _module_info(geneset_id)
+    catalog = f"{study}/{experiment}"
+    reader = _facet_results()
+    modules = _module_results()
+    datasets = reader.prepare(_facet_test_datasets())
+    scored = modules.scored_in(catalog, name, datasets)
+    if info is None and not scored:
+        raise HTTPException(status_code=404, detail=f"Geneset {geneset_id} not found")
+    wanted = [_tested_facet(item.strip()) for item in facet.split(',') if item.strip()] if facet \
+        else list(facet_results_lib.FACET_ORDER)
+    scope = _scope_param(scope)
+    members = info['genes'] if info else []
+
+    def card(facet_name: str, facet_scope: str) -> Dict[str, Any]:
+        entry = modules.module_effects(catalog, name, datasets, facet_name, exclude_secondary=exclude_secondary,
+                                       scope=facet_scope, cell_type=cell_type)
+        entry = module_card_forest(entry, forest)
+        if not include_units:
+            entry = {**entry, 'units': []}
+        member_entry = reader.member_replication(facet_name, members, datasets, exclude_secondary=exclude_secondary,
+                                                 scope=facet_scope) if members else None
+        return {'facet': facet_name, 'scope': facet_scope, 'module': entry, 'members': member_entry}
+
+    def scopes_of(facet_name: str) -> List[str]:
+        found = set(reader.scopes_with_results(facet_name, datasets)) | set(
+            modules.scopes_with_module_results(facet_name, datasets))
+        return [item for item in facet_scopes_lib.SCOPES if item in found]
+
+    by_scope: Dict[str, Dict[str, Any]] = {}
+    if scope is None:
+        for facet_name in wanted:
+            for facet_scope in scopes_of(facet_name):
+                by_scope.setdefault(facet_scope, {})[facet_name] = card(facet_name, facet_scope)
+    facets: Dict[str, Any] = {}
+    for facet_name in wanted:
+        default = facet_results_lib.FacetResults.default_scope(facet_name)
+        facets[facet_name] = by_scope.get(default, {}).get(facet_name) or card(facet_name, scope or default)
+    result: Dict[str, Any] = {
+        'geneset_id': geneset_id, 'catalog': catalog, 'module': name,
+        'display_name': info['display_name'] if info else name,
+        'description': info['description'] if info else None, 'organism': info['organism'] if info else None,
+        'n_genes': info['n_genes'] if info else None, 'celltypes': info['celltypes'] if info else None,
+        'role': info['role'] if info else None, 'direction': info['direction'] if info else None,
+        'quality': info['quality'] if info else None,
+        'directionless': bool(info and info['directionless']),
+        'directionless_reason': info['directionless_reason'] if info else None,
+        'directionless_note': info['directionless_note'] if info else None,
+        'member_match': 'gene symbols, case-insensitive, within one facet scope',
+        'scored_in': scored, 'scope': scope, 'facets': facets,
+        'effect_gate': {'std_effect': facet_rules_lib.MODULE_STD_EFFECT_GATE}}
+    if scope is None:
+        result['by_scope'] = by_scope
+    return _with_help(result, *_FACET_HELP_TOPICS, 'module-replication')
+
+
 @app.get("/facets/{facet_name}/effects/top", tags=["facet-tests"])
 def get_facet_recurring_genes(
     facet_name: str,
     cell_type: Optional[str] = Query(None, description="Cell type group (e.g. 'microglia') or a raw stratum label; default: the group with most cohorts"),
-    n: int = Query(50, ge=1, le=500, description="Rows returned"),
+    n: int = Query(50, ge=1, le=100000, description="Rows returned (no practical cap since 2.45; page with offset)"),
+    offset: int = Query(0, ge=0, description="Ranked rows to skip"),
+    effect_gate: bool = Query(False, description="Only genes whose effect gate passed (a change of at least 10%, Braak per three stages, age per decade, in 2 cohorts)"),
+    strict: bool = Query(False, description="Only genes that also pass the strict minimum-effect test (replicated_effect)"),
     exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
     scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC),
 ):
     """Genes that replicate for one facet in one facet scope and cell type group.
+
+    Paging (2.45): ``offset`` and ``n`` page through the ranked rows (``n`` has no practical cap); ``n_matching``
+    is the number of rows the filters keep (``effect_gate``, ``strict``), ``n_returned`` the rows in ``rows``,
+    ``has_more`` whether more follow, and ``headline`` the counts of the group (``n_replicated``,
+    ``n_effect_gate``, ``n_strict``, ``strict_genes``). Rows also carry ``n_small`` / ``small_cohorts`` (cohorts
+    below 20 donors), ``detection`` (``pct_median``, ``n_datasets``, ``low_detection``) and ``low_detection``;
+    ``cell_types`` carry the counts of every group.
 
     A gene is listed when its partial-conjunction r-value is below 0.05
     (Benjamini and Heller 2008; ``definition``) and it passes the effect gate: the
@@ -13429,9 +13786,17 @@ def get_facet_recurring_genes(
     their donor overlap checked.
     """
     test_facet = _tested_facet(facet_name)
-    return _with_help(_facet_results().recurring_genes(
-        test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n,
-        exclude_secondary=exclude_secondary, scope=_scope_param(scope)), *_FACET_HELP_TOPICS)
+    result = _facet_results().recurring_genes(
+        test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n, offset=offset, effect_gate=effect_gate,
+        strict=strict, exclude_secondary=exclude_secondary, scope=_scope_param(scope))
+    table = _detection_tables().get((result['scope'], result['celltype_group']))
+    for row in result['rows']:
+        pill = gene_detection_lib.pill(table, row['gene'])
+        row['detection'] = pill
+        row['low_detection'] = None if pill is None else pill['low_detection']
+        row['gene_flags'] = _context_gene_flags(row['gene'], result['celltype_group'], result['scope'],
+                                                row.get('gene_flags'))
+    return _with_help(result, *_FACET_HELP_TOPICS)
 
 
 
@@ -13442,6 +13807,7 @@ def get_facet_gene_effects(
     cell_type: Optional[str] = Query(None, description="Restrict to one cell type group (e.g. 'microglia') or raw stratum label"),
     exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
     scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC),
+    forest: str = Query('full', description=_FOREST_QUERY_DESC),
 ):
     """Result card of one gene for one facet in one facet scope: every tested (dataset, cell
     type) unit with log2 fold change, 95% CI, q, donors per level, cohort and
@@ -13472,12 +13838,22 @@ def get_facet_gene_effects(
     Cohorts come from the DRAFT cohort selection table. ``scope`` / ``scopes``: the
     answered scope and the scopes with results for this facet; genes are never matched
     across scopes (mouse and human symbols stay apart).
+
+    2.45 additions per replication entry: ``call`` (``replicated`` | ``not_replicated`` | ``not_tested``; ``nt_label``
+    reads ``1 cohort`` or ``not tested``), ``gate`` (at least 10% in 2 cohorts), ``strict`` (also the strict
+    minimum-effect test), ``k_over_m`` (``1/4``), ``cohorts_label`` (``3/4 cohorts, 1 small``), ``small_cohorts``,
+    ``r_cohorts`` (the cohorts that carry the r-value), ``forest`` (one row per cohort: ``anchor`` and
+    ``more_units`` with ``logFC``, ``ci_low``, ``ci_high`` from limma, ``lambda_gc``, ``inflated``, ``small_sample``,
+    ``modality``; ``counted`` false for cohorts that do not count) and ``detection`` / ``low_detection`` (median
+    percent of cells expressing the gene in this cell type and scope; low below 5). Unit cards add ``anchor_counted``,
+    ``cohort_display`` (``unassigned`` for a dataset outside the cohort table) and ``modality``.
     """
     facet_name = canonical_facet(facet_name)  # deprecated alias, one release
     test_facet = _tested_facet(facet_name)
-    return _with_help(_facet_results().gene_effects(
+    card = _facet_results().gene_effects(
         test_facet, gene, _facet_test_datasets(), cell_type=cell_type,
-        exclude_secondary=exclude_secondary, scope=_scope_param(scope)), *_FACET_HELP_TOPICS)
+        exclude_secondary=exclude_secondary, scope=_scope_param(scope))
+    return _with_help(_with_gene_context(card, gene, _detection_tables(), _forest_mode(forest)), *_FACET_HELP_TOPICS)
 
 
 
@@ -13488,6 +13864,7 @@ def get_gene_facet_effects(
     scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC + " Without `scope`, `facets` holds each facet's default scope and `by_scope` every scope separately."),
     facet: Optional[str] = Query(None, description="Comma-separated facets to answer (sex, disease, apoe4_carrier, apoe4_dose, braak, braak_threshold, age, age_adjusted, app_nlgf); default all. `strongest_facet` is chosen among those."),
     include_units: bool = Query(True, description="false: every card keeps `n_units`, `replication`, `cell_types` and `notes` but `units` is empty (the all-facets payload is several MB; fetch the units of one facet with /facets/{facet}/effects)"),
+    forest: str = Query('anchors', description=_FOREST_QUERY_DESC + " Default `anchors` here (the all-facets payload); `/facets/{facet}/effects` defaults to `full`."),
 ):
     """Result cards of one gene for every tested facet (sex, disease,
     apoe4_carrier, braak, age, app_nlgf), keyed by facet; same shape as
@@ -13520,6 +13897,15 @@ def get_gene_facet_effects(
     Cohorts come from the DRAFT cohort selection table. ``scope`` / ``scopes``: the
     answered scope and the scopes with results for this facet; genes are never matched
     across scopes (mouse and human symbols stay apart).
+
+    2.45 additions per replication entry: ``call`` (``replicated`` | ``not_replicated`` | ``not_tested``; ``nt_label``
+    reads ``1 cohort`` or ``not tested``), ``gate`` (at least 10% in 2 cohorts), ``strict`` (also the strict
+    minimum-effect test), ``k_over_m`` (``1/4``), ``cohorts_label`` (``3/4 cohorts, 1 small``), ``small_cohorts``,
+    ``r_cohorts`` (the cohorts that carry the r-value), ``forest`` (one row per cohort: ``anchor`` and
+    ``more_units`` with ``logFC``, ``ci_low``, ``ci_high`` from limma, ``lambda_gc``, ``inflated``, ``small_sample``,
+    ``modality``; ``counted`` false for cohorts that do not count) and ``detection`` / ``low_detection`` (median
+    percent of cells expressing the gene in this cell type and scope; low below 5). Unit cards add ``anchor_counted``,
+    ``cohort_display`` (``unassigned`` for a dataset outside the cohort table) and ``modality``.
     """
     wanted = [name.strip() for name in facet.split(',') if name.strip()] if facet else list(facet_results_lib.FACET_ORDER)
     wanted = [_tested_facet(name) for name in wanted]
@@ -13527,8 +13913,12 @@ def get_gene_facet_effects(
     datasets = reader.prepare(_facet_test_datasets())     # resolved once: the files are stat-ed once per request
     scope = _scope_param(scope)
 
+    detection_tables = _detection_tables()
+    forest = _forest_mode(forest)
+
     def card(facet_name: str, facet_scope: Optional[str]) -> Dict[str, Any]:
-        entry = reader.gene_effects(facet_name, gene, datasets, exclude_secondary=exclude_secondary, scope=facet_scope)
+        entry = _with_gene_context(reader.gene_effects(facet_name, gene, datasets, exclude_secondary=exclude_secondary,
+                                                       scope=facet_scope), gene, detection_tables, forest)
         return entry if include_units else {**entry, 'units': []}
 
     by_scope: Dict[str, Dict[str, Any]] = {}

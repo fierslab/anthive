@@ -28,6 +28,7 @@ import yaml
 import celltype_groups
 import facet_results as fr
 import facet_scopes
+from modality import modality_of_metadata
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SERVE_PATH = REPO_ROOT / 'bin' / 'api' / 'ant-serve'
@@ -365,6 +366,7 @@ def serve(tmp_path):
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple, 'Set': Set,
         'Path': Path, 'asyncio': asyncio, '_load_module_variability': lambda: variability,
         'BACKCOMPAT_LEGACY_NAMES': {}, 'GeneStatsCache': _GeneStatsCache, 'facet_scopes_lib': facet_scopes,
+        'modality_of_metadata': modality_of_metadata,
         '_module_variability_path': lambda: tmp_path / 'module_variability.parquet',
         '_cell_level_skips': lambda path: {'G9/BULK': 'bulk data (technology bulk_RNA-seq)', 'G1/PRI': 'about one observation per donor'},
     }

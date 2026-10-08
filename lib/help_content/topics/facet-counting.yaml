@@ -6,6 +6,7 @@ related:
 - facet-effects
 children:
 - facet-replication
+- module-replication
 - facet-effect-size
 - facet-not-replicated
 - facet-cell-type-groups
@@ -16,6 +17,8 @@ children:
 - facet-anatomy-clusters
 - facet-whole-cell-type
 - facet-technical-genes
+- facet-low-detection
+- facet-modality
 - facet-limits
 aliases:
 - replication

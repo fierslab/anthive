@@ -147,3 +147,16 @@ terms:
   term: Per-cell association (descriptive)
   definition_html: |
     Statistics such as omega squared or Spearman computed over cells rather than donors. Because all cells of a donor share the donor's facet value, these numbers mostly measure how different donors are from each other. They are not tests.
+- slug: forest-plot
+  term: Forest plot
+  definition_html: |
+    One row per cohort with its effect estimate and a 95 percent confidence interval, so you can see whether cohorts agree in direction and size. Only counted anchor units are drawn as rows; other units of a cohort sit under "more units". The interval comes from the model of that cohort, not from the combined test.
+- slug: low-detection
+  term: Low detection
+  definition_html: |
+    The gene has a count in fewer than 5 percent of the cells of the cell type (median over the datasets of that cell type and scope). Effects on such genes are fragile.
+- slug: modality
+  term: Modality (nuclei or cells)
+  definition_html: |
+    Whether a dataset was made from isolated nuclei or from whole cells. The two detect genes differently, so a dataset row carries the tag and detection differences between them are not read as biology. Xenograft microglia recorded as cells are sorted live cells.
+

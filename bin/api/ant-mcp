@@ -529,7 +529,9 @@ def main() -> None:
             '\n'
             'REPLICATE-LEVEL FACET EFFECTS  (sex, disease [provisional], APOE e4 carrier, Braak, age, App NL-G-F; exploratory)\n'
             '  facet_effects    one gene: every dataset x cell type, grouped by cohort, replication badge\n'
-            '  facet_top_genes  genes changing in the most independent cohorts, per cell type\n'
+            '  facet_top_genes  genes changing in the most independent cohorts, per cell type (pages with offset=)\n'
+            '  module_facet_effects  one gene set: does its score change with a facet, and which members do\n'
+            '  facet_top_modules  gene sets whose score changes in the most cohorts, per cell type\n'
             '  facet_units      which units were tested, donors, model, flags; why others were not\n'
             '  get_facet_tests  gene or module rows of one dataset (limma-voom / OLS + permutations)\n'
             '  All of them take scope= (human_postmortem | xenograft_human_in_mouse): facets are\n'
@@ -1693,6 +1695,24 @@ def main() -> None:
                                      else 'distinct not recorded'))
                 lines.append(f"  [{rep['cell_type']}] {rep['badge']}{donor_text}"
                              + (f" (labels: {labels})" if labels else ''))
+                if rep.get('cohorts_label'):
+                    lines.append(f"    call: {rep.get('call')}; {rep['cohorts_label']}"
+                                 + ('; at least 10 percent change in 2 cohorts' if rep.get('gate') else '')
+                                 + ('; passes the strict minimum-effect test' if rep.get('strict') else '')
+                                 + (f"; carried by {', '.join(rep['r_cohorts'])}" if rep.get('r_cohorts') else ''))
+                if rep.get('low_detection'):
+                    lines.append(f"    low detection: expressed in a median {_fmt_number((rep.get('detection') or {}).get('pct_median'))} "
+                                 f"percent of {rep['cell_type']} cells ({(rep.get('detection') or {}).get('n_datasets')} datasets); "
+                                 'treat the effect as fragile')
+                for row in rep.get('forest') or []:
+                    point = row.get('anchor') or {}
+                    lines.append(f"    cohort {row.get('cohort_display')}{'' if row.get('counted') else ' (not counted)'}: "
+                                 f"log2FC {_fmt_number(point.get('logFC'))} [{_fmt_number(point.get('ci_low'))}, "
+                                 f"{_fmt_number(point.get('ci_high'))}], {point.get('n_donors')} donors"
+                                 f"{', small cohort' if point.get('small_sample') else ''}"
+                                 f"{', lambda ' + _fmt_number(point.get('lambda_gc')) + ' (inflated)' if point.get('inflated') else ''}"
+                                 f"{', ' + str(point.get('modality')) if point.get('modality') else ''}"
+                                 f"{'; ' + str(row['n_more_units']) + ' more units' if row.get('n_more_units') else ''}")
                 if anchors:
                     lines.append(f"    anchors: {anchors}")
             if card.get('gene_flags'):
@@ -1729,7 +1749,8 @@ def main() -> None:
 
     @mcp.tool()
     async def facet_top_genes(facet: str, cell_type: Optional[str] = None, n: int = 30,
-                              exclude_secondary: bool = True, scope: Optional[str] = None) -> str:
+                              exclude_secondary: bool = True, scope: Optional[str] = None,
+                              offset: int = 0, effect_gate: bool = False, strict: bool = False) -> str:
         """Genes that change with a facet in the most independent cohorts, within one cell type group.
 
         Lists the genes with a partial-conjunction r-value below 0.05 (the
@@ -1750,13 +1771,17 @@ def main() -> None:
         Args:
             facet: sex, disease, apoe4_carrier, braak, age or app_nlgf.
             cell_type: Cell type group (e.g. 'microglia') or raw label; omit for the group with most cohorts (the reply lists the options).
-            n: Rows (default 30, max 500).
+            n: Rows (default 30; no cap, page with offset).
             exclude_secondary: Do not count reanalyses (default true).
             scope: human_postmortem or xenograft_human_in_mouse. Default: human_postmortem
                 (app_nlgf: xenograft_human_in_mouse). Scopes are never merged.
+            offset: Ranked rows to skip (paging).
+            effect_gate: Only genes with a change of at least 10 percent in 2 cohorts (Braak: over three stages, age: per decade).
+            strict: Only genes that also pass the strict minimum-effect test.
         """
         try:
-            data = await _get(f'/facets/{facet}/effects/top', cell_type=cell_type, n=max(1, min(int(n), 500)),
+            data = await _get(f'/facets/{facet}/effects/top', cell_type=cell_type, n=max(1, int(n)), offset=max(0, int(offset)),
+                              effect_gate=str(bool(effect_gate)).lower(), strict=str(bool(strict)).lower(),
                               scope=scope, exclude_secondary=str(bool(exclude_secondary)).lower())
         except httpx.HTTPStatusError as exc:
             return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
@@ -1776,6 +1801,12 @@ def main() -> None:
         lines.append(f"{data.get('n_replicated')} genes replicate (r < 0.05; {data.get('n_effect_gate')} also have an effect of "
                      f"at least 10 percent in 2 cohorts, {data.get('n_replicated_effect')} replicate with at least 10 percent "
                      f"by r_treat) of {data.get('n_genes_in_family')} testable in at least two cohorts.")
+        headline = data.get('headline') or {}
+        if headline.get('strict_genes'):
+            lines.append(f"{headline.get('n_strict')} pass the strict minimum-effect test: {', '.join(headline['strict_genes'])}"
+                         + (' and more' if (headline.get('n_strict') or 0) > len(headline['strict_genes']) else '') + '.')
+        lines.append(f"Showing {data.get('n_returned')} of {data.get('n_matching')} matching genes from offset {data.get('offset')}"
+                     + ('; more follow (raise offset).' if data.get('has_more') else '.'))
         lines.append('gene | r_value | k of m cohorts | agreement | direction | carried by | effect gate | flags')
         for row in rows:
             lines.append(f"{row['gene']} | {_fmt_number(row.get('r_value'))} | {row['k']} of {row['m']} | "
@@ -1786,7 +1817,137 @@ def main() -> None:
                          f"{' + r_treat ' + _fmt_number(row.get('r_treat')) if row.get('replicated_effect') else ''} | "
                          f"{', '.join(row.get('cohorts') or [])}"
                          f"{' | overlap unknown: ' + ', '.join(row['cohorts_overlap_unknown']) if row.get('overlap_unknown') else ''}"
+                         f"{' | small cohorts: ' + ', '.join(row['small_cohorts']) if row.get('small_cohorts') else ''}"
+                         f"{' | low detection (' + _fmt_number((row.get('detection') or {}).get('pct_median')) + ' percent of cells)' if row.get('low_detection') else ''}"
                          f"{' | flags: ' + ', '.join(row['gene_flags']) if row.get('gene_flags') else ''}")
+        return '\n'.join(lines)
+
+    _MODULE_TOOL_RULES = (
+        'EXPLORATORY. A module is a gene set; its score per donor is tested the same way as a gene, per dataset and cell '
+        'type, then combined across cohorts: one anchor unit per cohort and cell type group, permutation p values of the '
+        'donor-level module score, partial-conjunction r-value (Simes, at least 2 cohorts, same direction), '
+        'Benjamini-Hochberg over the modules of one scope, facet, cell type group and method. replicated = r_value < 0.05. '
+        'The effect filter is separate: a standardised effect of at least 0.2 in 2 cohorts. Modules have no strict tier. '
+        'Two variants exist: pseudobulk of raw counts (B, shown where the dataset has counts) and the mean of per-cell '
+        'scores (A); the reply says which one it shows and flags when A and B point in opposite directions. Mean scores '
+        'of GWAS-like sets are not meaningful: read the member-gene counts. Sets dominated by mitochondrial or ribosomal '
+        'genes track cell quality (quality sensitive). Scopes are never merged.'
+    )
+
+    @mcp.tool()
+    async def module_facet_effects(geneset: str, facet: Optional[str] = None, cell_type: Optional[str] = None,
+                                   scope: Optional[str] = None, exclude_secondary: bool = True) -> str:
+        """Effect of one gene set (module) for the tested facets, across cohorts, next to how many of its member genes replicate.
+
+        EXPLORATORY. Use it to ask "does the DAM program rise with Braak stage in microglia, and which of its genes do it?".
+        For each facet and scope the reply gives, per cell type group, the module call (replicated or not, cohorts
+        k of m, the cohorts that carry it, the effect filter), the variant shown (pseudobulk or cell mean) and
+        whether the two variants disagree, then the member genes that replicate for the same facet (plain counts and names,
+        never truncated, with the up and down split and the subset passing the 10 percent effect filter). It also says
+        in which datasets the module was tested, whether the set is quality sensitive or directionless.
+
+        Args:
+            geneset: Gene set id 'study/experiment/name', e.g. 'Mancuso2024/Cell_states/DAM'.
+            facet: sex, disease, apoe4_carrier, braak, age or app_nlgf; omit for all.
+            cell_type: Restrict to one cell type group (e.g. 'microglia').
+            scope: human_postmortem or xenograft_human_in_mouse. Default: each facet's default scope.
+            exclude_secondary: Do not count reanalyses (default true).
+        """
+        parts = geneset.strip('/').split('/')
+        if len(parts) != 3:
+            return "Give the gene set as 'study/experiment/name', for example 'Mancuso2024/Cell_states/DAM'."
+        try:
+            data = await _get(f'/genesets/{geneset.strip("/")}/facet-effects', facet=facet, cell_type=cell_type,
+                              scope=scope, exclude_secondary=str(bool(exclude_secondary)).lower())
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
+        lines = [_MODULE_TOOL_RULES, f"\n# {data['geneset_id']}: {data.get('n_genes')} genes, cell type scope "
+                 f"{', '.join(data.get('celltypes') or []) or 'not recorded'}"]
+        if data.get('directionless'):
+            lines.append(f"NOTE: {data.get('directionless_note')}")
+        if (data.get('quality') or {}).get('quality_sensitive'):
+            lines.append('NOTE: quality sensitive: mitochondrial or ribosomal genes make up most of this set, so a change can '
+                         'reflect cell quality rather than biology.')
+        scored = data.get('scored_in') or []
+        lines.append(f"Tested in {len(scored)} datasets: " + ', '.join(
+            f"{d['db_id']} ({d.get('modality')}{', counts' if d.get('has_counts') else ', no counts'})" for d in scored[:30])
+            + (' and more' if len(scored) > 30 else '') if scored else 'No facet test result for this set yet.')
+        for name, card in (data.get('facets') or {}).items():
+            module = card.get('module') or {}
+            members = (card.get('members') or {}).get('groups') or {}
+            entries = module.get('replication') or []
+            if not entries and not members:
+                continue
+            lines.append(f"\n## {name} [{card.get('scope')}]")
+            for entry in entries:
+                primary = next((v for v in entry['variants'] if v['method'] == entry['primary']['method']
+                                and v['source'] == entry['primary']['source']), entry['variants'][0])
+                lines.append(f"  [{entry['celltype_group']}] module ({primary['label']}): {primary['call']}; "
+                             f"{primary['cohorts_label']}; r {_fmt_number(primary.get('r_value'))}; direction "
+                             f"{primary.get('r_direction') or '-'}; median effect {_fmt_number(primary.get('median_std_effect'))} SD"
+                             + ('; effect filter passed (0.2 SD in 2 cohorts)' if primary.get('gate') else '')
+                             + (f"; carried by {', '.join(primary['r_cohorts'])}" if primary.get('r_cohorts') else ''))
+                if (entry.get('ab') or {}).get('disagree'):
+                    lines.append(f"    A and B disagree: {entry['ab']['reason']}")
+                for variant in entry['variants']:
+                    if variant is not primary:
+                        lines.append(f"    other variant {variant['label']}: {variant['call']}; {variant['cohorts_label']}; "
+                                     f"r {_fmt_number(variant.get('r_value'))}")
+            for group, found in members.items():
+                if not found['n_replicated']:
+                    lines.append(f"  [{group}] members: none of {found['n_tested']} tested members replicate")
+                    continue
+                lines.append(f"  [{group}] members: {found['n_replicated']} of {found['n_tested']} tested members replicate "
+                             f"(r < 0.05; {found['n_up']} up, {found['n_down']} down; {found['n_effect_gate']} also with a "
+                             f"10 percent change, {found['n_strict']} strict): up {', '.join(found['genes_up']) or '-'}; "
+                             f"down {', '.join(found['genes_down']) or '-'}")
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def facet_top_modules(facet: str, cell_type: Optional[str] = None, n: int = 30, scope: Optional[str] = None,
+                                offset: int = 0, effect_gate: bool = False, include_not_replicated: bool = False,
+                                exclude_secondary: bool = True) -> str:
+        """Gene sets (modules) whose score changes with a facet in at least 2 cohorts, within one cell type group.
+
+        EXPLORATORY. The module counterpart of facet_top_genes: ranked by r_value, then k, agreement and the size of
+        the standardised effect. Each row shows the pseudobulk-of-counts result where it exists, else the mean of
+        per-cell scores, and flags A/B disagreement, quality-sensitive sets (mitochondrial or ribosomal) and
+        directionless (GWAS-like) sets. Use module_facet_effects on a row for its cohorts and member genes.
+
+        Args:
+            facet: sex, disease, apoe4_carrier, braak, age or app_nlgf.
+            cell_type: Cell type group (e.g. 'microglia'); omit for the group with most cohorts.
+            n: Rows (default 30; no cap, page with offset).
+            scope: human_postmortem or xenograft_human_in_mouse. Default: human_postmortem.
+            offset: Ranked rows to skip.
+            effect_gate: Only modules with a standardised effect of 0.2 in 2 cohorts.
+            include_not_replicated: Also list modules with r_value of 0.05 or more.
+            exclude_secondary: Do not count reanalyses (default true).
+        """
+        try:
+            data = await _get(f'/facets/{facet}/modules/top', cell_type=cell_type, n=max(1, int(n)), offset=max(0, int(offset)),
+                              effect_gate=str(bool(effect_gate)).lower(), scope=scope,
+                              include_not_replicated=str(bool(include_not_replicated)).lower(),
+                              exclude_secondary=str(bool(exclude_secondary)).lower())
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
+        lines = [_MODULE_TOOL_RULES,
+                 f"{facet} [{data.get('scope')}] in {data.get('cell_type')}: {data.get('cohorts_in_cell_type')} counted cohorts; "
+                 f"{data.get('n_replicated')} of {data.get('n_modules_in_family')} modules replicate (r < 0.05), "
+                 f"{data.get('n_effect_gate')} of them also pass the effect filter.",
+                 'Other cell types: ' + ', '.join(f"{o['cell_type']} ({o['n_cohorts']} cohorts)"
+                                                  for o in (data.get('cell_types') or [])[:12]),
+                 f"Showing {data.get('n_returned')} of {data.get('n_matching')} matching modules from offset {data.get('offset')}"
+                 + ('; more follow (raise offset).' if data.get('has_more') else '.')]
+        for row in data.get('rows') or []:
+            notes = [text for flag, text in (('quality_sensitive', 'quality sensitive'), ('directionless', 'directionless set'))
+                     if row.get(flag)]
+            if (row.get('ab') or {}).get('disagree'):
+                notes.append('A and B disagree')
+            lines.append(f"{row['geneset_id']} | {row['variant_label']} | r {_fmt_number(row.get('r_value'))} | "
+                         f"{row['cohorts_label']} | {row.get('r_direction') or '-'} | median effect "
+                         f"{_fmt_number(row.get('median_std_effect'))} SD | {'effect filter passed' if row.get('gate') else 'below 0.2 SD in fewer than 2 cohorts'}"
+                         f"{' | ' + ', '.join(notes) if notes else ''}")
         return '\n'.join(lines)
 
     @mcp.tool()

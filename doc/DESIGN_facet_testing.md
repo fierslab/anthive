@@ -4,6 +4,36 @@ Status: implemented in `bin/annot/ant-facet-test` (+ `bin/annot/facet_test_limma
 `bin/annot/ant-facet-test-modules`. The v1 and v2 text below is kept where it still holds; the v3 section above
 overrides it where they differ. All output is exploratory. Written 2026-10-04, v3 2026-10-06.
 
+## Views API (2.45, 2026-10-08): what the gene, gene set and facet views read
+
+Decisions of Mark on 2026-10-08 (mock-ups reviewed by Fable). Statistics are unchanged; the API adds what a view needs.
+
+* **Calls.** Main colour = replicated (r < 0.05, direction-consistent). The pill "at least 10% in 2 cohorts" is the effect
+  filter, a filter and not error control; the star is the strict tier (`replicated_effect`, the treat-based minimum-effect
+  r-value). There is no "small effect" call; a grey cell shows k/m. `call`, `gate`, `strict`, `k_over_m`, `cohorts_label` and
+  `nt_label` on every replication entry say all of this, so no client re-derives it. Cohorts are "cohorts", never
+  "independent cohorts".
+* **Forest.** One row per cohort (its counted anchor), other units folded under `more_units` and marked not counted; the
+  rows that count are the cohorts behind m. Intervals are the limma `ci_low` / `ci_high` stored by the test, never rebuilt
+  from p values. Lambda and `inflated` (above 1.3) sit on every row; a cohort outside the cohort table is `unassigned`.
+* **Modules.** `lib/facet_module_results.py` applies the gene replication rule to the module results: one anchor per
+  cohort and cell type group, Simes partial conjunction (u = 2) on the permutation p values, BH over the modules of one
+  (scope, facet, cell type group, method, source) family, effect filter |std_effect| >= 0.2 in 2 cohorts, no strict tier.
+  Pseudobulk of counts (B) is the shown variant where it exists, else the cell mean (A); A and B disagree only for
+  opposite directions with one replicated or both at 0.2. Member genes that replicate for the same facet come from the
+  gene families (`FacetResults.member_replication`), uncapped. Mean scores of GWAS-like sets are not suited
+  (`directionless`); mitochondrial or ribosomal sets are `quality_sensitive`.
+* **Detection and modality.** Low detection = a median below 5 percent of cells expressing the gene, over the datasets that
+  hold only that cell type in that scope (`lib/gene_detection.py`, from the precomputed gene statistics). Modality
+  (nuclei, cells, unknown; xenograft cells are sorted live cells) comes from `suspension_type` or the technology name
+  (`lib/modality.py`) and is on every dataset row. Neither changes an r-value.
+* **Context gene flags** (`gene_classes.context_flags`): `foreign_lineage_marker` (a gene of a non-microglial marker panel
+  of the genesetstore, `role: markers`, shown in a myeloid cell type group) and `no_mouse_ortholog` (a xenograft result
+  for a human gene without an MGI ortholog; `_orthologs/mouse_human_orthologs.tsv`, matched by symbol). Informational.
+* **Paging.** `/facets/{f}/effects/top` and `/facets/{f}/modules/top` have no row cap (`n` up to 100000, `offset`,
+  `n_matching`, `has_more`). `/facets/{f}/effects/overview` gives the headline and one card per cell type group with each
+  gene shown once.
+
 ## v3c (2026-10-07): scopes, floors, exclusions, anatomy: what changed
 
 Decisions of Mark on 2026-10-07 (accepting the reassessment recommendations and the store audit). Where this section and

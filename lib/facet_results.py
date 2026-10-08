@@ -82,7 +82,7 @@ UNIT_TABLE_COLUMNS = [
     'n_donors_test', 'level_ref', 'level_test', 'descriptive_only', 'cohort', 'cohort_label',
     'role', 'counted', 'independence', 'overlap_unknown', 'pooled', 'disease_basis',
     'analysis_level', 'tau_log2', 'exclusion_missing', 'is_secondary', 'celltype_group', 'facet_scope',
-    'summary_unit', 'donor_digests']
+    'summary_unit', 'donor_digests', 'modality', 'modality_note']
 
 FACET_ORDER = ('sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age', 'age_adjusted',
                'app_nlgf')
@@ -212,6 +212,9 @@ RANKING_DEFINITION = (
     'effect has that sign (significant or not); (4) the median absolute log2 fold change over the m tested cohorts. '
     'effect_gate_passed and replicated_effect are shown, not used for the ranking.'
 )
+
+#: Genes named in a facet headline (the strict-tier list is short on purpose).
+STRICT_GENES_LISTED = 10
 
 #: Order in which a stratum's cell type source stands for its group when one
 #: cohort has several units in the same group (lower is more direct).
@@ -1353,7 +1356,7 @@ class FacetResults:
         """Cache key of the gene tables: changes when a result file, the cohort table or a dataset attribute
         that enters the tables changes. ``datasets`` are already resolved (``_with_scope(_with_pooled(...))``)."""
         return (_file_key(self.results_dir / COHORT_TABLE_NAME), tuple(
-            (d['db_id'], bool(d.get('is_secondary')), d.get('disease_basis'), d['facet_scope'],
+            (d['db_id'], bool(d.get('is_secondary')), d.get('disease_basis'), d['facet_scope'], d.get('modality'),
              self.fingerprint(d['group_folder'], d['stem'])) for d in datasets))
 
     def _cached_build(self, store: "OrderedDict[Tuple, Tuple[Tuple, Any]]", key: Tuple, signature: Tuple,
@@ -1478,6 +1481,7 @@ class FacetResults:
                     'facet_scope': dataset['facet_scope'],
                     'summary_unit': unit,
                     'donor_digests': digests.get(_unit_key(facet, cell_type, celltype_source)),
+                    'modality': dataset.get('modality'), 'modality_note': dataset.get('modality_note'),
                 })
                 parts.append(pd.DataFrame({
                     'gene': group['gene'].array,
@@ -1721,8 +1725,38 @@ class FacetResults:
             **donors,
         }
         entry.update(FacetResults._replicability_fields(family, m_legacy, eligible, facet))
+        entry.update(FacetResults._call_fields(entry))
         entry['badge'] = FacetResults._badge(entry)
         return entry
+
+    @staticmethod
+    def _call_fields(entry: Dict[str, Any]) -> Dict[str, Any]:
+        """The call a view draws from a replication entry (2.45).
+
+        ``call``: ``replicated`` (r < 0.05 over at least two cohorts, direction-consistent), ``not_replicated``
+        (two or more cohorts, r >= 0.05) or ``not_tested`` (fewer than two cohorts; ``nt_label`` says ``1 cohort`` or
+        ``not tested``). ``gate``: the effect gate passed (the "at least 10% in 2 cohorts" pill); ``strict``: also
+        passes the strict minimum-effect test (the star). ``k_over_m`` reads ``1/4``; ``cohorts_label`` reads
+        ``3/4 cohorts, 1 small``. There is no "small effect" call: the word is never used for effects.
+        """
+        m = entry.get('m') or 0
+        k = entry.get('k')
+        r_value = entry.get('r_value')
+        if m >= 2 and r_value is not None:
+            call = 'replicated' if r_value < replication.R_THRESHOLD else 'not_replicated'
+        else:
+            call = 'not_tested'
+        tested = max(m, entry.get('cohorts_tested') or 0)
+        nt_label = None if call != 'not_tested' else ('1 cohort' if tested == 1 else 'not tested')
+        small = entry.get('n_small') or 0
+        shown = m if m else tested
+        label = f'{k}/{m} cohorts' if k is not None and m else (f'{shown} cohort' + ('s' if shown != 1 else ''))
+        if small:
+            label += f', {small} small'
+        gate = bool(call == 'replicated' and entry.get('effect_gate_passed'))
+        return {'call': call, 'nt_label': nt_label, 'gate': gate,
+                'strict': bool(gate and entry.get('replicated_effect')),
+                'k_over_m': f'{k}/{m}' if k is not None and m else None, 'cohorts_label': label}
 
     @staticmethod
     def _replicability_fields(family: Optional[pd.Series], m_legacy: int, eligible: pd.DataFrame,
@@ -1734,6 +1768,9 @@ class FacetResults:
         label_of = dict(zip(eligible['cohort'], eligible.get('cohort_label', eligible['cohort']))) if len(eligible) else {}
         n_small = int((pd.to_numeric(eligible['n_donors'], errors='coerce')
                        < facet_rules.SMALL_COHORT_REPLICATES).sum()) if len(eligible) and 'n_donors' in eligible else 0
+        small_cohorts = sorted({str(label_of.get(cohort) or cohort) for cohort, donors in zip(
+            eligible['cohort'], pd.to_numeric(eligible['n_donors'], errors='coerce'))
+            if donors < facet_rules.SMALL_COHORT_REPLICATES}) if len(eligible) and 'n_donors' in eligible else []
 
         def labels(cohorts: Any) -> List[str]:
             return [str(label_of.get(c) or c) for c in (cohorts if isinstance(cohorts, list) else [])]
@@ -1746,7 +1783,7 @@ class FacetResults:
                     'r_significant': None, 'effect_gate_passed': None, 'effect_gate_cohorts': [],
                     'n_cohorts_ge_tau': None, 'median_logFC': None, 'effect_gate_tau': None, 'r_treat': None,
                     'replicated_effect': None, 'r_strong': None, 'replicated_strong': None, 'n_small': n_small,
-                    'r_cohorts': [], 'r_direction': None, **base}
+                    'small_cohorts': small_cohorts, 'r_cohorts': [], 'r_direction': None, **base}
         has_r = _finite(family.get('r_value')) is not None
         has_treat = _finite(family.get('r_treat')) is not None
         return {
@@ -1767,6 +1804,7 @@ class FacetResults:
             'r_strong': _finite(family.get('r_strong')),
             'replicated_strong': bool(family.get('replicated_strong')) if has_treat else None,
             'n_small': n_small,
+            'small_cohorts': small_cohorts,
             'r_cohorts': labels(family.get('r_cohorts')),
             'r_direction': family.get('r_direction') if isinstance(family.get('r_direction'), str) else None,
             **base,
@@ -2058,19 +2096,12 @@ class FacetResults:
                 rep = self._replication(sub, family_row, facet)
                 labels = sorted(set(sub['cell_type']))
                 details = group_info(group)
-                anchors = [{
-                    'cohort': record.get('cohort'), 'cohort_label': record.get('cohort_label'),
-                    'db_id': record['db_id'], 'cell_type': record['cell_type'],
-                    'celltype_source': record['celltype_source'], 'pooled': bool(record.get('pooled')),
-                    'n_donors': _as_int(record.get('n_donors')), 'logFC': _finite(record.get('logFC')),
-                    'p_treat': _finite(record.get('p_treat')), 'q_treat': _finite(record.get('q_treat')),
-                    'p_value': _finite(record.get('p_value')), 'q_value': _finite(record.get('q_value')),
-                    'independence': record.get('independence'),
-                    'disease_basis': record.get('disease_basis'),
-                } for record in sub[sub['counted_effective']].to_dict(orient='records')]
+                counted_rows = sub[sub['counted_effective']].to_dict(orient='records')
+                anchors = [_anchor_record(record) for record in counted_rows]
+                forest = _forest(sub)
                 bases = sorted({str(a['disease_basis']) for a in anchors if a['disease_basis']})
                 replication_entries.append({'cell_type': group, 'celltype_group': group, 'cl_id': details['cl_id'],
-                                            'labels': labels, 'anchors': anchors,
+                                            'labels': labels, 'anchors': anchors, 'forest': forest,
                                             'disease_basis': bases if facet == 'disease' else None, **rep})
                 cell_types.append({'cell_type': group, 'celltype_group': group, 'labels': labels,
                                    'n_units': int(len(sub)), 'n_cohorts': rep['m'] or rep['cohorts_tested']})
@@ -2100,6 +2131,10 @@ class FacetResults:
                     'role': record.get('role'),
                     'counted': bool(record.get('counted_effective')),
                     'anchor': bool(record.get('counted_effective')),
+                    'anchor_counted': bool(record.get('counted_effective')),
+                    'cohort_display': cohort_display(record.get('cohort_label')),
+                    'modality': record.get('modality'), 'modality_note': record.get('modality_note'),
+                    'small_sample': _is_small(record.get('n_donors')),
                     'not_counted_reason': _not_counted_reason(record),
                     'is_secondary': bool(record.get('is_secondary')),
                     'pooled': bool(record.get('pooled')),
@@ -2187,7 +2222,8 @@ class FacetResults:
 
     def recurring_genes(self, facet: str, datasets: Sequence[Dict[str, Any]],
                         cell_type: Optional[str] = None, limit: int = 50,
-                        exclude_secondary: bool = True, scope: Optional[str] = None) -> Dict[str, Any]:
+                        exclude_secondary: bool = True, scope: Optional[str] = None,
+                        offset: int = 0, effect_gate: bool = False, strict: bool = False) -> Dict[str, Any]:
         """Genes that replicate across cohorts for a facet, within one facet scope and cell type group.
 
         A gene is listed when its partial conjunction r-value is below 0.05 and it passes the effect gate
@@ -2206,6 +2242,11 @@ class FacetResults:
         ``cohorts_same_sign``, ``sign_discordant``. The response carries
         ``n_replicated`` (genes with r < 0.05 in the group) and
         ``n_genes_in_family`` (genes tested in at least two cohorts).
+
+        Paging (2.45): ``offset`` skips ranked rows, ``limit`` has no upper bound here; ``n_matching`` is the
+        number of rows the filters keep (``effect_gate``: only genes whose effect gate passed; ``strict``: only
+        those that also pass the strict minimum-effect test, ``replicated_effect``), ``n_returned`` the rows in
+        ``rows`` and ``has_more`` whether more follow. ``headline`` has the counts of the group in one place.
         """
         facet = canonical_facet(facet) if facet else facet
         scope = scope or self.default_scope(facet)
@@ -2220,7 +2261,8 @@ class FacetResults:
                 options.append({'cell_type': group, 'celltype_group': group,
                                 'cl_id': group_info(group)['cl_id'],
                                 'labels': sorted(set(sub['cell_type'])),
-                                'n_cohorts': int(sub['cohort'].nunique()), 'n_units': int(len(sub))})
+                                'n_cohorts': int(sub['cohort'].nunique()), 'n_units': int(len(sub)),
+                                **family_counts((families.get(group) or {}).get('frame'))})
         options.sort(key=lambda o: (-o['n_cohorts'], -o['n_units'], o['celltype_group']))
         group_filter, label_filter = self._resolve_group_filter(units, cell_type) if len(units) else (None, None)
         if label_filter:
@@ -2234,6 +2276,9 @@ class FacetResults:
         n_replicated_effect = 0
         n_replicated_strong = 0
         n_family = 0
+        n_strict = 0
+        n_matching = 0
+        strict_genes: List[str] = []
         group_donors: Dict[str, Optional[int]] = {'n_donors_sum': None, 'n_donors_distinct': None}
         overlap_labels: Dict[str, bool] = {}
         if chosen is not None and len(rows):
@@ -2242,6 +2287,9 @@ class FacetResults:
             group_donors = _donor_counts(chosen_units)
             overlap_labels = {str(label): bool(flag) for label, flag in zip(
                 chosen_units['cohort_label'], chosen_units['overlap_unknown'])}
+            small_labels = {str(label) for label, donors in zip(
+                chosen_units['cohort_label'], pd.to_numeric(chosen_units['n_donors'], errors='coerce'))
+                if donors < facet_rules.SMALL_COHORT_REPLICATES}
             family_entry = families.get(chosen)
             if family_entry is not None:
                 frame = family_entry['frame']
@@ -2256,16 +2304,30 @@ class FacetResults:
                 n_replicated_effect = int(usable['replicated_effect'].astype(bool).sum())
                 n_replicated_strong = int(usable['replicated_strong'].astype(bool).sum())
                 adjusted = self._adjusted_age_family(facet, datasets, exclude_secondary, scope, chosen)
-                ranked = replicated.sort_values(['r_value', 'k', 'agreement', 'median_abs_logFC'],
-                                                ascending=[True, False, False, False]).head(limit)
+                rows_by_gene = family_entry.get('rows_by_gene')
+                if rows_by_gene is None:                     # built once per family: the rows of each gene by position
+                    rows_by_gene = family_entry['rows_by_gene'] = per_cohort.groupby('gene_key', sort=False).indices
+                donors_of: Dict[frozenset, Dict[str, Optional[int]]] = {}
+                ordered = replicated.sort_values(['r_value', 'k', 'agreement', 'median_abs_logFC'],
+                                                 ascending=[True, False, False, False])
+                gated = ordered[ordered['effect_gate_passed'].astype(bool)]
+                strict_rows = gated[gated['replicated_effect'].astype(bool)]
+                n_strict = int(len(strict_rows))
+                strict_genes = [str(name) for name in strict_rows['gene'].head(STRICT_GENES_LISTED)]
+                kept = strict_rows if strict else gated if effect_gate else ordered
+                n_matching = int(len(kept))
+                ranked = kept.iloc[offset:offset + limit]
                 for gene_key, record in ranked.iterrows():
                     direction = record['r_direction']
                     sig_column = 'up' if direction == 'up' else 'down'
-                    gene_cohorts = per_cohort[per_cohort['gene_key'] == gene_key]
+                    gene_cohorts = per_cohort.iloc[rows_by_gene[gene_key]]
                     names = gene_cohorts.loc[gene_cohorts[sig_column], 'cohort']
-                    tested_cohorts = set(gene_cohorts['cohort'])
-                    gene_donors = _donor_counts(chosen_units[chosen_units['cohort'].isin(tested_cohorts)])
+                    tested_cohorts = frozenset(gene_cohorts['cohort'])
+                    if tested_cohorts not in donors_of:      # few distinct cohort sets: count the donors once per set
+                        donors_of[tested_cohorts] = _donor_counts(chosen_units[chosen_units['cohort'].isin(tested_cohorts)])
+                    gene_donors = donors_of[tested_cohorts]
                     cohort_labels = sorted(labels.get(c) or c for c in tested_cohorts)
+                    small_cohorts = sorted(small_labels & set(cohort_labels))
                     unknown = sorted(label for label in cohort_labels if overlap_labels.get(label))
                     out_rows.append({
                         'gene': str(record['gene']), 'r_value': _finite(record['r_value']),
@@ -2290,6 +2352,7 @@ class FacetResults:
                         'median_abs_logFC': _finite(record.get('median_abs_logFC')),
                         'cohorts': sorted({labels.get(c) or c for c in names}),
                         'cohorts_tested_labels': cohort_labels,
+                        'n_small': len(small_cohorts), 'small_cohorts': small_cohorts,
                         'overlap_unknown': bool(unknown), 'cohorts_overlap_unknown': unknown,
                         'cohorts_sig_same_sign': int(record['k']), 'cohorts_tested': int(record['m']),
                         'cohorts_same_sign': (int(round(record['agreement'] * len(gene_cohorts)))
@@ -2301,6 +2364,11 @@ class FacetResults:
         chosen_info = group_info(chosen) if chosen else {}
         return json_safe({
             'facet': facet,
+            'headline': {'n_replicated': n_replicated, 'n_effect_gate': n_effect_gate, 'n_strict': n_strict,
+                         'strict_genes': strict_genes, 'n_genes_in_family': n_family,
+                         'cohorts': n_cohorts, 'effect_gate_unit': gate_words(facet)},
+            'offset': offset, 'n_matching': n_matching, 'n_returned': len(out_rows),
+            'has_more': offset + len(out_rows) < n_matching,
             'cell_type': chosen,
             'celltype_group': chosen,
             'cl_id': chosen_info.get('cl_id'),
@@ -2323,6 +2391,131 @@ class FacetResults:
             'exclude_secondary': exclude_secondary,
             'cohort_table_status': 'DRAFT',
         })
+
+    # ── gene sets and the facet overview ───────────────────────────────────
+
+    def member_replication(self, facet: str, members: Sequence[str], datasets: Sequence[Dict[str, Any]],
+                           exclude_secondary: bool = True, scope: Optional[str] = None) -> Dict[str, Any]:
+        """The member genes of a gene set that replicate for one facet in one scope, per cell type group.
+
+        Uses the gene replication families (the same r-values as ``/facets/{facet}/effects/top``), so the numbers are
+        the gene-level truth, next to the module result of the whole set. Nothing is truncated.
+
+        Args:
+            facet: Test facet name.
+            members: Gene symbols of the set (any case; matched by upper case symbol within the scope).
+            datasets: As for ``gene_effects``.
+            exclude_secondary: Secondary datasets are not counted.
+            scope: Facet scope; default ``default_scope(facet)``.
+
+        Returns:
+            ``{facet, scope, scopes, n_members, groups}``; ``groups[group]`` has ``n_members``, ``n_tested`` (members
+            tested in at least two cohorts), ``n_replicated`` (r < 0.05), ``n_up``, ``n_down``, ``n_effect_gate``
+            (replicated and the effect gate passed), ``n_strict``, ``genes_up`` and ``genes_down`` (names of the
+            replicated members by direction, best r first), ``genes_gate`` and ``genes`` (one dict per replicated
+            member: ``gene, r_value, direction, median_logFC, k, m, effect_gate_passed, strict``).
+        """
+        facet = canonical_facet(facet) if facet else facet
+        scope = scope or self.default_scope(facet)
+        prepared = self.prepare(datasets)
+        families = self.replication_families(facet, prepared, exclude_secondary, scope)
+        keys = {str(name).strip().upper() for name in members if str(name).strip()}
+        groups: Dict[str, Dict[str, Any]] = {}
+        for group, entry in families.items():
+            frame = entry['frame']
+            present = frame.loc[frame.index.intersection(list(keys))]
+            usable = present[present['r_value'].notna()]
+            replicated = usable[usable['replicated'].astype(bool)].sort_values(
+                ['r_value', 'k'], ascending=[True, False])
+            gated = replicated[replicated['effect_gate_passed'].astype(bool)]
+            strict_mask = gated['replicated_effect'].astype(bool)
+            genes = [{'gene': str(record['gene']), 'r_value': _finite(record['r_value']),
+                      'direction': record['r_direction'], 'median_logFC': _finite(record['median_logFC']),
+                      'k': int(record['k']), 'm': int(record['m']),
+                      'effect_gate_passed': bool(record['effect_gate_passed']),
+                      'strict': bool(record['effect_gate_passed'] and record['replicated_effect'])}
+                     for _, record in replicated.iterrows()]
+            groups[group] = {
+                'n_members': len(keys), 'n_in_data': int(len(present)), 'n_tested': int(len(usable)),
+                'n_replicated': int(len(replicated)),
+                'n_up': int((replicated['r_direction'] == 'up').sum()),
+                'n_down': int((replicated['r_direction'] == 'down').sum()),
+                'n_effect_gate': int(len(gated)), 'n_strict': int(strict_mask.sum()),
+                'genes_up': [g['gene'] for g in genes if g['direction'] == 'up'],
+                'genes_down': [g['gene'] for g in genes if g['direction'] == 'down'],
+                'genes_gate': [g['gene'] for g in genes if g['effect_gate_passed']],
+                'genes': genes}
+        return json_safe({'facet': facet, 'scope': scope, 'scopes': self.scopes_with_results(facet, prepared),
+                          'n_members': len(keys), 'groups': groups})
+
+    def effects_overview(self, facet: str, datasets: Sequence[Dict[str, Any]], exclude_secondary: bool = True,
+                         scope: Optional[str] = None, n_per_group: int = 10) -> Dict[str, Any]:
+        """The data of a simplified facet view: the headline and every cell type group, each gene shown once.
+
+        A gene replicated in several groups is listed only in the group where it is strongest (smallest r-value,
+        then most cohorts), so a page does not repeat PTPRG in five cards. Groups without a replicated gene are
+        named in ``quiet_groups`` with their cohort count and ``low_power`` (at most 2 cohorts), for one summary line.
+
+        Returns:
+            ``{facet, scope, scopes, headline, cell_types, quiet_groups, n_genes_unique}``. ``headline`` has the
+            counts of the group with the most cohorts (``cell_type``) and ``strict_genes``; ``cell_types`` one
+            card per group with replicated genes: ``celltype_group``, ``n_cohorts``, counts, ``n_assigned`` (genes
+            listed here) and ``genes`` (the best ``n_per_group``: ``gene, r_value, direction, median_logFC, k, m,
+            effect_gate_passed, strict, also_in`` (other groups where it replicates)).
+        """
+        facet = canonical_facet(facet) if facet else facet
+        scope = scope or self.default_scope(facet)
+        prepared = self.prepare(datasets)
+        families = self.replication_families(facet, prepared, exclude_secondary, scope)
+        candidates: List[pd.DataFrame] = []
+        cohorts_of: Dict[str, int] = {}
+        counts_of: Dict[str, Dict[str, int]] = {}
+        for group, entry in families.items():
+            frame = entry['frame']
+            cohorts_of[group] = int(entry['units']['cohort'].nunique())
+            counts_of[group] = family_counts(frame)
+            usable = frame[frame['r_value'].notna() & frame['replicated'].astype(bool)
+                           & frame['effect_gate_passed'].astype(bool)]
+            if len(usable):
+                candidates.append(usable.assign(group=group))
+        everything = pd.concat(candidates) if candidates else None
+        cards: List[Dict[str, Any]] = []
+        owner: Dict[str, str] = {}
+        if everything is not None:
+            ranked = everything.reset_index().sort_values(['r_value', 'm', 'k'], ascending=[True, False, False],
+                                                          kind='stable')
+            owner = dict(zip(ranked.drop_duplicates('gene_key')['gene_key'],
+                             ranked.drop_duplicates('gene_key')['group']))
+            where = ranked.groupby('gene_key')['group'].agg(list).to_dict()
+            for group in sorted(counts_of, key=lambda g: (-cohorts_of[g], -counts_of[g]['n_effect_gate'], g)):
+                mine = ranked[(ranked['group'] == group) & ranked['gene_key'].map(owner).eq(group)]
+                if mine.empty:
+                    continue
+                genes = [{'gene': str(record['gene']), 'r_value': _finite(record['r_value']),
+                          'direction': record['r_direction'], 'median_logFC': _finite(record['median_logFC']),
+                          'k': int(record['k']), 'm': int(record['m']), 'effect_gate_passed': True,
+                          'strict': bool(record['replicated_effect']),
+                          'also_in': [g for g in where[record['gene_key']] if g != group]}
+                         for _, record in mine.head(n_per_group).iterrows()]
+                cards.append({'celltype_group': group, 'cell_type': group, 'cl_id': group_info(group)['cl_id'],
+                              'n_cohorts': cohorts_of[group], **counts_of[group], 'n_assigned': int(len(mine)),
+                              'genes': genes})
+        quiet = [{'celltype_group': group, 'n_cohorts': cohorts_of[group], **counts_of[group],
+                  'low_power': cohorts_of[group] <= replication.DEFAULT_U}
+                 for group in sorted(counts_of, key=lambda g: (-cohorts_of[g], g))
+                 if group not in {card['celltype_group'] for card in cards} and group != UNMAPPED]
+        main = max(counts_of, key=lambda g: (cohorts_of[g], counts_of[g]['n_effect_gate'])) if counts_of else None
+        strict_genes: List[str] = []
+        if main is not None and everything is not None:
+            frame = families[main]['frame']
+            hit = frame[frame['replicated'].astype(bool) & frame['effect_gate_passed'].astype(bool)
+                        & frame['replicated_effect'].astype(bool)].sort_values(['r_value', 'k'], ascending=[True, False])
+            strict_genes = [str(name) for name in hit['gene'].head(STRICT_GENES_LISTED)]
+        headline = {'celltype_group': main, 'cohorts': cohorts_of.get(main, 0), **counts_of.get(main, family_counts(None)),
+                    'strict_genes': strict_genes, 'effect_gate_unit': gate_words(facet)}
+        return json_safe({'facet': facet, 'scope': scope, 'scopes': self.scopes_with_results(facet, prepared),
+                          'exclude_secondary': exclude_secondary, 'headline': headline, 'cell_types': cards,
+                          'quiet_groups': quiet, 'n_genes_unique': len(owner)})
 
     # ── one facet across datasets ──────────────────────────────────────────
 
@@ -2352,7 +2545,8 @@ class FacetResults:
         all_scopes = self.scopes_with_results(facet, datasets)
         datasets = self._with_scope(self._with_pooled(self.prepare(datasets).datasets), None if scope == 'all' else scope)
         signature = (facet, scope, top_genes, exclude_secondary, _file_key(self.results_dir / COHORT_TABLE_NAME), tuple(
-            (d['db_id'], bool(d.get('is_secondary')), d.get('disease_basis'), self.fingerprint(d['group_folder'], d['stem']))
+            (d['db_id'], bool(d.get('is_secondary')), d.get('disease_basis'), d.get('modality'),
+             self.fingerprint(d['group_folder'], d['stem']))
             for d in datasets))
         with self._lock:
             cached = self._overview_cache.get(signature)
@@ -2403,6 +2597,8 @@ class FacetResults:
                     'dataset_changed': summary.get('dataset_changed'),
                     'cohort': (summary.get('cohort') or {}).get('cohort'),
                     'cohort_label': (summary.get('cohort') or {}).get('cohort_label'),
+                    'cohort_display': cohort_display((summary.get('cohort') or {}).get('cohort_label')),
+                    'modality': dataset.get('modality'), 'modality_note': dataset.get('modality_note'),
                     'role': (summary.get('cohort') or {}).get('role'),
                     'counted': bool((summary.get('cohort') or {}).get('counted'))
                     and not (exclude_secondary and bool(dataset.get('is_secondary'))),
@@ -2564,6 +2760,137 @@ class FacetResults:
                 while len(self._png) > 64:
                     self._png.popitem(last=False)
         return png
+
+
+UNASSIGNED_COHORT = 'unassigned'
+
+
+def family_counts(frame: Optional[pd.DataFrame]) -> Dict[str, int]:
+    """Headline counts of one replication family frame: genes tested in at least two cohorts, replicated
+    (r < 0.05), replicated with the effect gate passed, and those that also pass the strict minimum-effect test
+    (``replicated_effect``). Zeros for a missing frame."""
+    if frame is None or frame.empty:
+        return {'n_genes_in_family': 0, 'n_replicated': 0, 'n_effect_gate': 0, 'n_strict': 0}
+    usable = frame[frame['r_value'].notna()]
+    replicated = usable[usable['replicated'].astype(bool)]
+    gated = replicated[replicated['effect_gate_passed'].astype(bool)]
+    return {'n_genes_in_family': int(len(usable)), 'n_replicated': int(len(replicated)),
+            'n_effect_gate': int(len(gated)), 'n_strict': int(gated['replicated_effect'].astype(bool).sum())}
+
+
+def cohort_display(label: Any) -> str:
+    """The cohort label as shown: ``unassigned`` for a dataset that is not in the cohort table (no label)."""
+    text = _clean_text(label)
+    return text if text else UNASSIGNED_COHORT
+
+
+def _is_small(n_donors: Any) -> bool:
+    """A unit below ``facet_rules.SMALL_COHORT_REPLICATES`` replicates (counted, flagged small)."""
+    count = _as_int(n_donors)
+    return count is not None and count < facet_rules.SMALL_COHORT_REPLICATES
+
+
+def _rounded(value: Any, digits: int) -> Optional[float]:
+    number = _finite(value)
+    return None if number is None else round(number, digits)
+
+
+def _forest_point(record: Dict[str, Any]) -> Dict[str, Any]:
+    """One row of a forest plot from a merged gene row and unit record.
+
+    ``ci_low`` / ``ci_high`` are the limma confidence interval (moderated t) of ``logFC`` as stored by the test
+    run (rounded to 5 decimals); draw intervals only from them. ``anchor_counted`` says the row carries its cohort's
+    vote. The row is deliberately slim (a gene page carries hundreds of them); the full unit card is in ``units``.
+    """
+    unit = record.get('summary_unit') or {}
+    return {
+        'cohort_label': _clean_text(record.get('cohort_label')),
+        'db_id': record['db_id'], 'title': record.get('title'), 'cell_type': record['cell_type'],
+        'celltype_source': record['celltype_source'], 'pooled': bool(record.get('pooled')),
+        'anchor_counted': bool(record.get('counted_effective')),
+        'n_donors': _as_int(record.get('n_donors')), 'n_donors_ref': _as_int(record.get('n_donors_ref')),
+        'n_donors_test': _as_int(record.get('n_donors_test')), 'small_sample': _is_small(record.get('n_donors')),
+        'logFC': _rounded(record.get('logFC'), 5), 'ci_low': _rounded(record.get('ci_low'), 5),
+        'ci_high': _rounded(record.get('ci_high'), 5),
+        'p_value': _finite(record.get('p_value')), 'q_value': _finite(record.get('q_value')),
+        'lambda_gc': _rounded(unit.get('lambda_gc'), 3), 'inflated': unit.get('inflated'),
+        'analysis_level': record.get('analysis_level'), 'replicate_unit': unit.get('replicate_unit'),
+        'modality': record.get('modality'), 'modality_note': record.get('modality_note'),
+        'not_counted_reason': None if record.get('counted_effective') else _not_counted_reason(record),
+    }
+
+
+def _folded_point(record: Dict[str, Any]) -> Dict[str, Any]:
+    """A unit folded under ``more_units`` of a forest row: the estimate with its interval and why it is not the
+    anchor (the minimum a reader needs; the full row is in the card's ``units``)."""
+    return {
+        'db_id': record['db_id'], 'title': record.get('title'), 'cell_type': record['cell_type'],
+        'celltype_source': record['celltype_source'], 'anchor_counted': bool(record.get('counted_effective')),
+        'n_donors': _as_int(record.get('n_donors')),
+        'logFC': _rounded(record.get('logFC'), 5), 'ci_low': _rounded(record.get('ci_low'), 5),
+        'ci_high': _rounded(record.get('ci_high'), 5), 'q_value': _finite(record.get('q_value')),
+        'modality': record.get('modality'),
+        'not_counted_reason': None if record.get('counted_effective') else _not_counted_reason(record),
+    }
+
+
+def _anchor_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """The legacy ``anchors`` row of a counted unit: the forest row plus the cohort id, treat p values, independence
+    and disease basis (kept for clients of 2.44)."""
+    return {**_forest_point(record), 'cohort': _clean_text(record.get('cohort')),
+            'p_treat': _finite(record.get('p_treat')), 'q_treat': _finite(record.get('q_treat')),
+            'independence': record.get('independence'), 'disease_basis': record.get('disease_basis'),
+            'cohort_display': cohort_display(record.get('cohort_label'))}
+
+
+FOREST_MODES = ('full', 'anchors', 'none')
+
+
+def forest_view(forest: List[Dict[str, Any]], mode: str) -> List[Dict[str, Any]]:
+    """A forest list in the requested detail (a copy; cached cards are shared and must not change).
+
+    ``full``: every row with its folded ``more_units``. ``anchors``: the cohort rows with their counted anchor, the
+    folded units left out (``n_more_units`` still says how many). ``none``: no rows. Raises ``FacetResultsError`` for
+    another value.
+    """
+    if mode not in FOREST_MODES:
+        raise FacetResultsError(f'forest must be one of {", ".join(FOREST_MODES)}')
+    if mode == 'full':
+        return forest
+    if mode == 'none':
+        return []
+    return [{**row, 'more_units': []} for row in forest]
+
+
+def _forest(sub: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Forest rows of one cell type group, one per cohort: its counted anchor, the other units folded.
+
+    Counted cohorts come first (by label), then the cohorts that do not count (secondary datasets, units outside
+    the cohort table), greyed by the reader: the visible counted rows agree with ``m`` (a counted cohort whose
+    anchor has no p value is listed with ``in_m`` false). ``more_units`` are the cohort's other units of the group
+    (``anchor_counted`` false unless the cohort has several equal strata, which share its one vote).
+    """
+    records_sorted = sub.to_dict(orient='records')
+    records_sorted.sort(key=lambda r: (not r['counted_effective'], -(_as_int(r.get('n_donors')) or 0),
+                                       str(r['db_id']), str(r['cell_type'])))
+    by_cohort: Dict[Optional[str], List[Dict[str, Any]]] = {}
+    for record in records_sorted:
+        by_cohort.setdefault(_clean_text(record.get('cohort')), []).append(record)
+    entries: List[Dict[str, Any]] = []
+    for cohort, records in by_cohort.items():
+        counted = [record for record in records if record.get('counted_effective')]
+        shown = counted[0] if counted else records[0]
+        rest = [_folded_point(record) for record in records if record is not shown]
+        point = _forest_point(shown)
+        entries.append({
+            'cohort': cohort, 'cohort_label': point['cohort_label'],
+            'cohort_display': cohort_display(point['cohort_label']), 'counted': bool(counted),
+            'in_m': bool(counted) and point['q_value'] is not None,
+            'small': point['small_sample'] if counted else None,
+            'anchor': point, 'more_units': rest, 'n_more_units': len(rest),
+        })
+    entries.sort(key=lambda e: (not e['counted'], str(e['cohort_display']).lower()))
+    return entries
 
 
 def _run_info(manifest: Optional[dict], kind: str) -> Optional[Dict[str, Any]]:

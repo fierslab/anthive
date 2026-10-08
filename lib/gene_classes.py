@@ -7,6 +7,10 @@ Names are classified by pattern (human and mouse). Sex chromosome and span need 
 the name based flags exist. Mouse genes have no span annotation here.
 
 The GTF is read once per process (gene lines only, about a second) and cached in memory by file size and mtime.
+
+Two more flags depend on where a result is shown and are added by ``context_flags``: ``foreign_lineage_marker`` (the
+gene is a marker of a neuronal, glial or vascular panel and the cell type group is myeloid) and ``no_mouse_ortholog``
+(a xenograft result for a human gene without a mouse ortholog). Both are informational; they never change an r-value.
 """
 from __future__ import annotations
 
@@ -15,7 +19,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 LONG_GENE_BP = 500_000
 APOE_LOCUS = frozenset({'APOE', 'APOC1', 'APOC1P1', 'TOMM40', 'NECTIN2', 'PVRL2'})
@@ -122,4 +126,88 @@ def flags(symbol: str, annotation: Optional[Dict[str, Tuple[str, int]]] = None) 
             out.append('long_gene')
     if symbol.upper() in APOE_LOCUS:
         out.append('apoe_locus')
+    return out
+
+
+# ── context flags: depend on the cell type group and the facet scope (informational, never change an r-value) ──
+
+FLAG_FOREIGN_LINEAGE = 'foreign_lineage_marker'
+FLAG_NO_MOUSE_ORTHOLOG = 'no_mouse_ortholog'
+#: Cell type groups in which a neuronal, glial or vascular marker is out of place (the myeloid lineage).
+MYELOID_GROUPS = frozenset({'microglia', 'perivascular macrophage', 'macrophage (other)', 'myeloid (mixed)'})
+#: Facet scope whose human cells sit in a mouse brain (a human gene without a mouse ortholog is not protected by a
+#: combined human and mouse reference: reads of that region cannot be assigned to the mouse copy).
+XENOGRAFT_SCOPE = 'xenograft_human_in_mouse'
+ORTHOLOG_FILE = Path('_orthologs') / 'mouse_human_orthologs.tsv'
+_MYELOID_PANEL = re.compile(r'micro|macroph|monocyt|myeloid', re.I)
+_ortholog_cache: Dict[str, Tuple[Tuple[float, int], FrozenSet[str]]] = {}
+
+
+def foreign_lineage_symbols(genesets: Iterable[Any]) -> FrozenSet[str]:
+    """Upper-case symbols of the marker panels of lineages other than microglia, for the foreign-lineage flag.
+
+    Args:
+        genesets: Geneset-store entries (``role``, ``name``, ``genes``); the ``role: markers`` ones are the panels
+            (PanglaoDB Neuron, Glia and Vasculature markers, the LuChen NBB cell type markers). Panels of the myeloid
+            lineage (name matches micro, macroph, monocyt, myeloid) are not foreign, and a gene that is also in one of
+            them is not flagged.
+    """
+    foreign: set = set()
+    own: set = set()
+    for geneset in genesets:
+        if getattr(geneset, 'role', None) != 'markers':
+            continue
+        symbols = {str(gene).upper() for gene in geneset.genes}
+        (own if _MYELOID_PANEL.search(str(geneset.name)) else foreign).update(symbols)
+    return frozenset(foreign - own)
+
+
+def human_orthologs(path: Path) -> Optional[FrozenSet[str]]:
+    """Upper-case human symbols that have a mouse ortholog in the MGI homology table (``mouse<TAB>human``).
+
+    The table is ``<genesetstore>/_orthologs/mouse_human_orthologs.tsv`` (MGI HOM_MouseHumanSequence). Matching is by
+    symbol, so a gene renamed since the MGI release reads as without an ortholog; the flag is a prompt to look, not a
+    verdict. Cached by file mtime and size; None when the file is missing or unreadable (the flag is then not raised).
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = str(path)
+    stamp = (stat.st_mtime, stat.st_size)
+    with _lock:
+        cached = _ortholog_cache.get(key)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+    humans: set = set()
+    try:
+        with open(path, encoding='utf-8') as handle:
+            next(handle, None)
+            for line in handle:
+                parts = line.rstrip('\n').split('\t')
+                if len(parts) >= 2 and parts[1]:
+                    humans.add(parts[1].upper())
+    except OSError:
+        return None
+    result = frozenset(humans)
+    with _lock:
+        _ortholog_cache[key] = (stamp, result)
+    return result
+
+
+def context_flags(symbol: str, group: Optional[str], scope: Optional[str],
+                  foreign: Optional[FrozenSet[str]] = None, orthologs: Optional[FrozenSet[str]] = None) -> List[str]:
+    """Flags that depend on where a result is shown (informational: they never change an r-value).
+
+    ``foreign_lineage_marker``: the gene is a marker of a neuronal, glial or vascular panel and the result is for a
+    myeloid cell type group (``MYELOID_GROUPS``): in microglia such a gene points at ambient RNA, doublets or, in
+    xenografts, cross-species read misassignment. ``no_mouse_ortholog``: a xenograft result for a human gene with no
+    mouse ortholog (None for ``foreign`` / ``orthologs`` means the source is unavailable: the flag is not raised).
+    """
+    out: List[str] = []
+    upper = symbol.upper()
+    if foreign and group in MYELOID_GROUPS and upper in foreign:
+        out.append(FLAG_FOREIGN_LINEAGE)
+    if orthologs and scope == XENOGRAFT_SCOPE and upper not in orthologs:
+        out.append(FLAG_NO_MOUSE_ORTHOLOG)
     return out
