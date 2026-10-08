@@ -55,6 +55,10 @@
     return '<span class="vw-modality ' + cls + '" title="' + (modality === 'nuclei' ? 'Single nuclei: detection of long and nuclear-enriched genes is higher, cytoplasmic genes lower.' : 'Whole cells (' + V.esc(modality) + '): not directly comparable with nuclei in detection rate.') + '">' + V.esc(modality) + '</span>';
   }
   function topPct(rank) { return rank == null ? 'n/a' : 'top ' + Math.max(1, Math.round((1 - rank) * 100)) + '%'; }
+  function servedModality(result) {
+    if (!result.modality || result.modality === 'unknown') return '';
+    return result.modality_note === 'sorted live cells' ? 'sorted live cells' : result.modality;
+  }
   function collectRows(stats) {
     var rows = [];
     var other = 0;
@@ -64,7 +68,7 @@
       if (!db || result.is_secondary || db.secondary || !stat || stat.pct_nonzero == null || result.n_cells < 50 || !db.human) return;
       if (db.scope !== 'human_postmortem' && db.scope !== 'xenograft_human_in_mouse') { other += 1; return; }
       rows.push({ db_id: result.db_id, title: db.title || result.title, scope: db.scope, group: db.group, n_cells: result.n_cells, pct: stat.pct_nonzero, mean: stat.mean,
-                  rank: stat.rank_mean, q10: stat.q10_nonzero, q90: stat.q90_nonzero, modality: db.modality || '' });
+                  rank: stat.rank_mean, q10: stat.q10_nonzero, q90: stat.q90_nonzero, modality: servedModality(result) || db.modality || '' });
     });
     return { rows: rows, other: other };
   }
@@ -141,7 +145,8 @@
         (card.replication || []).forEach(function (rep) {
           var group = rep.celltype_group;
           if (V.GROUPS.indexOf(group) < 0) return;
-          var cell = V.cellFromRep(rep, lowDet[scope + '|' + group]);
+          var served = rep.detection !== undefined ? (rep.detection && rep.detection.low_detection ? { pct: rep.detection.pct_median, n: rep.detection.n_datasets } : null) : undefined;
+          var cell = V.cellFromRep(rep, served !== undefined ? served : lowDet[scope + '|' + group]);
           if (!cell) return;
           cells[group] = cell;
           seen[group] = 1;
@@ -172,7 +177,7 @@
     var where = V.esc(V.plain(group));
     var unit = V.SCOPES[scope].noun;
     var smallText = cell.nSmall ? ' ' + (cell.nSmall === 1 ? '1 of these cohorts has' : cell.nSmall + ' of these cohorts have') + ' fewer than ' + cell.smallLimit + ' ' + unit + '.' : '';
-    var carried = cell.rCohorts.length ? ', carried by ' + V.esc(cell.rCohorts.slice(0, 2).join(' and ')) : '';
+    var carried = cell.rCohorts.length ? ', carried by ' + V.esc(cell.rCohorts.slice(0, 2).map(function (c) { return c.replace(/^Xenograft:\s*/, ''); }).join(' and ')) : '';
     if (V.cellKind(cell) === 'rep') {
       var filter = cell.gate ? ' The effect filter is met: at least ' + V.esc(cell.gateUnit || '10%') + ' in 2 cohorts.' : ' The effect filter (at least ' + V.esc(cell.gateUnit || '10%') + ' in 2 cohorts) is not met.';
       var strict = cell.strict ? ' The strict minimum-effect test also passes (r = ' + V.pfmt(cell.rTreat) + ').' : '';
@@ -189,11 +194,17 @@
       if (u.analysis_level === 'below_floor' || u.analysis_level === 'cell') pills += V.pill('descriptive', 'warn', 'Below the p-value floor or cell-level: shown without interval, p or q, and not counted.', 'descriptive-only');
       if (u.n_donors != null && u.n_donors < 20 && replicate) pills += V.pill('small', '', 'Fewer than 20 ' + noun + ': cannot reach significance for effects of this size.', 'small-cohorts');
       if (u.inflated) pills += V.pill('inflated, lambda ' + V.num(u.lambda_gc, 1), 'warn', 'Many genes shift together (lambda above 1.3): often a batch, depth or composition difference. Read p values with care.', 'lambda');
-      var cohort = u.cohort_label && u.cohort_label !== 'None' ? u.cohort_label : 'unassigned';
+      var cohort = u.cohort_label && u.cohort_label !== 'None' ? u.cohort_label.replace(/^Xenograft:\s*/, '') : 'unassigned';
       return { name: cohort, title: u.title || u.db_id, sub: '<a href="/browse/' + V.esc(u.db_id) + '">' + V.esc(u.db_id) + '</a>', n: u.n_donors, est: u.logFC,
                lo: replicate ? u.ci_low : null, hi: replicate ? u.ci_high : null, q: replicate ? u.q_value : null, sig: replicate && u.q_value != null && u.q_value < 0.05,
-               counted: !!u.counted, reason: u.not_counted_reason, pills: pills, db_id: u.db_id };
-    }).sort(function (a, b) { return (b.counted - a.counted) || ((b.n || 0) - (a.n || 0)); });
+               counted: !!u.counted, anchor: !!u.anchor, reason: u.not_counted_reason, pills: pills, db_id: u.db_id };
+    }).sort(function (a, b) { return (b.counted - a.counted) || (b.anchor - a.anchor) || ((b.n || 0) - (a.n || 0)); }).map(function (row, index, all) {
+      // strata of one cohort (lines, timepoints) share one vote: the first counted row of a cohort stands for it
+      if (!row.counted) return row;
+      var earlier = all.slice(0, index).some(function (other) { return other.counted && other.name === row.name; });
+      if (earlier) { row.counted = false; row.reason = 'another unit of this cohort (one vote per cohort)'; }
+      return row;
+    }).sort(function (a, b) { return (b.counted - a.counted) || (b.anchor - a.anchor) || ((b.n || 0) - (a.n || 0)); });
   }
   function detailHtml(block, row, group, cell, card) {
     var scope = block.scope;
@@ -250,10 +261,28 @@
         parts.push((model.blocks.length > 1 ? (block.scope === 'human_postmortem' ? 'In post-mortem brain, ' : 'In xenografts, ') : '') + 'replicated in ' + V.esc(V.plain(group)) + ' for ' + items.map(function (x) { return V.esc(x.text); }).join(', ') + (axis ? ' (Braak stage and pathologic AD are one pathology axis)' : ''));
       });
     });
+    var others = {};
+    model.blocks.forEach(function (block) {
+      block.groups.forEach(function (group) {
+        var anyRep = block.rows.some(function (row) { return row.cells[group] && V.cellKind(row.cells[group]) === 'rep'; });
+        if (anyRep) return;
+        var ms = block.rows.map(function (row) { return row.cells[group] && row.cells[group].m >= 2 ? row.cells[group].m : null; }).filter(Boolean);
+        if (ms.length && block.scope === 'human_postmortem') others[group] = { min: Math.min.apply(null, ms), max: Math.max.apply(null, ms) };
+      });
+    });
+    var otherNames = Object.keys(others);
+    var mins = otherNames.map(function (g) { return others[g].min; }), maxs = otherNames.map(function (g) { return others[g].max; });
+    var lowest = mins.length ? Math.min.apply(null, mins) : 0, highest = maxs.length ? Math.max.apply(null, maxs) : 0;
+    var otherText = otherNames.length && parts.length ? ' No replicated change was seen in the other cell types tested (' + (lowest === highest ? V.plural(lowest, 'cohort') : lowest + ' to ' + highest + ' cohorts') + (lowest <= 2 ? '; with 2 cohorts the test has little power' : '') + ').' : '';
     var html = '';
-    if (parts.length) html += '<p class="vw-lede">' + parts.join('. ') + '.</p>';
+    if (parts.length) html += '<p class="vw-lede">' + parts.join('. ') + '.' + otherText + '</p>';
     else if (tested) html += '<p class="vw-lede">No facet effect replicates for ' + V.esc(GENE) + ' in any tested cell type. This is not evidence that there is none: some cell types are tested in only 2 cohorts, which has little power.</p>';
-    var low = ['human_postmortem', 'xenograft_human_in_mouse'].map(function (scope) { return lowDet[scope + '|microglia'] ? { scope: scope, info: lowDet[scope + '|microglia'] } : null; }).filter(Boolean);
+    var low = [];
+    model.blocks.forEach(function (block) {
+      var found = lowDet[block.scope + '|microglia'];
+      block.rows.forEach(function (row) { if (!found && row.cells.microglia && row.cells.microglia.lowDet) found = row.cells.microglia.lowDet; });
+      if (found) low.push({ scope: block.scope, info: found });
+    });
     if (low.length) html += '<p class="vw-lede">' + V.lowDetectionPill(low[0].info) + ' ' + V.esc(GENE) + ' is detected in about ' + Math.round(low[0].info.pct) + ' percent of microglial cells; read facet results for it as fragile.</p>';
     document.getElementById('vwg-headline').innerHTML = html;
   }

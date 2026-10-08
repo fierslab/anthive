@@ -121,6 +121,7 @@
              padding: 3px 0; border-bottom: 1px solid var(--border-light); font-size: 11.5px; }
   .vw-frow:last-child { border-bottom: none; }
   .vw-frow.head { font-size: 9.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
+  .vw-frow.head > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .vw-frow.uncounted { color: #8a9199; }
   .vw-frow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .vw-frow .nm small { color: var(--text-muted); display: block; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
@@ -205,6 +206,8 @@ window.antViews = window.antViews || (function () {
     sex_chromosome: ['sex chromosome', 'X or Y linked: sex composition can move it.'],
     long_gene: ['long gene', 'Gene span above 500 kb: intron-rich, tracks nuclear RNA quality and post-mortem interval.'],
     apoe_locus: ['APOE locus', 'Allele-linked expression and read-mapping differences near APOE can produce an e4 effect that need not be biology.'],
+    foreign_lineage_marker: ['foreign lineage', 'A marker of a neuronal, glial or vascular cell type seen in a myeloid cell type: often ambient RNA or read misassignment, not expression by microglia. Informational; it does not change the r-value.'],
+    no_mouse_ortholog: ['no mouse ortholog', 'A human gene without a mouse ortholog in a xenograft: reads cannot be assigned to a mouse copy, so cross-species misassignment is less likely, but the gene cannot be checked against the host.'],
     neuronal_in_microglia: ['neuronal gene', 'A neuronal gene seen in microglia: usually ambient RNA or read misassignment, not microglial expression.'],
     lymphoid_in_microglia: ['lymphoid gene', 'A lymphoid gene seen in microglia: usually contamination or misassignment, not microglial expression.']
   };

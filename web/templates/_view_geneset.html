@@ -119,8 +119,9 @@
     cell.strict = false;
     cell.variant = variant;
     cell.label = primary.label || variant.label || '';
-    cell.disagree = entry.ab ? 1 : 0;
-    cell.ab = entry.ab || null;
+    var disagrees = !!(entry.ab && entry.ab.disagree);
+    cell.disagree = disagrees ? 1 : 0;
+    cell.ab = disagrees ? entry.ab : null;
     cell.entry = entry;
     return cell;
   }
@@ -217,7 +218,11 @@
       if (anchors.length) html += '<div class="vw-anchor-chips"><span class="lbl">Anchor datasets</span>' + anchors.map(function (r) { return '<a class="vw-cohort-chip" href="/browse/' + V.esc(r.db_id) + '">' + V.esc(r.db_id) + '</a>'; }).join(' ') + '</div>';
     }
     if (cell.genes) {
-      html += '<div class="vw-mcg"><b>' + (cell.genes.n === 0 ? 'No member gene replicates' : cell.genes.n + (cell.genes.more ? '+' : '') + ' member ' + (cell.genes.n === 1 ? 'gene replicates' : 'genes replicate')) + '</b> for ' + V.esc(row.label) + ' in ' + V.esc(V.plain(group)) + ' (gene level, same rule as the gene view)' + (cell.genes.genes.length ? ': ' + cell.genes.genes.map(function (g) { return '<a class="g" href="/genes/' + V.esc(g.gene) + '">' + V.esc(g.gene) + ' ' + V.arrow(g.direction || g.dir) + ' ' + V.signed(g.median_logFC != null ? g.median_logFC : g.lfc, 2) + '</a>'; }).join('') : '.') + '</div>';
+      var chips = function (list) { return list.map(function (g) { return '<a class="g" href="/genes/' + V.esc(g.gene) + '">' + V.esc(g.gene) + ' ' + V.arrow(g.direction || g.dir) + ' ' + V.signed(g.median_logFC != null ? g.median_logFC : g.lfc, 2) + '</a>'; }).join(''); };
+      var shownGenes = cell.genes.genes.slice(0, 30), restGenes = cell.genes.genes.slice(30);
+      html += '<div class="vw-mcg"><b>' + (cell.genes.n === 0 ? 'No member gene replicates' : cell.genes.n + ' member ' + (cell.genes.n === 1 ? 'gene replicates' : 'genes replicate')) + '</b> for ' + V.esc(row.label) + ' in ' + V.esc(V.plain(group)) + ' (gene level, same rule as the gene view; r &lt; 0.05' + (cell.genes.nGate != null ? ', ' + cell.genes.nGate + ' also meet the effect filter' + (cell.genes.nStrict ? ', ' + cell.genes.nStrict + ' the strict test' : '') : '') + ')' +
+        (cell.genes.nTested != null ? '. ' + cell.genes.nTested + ' of ' + cell.genes.nMembers + ' member genes are tested in at least 2 cohorts' : '') +
+        (shownGenes.length ? ': ' + chips(shownGenes) : '.') + (restGenes.length ? '<details class="vw-rest-genes"><summary class="muted" style="cursor:pointer;font-size:11.5px">and ' + restGenes.length + ' more</summary>' + chips(restGenes) + '</details>' : '') + '</div>';
     }
     return Promise.resolve(html + '</div>');
   }
@@ -234,7 +239,7 @@
     if (effects.directionless) note += '<div class="vw-note"><b>A mean score is not well suited to this set.</b> ' + V.esc(effects.directionless_note || 'The set has no expected direction: its genes can go up and down together, so a flat mean score is uninformative. Read the member-gene counts instead.') + '</div>';
     if (effects.quality && effects.quality.quality_sensitive) note += '<div class="vw-note"><b>Quality-sensitive set.</b> Mitochondrial or ribosomal genes make up much of this set, so its score tracks RNA quality and cell damage as much as biology.</div>';
     var tested = effects.scored_in || [];
-    if (tested.length) note += '<p class="vw-fnote">The module result comes from ' + V.plural(tested.length, 'dataset') + ' where the set was scored at test time: ' + tested.map(function (d) { return '<a href="/browse/' + V.esc(d.db_id) + '">' + V.esc(d.db_id) + '</a>' + (d.modality ? ' ' + modalityTag(d.modality) : ''); }).join(', ') + '. The member-gene counts come from all cohorts of the gene-level tests.</p>';
+    if (tested.length) note += '<details class="vw-scored"><summary class="muted" style="cursor:pointer;font-size:11.5px">The module result comes from ' + V.plural(tested.length, 'dataset') + ' where the set was scored at test time (show them). The member-gene counts come from all cohorts of the gene-level tests.</summary><p class="vw-fnote">' + tested.map(function (d) { return '<a href="/browse/' + V.esc(d.db_id) + '">' + V.esc(d.db_id) + '</a>' + (d.modality ? ' ' + modalityTag(d.modality) : ''); }).join(', ') + '</p></details>';
     else note += '<p class="vw-fnote">No dataset has module results for this set; only member genes are counted.</p>';
     document.getElementById('vws-direction').innerHTML = note;
     if (!state.preselected) {
@@ -243,7 +248,7 @@
       model.blocks.forEach(function (block) { block.rows.forEach(function (row) { Object.keys(row.cells).forEach(function (group) {
         var cell = row.cells[group];
         var kind = V.cellKind(cell);
-        var score = kind === 'rep' ? cell.r : (kind === 'genes' ? 2 - Math.min(1, (cell.genes ? cell.genes.n : 0) / 1000) : null);
+        var score = kind === 'rep' ? cell.r : (kind === 'genes' ? 2 - Math.min(1, (cell.genes ? cell.genes.n : 0) / 1000) - (block.scope === 'human_postmortem' ? 0.5 : 0) : null);
         if (score != null && (!best || score < best.score)) best = { scope: block.scope, facet: row.facet, group: group, score: score };
       }); }); });
       if (best) V.preselect(best.scope, best.facet, best.group);

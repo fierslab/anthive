@@ -189,6 +189,22 @@ the p-value floor" (`_floor_text`). Excluded datasets (`_fx_exclusion_text`, ser
 "excluded from the facet layer" or mouse-only) keep the Facets tab with `#fx-excluded`. Author-cluster facets get
 a "dataset-scoped, no tests" note, `ant_tissue` an umbrella note plus `#ds-tissue-detail` (from `/info` `tissue`).
 
+**Gene, gene set and facet views (new tabs, 2026-10).** `genes.html` (single gene only), `geneset.html` and
+`facet.html` (only when the facet has tests) carry a tab bar (`#vw-tabs`, `window.antViews.initTabs`, hashes
+`#gene-view` / `#atlas` / `#author-de`, `#geneset-view` / `#page`, `#overview` / `#detail`; a hash that points into
+another panel opens that panel, and the atlas `&gv=` tail is kept) with the new view first and the old page untouched
+in its own panel. The code is four partials: `_views.html` (CSS `.vw-*`, shared JS: call logic, the grid for >= 900 px
+and the list below it, the forest, tabs), `_view_gene.html`, `_view_geneset.html`, `_view_facet.html`. All rendering
+is client-side from the API; `browser.py` only passes `view_dbs` (`_view_db_map`: scope, cell type group, human flag,
+secondary flag, `modality` from `_view_modality`) and serves `GET /genes/{gene}/author-de` (JSON: the datasets with
+author DE are found once and cached for an hour, `_gene_author_de_rows`, plain labels from `_plain_de_label`).
+Rules the code follows: the main colour is the plain partial conjunction (r < 0.05), the effect filter is a separate
+pill, the star is the strict tier, no yellow "small" call, "cohorts" never "independent cohorts", the forest shows one
+row per cohort with the rest under "+n more units (not counted)", intervals only from served `ci_low`/`ci_high`, a
+`low detection` pill below 5 percent, modality tags in panel 1, visible caveat lines (composition, one pathology axis,
+xenograft one lab pipeline, age floor). Every field the API may not serve yet is guarded; a missing one hides its element.
+Panel 3 is a placeholder.
+
 **MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/links`,
 `POST /me/mcp/links/{id}/rotate`, `DELETE /me/mcp/links/{id}`,
 `GET /admin/mcp-links`, `DELETE /admin/mcp-links/{user}/{id}` client-side

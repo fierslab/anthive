@@ -144,7 +144,7 @@
       var draw = function (limit) {
         var body = passing.slice(0, limit).map(function (row) {
           var flags = V.geneFlagPills((row.gene_flags || []).concat(row.apoe_locus && (row.gene_flags || []).indexOf('apoe_locus') < 0 ? ['apoe_locus'] : []));
-          return '<tr><td><a href="/genes/' + V.esc(row.gene) + '">' + V.esc(row.gene) + '</a>' + (row.replicated_effect ? ' <span title="Strict tier: minimum-effect r-value below 0.05">&#9733;</span>' : '') + '</td><td>' + V.arrow(row.direction) + ' ' + (row.direction || '') + '</td><td class="num">' + V.signed(row.median_logFC, 2) + '</td><td class="num">' + row.k + ' of ' + row.m + '</td><td>' + V.esc((row.r_cohorts || []).slice(0, 2).join(', ')) + '</td><td>' + flags + '</td></tr>';
+          return '<tr><td><a href="/genes/' + V.esc(row.gene) + '">' + V.esc(row.gene) + '</a>' + (row.replicated_effect ? ' <span title="Strict tier: minimum-effect r-value below 0.05">&#9733;</span>' : '') + '</td><td>' + V.arrow(row.direction) + ' ' + (row.direction || '') + '</td><td class="num">' + V.signed(row.median_logFC, 2) + '</td><td class="num">' + row.k + ' of ' + row.m + '</td><td>' + V.esc((row.r_cohorts || []).slice(0, 2).map(function (c) { return c.replace(/^Xenograft:\s*/, ''); }).join(', ')) + '</td><td>' + flags + '</td></tr>';
         }).join('');
         host.innerHTML = '<div class="vw-box"><table class="vw-table"><thead><tr><th>Gene</th><th>Direction</th><th class="num">Effect (log2 fold change)</th><th class="num">Cohorts significant</th><th>Carried by</th><th>Flags</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
           '<p class="vw-fnote">' + (limit < passing.length ? '<button type="button" class="vw-more-units" id="vwf-allgenes">show all ' + passing.length + ' listed genes</button> ' : '') + 'Genes that replicate and meet the effect filter' + (truncated ? '. The list holds the first 500 replicated genes by r-value; ' + nGate + ' meet the filter in all' : '') + '. &#9733; marks the strict tier. Cohorts significant = individually q &lt; 0.05 in the same direction, of those tested.</p>';
@@ -176,11 +176,11 @@
     var counted = testRows.filter(function (row) { return anchored ? row.anchor === true : row.counted; });
     var perCohort = {};
     counted.forEach(function (row) {
-      var name = row.cohort_label && row.cohort_label !== 'None' ? row.cohort_label : 'unassigned';
+      var name = row.cohort_label && row.cohort_label !== 'None' ? row.cohort_label.replace(/^Xenograft:\s*/, '') : 'unassigned';
       if (!perCohort[name] || (row.n_donors || 0) > (perCohort[name].n_donors || 0)) perCohort[name] = row;
     });
     var tested = {};
-    rows.forEach(function (row) { (row.cohorts_tested_labels || []).forEach(function (label) { tested[label] = 1; }); });
+    rows.forEach(function (row) { (row.cohorts_tested_labels || []).forEach(function (label) { tested[label.replace(/^Xenograft:\s*/, '')] = 1; }); });
     var names = Object.keys(perCohort).filter(function (name) { return !Object.keys(tested).length || tested[name]; });
     if (names.length) {
       document.getElementById('vwf-cohorts-head').hidden = false;
