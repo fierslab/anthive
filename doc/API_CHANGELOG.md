@@ -92,7 +92,7 @@ Changed (additive):
   (`3/4 cohorts, 1 small`), `small_cohorts`, `detection` (`{pct_median, n_datasets, low_detection}` or null) with
   `low_detection`, and `gene_flags` (the card's flags plus `foreign_lineage_marker` where the gene is a marker of a
   non-microglial panel and the group is myeloid; the card's own `gene_flags` add `no_mouse_ortholog` for a xenograft
-  scope). Both context flags are informational. New `forest` query parameter (`full` | `anchors` | `none`): `/facets/{facet}/effects`
+  scope). Both context flags are informational. `foreign_lineage_marker` needs more than panel membership: the gene must be detected in under 10 percent of microglia (median over the scope's microglia datasets) and at least 5 times more often in a non-myeloid cell type of that scope (`gene_classes.foreign_by_detection`); without detection data it is not raised. New `forest` query parameter (`full` | `anchors` | `none`): `/facets/{facet}/effects`
   defaults to `full`, `/genes/{gene}/facet-effects` (the all-facets payload) to `anchors` (folded units left out,
   `n_more_units` kept). `anchors` rows keep the 2.44 fields and add `ci_low`, `ci_high`, `lambda_gc`, `inflated`,
   `small_sample`, `modality`. Unit cards add `anchor_counted`, `cohort_display`, `modality`, `modality_note`,

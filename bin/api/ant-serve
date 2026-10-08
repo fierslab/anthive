@@ -13508,10 +13508,13 @@ def _gene_context() -> Tuple[Optional[frozenset], Optional[frozenset]]:
 def _context_gene_flags(symbol: str, group: Optional[str], scope: Optional[str],
                         base: Optional[List[str]] = None) -> List[str]:
     """``base`` (or the name based flags of the symbol) plus ``foreign_lineage_marker`` and ``no_mouse_ortholog``
-    where they apply to this cell type group and facet scope (``gene_classes.context_flags``)."""
+    where they apply to this cell type group and facet scope (``gene_classes.context_flags``; the foreign-lineage flag
+    also needs the fleet detection of the gene: rare in microglia, at least 5 times higher in another cell type)."""
     flags = list(gene_classes_lib.flags(symbol) if base is None else base)
     foreign, orthologs = _gene_context()
-    return flags + [flag for flag in gene_classes_lib.context_flags(symbol, group, scope, foreign, orthologs)
+    pcts = (gene_detection_lib.group_pcts(_detection_tables(), scope, symbol)
+            if foreign and group in gene_classes_lib.MYELOID_GROUPS and symbol.upper() in foreign else None)
+    return flags + [flag for flag in gene_classes_lib.context_flags(symbol, group, scope, foreign, orthologs, pcts)
                     if flag not in flags]
 
 

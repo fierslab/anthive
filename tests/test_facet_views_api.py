@@ -525,12 +525,27 @@ STATS_ROWS = [
     {'dataset': 'G2/ds2', 'gene': 'PTPRG', 'n_cells': 3000, 'pct_nonzero': 2.0},
     {'dataset': 'G1/ds1', 'gene': 'APOE', 'n_cells': 2000, 'pct_nonzero': 70.0},
     {'dataset': 'G2/ds2', 'gene': 'APOE', 'n_cells': 3000, 'pct_nonzero': 60.0},
+    # neuronal and oligodendrocyte markers: rare in the two microglia datasets, common in their own cell type
+    {'dataset': 'G1/ds1', 'gene': 'SNAP25', 'n_cells': 2000, 'pct_nonzero': 1.0},
+    {'dataset': 'G2/ds2', 'gene': 'SNAP25', 'n_cells': 3000, 'pct_nonzero': 2.0},
+    {'dataset': 'G5/ds5', 'gene': 'SNAP25', 'n_cells': 4000, 'pct_nonzero': 60.0},
+    {'dataset': 'G1/ds1', 'gene': 'MBP', 'n_cells': 2000, 'pct_nonzero': 0.0},
+    {'dataset': 'G2/ds2', 'gene': 'MBP', 'n_cells': 3000, 'pct_nonzero': 1.0},
+    {'dataset': 'G6/ds6', 'gene': 'MBP', 'n_cells': 4000, 'pct_nonzero': 45.0},
+    # a neuronal-panel gene that microglia express broadly (PTPRG-like), and one that all cell types express
+    {'dataset': 'G1/ds1', 'gene': 'PTPRG2', 'n_cells': 2000, 'pct_nonzero': 35.0},
+    {'dataset': 'G2/ds2', 'gene': 'PTPRG2', 'n_cells': 3000, 'pct_nonzero': 30.0},
+    {'dataset': 'G5/ds5', 'gene': 'PTPRG2', 'n_cells': 4000, 'pct_nonzero': 90.0},
+    {'dataset': 'G1/ds1', 'gene': 'HOUSE', 'n_cells': 2000, 'pct_nonzero': 95.0},
+    {'dataset': 'G5/ds5', 'gene': 'HOUSE', 'n_cells': 4000, 'pct_nonzero': 99.0},
 ]
 VIEW_METADATA = {
     'G1/ds1': {'facet_scope': 'human_postmortem', 'cell_type': 'microglial cell', 'n_cells': 2000, 'title': 'Dataset one',
                'suspension_type': 'nucleus', 'default_layer': 'X'},
     'G2/ds2': {'facet_scope': 'human_postmortem', 'cell_type': 'microglial cell', 'n_cells': 3000, 'title': 'Dataset two',
                'suspension_type': 'cell', 'default_layer': 'X'},
+    'G5/ds5': {'facet_scope': 'human_postmortem', 'cell_type': 'excitatory neuron', 'n_cells': 4000, 'title': 'Neurons'},
+    'G6/ds6': {'facet_scope': 'human_postmortem', 'cell_type': 'oligodendrocyte', 'n_cells': 4000, 'title': 'Oligos'},
     'M1/mus': {'suspension_type': 'cell'},
 }
 
@@ -542,7 +557,8 @@ def api(views: Path, tmp_path: Path):
     (store / gene_classes.ORTHOLOG_FILE).write_text('mouse\thuman\nApoe\tAPOE\nCd9\tCD9\nXist\tXIST\n')
     registry = _GenesetRegistry(_Geneset('modA', ['PTPRG', 'APOE', 'CD9', 'NOT_IN_DATA']),
                                 _Geneset('gwas', ['MT-CO1', 'MT-ND1'], direction='bidirectional'),
-                                _Geneset('Neurons', ['PTPRG', 'SNAP25', 'APOE'], role='markers'),
+                                _Geneset('Neurons', ['PTPRG', 'PTPRG2', 'HOUSE', 'SNAP25', 'APOE'], role='markers'),
+                                _Geneset('Oligodendrocytes', ['MBP'], role='markers'),
                                 _Geneset('Microglia', ['APOE', 'P2RY12'], role='markers'),
                                 root=store)
     return build_serve(views, geneset_registry=registry, stats_rows=STATS_ROWS, metadata=VIEW_METADATA,
@@ -706,16 +722,36 @@ def test_foreign_lineage_symbols_come_from_non_myeloid_marker_panels():
     assert gene_classes.foreign_lineage_symbols([]) == frozenset()
 
 
+@pytest.mark.parametrize('pcts, expected', [
+    ({'microglia': 1.0, 'excitatory neuron': 60.0}, True),                     # SNAP25-like
+    ({'microglia': 0.0, 'oligodendrocyte': 3.0}, True),                        # MBP-like, floor of 0.5 percent
+    ({'microglia': 0.0, 'oligodendrocyte': 2.0}, False),                       # under 5 x the floor
+    ({'microglia': 35.0, 'excitatory neuron': 90.0}, False),                   # PTPRG-like: a microglial state gene
+    ({'microglia': 10.0, 'excitatory neuron': 99.0}, False),                   # 10 percent or more: never
+    ({'microglia': 8.0, 'excitatory neuron': 30.0}, False),                    # under 5 x
+    ({'microglia': 8.0, 'excitatory neuron': 40.0}, True),
+    ({'microglia': 1.0, 'perivascular macrophage': 80.0}, False),              # other myeloid groups do not count
+    ({'microglia': 1.0}, False),                                               # nowhere else detected
+    ({'excitatory neuron': 60.0}, False),                                      # microglia unknown
+    ({}, False), (None, False),
+])
+def test_foreign_by_detection_rule(pcts, expected):
+    assert gene_classes.foreign_by_detection(pcts) is expected
+
+
 def test_context_flags_depend_on_group_and_scope():
     foreign, orthologs = frozenset({'PTPRG'}), frozenset({'APOE'})
     flags = gene_classes.context_flags
-    assert flags('ptprg', 'microglia', 'human_postmortem', foreign, orthologs) == ['foreign_lineage_marker']
-    assert flags('PTPRG', 'astrocyte', 'human_postmortem', foreign, orthologs) == []
-    assert flags('PTPRG', 'perivascular macrophage', 'xenograft_human_in_mouse', foreign, orthologs) == [
+    rare = {'microglia': 1.0, 'excitatory neuron': 60.0}
+    assert flags('ptprg', 'microglia', 'human_postmortem', foreign, orthologs, rare) == ['foreign_lineage_marker']
+    assert flags('ptprg', 'microglia', 'human_postmortem', foreign, orthologs) == []     # no detection data: not flagged
+    assert flags('PTPRG', 'microglia', 'human_postmortem', foreign, orthologs, {'microglia': 35.0, 'neuron (mixed)': 90.0}) == []
+    assert flags('PTPRG', 'astrocyte', 'human_postmortem', foreign, orthologs, rare) == []
+    assert flags('PTPRG', 'perivascular macrophage', 'xenograft_human_in_mouse', foreign, orthologs, rare) == [
         'foreign_lineage_marker', 'no_mouse_ortholog']
     assert flags('APOE', 'microglia', 'xenograft_human_in_mouse', foreign, orthologs) == []
     assert flags('TREM2', 'microglia', 'human_postmortem', foreign, orthologs) == []   # not xenograft: no ortholog flag
-    assert flags('PTPRG', 'microglia', 'xenograft_human_in_mouse', None, None) == []   # sources missing: never guessed
+    assert flags('PTPRG', 'microglia', 'xenograft_human_in_mouse', None, None, rare) == []   # sources missing: never guessed
 
 
 def test_human_orthologs_table_is_read_once_per_file_state(tmp_path):
@@ -730,7 +766,7 @@ def test_human_orthologs_table_is_read_once_per_file_state(tmp_path):
 
 def test_gene_cards_carry_context_flags_per_cell_type_group(api):
     card = api.get('/facets/braak/effects', params={'gene': 'PTPRG'}).json()
-    assert 'foreign_lineage_marker' in _replication(card)['gene_flags']
+    assert 'foreign_lineage_marker' not in _replication(card)['gene_flags']      # a panel gene, but no neuron data here
     assert 'foreign_lineage_marker' not in card['gene_flags'] and 'no_mouse_ortholog' not in card['gene_flags']
     apoe = api.get('/facets/braak/effects', params={'gene': 'APOE'}).json()
     assert 'foreign_lineage_marker' not in _replication(apoe)['gene_flags'] and 'apoe_locus' in apoe['gene_flags']
@@ -740,15 +776,27 @@ def test_gene_cards_carry_context_flags_per_cell_type_group(api):
     cd9 = api.get('/facets/app_nlgf/effects', params={'gene': 'Cd9'}).json()
     assert 'no_mouse_ortholog' not in cd9['gene_flags']
     allf = api.get('/genes/PTPRG/facet-effects').json()
-    assert 'foreign_lineage_marker' in _replication(allf['facets']['braak'])['gene_flags']
+    assert 'foreign_lineage_marker' not in _replication(allf['facets']['braak'])['gene_flags']
+
+
+def test_foreign_lineage_flag_needs_rarity_in_microglia_and_richness_elsewhere(api):
+    flags = api.namespace['_context_gene_flags']
+    assert flags('SNAP25', 'microglia', 'human_postmortem', []) == ['foreign_lineage_marker']   # neuronal marker
+    assert flags('MBP', 'microglia', 'human_postmortem', []) == ['foreign_lineage_marker']      # oligodendrocyte marker
+    assert flags('SNAP25', 'astrocyte', 'human_postmortem', []) == []                           # not a myeloid group
+    assert flags('PTPRG2', 'microglia', 'human_postmortem', []) == []       # in a neuron panel, 30 percent in microglia
+    assert flags('HOUSE', 'microglia', 'human_postmortem', []) == []        # expressed everywhere
+    assert flags('PTPRG', 'microglia', 'human_postmortem', []) == []        # rare here, but nowhere else detected
+    assert 'foreign_lineage_marker' not in flags('SNAP25', 'microglia', 'xenograft_human_in_mouse', [])   # no xenograft detection
 
 
 def test_top_rows_and_overview_genes_carry_context_flags(api):
     top = api.get('/facets/ant_braak/effects/top', params={'cell_type': 'microglia'}).json()
-    assert 'foreign_lineage_marker' in next(r for r in top['rows'] if r['gene'] == 'PTPRG')['gene_flags']
+    row = next(r for r in top['rows'] if r['gene'] == 'PTPRG')
+    assert 'foreign_lineage_marker' not in row['gene_flags'] and 'gene_flags' in row
     overview = api.get('/facets/ant_braak/effects/overview').json()
     gene = next(g for card in overview['cell_types'] for g in card['genes'] if g['gene'] == 'PTPRG')
-    assert 'foreign_lineage_marker' in gene['gene_flags']
+    assert 'foreign_lineage_marker' not in gene['gene_flags'] and 'gene_flags' in gene
 
 
 def test_context_flags_are_absent_without_a_geneset_store(views):

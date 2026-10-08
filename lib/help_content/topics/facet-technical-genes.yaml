@@ -1,10 +1,12 @@
 id: facet-technical-genes
 title: Technical genes
 summary: Some genes (mitochondrial, ribosomal, sex chromosome, long genes, lncRNA or clone names) are flagged because their effects are often technical.
+terms:
+- foreign-lineage-marker
 aliases:
 - technical genes
 - gene classes
 - gene flags
 body_html: |
-  <p>Mitochondrial transcripts, ribosomal proteins, long intron-rich genes and lncRNAs track nuclear RNA quality, post-mortem interval and ambient RNA in nuclei data, and are flagged on the gene row. A microglial gene changing in an astrocyte unit (for example INPP5D) is most likely ambient RNA or doublets, and the unit shows a foreign-marker flag when such genes move with the facet. Cytoplasmic transcripts such as cytokines are under-represented in nuclei, so a null for them is not informative.</p>
+  <p>Mitochondrial transcripts, ribosomal proteins, long intron-rich genes and lncRNAs track nuclear RNA quality, post-mortem interval and ambient RNA in nuclei data, and are flagged on the gene row. A microglial gene changing in an astrocyte unit (for example INPP5D) is most likely ambient RNA or doublets, and a gene row shows the <a href="#glossary-foreign-lineage-marker">foreign lineage marker</a> flag when such a gene is rare in microglia but common in another cell type. Cytoplasmic transcripts such as cytokines are under-represented in nuclei, so a null for them is not informative.</p>
   <p>Genes detected in few cells of the cell type carry their own flag, <a href="#facet-low-detection">low detection</a>, and nuclei and cells differ in what they detect (<a href="#facet-modality">modality</a>).</p>

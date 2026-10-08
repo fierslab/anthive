@@ -169,3 +169,13 @@ def pill(table: Optional[pd.DataFrame], gene: str) -> Optional[Dict[str, Any]]:
     median = float(row['pct_median'])
     return {'pct_median': round(median, 1), 'n_datasets': int(row['n_datasets']),
             'low_detection': median < LOW_DETECTION_PCT}
+
+
+def group_pcts(tables: Mapping[Tuple[str, str], pd.DataFrame], scope: Optional[str], gene: str) -> Dict[str, float]:
+    """Median percent of cells expressing ``gene`` per cell type group in one scope, from ``detection_table`` output."""
+    out: Dict[str, float] = {}
+    key = gene.lower()
+    for (table_scope, group), table in tables.items():
+        if table_scope == scope and key in table.index:
+            out[group] = float(table.loc[key, 'pct_median'])
+    return out

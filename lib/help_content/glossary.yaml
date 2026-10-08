@@ -160,3 +160,7 @@ terms:
   definition_html: |
     Whether a dataset was made from isolated nuclei or from whole cells. The two detect genes differently, so a dataset row carries the tag and detection differences between them are not read as biology. Xenograft microglia recorded as cells are sorted live cells.
 
+- slug: foreign-lineage-marker
+  term: Foreign lineage marker
+  definition_html: |
+    A gene that marks another cell lineage (neurons, oligodendrocytes, astrocytes, vessels) and is out of place in a microglia or macrophage result. It is flagged only when two things hold: the gene is in a non-microglial marker panel, and it is rare in microglia, detected in fewer than 10 percent of microglial cells (median over microglia datasets of the same scope), while at least 5 times more cells express it in some non-myeloid cell type of that scope. Genes microglia express broadly (10 percent or more, which includes microglial state genes such as PTPRG, and housekeeping-like genes) are never flagged, and so is a gene without detection data. The flag only says that ambient RNA, doublets or, in xenografts, cross-species read misassignment are a likelier explanation than microglial biology; it never changes an r-value.

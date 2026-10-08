@@ -195,18 +195,51 @@ def human_orthologs(path: Path) -> Optional[FrozenSet[str]]:
     return result
 
 
+#: A foreign-lineage flag needs the gene to be rare in microglia (median percent of cells expressing, below this) ...
+FOREIGN_MAX_MICROGLIA_PCT = 10.0
+#: ... and at least this many times more often detected in a non-myeloid cell type group of the same scope.
+FOREIGN_MIN_FOLD = 5.0
+#: Detection of the microglia is floored here before the fold is taken (a gene at 0 percent needs 2.5 percent elsewhere).
+FOREIGN_PCT_FLOOR = 0.5
+MICROGLIA_GROUP = 'microglia'
+
+
+def foreign_by_detection(group_pcts: Optional[Dict[str, float]]) -> bool:
+    """Whether a gene is out of place in microglia judged by how often it is detected.
+
+    Args:
+        group_pcts: Median percent of cells expressing the gene per cell type group in one facet scope (fleet gene
+            statistics, ``gene_detection.group_pcts``); None or without microglia means unknown, never flagged.
+
+    Returns:
+        True when the gene is detected in fewer than ``FOREIGN_MAX_MICROGLIA_PCT`` percent of microglia and at least
+        ``FOREIGN_MIN_FOLD`` times more often (microglia floored at ``FOREIGN_PCT_FLOOR``) in some non-myeloid group.
+        A gene at or above 10 percent in microglia (broadly expressed genes, state genes such as PTPRG) is never flagged.
+    """
+    if not group_pcts or MICROGLIA_GROUP not in group_pcts:
+        return False
+    microglia = group_pcts[MICROGLIA_GROUP]
+    if microglia >= FOREIGN_MAX_MICROGLIA_PCT:
+        return False
+    others = [value for name, value in group_pcts.items() if name not in MYELOID_GROUPS and name != 'unmapped']
+    return bool(others) and max(others) >= FOREIGN_MIN_FOLD * max(microglia, FOREIGN_PCT_FLOOR)
+
+
 def context_flags(symbol: str, group: Optional[str], scope: Optional[str],
-                  foreign: Optional[FrozenSet[str]] = None, orthologs: Optional[FrozenSet[str]] = None) -> List[str]:
+                  foreign: Optional[FrozenSet[str]] = None, orthologs: Optional[FrozenSet[str]] = None,
+                  group_pcts: Optional[Dict[str, float]] = None) -> List[str]:
     """Flags that depend on where a result is shown (informational: they never change an r-value).
 
-    ``foreign_lineage_marker``: the gene is a marker of a neuronal, glial or vascular panel and the result is for a
-    myeloid cell type group (``MYELOID_GROUPS``): in microglia such a gene points at ambient RNA, doublets or, in
-    xenografts, cross-species read misassignment. ``no_mouse_ortholog``: a xenograft result for a human gene with no
-    mouse ortholog (None for ``foreign`` / ``orthologs`` means the source is unavailable: the flag is not raised).
+    ``foreign_lineage_marker``: the gene is in a neuronal, glial or vascular marker panel, the result is for a myeloid
+    cell type group (``MYELOID_GROUPS``) AND the gene is rare in microglia and much more often detected elsewhere
+    (``foreign_by_detection`` over ``group_pcts``): in microglia such a gene points at ambient RNA, doublets or, in
+    xenografts, cross-species read misassignment. Panel membership alone is not enough. ``no_mouse_ortholog``: a
+    xenograft result for a human gene with no mouse ortholog (None for ``foreign`` / ``orthologs`` means the source is
+    unavailable: the flag is not raised).
     """
     out: List[str] = []
     upper = symbol.upper()
-    if foreign and group in MYELOID_GROUPS and upper in foreign:
+    if foreign and group in MYELOID_GROUPS and upper in foreign and foreign_by_detection(group_pcts):
         out.append(FLAG_FOREIGN_LINEAGE)
     if orthologs and scope == XENOGRAFT_SCOPE and upper not in orthologs:
         out.append(FLAG_NO_MOUSE_ORTHOLOG)
