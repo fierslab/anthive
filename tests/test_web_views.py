@@ -198,7 +198,9 @@ def test_geneset_page_has_the_view_tab(client):
     assert "doc-block" not in text.split('id="vt-page"')[0].split('id="vw-tabs"')[1]       # no doc_block clutter in the view tabs
     payload = json.loads(re.search(r"var PAYLOAD = (\{.*?\});\n", text, re.S).group(1))
     assert payload["scored_in"] == ["A/n1", "A/c1"] and payload["column_name"] == "Study1::Exp1::DAM"
-    assert "Scores of different sets are not on one scale" in text or "not ranked against each other" in text
+    assert "Rank among gene sets" in text and "within one dataset only, never across datasets" in text
+    assert "depends on the number of genes in the set" in text and "Mean module score" not in text
+    assert "/rank?db_id=" in text and "UCell is not used" in text
     assert "A mean score is not well suited" in text
     assert "Rank among modules" not in text
 

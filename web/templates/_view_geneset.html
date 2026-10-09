@@ -12,13 +12,14 @@
 {% macro view_geneset_score(name) -%}
 <div id="vws-score">
   {% call section_help('1. Module score', 'vws-p1-help') %}
-    <p>This panel is descriptive: for each cell type it shows how strongly cells score for {{ name }}, not whether anything changes. Click a row to list its datasets.</p>
-    <h4>Mean module score</h4>
-    <p>The score of a cell is a rank score (UCell) of the genes of the set. The bar shows the median over the datasets of that cell type with the range as a lighter stretch; the opened rows give mean and median of each dataset. Means and standard deviations are taken over the cells of one dataset: they describe the cells and say nothing about differences between donors.</p>
+    <p>This panel is descriptive: for each cell type it shows how high {{ name }} ranks among the gene sets of the same dataset, not whether anything changes. Click a row to list its datasets.</p>
+    <h4>Rank among gene sets</h4>
+    <p>A mean module score cannot be compared between datasets, because every dataset has its own scale, depth and background. So the bar shows where the mean score of {{ name }} falls among ALL gene sets scored on the same cells of the same dataset, as "top x%" (a longer bar means a higher mean score than more of the other sets; "of N" is the number of other sets compared). In a cell type row the value is the mean over its datasets, in an opened row the dotted line marks that mean. Where gene sets are scored only on the cells of their own cell type, a set is compared with the sets scored on those cells (sets that apply to every cell are included), and a set that covers several cell types gets the cell-weighted mean of its ranks per cell type.</p>
+    <p>The ranking uses the scanpy score, which subtracts the mean of a matched control set of genes, so scores of different sets in one dataset are comparable. UCell is not used here: it depends on the number of genes in the set. The rank compares gene sets within one dataset only and says nothing about how the same set scores in another dataset. It needs at least 10 other sets scored on at least 20 cells, otherwise it reads n/a. The first visit of a dataset can take a moment while its scores are read.</p>
     <h4>Cell-to-cell SD</h4>
-    <p>How much the score varies between cells within a dataset (median over the datasets of the row).</p>
+    <p>How much the score varies between cells within a dataset (median over the datasets of the row). Means and standard deviations are taken over the cells of one dataset: they describe the cells and say nothing about differences between donors.</p>
     <h4>Which datasets</h4>
-    <p>Scores exist only in the datasets where the set was scored in advance. Scores of different sets are not on one scale, so sets are not ranked against each other. The facet results in the next tab come from donor-level scores of the datasets they were tested in, which can be more datasets.</p>
+    <p>Scores exist only in the datasets where the set was scored in advance. The facet results in the next tab come from donor-level scores of the datasets they were tested in, which can be more datasets.</p>
   {% endcall %}
   <div id="vws-p1"><p class="vw-loading">Loading the module scores...</p></div>
 </div>
@@ -73,8 +74,25 @@
     if (!modality) return '';
     return '<span class="vw-modality ' + (modality === 'nuclei' ? 'nuclei' : 'cells') + '">' + V.esc(modality) + '</span>';
   }
-  function bar(pct, lo, hi) {
-    return '<div class="vw-bar-track"><span class="vw-bar-range" style="left:' + lo + '%;width:' + Math.max(1, hi - lo) + '%"></span><span class="vw-bar-med" style="left:calc(' + pct + '% - 1px)"></span></div>';
+  // Rank bar as in the gene view: a value on a 0 to 100 scale, `mark` (optional) the dotted mean line.
+  function rankBar(value, mark) {
+    var width = Math.max(0, Math.min(100, value));
+    return '<span class="vw-bar rank"><span class="vw-bar-fill" style="width:' + width + '%"></span>' + (mark != null ? '<span class="vw-bar-mark" style="left:' + Math.max(0, Math.min(100, mark)) + '%"></span>' : '') + '</span>';
+  }
+  function topPct(rank) { return 'top ' + Math.max(1, Math.round((1 - rank) * 100)) + '%'; }
+  function meanOf(values) {
+    var kept = values.filter(function (v) { return v != null && !isNaN(v); });
+    return kept.length ? kept.reduce(function (a, b) { return a + b; }, 0) / kept.length : null;
+  }
+  // One rank cell. `entry` is 'pending', null (no rank) or {rank, n_modules_compared, reason}; `of` adds the number of gene sets compared.
+  function rankCell(entry, mark, withCount) {
+    if (entry === 'pending') return '<span class="muted">computing...</span>';
+    if (!entry || entry.rank == null) return '<span class="muted" title="' + V.esc((entry && entry.reason) || 'no rank available') + '">n/a</span>';
+    return rankBar(entry.rank * 100, mark == null ? null : mark * 100) + '<span class="vw-bar-val">' + topPct(entry.rank) + (withCount ? '<span class="rng">of ' + entry.n_modules_compared + '</span>' : '') + '</span>';
+  }
+  function rankTitle(row) {
+    if (!row || row.rank == null) return '';
+    return 'Mean score ' + V.num(row.mean, 3) + ' (scanpy score) is higher than that of ' + Math.round(row.rank * 100) + ' percent of the ' + row.n_modules_compared + ' other gene sets scored on the same cells of this dataset';
   }
 
   /* ---------- panel 1 ---------- */
@@ -82,6 +100,7 @@
     var column = (DBS[row.db_id] || {}).celltype_col;
     return V.dbLink(row.db_id) + '/plot/violin?' + (column ? 'x=' + enc(column) + '&' : '') + 'y=' + enc(PAYLOAD.column_name);
   }
+  var opened = {};
   function renderP1(host, rows) {
     var scored = (PAYLOAD.scored_in || []);
     if (!rows.length) {
@@ -90,9 +109,7 @@
     }
     var buckets = {};
     rows.forEach(function (row) { (buckets[row.scope + '|' + row.group] = buckets[row.scope + '|' + row.group] || []).push(row); });
-    var all = rows.map(function (row) { return row.mean; });
-    var hi = Math.max.apply(null, all) * 1.05 || 1;
-    var html = '<div class="vw-box"><table class="vw-table fixed"><colgroup><col class="c-name"><col class="c-ds"><col class="c-pct"><col class="c-rank"></colgroup><thead><tr><th>Cell type ' + V.info('Cell type group of the dataset. Click a row to list its datasets.') + '</th><th class="num">Datasets ' + V.info('Number of datasets of this cell type in which the set was scored per cell.') + '</th><th>Mean module score ' + V.info('Median over the datasets of the cell type of the mean cell score, with the range over datasets as the lighter stretch. Rank scores of one set only; not comparable between sets.') + '</th><th class="num">Cell-to-cell SD ' + V.info('Spread of the score between cells within a dataset (median over the datasets of the row).') + '</th></tr></thead><tbody>';
+    var html = '<div class="vw-box"><table class="vw-table fixed"><colgroup><col class="c-name"><col class="c-ds"><col class="c-pct"><col class="c-rank"></colgroup><thead><tr><th>Cell type ' + V.info('Cell type group of the dataset. Click a row to list its datasets.') + '</th><th class="num">Datasets ' + V.info('Number of datasets of this cell type in which the set was scored per cell.') + '</th><th>Rank among gene sets ' + V.info('Percentile of the mean score of this gene set among ALL gene sets scored on the same cells of the same dataset, shown as top x%. A longer bar means a higher mean score than more of the other sets. The score is the scanpy score (the mean of the set minus a matched control set), so the means of different sets in one dataset are comparable. UCell is not used for the ranking because its score depends on the number of genes of the set. The rank compares gene sets within one dataset only, never across datasets. In a cell type row the value is the mean over its datasets; in an opened row the dotted line is that mean.') + '</th><th class="num">Cell-to-cell SD ' + V.info('Spread of the score between cells within a dataset (median over the datasets of the row).') + '</th></tr></thead><tbody>';
     var index = 0;
     ['human_postmortem', 'xenograft_human_in_mouse', ''].forEach(function (scope) {
       var keys = Object.keys(buckets).filter(function (key) { return key.split('|')[0] === scope; });
@@ -100,24 +117,29 @@
       html += '<tr class="vw-scope-row"><td colspan="4">' + V.esc(scope ? V.SCOPES[scope].title : 'Other systems') + '</td></tr>';
       keys.sort(function (a, b) { return V.GROUPS.indexOf(a.split('|')[1]) - V.GROUPS.indexOf(b.split('|')[1]); }).forEach(function (key) {
         var list = buckets[key];
-        var means = list.map(function (row) { return row.mean; });
         var groupName = key.split('|')[1];
-        html += '<tr class="vw-toggle" data-i="' + index + '"><td><span class="caret">&#9656;</span>' + V.esc(groupName ? V.plain(groupName) : 'mixed or other (not summarised)') + '</td><td class="num">' + list.length + '</td><td class="vw-bar-cell">' + bar(V.median(means) / hi * 100, Math.min.apply(null, means) / hi * 100, Math.max.apply(null, means) / hi * 100) +
-          '<span class="vw-bar-val">' + V.num(V.median(means), 3) + '</span></td><td class="num">' + V.num(V.median(list.map(function (row) { return row.sd; })), 3) + '</td></tr>';
+        var ranked = list.map(function (row) { return row.rank && row.rank.rank; });
+        var meanRank = meanOf(ranked);
+        var pending = list.some(function (row) { return row.rank === 'pending'; });
+        var groupEntry = pending ? 'pending' : (meanRank == null ? { reason: 'no dataset of this cell type could be ranked' } : { rank: meanRank });
+        var isOpen = !!opened[key];
+        html += '<tr class="vw-toggle" data-key="' + V.esc(key) + '" data-i="' + index + '"><td><span class="caret">' + (isOpen ? '&#9662;' : '&#9656;') + '</span>' + V.esc(groupName ? V.plain(groupName) : 'mixed or other (not summarised)') + '</td><td class="num">' + list.length + '</td><td class="vw-bar-cell">' +
+          rankCell(groupEntry, null, false) + '</td><td class="num">' + V.num(V.median(list.map(function (row) { return row.sd; })), 3) + '</td></tr>';
         list.forEach(function (row) {
-          html += '<tr class="vw-sub" data-p="' + index + '" hidden><td title="' + V.esc(row.title) + '"><a href="' + V.dbLink(row.db_id) + '">' + V.esc(row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span> ' + modalityTag(row.modality) +
-            '<span class="vw-links"><a href="' + V.dbLink(row.db_id) + '">dataset page</a><a href="' + plotLink(row) + '" title="Score of this set in this dataset, by cell type">plot by cell type</a></span></td><td class="num">' + 'n=' + V.compact(row.n_cells) + '</td><td class="vw-bar-cell" title="median ' + V.num(row.median, 3) + '"><span class="vw-bar-val" style="margin-left:0">' + V.num(row.mean, 3) + '</span> <span class="muted">median ' + V.num(row.median, 3) + '</span></td><td class="num">' + V.num(row.sd, 3) + '</td></tr>';
+          html += '<tr class="vw-sub" data-p="' + index + '"' + (isOpen ? '' : ' hidden') + '><td title="' + V.esc(row.title) + '"><a href="' + V.dbLink(row.db_id) + '">' + V.esc(row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span> ' + modalityTag(row.modality) +
+            '<span class="vw-links"><a href="' + V.dbLink(row.db_id) + '">dataset page</a><a href="' + plotLink(row) + '" title="Score of this set in this dataset, by cell type">plot by cell type</a></span></td><td class="num">n=' + V.compact(row.n_cells) + '</td><td class="vw-bar-cell" title="' + V.esc(rankTitle(row.rank)) + '">' + rankCell(row.rank, meanRank, true) + '</td><td class="num">' + V.num(row.sd, 3) + '</td></tr>';
         });
         index += 1;
       });
     });
-    html += '</tbody></table></div><p class="vw-fnote">Scored in ' + V.plural(rows.length, 'dataset') + '. Scores are descriptive, per cell, and say nothing about differences between donors&nbsp;' + V.helpBtn('vws-p1-help') + '</p>';
+    html += '</tbody></table></div><p class="vw-fnote">Scored in ' + V.plural(rows.length, 'dataset') + '. The rank compares gene sets within one dataset, never between datasets. Scores are descriptive, per cell, and say nothing about differences between donors&nbsp;' + V.helpBtn('vws-p1-help') + '</p>';
     host.innerHTML = html;
     host.querySelectorAll('tr.vw-toggle').forEach(function (tr) {
       tr.addEventListener('click', function () {
         var subs = host.querySelectorAll('tr[data-p="' + tr.dataset.i + '"]');
         var show = subs.length && subs[0].hidden;
         subs.forEach(function (sub) { sub.hidden = !show; });
+        opened[tr.dataset.key] = !!show;
         tr.querySelector('.caret').innerHTML = show ? '&#9662;' : '&#9656;';
       });
     });
@@ -130,9 +152,26 @@
       return V.cached(V.API + '/databases/' + dbId.split('/').map(enc).join('/') + '/module_scores').then(function (data) {
         var hit = (data.scored_genesets || []).filter(function (item) { return item.column_name === column; })[0];
         if (!hit || !hit.stats || db.secondary) return null;
-        return { db_id: dbId, title: db.title || dbId, scope: db.scope || '', group: db.group || '', modality: db.modality || '', n_cells: hit.stats.n, mean: hit.stats.mean, sd: hit.stats.std, median: hit.stats.median };
+        return { db_id: dbId, title: db.title || dbId, scope: db.scope || '', group: db.group || '', modality: db.modality || '', n_cells: hit.stats.n, mean: hit.stats.mean, sd: hit.stats.std, median: hit.stats.median, rank: 'pending' };
       }).catch(function () { return null; });
     })).then(function (list) { return list.filter(Boolean); });
+  }
+  // The rank of the set among all sets of a dataset: the API reads the whole score sidecar the first time, so rows
+  // are drawn at once and each rank fills in when its dataset answers.
+  function loadRanks(rows, redraw) {
+    var base = V.API + '/genesets/' + enc(STUDY) + '/' + enc(EXPERIMENT) + '/' + enc(NAME) + '/rank?db_id=';
+    return Promise.all(rows.map(function (row) {
+      return fetch(base + enc(row.db_id), { credentials: 'same-origin' }).then(function (response) {
+        if (!response.ok) throw new Error('rank ' + response.status);
+        return response.json();
+      }).then(function (data) {
+        var entry = (data.datasets || [])[0];
+        var geneset = entry && entry.geneset;
+        row.rank = geneset && geneset.available ? geneset : { rank: null, reason: (geneset && geneset.reason) || ((data.not_available || [])[0] || {}).reason || 'no rank available' };
+      }).catch(function () {
+        row.rank = { rank: null, reason: 'the rank could not be computed' };
+      }).then(redraw);
+    }));
   }
 
   /* ---------- panel 2: the module result cards ---------- */
@@ -295,7 +334,11 @@
   /* ---------- mount ---------- */
   var p1 = document.getElementById('vws-p1');
   var p2 = document.getElementById('vws-p2');
-  loadScores().then(function (rows) { renderP1(p1, rows); });
+  loadScores().then(function (rows) {
+    var redraw = function () { renderP1(p1, rows); };
+    redraw();
+    loadRanks(rows, redraw);
+  });
   V.cached(V.API + '/genesets/' + enc(STUDY) + '/' + enc(EXPERIMENT) + '/' + enc(NAME) + '/facet-effects').then(function (effects) {
     state.effects = effects;
     var model = buildBlocks(effects);

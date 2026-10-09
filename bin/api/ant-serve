@@ -98,6 +98,7 @@ from facet_aliases import canonical_facet, is_deprecated_facet_column
 import facet_results as facet_results_lib
 import facet_donor_values as donor_values_lib
 import donor_variability as donor_variability_lib
+import module_rank as module_rank_lib
 import help_content
 import facet_scopes as facet_scopes_lib
 import gene_classes as gene_classes_lib
@@ -12980,6 +12981,93 @@ def get_geneset(study: str, experiment: str, name: str):
         name=geneset.name,
     )
     return detail
+
+
+_MODULE_RANK_STORE: Optional[module_rank_lib.ModuleRankStore] = None
+_MODULE_RANK_LOCK = threading.Lock()
+_MODULE_RANK_HELP_TOPICS = ('geneset-view', 'module-scores')
+
+
+def _module_rank_store() -> module_rank_lib.ModuleRankStore:
+    """The per-dataset score-mean tables, cached under ``<tmp_dir>/module_rank`` (created on first use)."""
+    global _MODULE_RANK_STORE
+    with _MODULE_RANK_LOCK:
+        if _MODULE_RANK_STORE is None:
+            _MODULE_RANK_STORE = module_rank_lib.ModuleRankStore(get_tmp_dir() / 'module_rank')
+        return _MODULE_RANK_STORE
+
+
+def _module_rank_means(db_id: str) -> Tuple[Optional[Any], str]:
+    """Score means per source, module and cell type group of one dataset, or (None, reason).
+
+    Built once from the score sidecar and the dataset's ``ant_cell_type`` and cached on disk until the
+    sidecar or the duckdb changes.
+    """
+    db_url = registry.get_database_path(db_id)
+    if db_url.startswith('s3://'):
+        return None, 'the dataset is not stored on this server'
+    sidecar = Path(db_url.replace('file://', '')).with_suffix('.scores.parquet')
+    try:
+        sidecar_stat = sidecar.stat()
+        duckdb_stat = Path(db_url.replace('file://', '')).stat()
+    except OSError:
+        return None, 'no per-cell scores for this dataset'
+    fingerprint = f'{sidecar_stat.st_mtime_ns}-{sidecar_stat.st_size}-{duckdb_stat.st_mtime_ns}'
+
+    def build():
+        conn = connection_pool.get_connection(db_url)
+        try:
+            return module_rank_lib.stratum_means(conn, sidecar, module_rank_lib.cell_strata(conn))
+        finally:
+            connection_pool.return_connection(db_url, conn)
+
+    return _module_rank_store().get(db_id, fingerprint, build), ''
+
+
+@app.get("/genesets/{study}/{experiment}/{name}/rank", tags=["genesets"])
+def get_geneset_rank(
+    study: str, experiment: str, name: str,
+    db_id: Optional[str] = Query(None, description="One dataset (a db_id of `scored_in`); default every scored dataset"),
+):
+    """Where the mean score of one gene set ranks among ALL gene sets scored in the same dataset.
+
+    A mean module score is not comparable between datasets, but it is between the modules of one dataset. Per
+    dataset, ``geneset`` (the scanpy ``score_genes`` score, which subtracts a matched control set: the primary
+    ranking) and ``ucell`` (rank statistic, depends on the size of the gene set: secondary) each give ``rank``
+    (0 lowest to 1 highest mean: the fraction of the other modules with a lower mean, ties half),
+    ``n_modules_compared``, ``n_cells``, ``mean`` and ``cell_types``, one entry per cell type group
+    (``cell_type``, ``n_cells``, ``mean``, ``rank``, ``n_modules_compared``; '' = all cells of a dataset
+    without cell types). Peers are every other module of the same source (all catalogs) scored on the cells of
+    that cell type group (modules are scored on the cells of their cell type scope; ``all`` modules on every
+    cell), at least 10 peers and 20 cells are needed. The dataset ``rank`` is the cell-weighted mean of the
+    cell type ranks. The ranking is within one dataset only: never compare it, or a score, between datasets.
+    ``not_available`` lists datasets without per-cell scores. The first request for a dataset reads its whole
+    score sidecar (seconds to a minute for the largest); the result is cached until the scores change.
+    """
+    gene_registry = _require_geneset_registry()
+    geneset_id = f"{study}/{experiment}/{name}"
+    if gene_registry.get(geneset_id) is None:
+        raise HTTPException(status_code=404, detail=f"Geneset {geneset_id} not found")
+    scored_in = list(_score_index_by_geneset.get(geneset_id, []))
+    if db_id is not None:
+        if db_id not in scored_in:
+            raise HTTPException(status_code=404, detail=f"Geneset {geneset_id} is not scored in {db_id}")
+        scored_in = [db_id]
+    catalog = f"{study}/{experiment}"
+    datasets: List[Dict[str, Any]] = []
+    not_available: List[Dict[str, str]] = []
+    for scored_db in scored_in:
+        means, reason = _module_rank_means(scored_db)
+        if means is None:
+            not_available.append({'db_id': scored_db, 'reason': reason})
+            continue
+        datasets.append({'db_id': scored_db,
+                         module_rank_lib.PRIMARY_SOURCE: module_rank_lib.module_rank(means, module_rank_lib.PRIMARY_SOURCE, catalog, name),
+                         module_rank_lib.SECONDARY_SOURCE: module_rank_lib.module_rank(means, module_rank_lib.SECONDARY_SOURCE, catalog, name)})
+    return _with_help({'geneset_id': geneset_id, 'primary_source': module_rank_lib.PRIMARY_SOURCE,
+                       'secondary_source': module_rank_lib.SECONDARY_SOURCE,
+                       'min_cells': module_rank_lib.MIN_CELLS, 'min_peers': module_rank_lib.MIN_PEERS,
+                       'datasets': datasets, 'not_available': not_available}, *_MODULE_RANK_HELP_TOPICS)
 
 
 @app.post("/genesets/rescan", tags=["genesets"])

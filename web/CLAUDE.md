@@ -207,6 +207,12 @@ the donor plot lazily (fetch + IntersectionObserver, caption from `X-Plot-Captio
 and "per-cell view in <dataset>" links. Fields read (API 2.45, `links` on every gene and module replication entry): `donor_plot`, `donor_plot_svg`, `donor_plot_adjusted`, `donor_values`, `donor_values_available` (false until the facet tests are rerun: the block then says the plot is available after the next run and shows no image), `anchors` (genes only, `{db_id, url}`; the API path `/databases/..` is turned into the `/browse/..` page). Panel 1 dataset rows link the dataset page and a violin of the gene
 (or module score) by the dataset's `celltype_col`. The forest shows estimate, 95% CI and the per-cohort q.
 
+**Geneset panel 1 rank (API 2.45).** `1. Module score` shows the "Rank among gene sets" bar (top x%, "of N" in dataset rows, cell type row =
+mean over datasets, dotted line in opened rows), not the mean score: a mean score is not comparable between datasets. Rows are drawn from
+`/databases/{id}/module_scores` at once and each rank fills in from `GET /genesets/{s}/{e}/{n}/rank?db_id=` (first call per dataset reads the
+whole sidecar, so the cell shows "computing..." until it answers; the open/closed state of cell type rows survives the redraws). The scanpy
+source is the only one shown; the (i) tooltip and the (?) help say UCell depends on gene-set size and that ranks compare sets within one dataset only.
+
 **MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/links`,
 `POST /me/mcp/links/{id}/rotate`, `DELETE /me/mcp/links/{id}`,
 `GET /admin/mcp-links`, `DELETE /admin/mcp-links/{user}/{id}` client-side

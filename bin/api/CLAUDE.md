@@ -188,6 +188,12 @@ and `lib/config.py` (anthive.yaml loader).
   `donor_variability`; help topic `donor-variability`. Tests: `tests/test_donor_variability_api.py` (the routes are in
   `_SERVE_WANTED` of `tests/test_facet_results.py`).
 
+- **Module rank** (2.45): `GET /genesets/{study}/{experiment}/{name}/rank` (`lib/module_rank.py`) answers where a gene set's mean score
+  ranks among all gene sets scored in the same dataset (scanpy source primary, UCell secondary). It reads the `.scores.parquet` sidecar,
+  not `scores_index.parquet` (no cell type column, can lag the rescoring), and caches the per-dataset table under `<tmp_dir>/module_rank/`
+  keyed on sidecar and duckdb stat; the first call per dataset reads the whole sidecar (up to a minute) with at most 2 builds at once, so
+  clients ask per dataset (`?db_id=`). Tests: `tests/test_module_rank.py`.
+
 - **Lineage and secondaries** (unreleased): dataset metadata carries
   `designation`, `reanalysis_of`, `donor_group`, `has_donor_uid`
   (`_lineage_fields`); `GET /donor-groups` lists the groups. Pooled or

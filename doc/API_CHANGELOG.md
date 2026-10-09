@@ -137,6 +137,19 @@ New endpoints:
   measures whether the excess reproduces. A partial conjunction as in the facet tests could never call a gene on rank p values.
   Relative and exploratory, not a test. Scopes are never mixed (default `human_postmortem`).
   404 when no analysed unit has the gene in the scope.
+- `GET /genesets/{study}/{experiment}/{name}/rank` (`db_id` optional, one dataset of `scored_in`): where the mean score of a gene set
+  ranks among ALL gene sets scored in the same dataset (a mean module score is not comparable between datasets, a rank within a dataset
+  is). Shape: `{geneset_id, primary_source: 'geneset', secondary_source: 'ucell', min_cells: 20, min_peers: 10, datasets: [{db_id,
+  geneset: R, ucell: R}], not_available: [{db_id, reason}], help_topics}` with `R = {available, reason, rank, n_modules_compared,
+  n_cells, mean, cell_types: [{cell_type, n_cells, mean, rank, n_modules_compared}]}`. `rank` runs from 0 (lowest mean) to 1 (highest):
+  the fraction of the other modules of the same source, any catalog, with a lower mean (ties half), taken per cell type group on the
+  cells of that group (modules are scored on the cells of their cell type scope, `all` modules on every cell; '' = all cells of a
+  dataset without cell types) and averaged weighted by the cells of the module for the dataset value. At least 10 peers and 20 cells
+  per module and stratum are needed, else `rank` is null with a `reason`. `geneset` (scanpy `score_genes`, matched control set) is
+  the primary ranking; `ucell` depends on the size of the gene set and is secondary. Within one dataset only: never compare ranks or
+  means between datasets. Computed from the `.scores.parquet` sidecar joined with `ant_cell_type`, cached per dataset under
+  `<tmp_dir>/module_rank/` until the sidecar or the duckdb changes (first request of a dataset reads its whole sidecar: seconds to
+  about a minute; `scores_index.parquet` has no cell type column and can lag the sidecars, so it is not used).
 - `GET /genesets/{study}/{experiment}/{name}/donor-variability` (`scope`, `cell_type`, `rung`, `method`, `source`,
   `exclude_secondary`): the same card for a gene set (the `pseudobulk` variant unless `method` is given); `k`, `p_rank_product` and `r_value` are
   null (no ranking test for modules).
