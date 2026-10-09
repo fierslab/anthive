@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}{{ study }}/{{ experiment }}/{{ name }} — geneset{% endblock %}
+{% block title %}{{ study }}/{{ experiment }}/{{ name }} - geneset{% endblock %}
 
 {% block content %}
 {% from "_macros.html" import breadcrumb, secondary_badge %}
@@ -19,14 +19,19 @@
 {% endif %}
 
 {% from "_views.html" import views_styles, views_core %}
-{% from "_view_geneset.html" import view_geneset_panels, view_geneset_script %}
+{% from "_view_geneset.html" import view_geneset_headline, view_geneset_score, view_geneset_shifts, view_geneset_variability, view_geneset_script %}
 {{ views_styles() }}
 {{ views_core() }}
+{{ view_geneset_headline() }}
 <div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
-  <button type="button" class="tab-btn" data-vtab="geneset" data-hash="geneset-view" role="tab">Geneset view<span class="vw-new">new</span></button>
-  <button type="button" class="tab-btn vw-old" data-vtab="page" data-hash="page" role="tab" title="The current geneset page: members, where the score varies most">Geneset page (current)</button>
+  <button type="button" class="tab-btn" data-vtab="score" data-hash="module-score" data-alias="geneset-view" role="tab">1. Module score</button>
+  <button type="button" class="tab-btn" data-vtab="shifts" data-hash="shifts" role="tab">2. What shifts it</button>
+  <button type="button" class="tab-btn" data-vtab="variability" data-hash="variability" role="tab">3. Donor variability</button>
+  <button type="button" class="tab-btn vw-old" data-vtab="page" data-hash="page" role="tab" title="The earlier geneset page: members, where the score varies most">Geneset page (old)</button>
 </div>
-<div class="tab-panel vw-panel" id="vt-geneset">{{ view_geneset_panels(name) }}</div>
+<div class="tab-panel vw-panel" id="vt-score">{{ view_geneset_score(name) }}</div>
+<div class="tab-panel vw-panel" id="vt-shifts">{{ view_geneset_shifts(name) }}</div>
+<div class="tab-panel vw-panel" id="vt-variability">{{ view_geneset_variability() }}</div>
 <div class="tab-panel" id="vt-page">
 
 <div class="two-col" style="margin:8px 0 12px">
@@ -67,7 +72,7 @@
     </div>
 </details>
 {% else %}
-<div class="muted" style="margin:8px 0;font-size:12px">Not pre-scored on any dataset yet — <a href="/genesets/variability">see geneset variability →</a></div>
+<div class="muted" style="margin:8px 0;font-size:12px">Not pre-scored on any dataset yet - <a href="/genesets/variability">see geneset variability →</a></div>
 {% endif %}
 
 {% if payload.geneset_metadata.get('top_go') %}
@@ -127,5 +132,5 @@
 </details>
 </div>
 {{ view_geneset_script(study, experiment, name, view_payload or {}, view_dbs or {}) }}
-<script>window.antViews.initTabs(document.getElementById('vw-tabs'), 'geneset');</script>
+<script>window.antViews.initTabs(document.getElementById('vw-tabs'), 'score');</script>
 {% endblock %}

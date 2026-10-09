@@ -25,7 +25,8 @@ _spec.loader.exec_module(browser)
 
 _DATABASES = [
     {"id": "A/n1", "title": "Nuclei microglia", "celltype": "microglial cell", "facet_scope": "human_postmortem",
-     "organism": "human", "suspension_type": "nucleus", "experimental_system": "post_mortem_tissue"},
+     "organism": "human", "suspension_type": "nucleus", "experimental_system": "post_mortem_tissue",
+     "obs": {"categorical": ["sample", "ant_cell_type"]}},
     {"id": "A/c1", "title": "Cells microglia", "celltype": "microglial cell", "facet_scope": "human_postmortem",
      "organism": "human", "suspension_type": "cell", "experimental_system": "post_mortem_tissue"},
     {"id": "B/x1", "title": "Xenograft microglia", "celltype": "microglial cell", "facet_scope": "xenograft_human_in_mouse",
@@ -104,7 +105,7 @@ def test_view_modality(db, expected):
 def test_view_db_map_groups_scope_and_flags(monkeypatch):
     monkeypatch.setattr(browser, "_api_get", _fake)
     result = browser._view_db_map("http://x")
-    assert result["A/n1"] == {"title": "Nuclei microglia", "scope": "human_postmortem", "group": "microglia",
+    assert result["A/n1"] == {"title": "Nuclei microglia", "celltype_col": "ant_cell_type", "scope": "human_postmortem", "group": "microglia",
                               "human": True, "secondary": False, "modality": "nuclei"}
     assert result["A/c1"]["modality"] == "cells"
     assert result["B/x1"]["secondary"] is True and result["B/x1"]["modality"] == "sorted live cells"
@@ -134,9 +135,18 @@ def test_plain_de_label(row, study, expected):
 
 def test_gene_page_has_the_three_tabs_and_the_dataset_map(client):
     text = client.get("/genes/PTPRG").text
-    for marker in ('data-vtab="gene"', 'data-vtab="atlas"', 'data-vtab="de"', 'id="vt-gene"', 'id="vt-atlas"', 'id="vwg-p1"', 'id="vwg-p2"'):
+    for marker in ('data-vtab="expression"', 'data-vtab="shifts"', 'data-vtab="variability"', 'data-vtab="atlas"', 'data-vtab="de"',
+                   'id="vt-expression"', 'id="vt-shifts"', 'id="vt-variability"', 'id="vt-atlas"', 'id="vwg-p1"', 'id="vwg-p2"', 'id="vwg-headline"'):
         assert marker in text, marker
+    for label in ("1. Expression", "2. What shifts it", "3. Donor variability", "Author DE (as published)", "Atlas (old)"):
+        assert label in text, label
+    for hash_name in ("expression", "shifts", "variability", "author-de", "atlas"):
+        assert f'data-hash="{hash_name}"' in text, hash_name
+    assert text.index('id="vwg-headline"') < text.index('id="vw-tabs"')       # the summary sentence sits above the tabs
+    assert text.index('data-vtab="de"') < text.index('data-vtab="atlas"')      # the old atlas tab is last
+    assert "expression across the catalogue" in text
     assert 'data-vtab="de" data-hash="author-de" role="tab" hidden' in text      # shown only when DE exists
+    assert '<col class="c-name">' in text and "table-layout: fixed" in text      # panel 1 is one fixed-width table
     dbs = json.loads(re.search(r"var DBS = (\{.*?\});\n", text, re.S).group(1))
     assert dbs["A/n1"]["modality"] == "nuclei" and dbs["A/c1"]["group"] == "microglia"
     assert "Donor variability" in text and "Coming later" in text      # panel 3 placeholder
@@ -145,8 +155,8 @@ def test_gene_page_has_the_three_tabs_and_the_dataset_map(client):
 
 
 def test_gene_list_and_empty_gene_page_have_no_views(client):
-    assert 'data-vtab="gene"' not in client.get("/genes/PTPRG,APOE").text
-    assert 'data-vtab="gene"' not in client.get("/genes").text
+    assert 'data-vtab="expression"' not in client.get("/genes/PTPRG,APOE").text
+    assert 'data-vtab="expression"' not in client.get("/genes").text
 
 
 def test_author_de_route_labels_filters_and_sorts(client):
@@ -179,8 +189,13 @@ def test_author_de_route_reports_an_unavailable_api(client, monkeypatch):
 
 def test_geneset_page_has_the_view_tab(client):
     text = client.get("/genesets/Study1/Exp1/DAM").text
-    for marker in ('data-vtab="geneset"', 'data-vtab="page"', 'id="vt-geneset"', 'id="vt-page"', 'id="vws-p1"', 'id="vws-p2"'):
+    for marker in ('data-vtab="score"', 'data-vtab="shifts"', 'data-vtab="variability"', 'data-vtab="page"', 'id="vt-score"', 'id="vt-shifts"',
+                   'id="vt-variability"', 'id="vt-page"', 'id="vws-p1"', 'id="vws-p2"', 'id="vws-headline"', 'id="vws-p1-help" hidden', 'id="vws-p2-help" hidden'):
         assert marker in text, marker
+    for label in ("1. Module score", "2. What shifts it", "3. Donor variability", "Geneset page (old)"):
+        assert label in text, label
+    assert text.index('id="vws-headline"') < text.index('id="vw-tabs"')
+    assert "doc-block" not in text.split('id="vt-page"')[0].split('id="vw-tabs"')[1]       # no doc_block clutter in the view tabs
     payload = json.loads(re.search(r"var PAYLOAD = (\{.*?\});\n", text, re.S).group(1))
     assert payload["scored_in"] == ["A/n1", "A/c1"] and payload["column_name"] == "Study1::Exp1::DAM"
     assert "Scores of different sets are not on one scale" in text or "not ranked against each other" in text
@@ -193,7 +208,11 @@ def test_facet_page_has_overview_and_detail_tabs(client):
     for marker in ('data-vtab="overview"', 'data-vtab="detail"', 'id="vt-overview"', 'id="vt-detail"', 'id="vwf-answer"', 'id="facet-effects"'):
         assert marker in text, marker
     assert "Details for experts" in text or "vwf-expert" in text
-    assert "Detail (current)" in text
+    assert "Detail (old)" in text and "Detail (current)" not in text
+    for header in ("1. Cell types", "2. Replicated genes", "3. Gene sets", "4. Cohorts"):
+        assert header in text, header
+    for panel in ("vwf-p1-help", "vwf-p2-help", "vwf-p3-help", "vwf-p4-help"):
+        assert f'id="{panel}" hidden' in text, panel
 
 
 def test_facet_page_without_tests_keeps_the_old_page_only(client):
@@ -256,9 +275,48 @@ def test_gene_page_uses_numbered_help_headers_and_drops_old_labels(client):
     text = client.get("/genes/PTPRG").text
     for header in ("1. Where is it expressed", "2. What shifts it", "3. Donor variability"):
         assert header in text, header
-    for panel in ("vwg-p1-help", "vwg-p2-help"):
+    for panel in ("vwg-p1-help", "vwg-p2-help", "vwg-p3-help"):
         assert f'id="{panel}" hidden' in text
     for gone in ("panel 1, descriptive", "tested per donor or mouse", "Mean, log-normalised", "low det."):
         assert gone not in text, gone
     assert "without per-cell cell types" in text and "dataset-level label" in text
     assert "Detected in only" in text and "percentile of the gene's mean (log-normalised)" in text
+
+
+@pytest.mark.parametrize("name, needles", [
+    ("_views.html", ("vw-dplot", "X-Plot-Caption", "adjusted for covariates", "per-cell view in", "donor values (JSON)", "table-layout: fixed", 'class="q"')),
+    ("_view_gene.html", ("plot by cell type", "dataset page", "links: point.links", "linksHtml")),
+    ("_view_geneset.html", ("plot by cell type", "linksHtml", "vws-p2-help")),
+])
+def test_view_scripts_carry_the_donor_plot_links_and_q_column(name, needles):
+    text = (_WEB_DIR / "templates" / name).read_text(encoding="utf-8")
+    for needle in needles:
+        assert needle in text, needle
+
+
+@pytest.mark.parametrize("path, hashes", [
+    ("/genes/PTPRG", ("expression", "shifts", "variability", "author-de", "atlas")),
+    ("/genesets/Study1/Exp1/DAM", ("module-score", "shifts", "variability", "page")),
+    ("/facets/ant_disease", ("overview", "detail")),
+])
+def test_every_tab_has_a_deep_link_hash_and_a_panel(client, path, hashes):
+    text = client.get(path).text
+    for hash_name in hashes:
+        assert f'data-hash="{hash_name}"' in text, hash_name
+    assert "initTabs" in text
+
+
+@pytest.mark.parametrize("name", ["genes.html", "geneset.html", "facet.html"])
+def test_view_page_templates_have_no_em_dash(name):
+    assert "\u2014" not in (_WEB_DIR / "templates" / name).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("name, expected", [
+    ({"obs": {"categorical": ["x", "ant_cell_type", "cell_type"]}}, "ant_cell_type"),
+    ({"obs": {"categorical": ["x", "Cell_Type"]}}, "Cell_Type"),
+    ({"obs": {"categorical": ["cluster"]}}, ""),
+    ({"obs": None}, ""),
+    ({}, ""),
+])
+def test_view_celltype_column(name, expected):
+    assert browser._view_celltype_column(name) == expected

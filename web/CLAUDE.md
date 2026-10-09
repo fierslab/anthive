@@ -189,20 +189,24 @@ the p-value floor" (`_floor_text`). Excluded datasets (`_fx_exclusion_text`, ser
 "excluded from the facet layer" or mouse-only) keep the Facets tab with `#fx-excluded`. Author-cluster facets get
 a "dataset-scoped, no tests" note, `ant_tissue` an umbrella note plus `#ds-tissue-detail` (from `/info` `tissue`).
 
-**Gene, gene set and facet views (new tabs, 2026-10).** `genes.html` (single gene only), `geneset.html` and
-`facet.html` (only when the facet has tests) carry a tab bar (`#vw-tabs`, `window.antViews.initTabs`, hashes
-`#gene-view` / `#atlas` / `#author-de`, `#geneset-view` / `#page`, `#overview` / `#detail`; a hash that points into
-another panel opens that panel, and the atlas `&gv=` tail is kept) with the new view first and the old page untouched
-in its own panel. The code is four partials: `_views.html` (CSS `.vw-*`, shared JS: call logic, the grid for >= 900 px
-and the list below it, the forest, tabs), `_view_gene.html`, `_view_geneset.html`, `_view_facet.html`. All rendering
-is client-side from the API; `browser.py` only passes `view_dbs` (`_view_db_map`: scope, cell type group, human flag,
-secondary flag, `modality` from `_view_modality`) and serves `GET /genes/{gene}/author-de` (JSON: the datasets with
-author DE are found once and cached for an hour, `_gene_author_de_rows`, plain labels from `_plain_de_label`).
-Rules the code follows: the matrix cell shows only k/m (cohorts significant / tested, "0/1" for one cohort, a dash for not tested) in three colours: grey not replicated, light teal replicated (r < 0.05, at least 2 cohorts), dark teal also strict (no star), arrow for direction; pills live in one notes line under each matrix (low detection as a plain sentence, gene class, APOE, pathology axis, one lab pipeline) and in the (?) panel, the effect filter is under "More detail" of an opened cell, no yellow "small" call, "cohorts" never "independent cohorts", the forest shows one
-row per cohort with the rest under "+n more units (not counted)", intervals only from served `ci_low`/`ci_high`, a
-low detection note below 5 percent, modality tags in panel 1 (bars 0 to 100, dotted line = mean over datasets of the cell type), visible caveat lines (composition, one pathology axis,
-xenograft one lab pipeline, age floor). Every field the API may not serve yet is guarded; a missing one hides its element.
-Panel 3 is a placeholder.
+**Gene, gene set and facet views (tabs, 2026-10).** `genes.html` (single gene only), `geneset.html` and `facet.html`
+(only when the facet has tests) put a one-line summary above a tab bar (`#vw-tabs`, `window.antViews.initTabs`, panels `#vt-<name>`,
+buttons `data-vtab` / `data-hash` / optional `data-alias` for old hashes, no nested tabs). Gene: `1. Expression` (#expression, alias
+#gene-view), `2. What shifts it` (#shifts), `3. Donor variability` (#variability, placeholder), `Author DE (as published)` (#author-de, shown
+when present) and `Atlas (old)` (#atlas) last. Geneset: `1. Module score` (#module-score), `2. What shifts it`, `3. Donor variability`,
+`Geneset page (old)` (#page). Facet: `Overview` (#overview, four numbered sections) and `Detail (old)` (#detail). A hash pointing into another
+panel opens that panel; the atlas `&gv=` tail is kept. Partials: `_views.html` (CSS `.vw-*`, shared JS: call logic, grid >= 900 px and list
+below, forest with q column, donor plot and links, tabs), `_view_gene.html`, `_view_geneset.html`, `_view_facet.html`. All rendering is
+client-side from the API; `browser.py` passes `view_dbs` (`_view_db_map`: scope, group, human, secondary, `modality`, `celltype_col`) and serves
+`GET /genes/{gene}/author-de`. Layout rules: every table that opens rows or sits in a tab is `table.vw-table.fixed` with a `<colgroup>`
+(panel 1 is one table, opening a cell type adds rows to it; the facet matrix has fixed column widths and the cohort panel is a full-width row in
+the same table), so nothing shifts on expand (verified at 1440, 1024 and 390 by comparing header widths). Matrix cell shows only k/m, three
+colours, arrow for direction; caveats are one notes line under each matrix with a (?) into the help panel; no doc_block in the view tabs.
+Donor plot and links (API facet-donor-values): `V.linksHtml(links, rows)` renders nothing when the replication entry has no `links`; it shows
+the donor plot lazily (fetch + IntersectionObserver, caption from `X-Plot-Caption`), an "adjusted for covariates" toggle, "donor values (JSON)"
+and "per-cell view in <dataset>" links. Field names read: `links.donor_plot`, `donor_plot_adjusted` (else `adjusted=true` is appended),
+`donor_values`, `anchors` / `anchor_plots`, per unit `links.cell_plot`. Panel 1 dataset rows link the dataset page and a violin of the gene
+(or module score) by the dataset's `celltype_col`. The forest shows estimate, 95% CI and the per-cohort q.
 
 **MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/links`,
 `POST /me/mcp/links/{id}/rotate`, `DELETE /me/mcp/links/{id}`,

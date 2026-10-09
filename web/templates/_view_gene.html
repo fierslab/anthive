@@ -8,9 +8,12 @@
    /genes/{g}/author-de.  `view_dbs` is the compact dataset map built by browser.py. #}
 {% from "_macros.html" import section_help %}
 
-{% macro view_gene_panels(gene) -%}
-<div id="vwg-root" data-gene="{{ gene }}">
-  <div id="vwg-headline"></div>
+{% macro view_gene_headline() -%}
+<div id="vwg-headline"></div>
+{%- endmacro %}
+
+{% macro view_gene_expression(gene) -%}
+<div id="vwg-expression" data-gene="{{ gene }}">
   {% call section_help('1. Where is it expressed', 'vwg-p1-help') %}
     <p>This panel is descriptive: for each cell type it shows how much of it expresses {{ gene }}, not whether anything changes. Click a row to list its datasets.</p>
     <h4>% expressing</h4>
@@ -25,7 +28,11 @@
     <p>A gene found in fewer than 5 percent of the cells of a cell type is called <a href="/help#glossary-low-detection">low detection</a> (the median over the datasets of that cell type). Facet effects on such genes are fragile; panel 2 says so when it applies.</p>
   {% endcall %}
   <div id="vwg-p1"><p class="vw-loading">Computing {{ gene }} across the catalogue (the first view can take up to a minute, later views are cached)...</p></div>
+</div>
+{%- endmacro %}
 
+{% macro view_gene_shifts(gene) -%}
+<div id="vwg-shifts" data-gene="{{ gene }}">
   {% call section_help('2. What shifts it', 'vwg-p2-help') %}
     <p><strong>Exploratory.</strong> A <a href="/help#glossary-facet">facet</a> is a donor-level property such as sex, Braak stage or age, defined the same way in every dataset. A facet effect is a difference between donors (between host mice in the xenograft block), never between single cells, and it is tested within one cell type.</p>
     <h4>How to read the matrix</h4>
@@ -43,13 +50,20 @@
       <li><strong>APOE locus.</strong> APOE, APOC1, TOMM40 and neighbours sit in the e4 locus: allele-linked expression and read-mapping differences can produce an e4 effect that need not be downstream biology.</li>
     </ul>
     <p>The effect filter (at least a 10 percent change in 2 cohorts, 10 percent over three stages for Braak, per decade for age) is a separate condition on the effect size, not error control; it is listed under "More detail" when a cell is opened (<a href="/help#glossary-effect-filter">effect filter</a>).</p>
+    <h4>The opened cell</h4>
+    <p>The table lists one row per cohort: its size, the estimate with a 95 percent interval, and its <strong>q</strong>, the false discovery rate of that cohort on its own (a filled dot means q below 0.05). The q of a cohort is not the replication result; the r-value above combines the cohorts. Above the table the <strong>donor plot</strong> shows, per cohort, one dot per donor (per mouse in the xenograft block) with the value that was tested, so you can see the spread behind an estimate. The box "adjusted for covariates" shows the same donors after removing what the model adjusts for. Under the plot, "per-cell view in" links open a descriptive plot of the cells of an anchor dataset: it shows cells, not donors, and is not the test.</p>
   {% endcall %}
   <div id="vwg-legend"></div>
   <div id="vwg-p2"><p class="vw-loading">Loading the facet effects...</p></div>
+</div>
+{%- endmacro %}
 
+{% macro view_gene_variability(gene) -%}
+<div id="vwg-variability" data-gene="{{ gene }}">
   {% call section_help('3. Donor variability', 'vwg-p3-help') %}
-    <p>Coming later. This panel will show how much donors differ within a group.</p>
+    <p>This panel will show how much donors differ within a group.</p>
   {% endcall %}
+  <div class="vw-placeholder">Coming later.</div>
 </div>
 {%- endmacro %}
 
@@ -105,7 +119,7 @@
       if (!db || result.is_secondary || db.secondary || !stat || stat.pct_nonzero == null || result.n_cells < 50 || !db.human) return;
       if (db.scope !== 'human_postmortem' && db.scope !== 'xenograft_human_in_mouse') { other += 1; return; }
       rows.push({ db_id: result.db_id, title: db.title || result.title, scope: db.scope, group: db.group, n_cells: result.n_cells, pct: stat.pct_nonzero, mean: stat.mean,
-                  rank: stat.rank_mean, q10: stat.q10_nonzero, q90: stat.q90_nonzero, modality: servedModality(result) || db.modality || '' });
+                  celltype_col: db.celltype_col || '', rank: stat.rank_mean, q10: stat.q10_nonzero, q90: stat.q90_nonzero, modality: servedModality(result) || db.modality || '' });
     });
     return { rows: rows, other: other };
   }
@@ -122,12 +136,16 @@
   function headerCell(label, tip, axis, cls) {
     return '<th' + (cls ? ' class="' + cls + '"' : '') + '>' + label + ' ' + V.info(tip) + (axis ? '<div class="vw-axis"><span>' + axis[0] + '</span><span>' + axis[1] + '</span></div>' : '') + '</th>';
   }
+  // the dataset's own violin plot of the gene, grouped by its cell type column when it has one
+  function plotLink(row) {
+    return V.dbLink(row.db_id) + '/plot/violin?' + (row.celltype_col ? 'x=' + enc(row.celltype_col) + '&' : '') + 'y=' + enc(GENE);
+  }
   function renderP1(host, collected) {
     var rows = collected.rows;
     if (!rows.length) { host.innerHTML = '<div class="vw-placeholder">' + V.esc(GENE) + ' has no expression summary in the human post-mortem or xenograft datasets.</div>'; return; }
     var named = rows.filter(function (row) { return V.GROUPS.indexOf(row.group) >= 0; });
     var mixed = rows.filter(function (row) { return V.GROUPS.indexOf(row.group) < 0; });
-    var html = '<div class="vw-box"><table class="vw-table"><thead><tr>' +
+    var html = '<div class="vw-box"><table class="vw-table fixed"><colgroup><col class="c-name"><col class="c-ds"><col class="c-pct"><col class="c-rank"></colgroup><thead><tr>' +
       headerCell('Cell type', 'Cell type group, taken from the per-cell annotation of each dataset. Click a row to list its datasets.') +
       headerCell('Datasets', 'Number of datasets of this cell type, and the cells in them (n). The tag says whether a dataset was made from nuclei or from whole cells.') +
       headerCell('% expressing', 'Percent of the cells of this cell type with at least one count of the gene. The bar runs from 0 to 100 percent; the value is the mean over datasets with the range in brackets. In an opened row the dotted line is the mean over all datasets of the cell type.', ['0', '100%']) +
@@ -151,7 +169,8 @@
         html += '<tr class="vw-toggle" data-i="' + index + '"><td><span class="caret">&#9656;</span>' + V.esc(V.plain(group)) + '</td><td class="vw-ds">' + members.length + ' <span class="muted">n=' + V.compact(totalCells) + '</span>' + (mods ? '<div class="vw-mods">' + mods + '</div>' : '') + '</td><td class="vw-bar-cell">' +
           pctCell(meanPct, null, [Math.min.apply(null, pcts), Math.max.apply(null, pcts)]) + '</td><td class="vw-bar-cell">' + rankCell(meanRank, null) + '</td></tr>';
         members.sort(function (a, b) { return b.pct - a.pct; }).forEach(function (row) {
-          html += '<tr class="vw-sub" data-p="' + index + '" hidden><td title="' + V.esc(row.title) + '"><a href="/browse/' + V.esc(row.db_id) + '">' + V.esc(row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span> ' + modalityTag(row.modality) +
+          html += '<tr class="vw-sub" data-p="' + index + '" hidden><td title="' + V.esc(row.title) + '"><a href="' + V.dbLink(row.db_id) + '">' + V.esc(row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span> ' + modalityTag(row.modality) +
+            '<span class="vw-links"><a href="' + V.dbLink(row.db_id) + '">dataset page</a><a href="' + plotLink(row) + '" title="' + V.esc(GENE) + ' in this dataset, by cell type">plot by cell type</a></span>' +
             '</td><td class="vw-ds">n=' + V.compact(row.n_cells) + '</td><td class="vw-bar-cell">' + pctCell(row.pct, meanPct) + '</td><td class="vw-bar-cell">' + rankCell(row.rank, meanRank) + '</td></tr>';
         });
         index += 1;
@@ -261,7 +280,7 @@
       var cohort = u.cohort_label && u.cohort_label !== 'None' ? u.cohort_label.replace(/^Xenograft:\s*/, '') : 'unassigned';
       return { name: cohort, title: u.title || u.db_id, sub: withNotes('<a href="/browse/' + V.esc(u.db_id) + '">' + V.esc(u.db_id) + '</a>', notes), n: u.n_donors, est: u.logFC,
                lo: replicate ? u.ci_low : null, hi: replicate ? u.ci_high : null, q: replicate ? u.q_value : null, sig: replicate && u.q_value != null && u.q_value < 0.05,
-               counted: !!u.counted, anchor: !!u.anchor, reason: u.not_counted_reason, inflated: !!u.inflated, db_id: u.db_id };
+               counted: !!u.counted, anchor: !!u.anchor, reason: u.not_counted_reason, inflated: !!u.inflated, db_id: u.db_id, links: u.links };
     }).sort(function (a, b) { return (b.counted - a.counted) || (b.anchor - a.anchor) || ((b.n || 0) - (a.n || 0)); }).map(function (row, index, all) {
       // strata of one cohort (lines, timepoints) share one vote: the first counted row of a cohort stands for it
       if (!row.counted) return row;
@@ -277,7 +296,7 @@
     var name = (entry.cohort_display || entry.cohort_label || 'unassigned').replace(/^Xenograft:\s*/, '');
     return { name: name, title: point.title || point.db_id, sub: withNotes('<a href="/browse/' + V.esc(point.db_id) + '">' + V.esc(point.db_id) + '</a>', notes), n: point.n_donors, est: point.logFC,
              lo: replicate ? point.ci_low : null, hi: replicate ? point.ci_high : null, q: replicate ? point.q_value : null, sig: replicate && point.q_value != null && point.q_value < 0.05,
-             counted: isAnchor && !!(point.anchor_counted != null ? point.anchor_counted : entry.counted), anchor: isAnchor, reason: point.not_counted_reason, inflated: !!point.inflated, db_id: point.db_id };
+             counted: isAnchor && !!(point.anchor_counted != null ? point.anchor_counted : entry.counted), anchor: isAnchor, reason: point.not_counted_reason, inflated: !!point.inflated, db_id: point.db_id, links: point.links };
   }
   function forestRowsFromServed(forest, noun) {
     var rows = [];
@@ -311,6 +330,7 @@
     var rows = card.rows || unitRows(card.units || [], group, scope);
     var title = V.esc(GENE) + ', ' + V.esc(row.label) + ', ' + V.esc(V.plain(group));
     var html = '<div class="vw-detail"><div class="dc-title">' + title + '</div><div class="dc-line">' + (cell ? sentence(row, group, cell, scope) : 'This facet was not tested in this cell type group (too few cohorts or too few replicates).') + '</div>';
+    html += V.linksHtml(cell && cell.rep ? cell.rep.links : null, rows);
     if (rows.length) html += V.forestHtml(rows, { noun: V.SCOPES[scope].noun, unit: row.effectUnit || 'log2 fold change' });
     var extra = extraHtml(block, row, group, cell, rows);
     if (extra) html += '<details class="vw-more"><summary>More detail</summary>' + extra + '</details>';

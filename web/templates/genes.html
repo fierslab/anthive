@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}{% if gene %}{{ gene }} — {% endif %}gene atlas — anthive{% endblock %}
+{% block title %}{% if gene %}{{ gene }} - {% endif %}gene atlas - anthive{% endblock %}
 
 {% block content %}
 {% from "_macros.html" import doc_block %}
@@ -143,7 +143,7 @@
 <h1 class="page-title">
   <span id="gv-fav-star" style="display:none" title="you have favourited this gene (see /settings)">&#9733;</span>
   {{ gene }}
-  <span class="muted" style="font-size:13px;font-weight:normal">— expression across the catalogue</span>
+  <span class="muted" style="font-size:13px;font-weight:normal;margin-left:8px">expression across the catalogue</span>
 </h1>
 <form class="gv-lookup" id="gv-lookup" action="/genes" method="get" role="search">
   <input type="search" name="q" id="gv-lookup-q" placeholder="e.g. TREM2 or APOE,TREM2" aria-label="Gene symbol" autocomplete="off" spellcheck="false" autocapitalize="characters"{% if not gene %} autofocus{% endif %}>
@@ -166,15 +166,20 @@
 {% set _single = gene and ',' not in gene %}
 {% if _single %}
 {% from "_views.html" import views_styles, views_core %}
-{% from "_view_gene.html" import view_gene_panels, view_gene_author_de, view_gene_script %}
+{% from "_view_gene.html" import view_gene_headline, view_gene_expression, view_gene_shifts, view_gene_variability, view_gene_author_de, view_gene_script %}
 {{ views_styles() }}
 {{ views_core() }}
+{{ view_gene_headline() }}
 <div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
-  <button type="button" class="tab-btn" data-vtab="gene" data-hash="gene-view" role="tab">Gene view<span class="vw-new">new</span></button>
-  <button type="button" class="tab-btn vw-old" data-vtab="atlas" data-hash="atlas" role="tab" title="The current atlas page: one row per dataset">Atlas (current)</button>
+  <button type="button" class="tab-btn" data-vtab="expression" data-hash="expression" data-alias="gene-view" role="tab">1. Expression</button>
+  <button type="button" class="tab-btn" data-vtab="shifts" data-hash="shifts" role="tab">2. What shifts it</button>
+  <button type="button" class="tab-btn" data-vtab="variability" data-hash="variability" role="tab">3. Donor variability</button>
   <button type="button" class="tab-btn" data-vtab="de" data-hash="author-de" role="tab" hidden>Author DE (as published)<span class="tab-count"></span></button>
+  <button type="button" class="tab-btn vw-old" data-vtab="atlas" data-hash="atlas" role="tab" title="The earlier atlas page: one row per dataset">Atlas (old)</button>
 </div>
-<div class="tab-panel vw-panel" id="vt-gene">{{ view_gene_panels(gene) }}</div>
+<div class="tab-panel vw-panel" id="vt-expression">{{ view_gene_expression(gene) }}</div>
+<div class="tab-panel vw-panel" id="vt-shifts">{{ view_gene_shifts(gene) }}</div>
+<div class="tab-panel vw-panel" id="vt-variability">{{ view_gene_variability(gene) }}</div>
 <div class="tab-panel vw-panel" id="vt-de">{{ view_gene_author_de(gene) }}</div>
 <div id="vt-atlas" class="tab-panel">
 {% else %}
@@ -321,7 +326,7 @@
 </div>
 {% if _single %}
 {{ view_gene_script(gene, view_dbs or {}) }}
-<script>window.antViews.initTabs(document.getElementById('vw-tabs'), 'gene');</script>
+<script>window.antViews.initTabs(document.getElementById('vw-tabs'), 'expression');</script>
 {% endif %}
 
 <script>
@@ -380,9 +385,9 @@
   }
   function num(x, d) {
     d = d == null ? 2 : d;
-    return (x == null || isNaN(x)) ? '—' : Number(x).toFixed(d);
+    return (x == null || isNaN(x)) ? '-' : Number(x).toFixed(d);
   }
-  function intc(x) { return (x == null || isNaN(x)) ? '—' : Math.round(x).toLocaleString(); }
+  function intc(x) { return (x == null || isNaN(x)) ? '-' : Math.round(x).toLocaleString(); }
 
   function pillsFor(dbId) {
     var p = PILLS[dbId]; if (!p) return '';
@@ -399,7 +404,7 @@
   function statDot(frac, val, rankPct, nGenes, statLabel, gene) {
     var tip = '';
     if (statLabel && gene) {
-      var valStr = val != null ? num(val, statLabel === 'pct_nonzero' ? 1 : 3) : '—';
+      var valStr = val != null ? num(val, statLabel === 'pct_nonzero' ? 1 : 3) : '-';
       if (statLabel === 'pct_nonzero') {
         tip = 'pct_nonzero = ' + valStr + '%'
             + '  ·  fraction of cells with detectable UMIs of ' + gene
@@ -741,7 +746,7 @@
       });
     }
 
-    // Filter: n_cells bucket — cumulative lower bounds ("gt<N>" = nc > N).
+    // Filter: n_cells bucket - cumulative lower bounds ("gt<N>" = nc > N).
     if (flt.n_cells && flt.n_cells.value) {
       var ncBucket = flt.n_cells.value;
       rows = rows.filter(function (r) {
@@ -768,7 +773,7 @@
         return mul * String((pa.organism || {}).full || '').localeCompare(String((pb.organism || {}).full || ''));
       });
     } else {
-      // cell_type / tissue / biosample — sort via DS_ANNOT
+      // cell_type / tissue / biosample - sort via DS_ANNOT
       rows.sort(function (a, b) {
         var annA = DS_ANNOT[a.db_id] || {}, annB = DS_ANNOT[b.db_id] || {};
         var va = annA[col] || annA.celltype || '', vb = annB[col] || annB.celltype || '';
@@ -779,7 +784,7 @@
     summaryEl.textContent = rows.length + ' datasets';
     if (!rows.length) {
       gvBody.style.display = '';
-      gvRows.innerHTML = '<tr><td colspan="9" class="gv-empty">No datasets match — widen the filters.</td></tr>';
+      gvRows.innerHTML = '<tr><td colspan="9" class="gv-empty">No datasets match - widen the filters.</td></tr>';
       return;
     }
     gvRows.innerHTML = rows.map(function (r) {
@@ -787,7 +792,7 @@
       var p     = PILLS[r.db_id] || {};
       var orgFull  = ((p.organism || {}).full || ann.celltype || '');
       // We embed organism full name from PILLS for display; cell_type / tissue / biosample from DS_ANNOT.
-      var orgPill  = p.organism ? '<span title="' + esc(((p.organism || {}).full || '')) + '">' + esc(((p.organism || {}).abbrev || '')) + '</span>' : '—';
+      var orgPill  = p.organism ? '<span title="' + esc(((p.organism || {}).full || '')) + '">' + esc(((p.organism || {}).abbrev || '')) + '</span>' : '-';
       // stat dots: pct_nonzero uses cross-db max; mean / mean_nonzero use
       // per-dataset percentile rank so the bar is unit-invariant across
       // scRNA-seq and proteomics/bulk datasets.
@@ -803,8 +808,8 @@
       var mnzDot  = statDot(mnzRank01,
                                 r.mean_nonzero, mnzRankPct, nGenes, 'mean_nonzero', GENE);
       // Visible text for rank columns: show percentile (0–100), not raw value.
-      var meanRankText = meanRankPct != null ? meanRankPct.toFixed(1) + '%' : '—';
-      var mnzRankText  = mnzRankPct  != null ? mnzRankPct.toFixed(1)  + '%' : '—';
+      var meanRankText = meanRankPct != null ? meanRankPct.toFixed(1) + '%' : '-';
+      var mnzRankText  = mnzRankPct  != null ? mnzRankPct.toFixed(1)  + '%' : '-';
       var rowStats = { mean: r.mean, mean_nonzero: r.mean_nonzero };
       // Grey the whole row for secondary datasets (re-aggregated cells).
       var trClass = ann.is_secondary ? ' class="secondary-dataset"' : '';
@@ -831,15 +836,15 @@
     var total = found.length + missing.length;
     function card(n, lbl) { return '<div class="card"><div class="num">' + n + '</div><div class="lbl">' + lbl + '</div></div>'; }
     heroBox.innerHTML =
-      card(top ? esc(top.title || top.db_id) : '—', top ? 'highest abundance (scaled ' + (top.scaled_mean || 0).toFixed(2) + ')' : 'not detected') +
+      card(top ? esc(top.title || top.db_id) : '-', top ? 'highest abundance (scaled ' + (top.scaled_mean || 0).toFixed(2) + ')' : 'not detected') +
       card(broad + '/' + found.length, 'datasets with &gt;10% cells expressing') +
-      card(cv != null ? cv.toFixed(2) : '—', 'cross-dataset CV (spread)') +
+      card(cv != null ? cv.toFixed(2) : '-', 'cross-dataset CV (spread)') +
       card(found.length + '/' + total, 'detected (absent from ' + missing.length + ')');
   }
 
   // ── multi-gene heatmap (unchanged logic, consistent styling) ───────────────
   function hmNum(v) {
-    if (v == null || !isFinite(v)) return '—';
+    if (v == null || !isFinite(v)) return '-';
     var a = Math.abs(v);
     if (a !== 0 && (a >= 1000 || a < 0.01)) return v.toExponential(1);
     if (a >= 100) return v.toFixed(0);
@@ -881,10 +886,10 @@
       var fg = t > 0.55 ? '#fff' : '#1e293b';
       var pp = dbId.split('/');
       var href = '/browse/' + encodeURIComponent(pp[0] || '') + '/' + encodeURIComponent(pp[1] || '') + '/plot/histogram?x=' + encodeURIComponent(g);
-      return '<td class="hm-cell"><a href="' + href + '" style="background:rgba(29,78,216,' + op + ');color:' + fg + '" title="' + esc(g) + ' in ' + esc(dbId) + ': ' + hmFmt(cfg, v) + ' (' + esc(cfg.label) + ') — open distribution">' + hmFmt(cfg, v) + '</a></td>';
+      return '<td class="hm-cell"><a href="' + href + '" style="background:rgba(29,78,216,' + op + ');color:' + fg + '" title="' + esc(g) + ' in ' + esc(dbId) + ': ' + hmFmt(cfg, v) + ' (' + esc(cfg.label) + ') - open distribution">' + hmFmt(cfg, v) + '</a></td>';
     };
     // Prefix ★ on column headers whose gene is on the user's favourite list
-    // (see /settings) — matches the single-gene mode's ★ marker.
+    // (see /settings) - matches the single-gene mode's ★ marker.
     var isFav = (window.antSettings && window.antSettings.isFavourite)
         ? function (gene) { return window.antSettings.isFavourite(gene); }
         : function () { return false; };
@@ -946,7 +951,7 @@
     var _prevCounter = loading.querySelector('.gv-elapsed');
     if (_prevCounter) _prevCounter.remove();
 
-    // 30s hard timeout — a wedged /gene_stats_all across 130+ dbs shouldn't
+    // 30s hard timeout - a wedged /gene_stats_all across 130+ dbs shouldn't
     // spin forever. antFetchWithTimeout is defined in dataset.html but not
     // universally available from this page; fall back to a local implementation.
     var controller = new AbortController();
@@ -998,7 +1003,7 @@
           : (err && err.message ? err.message : 'network error');
         errBox.innerHTML =
             '<div class="err" style="padding:10px;border:1px solid #fecaca;background:#fef2f2;color:#991b1b;border-radius:6px;font-size:12px">'
-          + '⚠ could not load gene stats — ' + esc(msg)
+          + '⚠ could not load gene stats - ' + esc(msg)
           + '. <a href="#" data-action="retry" style="color:#991b1b;text-decoration:underline">Retry?</a>'
           + '</div>';
         var retry = errBox.querySelector('[data-action="retry"]');
@@ -1010,7 +1015,7 @@
   }
 
   // ── filter change handlers ──────────────────────────────────────────────────
-  // organism changes the server request — re-fetch.
+  // organism changes the server request - re-fetch.
   if (flt.organism) {
     flt.organism.addEventListener('change', function () {
       updateHash(!!this.value);
@@ -1018,7 +1023,7 @@
     });
     if (window.antRemember) antRemember.bindSelect(flt.organism, 'genes.gv.organism');
   }
-  // n_cells and pct are client-side filters — re-render only.
+  // n_cells and pct are client-side filters - re-render only.
   if (flt.n_cells) {
     flt.n_cells.addEventListener('change', function () {
       updateHash(!!this.value);

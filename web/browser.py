@@ -3798,10 +3798,28 @@ def _view_modality(db: Dict[str, Any]) -> str:
     return ''
 
 
+def _view_celltype_column(db: Dict[str, Any]) -> str:
+    """Name of the per-cell cell type column of a dataset, '' when none is recognisable.
+
+    Prefers the standardised ``ant_cell_type``, else a categorical column called
+    ``cell_type`` / ``celltype`` (any case). Used for the "plot by cell type" link of the
+    gene view.
+    """
+    obs = db.get('obs')
+    categorical = obs.get('categorical') if isinstance(obs, dict) else None
+    names = [name for name in (categorical or []) if isinstance(name, str)]
+    if 'ant_cell_type' in names:
+        return 'ant_cell_type'
+    for name in names:
+        if re.fullmatch(r'cell[_ ]?type', name, re.IGNORECASE):
+            return name
+    return ''
+
+
 def _view_db_map(api_url: str) -> Dict[str, Dict[str, Any]]:
     """Compact per-dataset facts the view panels need, keyed by db_id.
 
-    ``scope`` is the facet scope, ``group`` the cell type group of the dataset-level
+    ``celltype_col`` the per-cell cell type column (may be empty), ``scope`` is the facet scope, ``group`` the cell type group of the dataset-level
     cell type (empty when the dataset is mixed or has several cell types), ``human``
     whether the organism is human, ``secondary`` the reanalysis flag and ``modality``
     nuclei versus cells (``_view_modality``). Empty when the API is unreachable.
@@ -3823,6 +3841,7 @@ def _view_db_map(api_url: str) -> Dict[str, Dict[str, Any]]:
             group = ''
         result[db_id] = {
             'title': db.get('title') or db.get('basename') or db_id,
+            'celltype_col': _view_celltype_column(db),
             'scope': db.get('facet_scope') or '',
             'group': group,
             'human': 'human' in _flatten_annotation_field(db.get('organism')).lower(),

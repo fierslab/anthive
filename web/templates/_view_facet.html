@@ -2,24 +2,41 @@
    genes once, replicated gene sets, cohorts with donors and covariates, and the expert details closed.
    Data: /api/facets/{f}/effects/top (one call per cell type group), /api/facets/{f}/tests, and, when
    the API serves them, /api/facets/{f}/modules/top.  Needs _views.html. #}
-{% from "_macros.html" import doc_block %}
+{% from "_macros.html" import section_help %}
 
 {% macro view_facet_panel(facet_label) -%}
 <div id="vwf-root">
   <div id="vwf-variants"></div>
   <div id="vwf-answer"><p class="vw-loading">Loading the replicated genes per cell type...</p></div>
   <div id="vwf-caveat"></div>
-  {% call doc_block('About this page', id='vwf-about') %}
+  {% call section_help('1. Cell types', 'vwf-p1-help') %}
     <p>This page answers one question: which genes and gene sets change with {{ facet_label }}, and where is that finding repeated? A <a href="/help#glossary-facet">facet</a> is a donor-level property defined the same way in every dataset, so an effect is a difference between donors (between host mice in the xenograft scope), not between cells.</p>
     <p>A gene counts when the same direction appears in at least 2 cohorts according to a <a href="/help#glossary-partial-conjunction">partial conjunction test</a> at 5 percent FDR (<a href="/help#glossary-r-value">r-value</a>) and the change is at least 10 percent in 2 cohorts (<a href="/help#glossary-effect-filter">effect filter</a>, a condition on size, not error control). The strict subset also passes the minimum-effect test (<a href="/help#glossary-treat-tier">strict tier</a>). Cohorts can share a brain bank or protocol, so the count of cohorts is not a count of independent confirmations. A cell type without a hit is not shown as a negative result: with 2 cohorts the test has little power (<a href="/help#glossary-p-value-floor">p-value floor</a>).</p>
+    <h4>Genes and strict</h4>
+    <p>The number of genes that replicate and meet the effect filter in that cell type, and how many of them also pass the strict minimum-effect test. The examples are the strongest genes by r-value, split by direction.</p>
   {% endcall %}
   <div id="vwf-cards"></div>
-  <h2 class="section-head" id="vwf-genes-head" hidden>Replicated genes <span class="muted" id="vwf-genes-sub"></span></h2>
-  <div id="vwf-genes"></div>
-  <h2 class="section-head" id="vwf-modules-head" hidden>Gene sets that follow {{ facet_label }} <span class="muted" id="vwf-modules-sub"></span></h2>
-  <div id="vwf-modules"></div>
-  <h2 class="section-head" id="vwf-cohorts-head" hidden>Cohorts behind the result</h2>
-  <div id="vwf-cohorts"></div>
+  <div id="vwf-genes-sec" hidden>
+    {% call section_help('2. Replicated genes', 'vwf-p2-help') %}
+      <p>The genes of the main cell type that replicate and meet the effect filter, best r-value first. <strong>Direction</strong> and <strong>effect</strong> are the median over the cohorts that carry the result (log2 fold change; per Braak stage or per decade for the trend facets). <strong>Cohorts significant</strong> counts the cohorts with q below 0.05 on their own in the same direction, of those tested. <strong>Carried by</strong> names the two cohorts that give the r-value. The star marks the strict tier. Flags mark gene classes that move for technical reasons (long genes, lncRNAs, sex chromosome, ribosomal and mitochondrial genes, the APOE locus).</p>
+      <p>The list holds the first 500 replicated genes by r-value; the counts above are not capped. Click a gene to open its page with the cohorts behind the result.</p>
+    {% endcall %}
+    <p class="vw-essential" id="vwf-genes-sub"></p>
+    <div id="vwf-genes"></div>
+  </div>
+  <div id="vwf-modules-sec" hidden>
+    {% call section_help('3. Gene sets', 'vwf-p3-help') %}
+      <p>Gene sets whose mean score per donor follows {{ facet_label }}: the same partial conjunction rule as for genes, on permutation p values of the mean module score, Benjamini-Hochberg over the modules of one family. Pseudobulk of the member genes is used where counts exist, else the mean of per-cell scores. The effect filter for sets is a standardised effect of at least 0.2 standard deviations in 2 cohorts; there is no strict tier.</p>
+    {% endcall %}
+    <p class="vw-essential" id="vwf-modules-sub"></p>
+    <div id="vwf-modules"></div>
+  </div>
+  <div id="vwf-cohorts-sec" hidden>
+    {% call section_help('4. Cohorts', 'vwf-p4-help') %}
+      <p>The cohorts behind the main cell type: its donors (mice in the xenograft scope) and the covariates of its model. A cohort without age in its model is not adjusted for age. A cohort named "unassigned" is not in the cohort table yet.</p>
+    {% endcall %}
+    <div id="vwf-cohorts"></div>
+  </div>
   <div id="vwf-expert"></div>
 </div>
 {%- endmacro %}
@@ -59,7 +76,7 @@
     var answer = document.getElementById('vwf-answer');
     answer.innerHTML = '<p class="vw-loading">Loading the replicated genes per cell type...</p>';
     ['vwf-cards', 'vwf-genes', 'vwf-modules', 'vwf-cohorts', 'vwf-expert', 'vwf-caveat'].forEach(function (id) { document.getElementById(id).innerHTML = ''; });
-    ['vwf-genes-head', 'vwf-modules-head', 'vwf-cohorts-head'].forEach(function (id) { document.getElementById(id).hidden = true; });
+    ['vwf-genes-sec', 'vwf-modules-sec', 'vwf-cohorts-sec'].forEach(function (id) { document.getElementById(id).hidden = true; });
     var base = V.API + '/facets/' + enc(key) + '/effects/top?scope=' + enc(SCOPE);
     V.cached(base + '&n=1').then(function (first) {
       var groups = (first.cell_types || []).filter(function (g) { return V.GROUPS.indexOf(g.celltype_group) >= 0 && g.n_cohorts >= 1; })
@@ -108,49 +125,45 @@
     var lowCount = rows.length ? '' : '';
     document.getElementById('vwf-answer').innerHTML = '<div class="vw-answer"><div class="big">' + headline + '</div><div class="meta"><span class="fx-scope" data-scope="' + SCOPE + '">' + V.esc(V.SCOPES[SCOPE].title) + '</span> ' +
       V.pill('Exploratory', 'warn', 'Results are exploratory, not confirmatory.', '') + V.pill(focusTop.cohorts_in_cell_type + ' cohorts' + (nDonors ? ', ' + Number(nDonors).toLocaleString('en-US') + ' ' + noun : ''), 'teal', 'Cohorts and ' + noun + ' behind the ' + focusName + ' result. The count of ' + noun + ' is an upper bound where ids are not shared between cohorts. Cohorts can share a lab, brain bank or protocol.', 'cohort') + '</div></div>';
-    document.getElementById('vwf-caveat').innerHTML = '<p class="vw-essential">' + V.esc(CAVEAT[key] || CAVEAT.sex).replace(/Braak stage and pathologic AD are one pathology axis\./, '<a href="/help#glossary-disease-basis">Braak stage and pathologic AD are one pathology axis</a>.') + '</p>';
+    document.getElementById('vwf-caveat').innerHTML = '<p class="vw-notes">' + V.esc(CAVEAT[key] || CAVEAT.sex).replace(/Braak stage and pathologic AD are one pathology axis\./, '<a href="/help#glossary-disease-basis">Braak stage and pathologic AD are one pathology axis</a>.') + '&nbsp;' + V.helpBtn('vwf-p1-help') + '</p>';
 
-    // cards: other cell types with hits, then one merged line for the rest
-    var cards = '';
-    var empty = [];
+    // one compact table: a row per cell type
+    var rowsHtml = '';
     groups.forEach(function (g) {
       var name = g.celltype_group;
       var top = byGroup[name];
       if (!top) return;
       var passes = (top.rows || []).filter(function (row) { return row.effect_gate_passed; });
       var n = top.n_effect_gate != null ? top.n_effect_gate : passes.length;
-      if (name === focusGroup) {
-        cards += '<div class="vw-cellcard has"><div class="ct">' + V.esc(V.plain(name)) + ' <span class="muted" style="font-weight:400;font-size:11.5px">' + top.cohorts_in_cell_type + ' cohorts</span></div><div class="one">' +
-          (n ? n + ' genes' + (top.n_replicated_effect ? ' (' + top.n_replicated_effect + ' strict)' : '') + ', listed once in the table below.' : 'No gene meets the criteria.') + '</div></div>';
-      } else if (n > 0) {
+      var strictN = top.n_replicated_effect != null ? top.n_replicated_effect : 0;
+      var examples = '';
+      if (name === focusGroup) examples = n ? 'listed in section 2' : '';
+      else if (n > 0) {
         var up = passes.filter(function (row) { return row.direction === 'up'; }), down = passes.filter(function (row) { return row.direction === 'down'; });
         var parts = [];
-        if (up.length) parts.push(geneNames(up, 5) + ' up');
-        if (down.length) parts.push(geneNames(down, 5) + ' down');
-        cards += '<div class="vw-cellcard has"><div class="ct">' + V.esc(V.plain(name)) + ' <span class="muted" style="font-weight:400;font-size:11.5px">' + top.cohorts_in_cell_type + ' cohorts</span></div><div class="one">' + n + (n === 1 ? ' gene' : ' genes') + ': ' + parts.join('; ') + '.</div></div>';
-      } else {
-        empty.push({ name: V.plain(name), n: top.cohorts_in_cell_type });
+        if (up.length) parts.push(geneNames(up, 4) + ' &#9650;');
+        if (down.length) parts.push(geneNames(down, 4) + ' &#9660;');
+        examples = parts.join('; ');
       }
+      rowsHtml += '<tr class="' + (n ? '' : 'vw-grey') + '"><td>' + V.esc(V.plain(name)) + '</td><td class="num">' + top.cohorts_in_cell_type + '</td><td class="num">' + n + '</td><td class="num narrow-hide">' + (n ? strictN : '') + '</td><td>' + examples + '</td></tr>';
     });
-    if (empty.length) {
-      var same = empty.every(function (item) { return item.n === empty[0].n; });
-      cards += '<p class="vw-emptyline">No gene meets the criteria in ' + empty.map(function (item) { return V.esc(item.name) + (same ? '' : ' (' + item.n + ' cohorts)'); }).join(', ') + (same ? ' (' + empty[0].n + ' cohorts each' + (empty[0].n <= 2 ? ', low power' : '') + ')' : '') + '. Few cohorts mean little power; this is not evidence of no effect.</p>';
-    }
-    document.getElementById('vwf-cards').innerHTML = cards;
+    var lowPower = groups.some(function (g) { return byGroup[g.celltype_group] && byGroup[g.celltype_group].cohorts_in_cell_type <= 2 && !(byGroup[g.celltype_group].n_effect_gate > 0); });
+    document.getElementById('vwf-cards').innerHTML = '<div class="vw-box"><table class="vw-table fixed"><colgroup><col style="width:24%"><col style="width:12%"><col style="width:13%"><col class="narrow-hide" style="width:11%"><col></colgroup><thead><tr><th>Cell type ' + V.info('Cell type group, taken from the per-cell annotation of each dataset.') + '</th><th class="num">Cohorts ' + V.info('Cohorts that test this facet in this cell type. Two cohorts give the test little power.') + '</th><th class="num">Genes ' + V.info('Genes that replicate (same direction in at least 2 cohorts, FDR 5 percent) and meet the effect filter.') + '</th><th class="num narrow-hide">Strict ' + V.info('Of those genes, the number that also pass the strict minimum-effect test.') + '</th><th>Examples ' + V.info('Strongest genes by r-value, by direction. The main cell type is listed once in section 2.') + '</th></tr></thead><tbody>' + rowsHtml + '</tbody></table></div>' +
+      (lowPower ? '<p class="vw-fnote">A grey row is not evidence of no effect: with 2 cohorts the test has little power&nbsp;' + V.helpBtn('vwf-p1-help') + '</p>' : '');
 
     // replicated genes of the focus group
     if (passing.length) {
-      document.getElementById('vwf-genes-head').hidden = false;
-      document.getElementById('vwf-genes-sub').textContent = focusName + ', best r-value first';
+      document.getElementById('vwf-genes-sec').hidden = false;
+      document.getElementById('vwf-genes-sub').textContent = focusName + ', best r-value first.';
       var shown = 25;
       var host = document.getElementById('vwf-genes');
       var draw = function (limit) {
         var body = passing.slice(0, limit).map(function (row) {
           var flags = V.geneFlagPills((row.gene_flags || []).concat(row.apoe_locus && (row.gene_flags || []).indexOf('apoe_locus') < 0 ? ['apoe_locus'] : []));
-          return '<tr><td><a href="/genes/' + V.esc(row.gene) + '">' + V.esc(row.gene) + '</a>' + (row.replicated_effect ? ' <span title="Strict tier: minimum-effect r-value below 0.05">&#9733;</span>' : '') + '</td><td>' + V.arrow(row.direction) + ' ' + (row.direction || '') + '</td><td class="num">' + V.signed(row.median_logFC, 2) + '</td><td class="num">' + row.k + ' of ' + row.m + '</td><td>' + V.esc((row.r_cohorts || []).slice(0, 2).map(function (c) { return c.replace(/^Xenograft:\s*/, ''); }).join(', ')) + '</td><td>' + flags + '</td></tr>';
+          return '<tr><td><a href="/genes/' + V.esc(row.gene) + '">' + V.esc(row.gene) + '</a>' + (row.replicated_effect ? ' <span title="Strict tier: minimum-effect r-value below 0.05">&#9733;</span>' : '') + '</td><td>' + V.arrow(row.direction) + ' ' + (row.direction || '') + '</td><td class="num">' + V.signed(row.median_logFC, 2) + '</td><td class="num">' + row.k + ' of ' + row.m + '</td><td class="narrow-hide">' + V.esc((row.r_cohorts || []).slice(0, 2).map(function (c) { return c.replace(/^Xenograft:\s*/, ''); }).join(', ')) + '</td><td>' + flags + '</td></tr>';
         }).join('');
-        host.innerHTML = '<div class="vw-box"><table class="vw-table"><thead><tr><th>Gene</th><th>Direction</th><th class="num">Effect (log2 fold change)</th><th class="num">Cohorts significant</th><th>Carried by</th><th>Flags</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
-          '<p class="vw-fnote">' + (limit < passing.length ? '<button type="button" class="vw-more-units" id="vwf-allgenes">show all ' + passing.length + ' listed genes</button> ' : '') + 'Genes that replicate and meet the effect filter' + (truncated ? '. The list holds the first 500 replicated genes by r-value; ' + nGate + ' meet the filter in all' : '') + '. &#9733; marks the strict tier. Cohorts significant = individually q &lt; 0.05 in the same direction, of those tested.</p>';
+        host.innerHTML = '<div class="vw-box"><table class="vw-table fixed"><colgroup><col style="width:16%"><col style="width:13%"><col style="width:13%"><col style="width:14%"><col class="narrow-hide" style="width:20%"><col></colgroup><thead><tr><th>Gene ' + V.info('Click a gene to open its page.') + '</th><th>Direction ' + V.info('Direction of the median effect over the cohorts that carry the result.') + '</th><th class="num">Effect ' + V.info('Median log2 fold change over the cohorts (per Braak stage or per decade for the trend facets).') + '</th><th class="num">Cohorts ' + V.info('Cohorts significant on their own (q below 0.05, same direction) out of those tested.') + '</th><th class="narrow-hide">Carried by ' + V.info('The two cohorts that give the r-value.') + '</th><th>Flags ' + V.info('Gene classes that often move for technical reasons.') + '</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
+          '<p class="vw-fnote">' + (limit < passing.length ? '<button type="button" class="vw-more-units" id="vwf-allgenes">show all ' + passing.length + ' listed genes</button> ' : '') + (truncated ? 'The list holds the first 500 replicated genes by r-value; ' + nGate + ' meet the filter in all. ' : '') + '&#9733; marks the strict tier&nbsp;' + V.helpBtn('vwf-p2-help') + '</p>';
         var more = document.getElementById('vwf-allgenes');
         if (more) more.addEventListener('click', function () { draw(passing.length); });
       };
@@ -162,15 +175,15 @@
       var modules = (payload.rows || []).filter(function (m) { return m.replicated; });
       if (!modules.length) return;
       var total = payload.n_matching != null ? payload.n_matching : modules.length;
-      document.getElementById('vwf-modules-head').hidden = false;
-      document.getElementById('vwf-modules-sub').textContent = focusName + ', ' + total + ' replicated';
+      document.getElementById('vwf-modules-sec').hidden = false;
+      document.getElementById('vwf-modules-sub').textContent = focusName + ', ' + total + ' replicated, best first.';
       var body = modules.map(function (m) {
         var flags = (m.quality_sensitive ? V.pill('quality-sensitive', 'warn', 'Most member genes are mitochondrial or ribosomal: the score tracks RNA quality, not regulation.', 'gene-class-flags') : '') +
           (m.ab && m.ab.disagree ? V.pill('pseudobulk and cell mean disagree', 'warn', 'The donor-level pseudobulk and the mean of per-cell scores point in different directions and one is replicated, or both reach 0.2 SD.', 'pseudobulk') : '') +
           (m.directionless ? V.pill('no expected direction', 'warn', 'A set of loci has no expected direction; a mean score is not well suited to it.', '') : '');
-        return '<tr><td><a href="/genesets/' + V.esc(m.geneset_id || ((m.catalog || '') + '/' + m.module)) + '">' + V.esc(m.module) + '</a> <span class="muted">' + V.esc(m.catalog || '') + '</span>' + (m.n_genes ? ' <span class="muted">' + m.n_genes + ' genes</span>' : '') + '</td><td>' + V.arrow(m.r_direction) + ' ' + (m.r_direction || '') + '</td><td class="num">' + V.signed(m.median_std_effect, 2) + '</td><td class="num">' + (m.k != null ? m.k + ' of ' + m.m : '') + '</td><td>' + (m.gate ? 'yes' : 'no') + '</td><td>' + flags + '</td></tr>';
+        return '<tr><td><a href="/genesets/' + V.esc(m.geneset_id || ((m.catalog || '') + '/' + m.module)) + '">' + V.esc(m.module) + '</a> <span class="muted">' + V.esc(m.catalog || '') + '</span>' + (m.n_genes ? ' <span class="muted">' + m.n_genes + ' genes</span>' : '') + '</td><td>' + V.arrow(m.r_direction) + ' ' + (m.r_direction || '') + '</td><td class="num">' + V.signed(m.median_std_effect, 2) + '</td><td class="num">' + (m.k != null ? m.k + ' of ' + m.m : '') + '</td><td class="narrow-hide">' + (m.gate ? 'met' : 'not met') + '</td><td>' + flags + '</td></tr>';
       }).join('');
-      document.getElementById('vwf-modules').innerHTML = '<div class="vw-box"><table class="vw-table"><thead><tr><th>Gene set</th><th>Direction</th><th class="num">Standardised effect (SD)</th><th class="num">Cohorts significant</th><th>At least 0.2 SD in 2 cohorts</th><th>Flags</th></tr></thead><tbody>' + body + '</tbody></table></div><p class="vw-fnote">Same partial conjunction rule as for genes, on permutation p values of the mean module score per donor, Benjamini-Hochberg over the modules of one family. Pseudobulk where counts exist, else the mean of per-cell scores. Showing the best ' + modules.length + ' of ' + total + '.</p>';
+      document.getElementById('vwf-modules').innerHTML = '<div class="vw-box"><table class="vw-table fixed"><colgroup><col style="width:30%"><col style="width:12%"><col style="width:12%"><col style="width:12%"><col class="narrow-hide" style="width:12%"><col></colgroup><thead><tr><th>Gene set ' + V.info('Click a set to open its page.') + '</th><th>Direction ' + V.info('Direction of the median effect on the mean score.') + '</th><th class="num">Effect ' + V.info('Median standardised effect of the mean score, in standard deviations of the donor score.') + '</th><th class="num">Cohorts ' + V.info('Cohorts significant on their own, out of those tested.') + '</th><th class="narrow-hide">Filter ' + V.info('Effect filter for sets: at least 0.2 standard deviations in 2 cohorts.') + '</th><th>Flags ' + V.info('Quality-sensitive sets track RNA quality; a set without an expected direction suits a mean score poorly.') + '</th></tr></thead><tbody>' + body + '</tbody></table></div><p class="vw-fnote">Showing the best ' + modules.length + ' of ' + total + '&nbsp;' + V.helpBtn('vwf-p3-help') + '</p>';
     }).catch(function () { /* not served by this API version: the section stays hidden */ });
 
     // cohorts and expert details
@@ -186,14 +199,14 @@
     rows.forEach(function (row) { (row.cohorts_tested_labels || []).forEach(function (label) { tested[label.replace(/^Xenograft:\s*/, '')] = 1; }); });
     var names = Object.keys(perCohort).filter(function (name) { return !Object.keys(tested).length || tested[name]; });
     if (names.length) {
-      document.getElementById('vwf-cohorts-head').hidden = false;
+      document.getElementById('vwf-cohorts-sec').hidden = false;
       document.getElementById('vwf-cohorts').innerHTML = '<div class="vw-cohort-chips">' + names.map(function (name) {
         var row = perCohort[name];
         var cov = (row.covariates || []);
         var covText = cov.length ? cov.join(', ') + (cov.length === 1 ? ' only' : '') : 'no covariates';
         var inflated = row.inflated ? ' ' + V.pill('inflated', 'warn', 'Genome-wide inflation (lambda above 1.3).', 'lambda') : '';
         return '<span class="vw-cohort-chip">' + V.esc(name) + ', ' + (row.n_donors || '?') + ' ' + noun + ' <span class="cov">' + V.esc(covText) + '</span>' + inflated + '</span>';
-      }).join('') + '</div><p class="vw-fnote">Donors per cohort and the covariates of its model. A cohort without age is not adjusted for age.</p>';
+      }).join('') + '</div><p class="vw-fnote">Donors per cohort and the covariates of its model&nbsp;' + V.helpBtn('vwf-p4-help') + '</p>';
     }
     var tierRows = groups.map(function (g) {
       var top = byGroup[g.celltype_group];
@@ -208,12 +221,12 @@
       return '<tr class="' + (row.counted ? '' : 'vw-grey') + '"><td>' + V.esc(cohort) + '</td><td>' + V.esc(row.db_id) + '</td><td class="num">' + (row.n_donors || '') + '</td><td>' + V.esc((row.covariates || []).join(', ') || 'none') + '</td><td>' + (row.pooled ? 'pooled' : '') + '</td><td>' + V.esc(row.disease_basis || '') + '</td>' +
         (hasLambda ? '<td class="num">' + (row.lambda_gc != null ? V.num(row.lambda_gc, 2) : '') + '</td>' : '') + '<td class="num">' + (row.genes ? row.genes.n_q05 + ' of ' + row.genes.n_tested : '') + '</td><td>' + (row.counted ? 'counted' : V.esc(row.not_counted_reason || 'not counted')) + '</td></tr>';
     }).join('');
-    document.getElementById('vwf-expert').innerHTML = V.docBlock('Details for experts', 'vwf-expert-block',
+    document.getElementById('vwf-expert').innerHTML = '<details class="vw-more" id="vwf-expert-block"><summary>Details for experts</summary>' +
       '<div class="vw-expert"><h3 class="subsection-head">Tiers per cell type group</h3><div class="vw-box"><table class="vw-table"><thead><tr><th>Cell type group</th><th class="num">Cohorts</th><th class="num">Genes in family</th><th class="num">r-value &lt; 0.05</th><th class="num">Effect filter met</th><th class="num">Strict tier</th><th class="num">At least 25%</th></tr></thead><tbody>' + tierRows + '</tbody></table></div>' +
       '<p class="vw-fnote">The family is all genes tested in at least 2 cohorts of this scope and cell type group; Benjamini-Hochberg runs over that family. The strict tier repeats the partial conjunction on minimum-effect p values (<a href="/help#glossary-treat-tier">glossary</a>). Counts are not capped; the table above lists at most the first 500.</p>' +
       '<h3 class="subsection-head">Cohort table, ' + V.esc(focusName) + '</h3><div class="vw-box"><table class="vw-table"><thead><tr><th>Cohort</th><th>Dataset</th><th class="num">' + V.esc(noun) + '</th><th>Covariates</th><th></th><th>Disease basis</th>' + (hasLambda ? '<th class="num">lambda</th>' : '') + '<th class="num">Genes q &lt; 0.05</th><th>Status</th></tr></thead><tbody>' + cohortRows + '</tbody></table></div>' +
       '<p class="vw-fnote">Counted rows first; grey rows are listed but not counted (supplementary units, reanalyses, descriptive only). The cohort table is a draft. A cohort named "unassigned" is not in the cohort table.</p>' +
-      '<h3 class="subsection-head">Full replication rule</h3><p class="vw-essential">' + V.esc(first.definition || '') + '</p></div>');
+      '<h3 class="subsection-head">Full replication rule</h3><p class="vw-essential">' + V.esc(first.definition || '') + '</p></div></details>';
     V.afterRender(document.getElementById('vwf-root'));
   }
 

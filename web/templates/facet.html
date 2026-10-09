@@ -155,8 +155,8 @@
 {{ views_styles() }}
 {{ views_core() }}
 <div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
-  <button type="button" class="tab-btn" data-vtab="overview" data-hash="overview" role="tab">Overview<span class="vw-new">new</span></button>
-  <button type="button" class="tab-btn vw-old" data-vtab="detail" data-hash="detail" role="tab" title="The current facet page: effects per dataset and cell type, value distribution, datasets">Detail (current)</button>
+  <button type="button" class="tab-btn" data-vtab="overview" data-hash="overview" role="tab">Overview</button>
+  <button type="button" class="tab-btn vw-old" data-vtab="detail" data-hash="detail" role="tab" title="The earlier facet page: effects per dataset and cell type, value distribution, datasets">Detail (old)</button>
 </div>
 <div class="tab-panel vw-panel" id="vt-overview">{{ view_facet_panel(facet_name[4:] if facet_name.startswith('ant_') else facet_name) }}</div>
 <div class="tab-panel" id="vt-detail">

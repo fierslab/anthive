@@ -19,9 +19,10 @@
   .vw-loading { color: var(--text-muted); font-size: 12.5px; padding: 8px 0; }
   .vw-error { color: #9E2A2B; font-size: 12.5px; padding: 8px 0; }
   .vw-placeholder { border: 1px dashed #c9ced4; border-radius: 5px; padding: 10px 14px; color: #7b838c; font-size: 12.5px; background: #fbfcfd; max-width: 900px; }
-  .vw-new { font-size: 9px; background: #FFF3B0; color: #6b5a1c; border-radius: 3px; padding: 0 4px; margin-left: 5px; text-transform: uppercase; }
   .vw-tabs-bar .tab-btn.vw-old { color: #8a9199; }
   .vw-panel > h2.section-head:first-child { margin-top: 4px; }
+  #vwf-root .section-head { margin-top: 22px; }
+  #vwf-root > .section-head:first-of-type { margin-top: 12px; }
   .vw-pill { display: inline-block; padding: 0 7px; margin: 1px 4px 1px 0; font-size: 10.5px; line-height: 1.6; border-radius: 9px;
              border: 1px solid #e5e7eb; background: #f3f4f6; color: #374151; white-space: nowrap; cursor: help; }
   .vw-pill.warn { background: #fdf3e1; border-color: #f0d3a1; color: #7a4b0c; }
@@ -33,17 +34,27 @@
   .vw-modality.cells { background: #f6efe6; color: #6b4a1c; border-color: #e6d3b6; }
 
   /* ---- panel 1 ---- */
-  .vw-bar-cell { min-width: 200px; white-space: nowrap; }
+  .vw-bar-cell { white-space: nowrap; }
   td.vw-ds { white-space: nowrap; font-variant-numeric: tabular-nums; }
   .vw-mods { margin-top: 2px; font-size: 11px; color: var(--text-muted); }
   .vw-bar { position: relative; display: inline-block; width: 120px; height: 14px; vertical-align: middle; background: #e6e9ec; border-radius: 3px; border-right: 1px solid #b9c0c7; }
   .vw-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; min-width: 2px; background: #1f6f80; border-radius: 3px 0 0 3px; }
   .vw-bar.rank .vw-bar-fill { background: #3d5f94; }
   .vw-bar-mark { position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 2px dotted #1b2127; }
+  .vw-bar-track { position: relative; display: inline-block; width: 120px; height: 14px; vertical-align: middle; background: #e6e9ec; border-radius: 3px; }
+  .vw-bar-range { position: absolute; top: 4px; height: 6px; background: #8dbcc6; border-radius: 2px; }
+  .vw-bar-med { position: absolute; top: 0; bottom: 0; width: 2px; background: #1f5560; }
   .vw-bar-val { display: inline-block; margin-left: 7px; font-size: 11.5px; font-weight: 600; color: #1f2937; vertical-align: middle; font-variant-numeric: tabular-nums; }
   .vw-bar-val .rng { font-weight: 400; color: var(--text-muted); font-size: 10.5px; margin-left: 4px; }
   .vw-axis { display: flex; justify-content: space-between; width: 120px; font-size: 9px; color: #9aa1a9; letter-spacing: 0; text-transform: none; font-weight: 400; }
   table.vw-table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4; }
+  /* fixed layout: column widths come from the colgroup, so opening a row never moves a column */
+  table.vw-table.fixed { table-layout: fixed; }
+  table.vw-table.fixed td, table.vw-table.fixed th { overflow-wrap: anywhere; }
+  table.vw-table.fixed td.vw-bar-cell { overflow: hidden; }
+  col.c-name { width: 34%; } col.c-ds { width: 16%; } col.c-pct { width: 25%; } col.c-rank { width: 25%; }
+  .vw-links { display: block; margin-top: 1px; font-size: 10.5px; color: var(--text-muted); }
+  .vw-links a { margin-right: 8px; }
   table.vw-table th .info { font-size: 11px; text-transform: none; margin-left: 3px; }
   table.vw-table th { text-align: left; padding: 5px 8px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-weight: 500;
                       font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
@@ -91,7 +102,7 @@
   table.vw-grid td.fh .fl { font-size: 12.5px; font-weight: 500; }
   table.vw-grid td.fh .fc { font-size: 10.5px; color: var(--text-muted); }
   table.vw-grid tr.vw-detail-row > td { padding: 0; background: #fbfcfd; text-align: left; }
-  .vw-detail-wrap { position: sticky; left: 0; width: min(920px, calc(100vw - 52px)); }
+  .vw-detail-wrap { position: sticky; left: 0; width: min(920px, calc(100vw - 52px)); box-sizing: border-box; }
 
   /* variant B */
   .vw-clist { border: 1px solid var(--border); border-radius: 5px; background: #fff; }
@@ -118,7 +129,7 @@
   .vw-detail .dc-line { font-size: 12.5px; color: #374151; margin: 2px 0 6px; max-width: 860px; }
   .vw-detail .dc-pills { margin: 3px 0 5px; }
   .vw-forest { border: 1px solid var(--border-light); background: #fff; border-radius: 4px; padding: 4px 8px; max-width: 900px; }
-  .vw-frow { display: grid; grid-template-columns: minmax(130px, 230px) 44px minmax(120px, 1fr) 52px 96px; gap: 8px; align-items: center;
+  .vw-frow { display: grid; grid-template-columns: minmax(130px, 230px) 44px minmax(120px, 1fr) 52px 96px 52px; gap: 8px; align-items: center;
              padding: 3px 0; border-bottom: 1px solid var(--border-light); font-size: 11.5px; }
   .vw-frow:last-child { border-bottom: none; }
   .vw-frow.head { font-size: 9.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
@@ -127,8 +138,8 @@
   .vw-frow .nm { overflow: hidden; overflow-wrap: anywhere; }
   .vw-frow .nm small { color: var(--text-muted); display: block; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
   .vw-frow .nm .vw-pill { font-size: 9.5px; padding: 0 5px; margin: 0 0 0 3px; }
-  .vw-frow .n, .vw-frow .e, .vw-frow .q { text-align: right; font-variant-numeric: tabular-nums; }
-  .vw-frow .q { font-size: 10.5px; color: var(--text-muted); white-space: nowrap; }
+  .vw-frow .n, .vw-frow .e, .vw-frow .ci, .vw-frow .q { text-align: right; font-variant-numeric: tabular-nums; }
+  .vw-frow .ci, .vw-frow .q { font-size: 10.5px; color: var(--text-muted); white-space: nowrap; }
   .vw-frow.head .info { font-size: 10px; margin-left: 2px; text-transform: none; }
   .vw-fplot { position: relative; height: 18px; }
   .vw-fplot .zero { position: absolute; top: 0; bottom: 0; width: 1px; background: #9aa1a9; left: 50%; }
@@ -137,6 +148,13 @@
   .vw-fplot .dot.ns { background: #fff; border: 2px solid #6b8a91; }
   .vw-fplot .dot.b { width: 8px; height: 8px; margin-left: -4px; top: 5px; border-radius: 1px; background: #fff; border: 2px solid #E09F3E; }
   .vw-frow.uncounted .dot { opacity: .55; }
+  /* donor plot of an opened cell: a fixed-height box, so the panel does not jump while the image loads */
+  .vw-dplot { margin: 8px 0 4px; max-width: 900px; }
+  .vw-dplot .bar { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; font-size: 11.5px; color: #374151; margin-bottom: 4px; }
+  .vw-dplot-box { border: 1px solid var(--border-light); border-radius: 4px; background: #fff; min-height: 150px; display: flex; align-items: center; justify-content: center; padding: 4px; }
+  .vw-dplot-box img { max-width: 100%; height: auto; display: block; }
+  .vw-dplot .cap { font-size: 11px; color: var(--text-muted); margin: 3px 0 0; }
+  .vw-dlinks { font-size: 11.5px; margin: 6px 0 0; display: flex; flex-wrap: wrap; gap: 3px 14px; }
   .vw-more-units { background: none; border: none; color: var(--link); cursor: pointer; font: inherit; font-size: 11.5px; padding: 3px 0; }
   .vw-mcg { margin-top: 6px; font-size: 12px; }
   .vw-mcg .g { display: inline-block; background: #e8f0f1; border: 1px solid #c4d8db; color: #254850; border-radius: 10px; padding: 0 7px; margin: 1px 3px 1px 0; font-size: 11.5px; }
@@ -165,21 +183,30 @@
   .vw-seg .off { color: #b0b6bd; cursor: not-allowed; }
   tr.vw-grey td { color: #8a9199; }
   .vw-expert td, .vw-expert th { font-size: 11.5px; }
+  details.vw-more > div.vw-expert { margin-top: 8px; }
 
   @media (max-width: 640px) {
-    .vw-bar { width: 44px; }
-    .vw-axis { width: 44px; }
+    .vw-bar, .vw-bar-track { width: 36px; }
+    .vw-axis { width: 36px; }
     .vw-mods { display: none; }
     td.vw-ds { white-space: normal; }
-    .vw-bar-cell { min-width: 0; }
     .vw-bar-val .rng { display: none; }
     table.vw-table th, table.vw-table td { padding: 4px 5px; }
+    col.c-name { width: 34%; } col.c-ds { width: 14%; } col.c-pct { width: 26%; } col.c-rank { width: 26%; }
     table.vw-table { font-size: 11.5px; }
-    .vw-frow { grid-template-columns: minmax(64px, 1fr) 28px 54px 38px 70px; gap: 4px; font-size: 10.5px; }
+    .vw-forest { overflow-x: auto; }
+    .vw-frow { grid-template-columns: 112px 30px 76px 40px 86px 52px; min-width: 430px; gap: 4px; font-size: 10.5px; }
+    .vw-tabs-bar { flex-wrap: nowrap; overflow-x: auto; }
+    .vw-tabs-bar .tab-btn { flex: none; white-space: nowrap; }
+    col.c-ds { width: 14%; } 
+    table.vw-table th { font-size: 9px; letter-spacing: 0; }
+    table.vw-table th .info { margin-left: 1px; }
+    .vw-bar-val { margin-left: 4px; }
     .vw-frow .nm .vw-pill { display: none; }
     .vw-forest { padding: 4px 4px; }
     .vw-detail { padding: 8px 8px 10px; overflow-x: auto; }
     .vw-legend { font-size: 11px; }
+    .narrow-hide { display: none; }
     .vw-answer .big { font-size: 14px; }
   }
 </style>
@@ -367,9 +394,10 @@ window.antViews = window.antViews || (function () {
       plot += '</div>';
       var reason = row.reason ? '<small>not counted: ' + esc(row.reason) + '</small>' : '<small>' + (row.sub || '') + '</small>';
       return '<div class="vw-frow' + (row.counted ? '' : ' uncounted') + '"><div class="nm" title="' + esc(row.title || row.name) + '">' + esc(row.name) + (row.pills || '') + reason + '</div><div class="n">' + (row.n == null ? '' : row.n) + '</div>' + plot +
-        '<div class="e" title="' + (row.q == null ? 'no p value (below the p-value floor or cell-level)' : 'q = ' + pfmt(row.q)) + '">' + (row.est == null ? 'n/a' : signed(row.est, 2)) + '</div><div class="q">' + (row.lo != null && row.hi != null ? signed(row.lo, 2) + ' to ' + signed(row.hi, 2) : 'no interval') + '</div></div>';
+        '<div class="e">' + (row.est == null ? 'n/a' : signed(row.est, 2)) + '</div><div class="ci">' + (row.lo != null && row.hi != null ? signed(row.lo, 2) + ' to ' + signed(row.hi, 2) : 'no interval') + '</div>' +
+        '<div class="q" title="' + (row.q == null ? 'No p value: below the p-value floor or cell-level only.' : 'q of this cohort on its own: ' + pfmt(row.q)) + '">' + (row.q == null ? 'n/a' : pfmt(row.q)) + '</div></div>';
     }
-    var html = '<div class="vw-forest"><div class="vw-frow head"><div>Cohort and dataset</div><div class="n">' + esc(opts.noun || 'donors') + '</div><div>' + esc(opts.unit || 'log2 fold change') + '</div><div class="e">estimate</div><div class="q">95% CI ' + info('Confidence interval from the model of that cohort. A unit below the p-value floor has none. A filled dot means the cohort alone has q below 0.05; hover the estimate for its q.') + '</div></div>';
+    var html = '<div class="vw-forest"><div class="vw-frow head"><div>Cohort and dataset</div><div class="n">' + esc(opts.noun || 'donors') + '</div><div>' + esc(opts.unit || 'log2 fold change') + '</div><div class="e">estimate</div><div class="ci">95% CI ' + info('Confidence interval from the model of that cohort. A unit below the p-value floor has none.') + '</div><div class="q">q ' + info(opts.qTip || 'False discovery rate (Benjamini-Hochberg) of this cohort on its own, over the genes tested in it. Below 0.05 the cohort is significant by itself, shown as a filled dot. It is not the replication result, which combines the cohorts (r-value).', 'fdr') + '</div></div>';
     html += counted.map(line).join('');
     if (rest.length) {
       html += '<div class="vw-uncounted-wrap"><button type="button" class="vw-more-units" data-n="' + rest.length + '">+ ' + plural(rest.length, 'more unit') + ' (not counted)</button><div class="vw-uncounted" hidden>' + rest.map(line).join('') + '</div></div>';
@@ -388,6 +416,96 @@ window.antViews = window.antViews || (function () {
     });
   }
 
+  /* ---------- donor plot and links (API facet-donor-values; every field is optional) ---------- */
+  function linkOf(value) {
+    if (!value) return null;
+    if (typeof value === 'string') return value;
+    return value.url || value.href || null;
+  }
+  // The API serves relative paths ("/facets/..."): the browser reaches them under /api.
+  function apiUrl(url) {
+    if (!url) return null;
+    if (/^https?:/.test(url) || url.indexOf(API + '/') === 0) return url;
+    return url.charAt(0) === '/' ? API + url : API + '/' + url;
+  }
+  function withParam(url, name, value) { return url + (url.indexOf('?') >= 0 ? '&' : '?') + name + '=' + encodeURIComponent(value); }
+  function dbLink(dbId) { return '/browse/' + String(dbId).split('/').map(encodeURIComponent).join('/'); }
+  // per-cell descriptive plot of one anchor dataset, from the cell links or from the unit row
+  function anchorPlots(links, rows) {
+    var found = [], seen = {};
+    function add(dbId, value) {
+      var url = linkOf(value);
+      if (!url || !dbId || seen[dbId] || String(dbId).indexOf('pool:') === 0) return;
+      seen[dbId] = 1;
+      found.push({ db_id: dbId, url: url });
+    }
+    var served = links && (links.anchors || links.anchor_plots);
+    if (Array.isArray(served)) served.forEach(function (item) { add(item.db_id, item.plot || item.cell_plot || item.descriptive_plot || item.url || item.href); });
+    else if (served && typeof served === 'object') Object.keys(served).forEach(function (dbId) { add(dbId, served[dbId]); });
+    (rows || []).forEach(function (row) {
+      var own = row.links;
+      if (own) add(row.db_id, own.cell_plot || own.descriptive_plot || own.per_cell_plot || own.plot);
+    });
+    return found;
+  }
+  // The block under the sentence of an opened cell. Renders nothing when the API served no links.
+  function linksHtml(links, rows, panelId) {
+    var plot = linkOf(links && links.donor_plot);
+    var values = linkOf(links && links.donor_values);
+    var anchors = anchorPlots(links, rows);
+    if (!plot && !values && !anchors.length) return '';
+    var html = '';
+    if (plot) {
+      html += '<div class="vw-dplot" data-plot="' + esc(plot) + '"' + (linkOf(links.donor_plot_adjusted) ? ' data-plot-adjusted="' + esc(linkOf(links.donor_plot_adjusted)) + '"' : '') + '>' +
+        '<div class="bar"><b>Donor values</b> ' + info('Small multiples per cohort: each dot is one donor (one mouse in the xenograft block), the value that was tested. Descriptive view of the same donors as the table below.') +
+        '<label><input type="checkbox" class="vw-adj"> adjusted for covariates</label></div>' +
+        '<div class="vw-dplot-box"><span class="vw-loading">Loading the donor plot...</span></div><p class="cap"></p></div>';
+    }
+    var parts = [];
+    if (plot) parts.push('<a class="vw-dl-img" href="' + esc(apiUrl(plot)) + '" target="_blank" rel="noopener">open the donor plot</a>');
+    if (values) parts.push('<a href="' + esc(apiUrl(values)) + '" target="_blank" rel="noopener">donor values (JSON)</a>');
+    anchors.forEach(function (item) { parts.push('<a href="' + esc(item.url.charAt(0) === '/' && item.url.indexOf('/browse/') !== 0 ? apiUrl(item.url) : item.url) + '">per-cell view in ' + esc(item.db_id) + '</a>'); });
+    if (parts.length) html += '<div class="vw-dlinks">' + parts.join('') + '</div>';
+    return html;
+  }
+  function loadDonorPlot(box) {
+    var adjusted = box.querySelector('.vw-adj').checked;
+    var url = adjusted ? (box.dataset.plotAdjusted || withParam(box.dataset.plot, 'adjusted', 'true')) : box.dataset.plot;
+    var holder = box.querySelector('.vw-dplot-box');
+    var caption = box.querySelector('.cap');
+    var token = String(Date.now() + Math.random());
+    box._token = token;
+    caption.textContent = '';
+    fetch(apiUrl(url), { credentials: 'same-origin' }).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      var text = response.headers.get('X-Plot-Caption');
+      return response.blob().then(function (blob) { return { blob: blob, caption: text }; });
+    }).then(function (done) {
+      if (box._token !== token) return;
+      var image = new Image();
+      image.alt = 'Donor values per cohort';
+      image.src = URL.createObjectURL(done.blob);
+      holder.innerHTML = '';
+      holder.appendChild(image);
+      caption.textContent = done.caption || '';
+    }).catch(function () {
+      if (box._token === token) holder.innerHTML = '<span class="vw-error">The donor plot could not be loaded.</span>';
+    });
+  }
+  // Called after a detail card is rendered; the image is fetched when the card is on screen.
+  function bindDonorPlot(root) {
+    root.querySelectorAll('.vw-dplot').forEach(function (box) {
+      var start = function () { if (!box._started) { box._started = true; loadDonorPlot(box); } };
+      box.querySelector('.vw-adj').addEventListener('change', function () { box._started = true; loadDonorPlot(box); });
+      if ('IntersectionObserver' in window) {
+        var observer = new IntersectionObserver(function (entries) {
+          if (entries.some(function (entry) { return entry.isIntersecting; })) { observer.disconnect(); start(); }
+        });
+        observer.observe(box);
+      } else start();
+    });
+  }
+
   /* ---------- panel 2 grid and list ---------- */
   // model.blocks: [{scope, rows: [{facet, label, contrast, tag, axis, apoeLocus, cells: {group: cell}}], groups: [...], notes: [html], footer}]
   // ctx: {kind, subject, detail(scope, row, group, cell) -> Promise<html>}
@@ -401,7 +519,7 @@ window.antViews = window.antViews || (function () {
     return '<div class="fl">' + esc(row.label) + '</div><div class="fc">' + esc(row.contrast) + '</div>';
   }
   function gridA(block, model, ctx) {
-    var html = '<div class="vw-box"><table class="vw-grid"><thead><tr><th class="fh">Facet ' + info('The donor-level property that was tested, and the comparison made. Click a cell to see the cohorts behind it.') + '</th>' +
+    var html = '<div class="vw-box"><table class="vw-grid"><colgroup><col style="width:200px">' + block.groups.map(function () { return '<col>'; }).join('') + '</colgroup><thead><tr><th class="fh">Facet ' + info('The donor-level property that was tested, and the comparison made. Click a cell to see the cohorts behind it.') + '</th>' +
       block.groups.map(function (g) { return '<th>' + esc(SHORT[g] || g) + '</th>'; }).join('') + '</tr></thead><tbody>';
     block.rows.forEach(function (row) {
       var open = selection && selection.scope === block.scope && selection.facet === row.facet;
@@ -476,7 +594,7 @@ window.antViews = window.antViews || (function () {
       var row = block && block.rows.filter(function (r) { return r.facet === selection.facet; })[0];
       var cell = row && row.cells[selection.group];
       var key = [ctx.subject, selection.scope, selection.facet, selection.group].join('|');
-      var show = function (html2) { slot.innerHTML = html2; bindForest(slot); afterRender(slot); };
+      var show = function (html2) { slot.innerHTML = html2; bindForest(slot); bindDonorPlot(slot); afterRender(slot); };
       if (detailCache[key]) show(detailCache[key]);
       else Promise.resolve(ctx.detail(block, row, selection.group, cell)).then(function (html2) { detailCache[key] = html2; if (slot.isConnected) show(html2); })
         .catch(function () { slot.innerHTML = '<div class="vw-error">The cohorts could not be loaded. Reload the page to try again.</div>'; });
@@ -523,7 +641,7 @@ window.antViews = window.antViews || (function () {
       var panel = target && target.closest ? target.closest('[id^="vt-"]') : null;
       return panel ? panel.id.replace(/^vt-/, '') : null;
     }
-    buttons.forEach(function (b) { if (b.dataset.hash === wanted) initial = b.dataset.vtab; });
+    buttons.forEach(function (b) { if (wanted && (b.dataset.hash === wanted || (b.dataset.alias || '').split(' ').indexOf(wanted) >= 0)) initial = b.dataset.vtab; });
     var holder = panelOfTarget(wanted);
     if (holder) initial = holder;
     show(initial, false);
@@ -539,7 +657,7 @@ window.antViews = window.antViews || (function () {
     LOW_DETECTION_PCT: LOW_DETECTION_PCT, esc: esc, num: num, signed: signed, pfmt: pfmt, plural: plural, arrow: arrow, plain: plain, median: median,
     gl: gl, pill: pill, GENE_FLAGS: GENE_FLAGS, getJson: getJson, cached: cached, docBlock: docBlock, afterRender: afterRender, facetMeta: facetMeta, geneFlagPills: geneFlagPills,
     info: info, helpBtn: helpBtn, compact: compact, CELLS: CELLS, cellFromRep: cellFromRep, cellKind: cellKind, cellHtml: cellHtml, forestHtml: forestHtml, bindForest: bindForest,
-    renderPanel2: renderPanel2, legendHtml: legendHtml, preselect: preselect, initTabs: initTabs
+    linksHtml: linksHtml, bindDonorPlot: bindDonorPlot, dbLink: dbLink, apiUrl: apiUrl, renderPanel2: renderPanel2, legendHtml: legendHtml, preselect: preselect, initTabs: initTabs
   };
 })();
 </script>
