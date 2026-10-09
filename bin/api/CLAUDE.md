@@ -178,6 +178,16 @@ and `lib/config.py` (anthive.yaml loader).
   `available: false` until `ant-facet-test[-modules] run --samples-only` backfills them. Tests: `tests/test_facet_donor_values.py`
   (the ant-serve routes are listed in `_SERVE_WANTED` of `tests/test_facet_results.py`: add new helpers there).
 
+- **Donor variability** (2.45, `doc/DESIGN_donor_variability.md`): `lib/donor_variability.py` (`DonorVariability`, composed over the
+  shared `FacetResults`: same file keys, JSON cache and cohort table) serves `GET /databases/{id}/donor-variability` (registered
+  before the greedy `{db_id:path}/genes` route), `/genes/{gene}/donor-variability`,
+  `/genesets/{study}/{experiment}/{name}/donor-variability` and `/donor-variability/top` (`_donor_variability`, `_dv_call` turns bad
+  parameters into 400). A single gene or module is read with a pyarrow filter (the files are sorted by gene with small row
+  groups), never by loading every dataset; the cross-cohort family reads only the p_excess columns of the cohort anchors and is
+  cached per file version. Counted units are the cohort anchors with at least 30 replicates; scopes are never mixed. MCP tool
+  `donor_variability`; help topic `donor-variability`. Tests: `tests/test_donor_variability_api.py` (the routes are in
+  `_SERVE_WANTED` of `tests/test_facet_results.py`).
+
 - **Lineage and secondaries** (unreleased): dataset metadata carries
   `designation`, `reanalysis_of`, `donor_group`, `has_donor_uid`
   (`_lineage_fields`); `GET /donor-groups` lists the groups. Pooled or

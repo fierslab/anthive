@@ -97,6 +97,7 @@ from library_service import LIBRARY_S3_PREFIX, LibraryService
 from facet_aliases import canonical_facet, is_deprecated_facet_column
 import facet_results as facet_results_lib
 import facet_donor_values as donor_values_lib
+import donor_variability as donor_variability_lib
 import help_content
 import facet_scopes as facet_scopes_lib
 import gene_classes as gene_classes_lib
@@ -4380,6 +4381,78 @@ def get_facet_test_volcano(
         raise HTTPException(status_code=404, detail='no gene-level p values for this unit')
     return Response(content=png, media_type='image/png',
                     headers={'Cache-Control': 'private, max-age=300'})
+
+
+_donor_variability_instance: Optional[donor_variability_lib.DonorVariability] = None
+_DV_HELP_TOPICS = donor_variability_lib.HELP_TOPICS
+
+
+def _donor_variability() -> donor_variability_lib.DonorVariability:
+    """The shared reader of the donor variability files, over the same ``FacetResults`` as the facet tests."""
+    global _donor_variability_instance
+    reader = _facet_results()
+    with _facet_results_lock:
+        if _donor_variability_instance is None or _donor_variability_instance.reader is not reader:
+            _donor_variability_instance = donor_variability_lib.DonorVariability(reader)
+        return _donor_variability_instance
+
+
+def _dv_call(function, *args, **kwargs):
+    """Run a ``DonorVariability`` method; a bad parameter becomes a 400."""
+    try:
+        return function(*args, **kwargs)
+    except (donor_variability_lib.DonorVariabilityError, facet_scopes_lib.ScopeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/databases/{db_id:path}/donor-variability", tags=["donor-variability"])
+def get_dataset_donor_variability(
+    db_id: str,
+    feature_type: Optional[str] = Query(None, description="gene | module: add the rows of one unit (needs cell_type)"),
+    cell_type: Optional[str] = Query(None, description="Stratum label of the unit, as in `units[].cell_type`"),
+    celltype_source: Optional[str] = Query(None, description="Stratifier of the unit (default: the first unit with the label)"),
+    feature: Optional[str] = Query(None, description="One gene symbol, or Study/Experiment/name for a module"),
+    method: Optional[str] = Query(None, description="Modules: pseudobulk (primary) | cell_mean (secondary)"),
+    sort: str = Query('excess', description="excess | sd | reliability | feature"),
+    rung: str = Query('D1', description="raw | D0 | D1 | D2 | D3 | D4 | F: the design rung of the excess / sd sort"),
+    min_reliability: float = Query(0.0, ge=0, le=1, description="Keep features with at least this reliability"),
+    limit: int = Query(100, ge=1, le=2000, description="Rows returned"),
+):
+    """Donor (replicate) variability of one dataset: how much replicates differ per gene and per gene set.
+
+    Exploratory, per cell type stratum with at least 12 replicates of at least 40 cells. A replicate is the dataset's
+    ``replicate_unit`` (donor; animal for xenografts, where this is host-to-host variability). Without ``feature_type``
+    the answer is the summary::
+
+        {"db_id", "status": "analysed|not_analysed|not_run", "reason", "facet_scope", "replicate_unit",
+         "run": {tool, timestamp_utc, seed, versions, md_sha256, ...}, "parameters": {gates, rungs, ...},
+         "units": [{"cell_type", "celltype_source", "celltype_group", "n_replicates", "rung_deepest",
+                    "rungs": [{"name", "terms", "n", "p", "residual_df", "computed", "reason"}],
+                    "terms", "terms_omitted", "technical_covariates", "n_factors", "n_genes", "n_modules",
+                    "median_reliability", "median_sd_donor", "counted_in_cross_cohort"}]}
+
+    With ``feature_type`` and ``cell_type`` the rows of that unit are added as ``rows`` (``n_matching``, ``n_returned``,
+    ``unit``, ``rung``). A gene row is ``{gene, n_replicates, reliability, reliability_ci, v_donor, v_donor_ci,
+    sd_donor, fold_range_donor, rungs: {raw|D0..D4|F: {n, p, terms, v, sd, fold_range, share_design, excess_z,
+    p_excess}}, deepest_rung, share_design, share_design_ci, share_blocks, lmg, lmg_rung, ave_expr, ...}``; ``v`` and ``sd``
+    are the variance and SD (log2 units) left unexplained at that rung, ``fold_range`` the typical 2 SD fold range,
+    ``share_design`` the share of the donor variance the rung's design explains, ``excess_z`` / ``p_excess`` a within-unit
+    ranking (not a test). Module rows add ``module``, ``method``, ``source``, ``n_genes_found``.
+    """
+    group_folder, stem = _facet_results_location(db_id)
+    meta = registry.metadata_cache.get(db_id) or {}
+    reason = meta.get('facet_exclude_reason') or _no_scope_reason(db_id, meta)
+    reader = _donor_variability()
+    summary = reader.dataset_summary(db_id, group_folder, stem, skip_reason=reason)
+    if feature_type:
+        if not cell_type:
+            raise HTTPException(status_code=400, detail='cell_type is required with feature_type')
+        result = _dv_call(reader.dataset_rows, group_folder, stem, feature_type, cell_type, celltype_source, feature,
+                          method, sort, rung, limit, min_reliability)
+        if result['unit'] is None:
+            raise HTTPException(status_code=404, detail='no unit with this cell_type (and celltype_source)')
+        summary = {**summary, **result}
+    return _with_help(summary, *_DV_HELP_TOPICS)
 
 
 @app.get("/databases/{db_id:path}/genes", tags=["genes"])
@@ -14330,6 +14403,89 @@ def get_facet_donor_plot(
             while len(_DONOR_PLOT_CACHE) > _DONOR_PLOT_CACHE_ENTRIES:
                 _DONOR_PLOT_CACHE.popitem(last=False)
     return Response(content=cached[0], media_type=_PLOT_MIME_TYPES[fmt], headers=cached[1])
+
+
+# ── Donor variability across cohorts (2.45) ───────────────────────────────────
+
+@app.get("/genes/{gene}/donor-variability", tags=["donor-variability"])
+def get_gene_donor_variability(
+    gene: str,
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC),
+    cell_type: Optional[str] = Query(None, description="Restrict to a cell type group (e.g. 'microglia') or raw stratum label"),
+    rung: str = Query('D1', description="raw | D0 | D1 | D2 | D3 | D4 | F: rung of the cross-cohort summary"),
+    exclude_secondary: bool = Query(True, description="Secondary datasets are listed, not counted"),
+):
+    """Between-replicate variability of one gene in every analysed unit (exploratory).
+
+    ``units`` lists every dataset and cell type stratum that has the gene: cohort, ``n_replicates``, ``counted``
+    (the unit is the anchor of its cohort for the cell type group, at least 30 replicates) with ``not_counted_reason``,
+    and ``values`` (reliability, donor SD in log2 units and as a 2 SD fold range, what remains unexplained at every
+    rung, shares, excess ranking; see ``/databases/{id}/donor-variability``). ``by_group`` has per cell type group ``m``
+    (counted cohorts that reach the rung), ``k`` (cohorts in which the gene is in the top 5 percent of the excess
+    ranking), ``p_rank_product`` and ``r_value`` (Fisher combination of the cohorts' rank based p values, a rank product,
+    BH over genes; the null is that a gene's ranks in different cohorts are independent, so it measures reproducibility
+    of the excess, relative and exploratory, not a test of a hypothesis). Scopes are never mixed (default: human_postmortem).
+    """
+    resolved = _scope_param(scope) or facet_scopes_lib.DEFAULT_SCOPE
+    card = _dv_call(_donor_variability().feature_card, _facet_test_datasets(), resolved, 'gene', gene, cell_type, rung,
+                    exclude_secondary=exclude_secondary)
+    if not card['units']:
+        raise HTTPException(status_code=404, detail=f'no donor variability result for {gene} in scope {resolved}')
+    return _with_help(card, *_DV_HELP_TOPICS)
+
+
+@app.get("/genesets/{study}/{experiment}/{name}/donor-variability", tags=["donor-variability"])
+def get_geneset_donor_variability(
+    study: str, experiment: str, name: str,
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC),
+    cell_type: Optional[str] = Query(None, description="Restrict to a cell type group or raw stratum label"),
+    rung: str = Query('D1', description="raw | D0 | D1 | D2 | D3 | D4 | F"),
+    method: Optional[str] = Query(None, description="pseudobulk (primary, default) | cell_mean (secondary)"),
+    source: Optional[str] = Query(None, description="cell_mean only: geneset | ucell"),
+    exclude_secondary: bool = Query(True),
+):
+    """Between-replicate variability of one gene set (module score) in every analysed unit.
+
+    Same shape as ``/genes/{gene}/donor-variability``; the module value is the pseudobulk score (mean log2 CPM of
+    the members minus an expression matched control set) of each replicate, or with ``method=cell_mean`` the mean
+    of the per-cell scores. A module is analysed only in the cell types of its scope. Descriptive: there is no
+    ranking test for modules (``excess_z``, ``p_excess``, ``r_value`` are null).
+    """
+    resolved = _scope_param(scope) or facet_scopes_lib.DEFAULT_SCOPE
+    card = _dv_call(_donor_variability().feature_card, _facet_test_datasets(), resolved, 'module',
+                    f'{study}/{experiment}/{name}', cell_type, rung, method=method, source=source,
+                    exclude_secondary=exclude_secondary)
+    if not card['units']:
+        raise HTTPException(status_code=404, detail=f'no donor variability result for {study}/{experiment}/{name} in scope {resolved}')
+    return _with_help(card, *_DV_HELP_TOPICS)
+
+
+@app.get("/donor-variability/top", tags=["donor-variability"])
+def get_donor_variability_top(
+    cell_type: str = Query('microglia', description="Cell type group (e.g. microglia) or raw stratum label"),
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC),
+    feature_type: str = Query('gene', description="gene | module"),
+    rung: str = Query('D1', description="raw | D0 | D1 | D2 | D3 | D4 | F: design rung at which variability is ranked"),
+    limit: int = Query(50, ge=1, le=1000),
+    min_cohorts: int = Query(2, ge=1, le=20, description="A feature needs a result in at least this many cohorts"),
+    exclude_secondary: bool = Query(True),
+):
+    """Genes (or gene sets) that vary strongly between replicates in several cohorts at one design rung.
+
+    Cohorts count with their anchor unit (at least 30 replicates, the rung computed); ``cohorts`` lists them.
+    Genes: ``k`` cohorts in which the gene is in the top 5 percent of the within-cohort excess ranking of ``m`` cohorts
+    that ranked it, ``p_rank_product`` / ``r_value`` rank product (Fisher over the cohorts that ranked the gene, at
+    least two) BH over genes, ``concordance`` (mean Spearman correlation of the excess between cohorts),
+    ``median_excess_z``, ``median_reliability``, ``median_sd`` (log2 units left unexplained at the rung) and
+    ``fold_range``. Relative and exploratory: the ranking compares genes inside a cohort. Modules: descriptive
+    (``k`` cohorts with reliability at least 0.3, ``median_sd``, ``median_share_design``). ``concordance`` is
+    ``{mean_spearman, n_pairs, pairs}`` (genes only). Fewer cohorts than ``min_cohorts``: ``not_enough_cohorts`` true and no rows. Scopes are never mixed.
+    """
+    resolved = _scope_param(scope) or facet_scopes_lib.DEFAULT_SCOPE
+    result = _dv_call(_donor_variability().top, _facet_test_datasets(), resolved, cell_type, feature_type, rung, limit,
+                      min_cohorts, exclude_secondary)
+    return _with_help(result, *_DV_HELP_TOPICS)
+
 
 
 @app.get("/facets/cohorts", tags=["facet-tests"])

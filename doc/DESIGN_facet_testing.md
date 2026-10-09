@@ -968,3 +968,9 @@ xenograft scope (R needed), `age` end to end, the plan rules (numeric minimum, c
 host sex), module replication with the effect gate and per scope. `tests/test_facet_results.py`: per-scope effects,
 overview, recurring genes, the `scope` parameter on every route, the ordinary-p partial conjunction with a
 hand-computed r-value and the effect gate (including "two cohorts up, three down").
+
+## Donor variability (2026-10-09)
+
+How much replicates differ per gene and module, with the sampling noise of cells removed and the technical differences taken
+out in steps, is a separate analysis with its own tool, files and endpoints: see `doc/DESIGN_donor_variability.md`. It reuses
+this tool's strata, donor table, replicate unit, scopes, exclusions and cohort table, and writes next to the facet results.

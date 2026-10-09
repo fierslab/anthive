@@ -26,6 +26,7 @@ from collections import OrderedDict
 from urllib.parse import urlencode
 
 import config
+import donor_variability
 import facet_donor_values as donor_values
 import plotting
 import facet_results as fr
@@ -646,6 +647,9 @@ _SERVE_WANTED = {
     '_DONOR_PLOT_CACHE_ENTRIES', '_DONOR_SCALE_NOTE', '_donor_values', '_sidecar_exists', '_per_cell_link',
     '_donor_links', '_unit_location', '_gene_count_fetcher', '_donor_units_payload', 'get_facet_donor_values',
     '_donor_caption', 'get_facet_donor_plot', '_with_module_links', '_PLOT_MIME_TYPES',
+    # 2.45: donor variability
+    '_donor_variability_instance', '_DV_HELP_TOPICS', '_donor_variability', '_dv_call', 'get_dataset_donor_variability',
+    'get_gene_donor_variability', 'get_geneset_donor_variability', 'get_donor_variability_top',
 }
 
 
@@ -734,7 +738,7 @@ def build_serve(results: Path, geneset_registry: Any = None, stats_rows: Optiona
         'GeneStatsCache': _FakeStatsCache, 'geneset_registry': geneset_registry, 'threading': threading,
         'canonical_facet': canonical_facet, 'Response': Response, 'HTTPException': HTTPException, 'Query': Query,
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,
-        'donor_values_lib': donor_values, 'plotting': plotting, 'OrderedDict': OrderedDict, 'urlencode': urlencode,
+        'donor_values_lib': donor_values, 'donor_variability_lib': donor_variability, 'plotting': plotting, 'OrderedDict': OrderedDict, 'urlencode': urlencode,
         'duckdb': duckdb
     }
     namespace['_pooled_db'] = pooled_db if pooled_db is not None else _no_pooled_db

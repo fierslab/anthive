@@ -101,6 +101,55 @@ New endpoints:
   mean per group. Numeric facets: scatter with the straight line of the reported slope. The image is clean: panel titles are
   only the cohort and `n =`; the effect, interval and q of every cohort, the scale and the covariates of the model are in the
   `X-Plot-Caption` header and the image metadata, never drawn. 404 with the reasons when no unit has stored values.
+- `GET /databases/{db_id}/donor-variability` (`feature_type` gene | module, `cell_type`, `celltype_source`, `feature`, `method`,
+  `sort` excess | sd | reliability | feature, `rung`, `min_reliability`, `limit` up to 2000): donor (replicate) variability from
+  `ant-donor-variability`, per cell type stratum with at least 12 replicates of at least 40 cells; a replicate is the dataset's
+  `replicate_unit` (donor; animal for xenografts, where it is host-to-host variability). Without `feature_type` the summary
+  `{db_id, status (analysed | not_analysed | not_run), reason, facet_scope, replicate_unit, replicate_column, files: {genes,
+  modules}, run: {tool, timestamp_utc, seed, versions, md_sha256, anthive4_git, h5adstore_git, counts_layer, batch_column,
+  n_replicates_all, n_strata_analysed, runtime_seconds}, parameters (gates, rungs, normalisation), units: [{cell_type,
+  celltype_source, celltype_group, n_replicates, status, rung_deepest, rungs: [{name, terms, n, p, residual_df, computed,
+  reason}], terms, terms_omitted, technical_covariates, composition_pcs, n_factors, median_cells_per_replicate, n_genes_gate,
+  median_reliability, median_sd_donor, lmg_rung, n_genes, n_modules, counted_in_cross_cohort}], help_topics}`. With
+  `feature_type` and `cell_type` it adds `{unit, rung, n_matching, n_returned, rows}`. A gene row is `{gene, n_replicates,
+  reliability, reliability_ci, r_half, v_donor, v_donor_ci, sd_donor (log2 units), fold_range_donor (2 ** (2 sd)), var_half,
+  rungs: {raw | D0 | D1 | D2 | D3 | D4 | F: {n, p, terms, v, sd, fold_range, share_design, excess_z, p_excess} | null}, deepest_rung,
+  share_design, share_design_ci (deepest rung before factors), share_blocks: {technical, covariates, facets, latent}, lmg:
+  {technical, composition, sex, age, pmi, batch, disease, apoe4, braak} | null (only at n - p >= 30), lmg_rung,
+  r_composition_pc1, ave_expr, half_count_q70}`; `v` / `sd` of a rung are the variance and SD left unexplained after that rung's
+  design (the raw rung: all replicate differences), `share_design` the share of the replicate variance the design explains, `excess_z`
+  / `p_excess` a within-unit ranking of the unexplained variance against the mean-variance trend (a rank, not a test; null below 20
+  replicates and for genes with reliability under 0.3). A module row adds `module` (`Study/Experiment/name`), `method`
+  (`pseudobulk` primary, `cell_mean` secondary), `source` (`gene_list`, `geneset`, `ucell`), `n_genes_found`; modules have no
+  `excess_z`. Rungs: D0 technical block (cells, UMI per cell, genes per cell, mitochondrial fraction, ambient score, long gene
+  index, composition PCs), D1 + sex, age, PMI, batch, D2 + disease (host genotype for xenografts), D3 + APOE e4, D4 + Braak, F +
+  3 to 5 latent factors; a rung a cohort cannot support (n - p < 20, no new term) is `null`. Errors: 400 (bad `rung`, `sort`,
+  `feature_type`, `feature_type` without `cell_type`), 404 (unknown dataset or unit).
+- `GET /genes/{gene}/donor-variability` (`scope`, `cell_type`, `rung` default D1, `exclude_secondary`): one gene in every analysed
+  unit. `{feature, feature_type, scope, rung, rung_label, units: [{db_id, title, cohort, cohort_label, cell_type, celltype_source,
+  celltype_group, n_replicates, replicate_unit, rung_deepest, counted, not_counted_reason, values: <gene row above>}], by_group:
+  [{celltype_group, m (counted cohorts that reach the rung), k (cohorts in which the gene is in the top 5 percent of the excess
+  ranking), m_with_gene, p_rank_product, r_value, rung}], help_topics}`. A unit is `counted` when it is the anchor of a counted cohort for the cell type
+  group (one per cohort and group: most direct stratifier, then most replicates) with at least 30 replicates. `p_rank_product` is
+  Fisher's combination (a rank product) of the cohorts' `p_excess` over the cohorts that ranked the gene (at least 2), `r_value`
+  its Benjamini-Hochberg adjustment over the genes of the (scope, group, rung) family. A rank p value is uniform over genes and
+  cannot be below 1 / (number of genes), so the null is that a gene's ranks in different cohorts are independent: the pair
+  measures whether the excess reproduces. A partial conjunction as in the facet tests could never call a gene on rank p values.
+  Relative and exploratory, not a test. Scopes are never mixed (default `human_postmortem`).
+  404 when no analysed unit has the gene in the scope.
+- `GET /genesets/{study}/{experiment}/{name}/donor-variability` (`scope`, `cell_type`, `rung`, `method`, `source`,
+  `exclude_secondary`): the same card for a gene set (the `pseudobulk` variant unless `method` is given); `k`, `p_rank_product` and `r_value` are
+  null (no ranking test for modules).
+- `GET /donor-variability/top` (`cell_type` default microglia, `scope`, `feature_type` gene | module, `rung`, `limit`, `min_cohorts`
+  default 2, `exclude_secondary`): features that vary between replicates in several cohorts at one rung. `{scope, cell_type_group,
+  feature_type, rung, rung_label, cohorts: [{db_id, cohort, title, cell_type, celltype_source, n_replicates, replicate_unit,
+  rung_deepest}], m_cohorts, concordance: {mean_spearman, n_pairs, pairs: [{cohorts, n_genes, spearman}]} | null (mean
+  Spearman correlation of `excess_z` between the anchors over the genes both rank), min_replicates_per_cohort: 30, high_tail: 0.05,
+  not_enough_cohorts, rows, note, help_topics}`. Gene
+  row `{gene, m, k, p_rank_product, r_value, median_excess_z, median_reliability, median_sd, fold_range}` sorted by `r_value`, then
+  `median_excess_z`; module row `{module, method, source, m, k (cohorts with reliability >= 0.3), median_reliability, median_sd,
+  median_share_design, fold_range}` sorted by `median_sd`. Fewer cohorts than `min_cohorts` (counted, 30 or more replicates, rung
+  reached): `not_enough_cohorts` true and no rows.
 
 Changed (additive):
 
@@ -141,6 +190,8 @@ Changed (additive):
   row and anchor.
 - MCP: new tool `facet_donor_values` (one number per donor per counted cohort, the model line and the plot link).
 - Help: new topic `donor-plots` (child of `facet-effects`).
+- MCP: new tool `donor_variability` (one gene or gene set across cohorts, or the cross-cohort top list; exploratory).
+- Help: new topic `donor-variability` (its own section of the help page).
 - MCP: `facet_effects` prints the call, the forest with intervals, inflation, modality and the low-detection warning;
   `facet_top_genes` takes `offset`, `effect_gate`, `strict` and has no row cap; new tools `module_facet_effects` (one
   gene set across facets, with member-gene counts) and `facet_top_modules`.

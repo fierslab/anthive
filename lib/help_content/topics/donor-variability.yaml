@@ -1,0 +1,40 @@
+id: donor-variability
+title: Donor variability
+summary: How much donors (host animals in xenograft studies) differ from each other in one cell type, per gene and gene set, with the noise of counting cells removed and the technical differences between samples taken out step by step.
+related:
+- facet-replicate-unit
+- donor-plots
+- per-cell-per-donor
+aliases:
+- donor variability
+- donor variance
+- between donor variability
+- reliability
+- unexplained variance
+- excess
+- animal variability
+- host animal variability
+body_html: |
+  <p>Some genes differ a lot from one person to the next while others hardly move. Donor variability measures this for every well expressed gene and every gene set, separately per cell type and per cohort. It is exploratory. It tells you where to look, and it does not prove a cause.</p>
+  <ul>
+    <li><strong>One replicate is one donor.</strong> In post-mortem cohorts the replicate is the donor. In xenograft studies it is the host animal, so the numbers describe differences between mice, and grafts of one iPSC line carry no genetic donor variance. Human and xenograft results are never mixed.</li>
+    <li><strong>The noise of counting cells is taken out.</strong> The cells of each donor in a cell type are dealt at random into two halves. A gene that is really different between donors is high in both halves of a donor, while counting noise is not. The agreement between the halves across donors is the donor variance, and the share of what a donor looks like that is stable between halves is the <em>reliability</em>. Genes with fewer than about 10 counts per half are not reported, because their counts are too sparse to say anything.</li>
+    <li><strong>The donor SD is on a log2 scale.</strong> An SD of 0.5 means that donors typically differ by a factor of 2^(2 x 0.5) = 2 between a donor 1 SD above and one 1 SD below the average (the <em>fold range</em>). Intervals come from resampling donors.</li>
+  </ul>
+  <h3>What is left after what we know</h3>
+  <p>Everything that is constant within a donor is part of the donor variance, including how the sample was prepared. The tables therefore also show the variance that is left <em>unexplained</em> after known differences are removed, in steps (rungs). Each rung adds to the previous one and is only computed when enough donors remain (at least 20 more donors than model terms).</p>
+  <ul>
+    <li><strong>raw</strong> removes nothing.</li>
+    <li><strong>D0 technical block</strong> removes differences in the number of cells, UMI counts and genes detected per cell, mitochondrial reads, ambient RNA from other cell types (neuronal, oligodendrocyte or astrocyte marker genes seen in the cell type), an index of long gene capture that follows RNA quality, and the mix of cell states inside the cell type.</li>
+    <li><strong>D1</strong> adds sex, age, post-mortem interval and batch where known. <strong>D2</strong> adds disease, <strong>D3</strong> APOE e4 carrier status and <strong>D4</strong> Braak stage. A rung is skipped when a cohort has no such information.</li>
+    <li><strong>F</strong> adds 3 to 5 hidden factors that capture whatever else varies together across many genes (for cohorts of 30 or more donors). A gene whose variance stays after F is not riding a shared technical axis.</li>
+  </ul>
+  <p>Compare cohorts at the same rung. The share of donor variance that the model at a rung explains is shown with a confidence interval. With at least 30 more donors than terms the share is split over the terms (technical block, sex, age, PMI, batch, disease, APOE, Braak), and with fewer donors only the total is given, because splitting a share among many correlated terms with few donors would be noise. Shares depend on how different the groups are in that cohort (a 10 versus 10 sex split explains more than a 28 versus 2 split for the same effect), so use the effect size of the facet tests for how big an effect is.</p>
+  <h3>Reading the lists</h3>
+  <ul>
+    <li><strong>Excess</strong> compares the unexplained variance of a gene with other genes of similar expression level in the same cohort. It is a ranking inside one cohort and not a test, because almost every expressed gene varies between donors.</li>
+    <li>The cross-cohort list asks in how many cohorts a gene is in the top 5 percent of that ranking, and combines the ranks of the cohorts into a rank product (Fisher's method on the rank p values), so a gene needs to stand out consistently in at least two cohorts. This asks whether the excess reproduces between cohorts, not whether one cohort alone shows an effect, because a rank by itself is never evidence about a single cohort. A summary correlation of the excess between cohorts is shown with the list. Only cohorts with at least 30 replicates take part, and only at the rung you ask for. Overlapping cohorts are not independent, which makes the rank product too optimistic. Read the list as candidates.</li>
+    <li>Genes that stay variable after the technical and covariate rungs in several cohorts are candidates for genetic or donor-specific variation. Typical examples are deletions (GSTM1, GSTT1), the HLA region (HLA-DRB5 and others, where reads from other haplotypes also map poorly to the reference), the 17q21.31 inversion region (LRRC37A family, ARL17A, KANSL1) and common regulatory variants (ERAP2). Sex genes (XIST, RPS4Y1, UTY, DDX3Y) are explained by sex at D1 and serve as a positive control. Without genotypes the analysis cannot say which it is.</li>
+    <li>Gene sets are scored in two ways. The primary score is the mean expression of the set minus matched control genes in the donor's summed counts. The secondary score is the mean of the per-cell scores. For state sets, such as disease associated microglia, much of the donor variability is simply the fraction of cells in that state, which is a real donor trait. A set has no excess ranking and no cross-cohort test, only its donor SD, reliability and design shares.</li>
+  </ul>
+  <p>Donors with fewer than 40 cells in a cell type are left out (20 per half), and a cohort needs at least 12 replicates, and 20 for the ranking. Counts are the same as in the facet tests, so the replicate level values can be seen in a <a href="#donor-plots">donor plot</a>.</p>

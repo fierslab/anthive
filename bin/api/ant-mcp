@@ -535,6 +535,8 @@ def main() -> None:
             '  facet_units      which units were tested, donors, model, flags; why others were not\n'
             '  facet_donor_values  the donor-level values behind one result cell (one value per donor, per cohort) + plot link\n'
             '  get_facet_tests  gene or module rows of one dataset (limma-voom / OLS + permutations)\n'
+            '  donor_variability  how much replicates (donors; animals in xenografts) differ for one gene or gene set, or the genes\n'
+            '                   that vary most between replicates in several cohorts (exploratory; explain("donor-variability") first)\n'
             '  All of them take scope= (human_postmortem | xenograft_human_in_mouse): facets are\n'
             '  tested and counted per scope, human and mouse genes are never merged.\n'
             '  Prefer these over per-cell plots for donor-level facets, and state the model when reporting.\n'
@@ -1803,6 +1805,85 @@ def main() -> None:
             for donor in unit['donors']:
                 shown = donor.get('group') if unit['facet_kind'] == 'two_group' else _fmt_number(donor['facet_value'])
                 lines.append(f"  {donor['label']} | {shown} | {_fmt_number(donor['value'])} | {donor['n_cells']}")
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def donor_variability(gene: Optional[str] = None, geneset: Optional[str] = None,
+                                cell_type: str = 'microglia', scope: Optional[str] = None, rung: str = 'D1',
+                                feature_type: str = 'gene', n: int = 30, min_cohorts: int = 2,
+                                exclude_secondary: bool = True) -> str:
+        """How much donors (animals in xenograft studies) differ from each other in one cell type, per gene or gene set.
+
+        EXPLORATORY. Call explain('donor-variability') before interpreting. Replicate differences are measured on
+        halves of each replicate's cells, so cell sampling noise is removed; but technical differences between
+        replicates (depth, ambient RNA, RNA quality) are part of them until a rung from D0 on removes them. Rungs:
+        raw (nothing removed), D0 technical block, D1 + sex, age, PMI, batch, D2 + disease, D3 + APOE e4, D4 + Braak,
+        F + latent factors. A gene that stays variable at D1 or deeper in several cohorts is a candidate for
+        genetic or donor-specific state (a deletion, an HLA or 17q21.31 haplotype, an eQTL), not proof of one.
+        Rankings compare genes inside a cohort; they are not hypothesis tests.
+
+        Give gene or geneset for one feature in every analysed unit; give neither for the cross-cohort top list.
+
+        Args:
+            gene: Gene symbol, e.g. 'GSTM1'.
+            geneset: Gene set id 'Study/Experiment/name' (as in module_facet_effects).
+            cell_type: Cell type group such as 'microglia' (restricts one feature; selects the group of the top list).
+            scope: human_postmortem (default) or xenograft_human_in_mouse (variability between host animals).
+            rung: raw, D0, D1 (default), D2, D3, D4 or F.
+            feature_type: gene or module, for the top list.
+            n: Rows of the top list.
+            min_cohorts: Top list: results needed in at least this many cohorts (default 2).
+            exclude_secondary: Do not count reanalyses (default true).
+        """
+        params = {'scope': scope, 'rung': rung, 'exclude_secondary': str(bool(exclude_secondary)).lower()}
+        try:
+            if gene:
+                data = await _get(f'/genes/{gene}/donor-variability', cell_type=cell_type, **params)
+            elif geneset:
+                data = await _get(f'/genesets/{geneset}/donor-variability', cell_type=cell_type, **params)
+            else:
+                data = await _get('/donor-variability/top', cell_type=cell_type, feature_type=feature_type,
+                                  limit=max(1, int(n)), min_cohorts=max(1, int(min_cohorts)), **params)
+        except httpx.HTTPStatusError as exc:
+            return f'error {exc.response.status_code}: {exc.response.text[:300]}'
+        if 'rows' in data:
+            lines = [f"EXPLORATORY. {data['feature_type']}s varying between replicates, {data['cell_type_group']} [{data['scope']}], "
+                     f"rung {data['rung']}: {data['rung_label']}. {data['m_cohorts']} counted cohorts "
+                     f"(at least {data['min_replicates_per_cohort']} replicates).", data['note']]
+            if data['not_enough_cohorts']:
+                lines.append('Fewer cohorts than min_cohorts reach this rung: no list.')
+            concordance = data.get('concordance') or {}
+            if concordance.get('mean_spearman') is not None:
+                lines.append(f"Reproducibility: mean Spearman correlation of the excess between cohorts {_fmt_number(concordance['mean_spearman'], 2)} "
+                             f"({concordance['n_pairs']} cohort pairs); 0 means no reproducibility.")
+            for cohort in data['cohorts']:
+                lines.append(f"  cohort {cohort['cohort']} | {cohort['db_id']} | {cohort['cell_type']} | "
+                             f"{cohort['n_replicates']} {cohort['replicate_unit']}s | deepest rung {cohort['rung_deepest']}")
+            for row in data['rows']:
+                if data['feature_type'] == 'gene':
+                    lines.append(f"{row['gene']} | in top 5% in {row['k']}/{row['m']} cohorts | r {_fmt_number(row.get('r_value'))} | "
+                                 f"median excess z {_fmt_number(row.get('median_excess_z'), 2)} | SD {_fmt_number(row.get('median_sd'))} log2 "
+                                 f"(x{_fmt_number(row.get('fold_range'), 2)} at 2 SD) | reliability {_fmt_number(row.get('median_reliability'), 2)}")
+                else:
+                    lines.append(f"{row['module']} | {row['method']}/{row['source']} | reliable in {row['k']}/{row['m']} cohorts | "
+                                 f"SD {_fmt_number(row.get('median_sd'))} | reliability {_fmt_number(row.get('median_reliability'), 2)} | "
+                                 f"share explained by design {_fmt_number(row.get('median_share_design'), 2)}")
+            return '\n'.join(lines)
+        lines = [f"EXPLORATORY. {data['feature']} [{data['scope']}], rung {data['rung']}: {data['rung_label']}."]
+        for entry in data['by_group']:
+            line = f"group {entry['celltype_group']}: {entry['m']} counted cohorts at this rung"
+            if entry.get('r_value') is not None:
+                line += f"; in top 5% in {entry['k']}/{entry['m_with_gene']}; r {_fmt_number(entry['r_value'])} (relative, exploratory)"
+            lines.append(line)
+        for unit in data['units']:
+            values = unit['values']
+            rung_values = (values['rungs'].get(data['rung']) or {})
+            lines.append(
+                f"{unit['cohort_label'] or 'unassigned'} | {unit['db_id']} | {unit['cell_type']} | {unit['n_replicates']} {unit['replicate_unit']}s"
+                f"{'' if unit['counted'] else ' | not counted: ' + str(unit['not_counted_reason'])}"
+                f" | reliability {_fmt_number(values.get('reliability'), 2)} | donor SD {_fmt_number(values.get('sd_donor'))} log2 "
+                f"(x{_fmt_number(values.get('fold_range_donor'), 2)} at 2 SD) | at {data['rung']}: SD {_fmt_number(rung_values.get('sd'))}, "
+                f"design explains {_fmt_number(rung_values.get('share_design'), 2)}, excess z {_fmt_number(rung_values.get('excess_z'), 2)}")
         return '\n'.join(lines)
 
     def _donor_phrase(donors: Optional[dict]) -> str:

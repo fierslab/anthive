@@ -1,0 +1,719 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = [
+#   "duckdb>=1.0.0",
+#   "pandas>=2.0.0",
+#   "numpy>=1.24.0",
+#   "scipy>=1.10.0",
+#   "pyarrow>=14.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-donor-variability: how much do donors (animals in xenografts) differ, per gene and per module (v1, exploratory).
+
+What it does
+------------
+For every dataset of the facet layer (primary, human post-mortem or xenograft scope, raw counts served, not excluded
+by ``facet_exclude``) and every cell type stratum with at least 12 replicates of at least 40 cells, estimates the
+between-replicate variance of every well expressed gene and of every module with the split-half covariance estimator
+of ``lib/donor_variance.py`` (read its docstring and ``doc/DESIGN_donor_variability.md`` for the method):
+
+  * cells of a replicate are dealt into four random quarters (hash of the cell id and ``--seed``), counts summed per
+    quarter, three balanced pairings of quarters form the halves, TMM from the full replicate;
+  * ``V_donor``, reliability, donor SD (log2) with bootstrap intervals over replicates;
+  * the unexplained variance after nested designs D0 technical block (cells, UMI per cell, genes per cell,
+    mitochondrial fraction, ambient score of foreign lineage markers, long gene index, composition PCs), D1 + sex, age, PMI,
+    batch, D2 + disease (host genotype for xenografts), D3 + APOE e4, D4 + Braak, F + 3 to 5 latent factors;
+  * per-term Shapley (LMG) shares at ``n - p >= 30``; ``excess_z`` (within-unit ranking) at 20 replicates.
+
+Modules: primary variant ``pseudobulk`` (mean log2 CPM of the module genes minus an expression matched control set, from
+the same halves and normalisation), secondary ``cell_mean`` (mean of the per-cell scores of ``<stem>.scores.parquet``,
+sources geneset and ucell). A module is analysed only in strata of its cell type scope (``lib/celltype_scope.py``).
+
+Replicates are what the dataset's ``replicate_unit`` says: donors for post-mortem tissue, animals for xenografts (there
+"donor variability" is between-animal host variability; grafts of one iPSC line have no genetic donor variance). Scopes are
+never mixed. Datasets with ``facet_exclude`` are skipped; the ``facet_donor_exclusions`` rule of the ``.md`` is applied.
+
+Inputs: the h5adstore (read only: .md, .h5ad.mus, .duckdb, counts and scores sidecars) and the genesetstore.
+Outputs, only under ``<h5adstore>/_facet_tests/<group>/``:
+  <stem>.donor_variability.parquet          genes, one row per (stratum, gene)
+  <stem>.donor_variability_modules.parquet  modules, one row per (stratum, method, source, catalog, module)
+  <stem>.donor_variability_manifest.json    seed, gates, rungs and technical covariates per unit, versions, md_sha256
+
+Usage::
+
+  ant-donor-variability run --db-id G24/MMG [--min-cells 40] [--seed N] [--no-modules]
+  ant-donor-variability run --all [--max-load 12]
+
+Run big jobs under ``nice -n 19 ionice -c3 taskset -c ...``.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import importlib.machinery
+import importlib.util
+import json
+import os
+import platform
+import shutil
+import sys
+import tempfile
+import time
+import zlib
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import duckdb
+import numpy as np
+import pandas as pd
+import scipy
+
+script_dir = Path(__file__).parent.resolve()
+lib_dir = script_dir.parent.parent / 'lib'
+sys.path.insert(0, str(lib_dir))
+
+
+def _load_script(module_name: str, file_name: str):
+    """Import a sibling hyphenated script (not a package)."""
+    loader = importlib.machinery.SourceFileLoader(module_name, str(script_dir / file_name))
+    spec = importlib.util.spec_from_loader(module_name, loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    loader.exec_module(module)
+    return module
+
+
+aftm = _load_script('ant_facet_test_modules', 'ant-facet-test-modules')
+aft = aftm.aft
+import donor_variance as dv  # type: ignore  # noqa: E402
+import gene_classes  # type: ignore  # noqa: E402
+from celltype_groups import group_of  # type: ignore  # noqa: E402
+from geneset import GenesetRegistry  # type: ignore  # noqa: E402
+from scores_parquet import scores_path  # type: ignore  # noqa: E402
+
+TOOL_VERSION = 'ant-donor-variability/1.0'
+SEED = 20261009
+RESULT_SUFFIXES = ('.donor_variability.parquet', '.donor_variability_modules.parquet',
+                   '.donor_variability_manifest.json')
+MODULE_SOURCES = aftm.DEFAULT_SOURCES
+N_BINS = aftm.N_BINS
+CTRL_SIZE = aftm.CTRL_SIZE
+MIN_MODULE_GENES = aftm.MIN_MODULE_GENES
+LONG_GENE_N = 500
+MAX_CLUSTERS = 200
+FLOAT_COLUMNS_DTYPE = np.float32
+ROW_GROUP_SIZE = 20000
+
+
+# --------------------------------------------------------------------------
+# Pure helpers (unit tested)
+# --------------------------------------------------------------------------
+
+def result_stem(stem: str, min_cells: int) -> str:
+    """Stem of the output files: the sensitivity runs (``--min-cells`` other than 40) carry a ``.minN`` marker."""
+    return stem if min_cells == dv.MIN_CELLS_PER_REPLICATE else f'{stem}.min{min_cells}'
+
+
+def unit_seed(*parts: Any, base: int = SEED) -> int:
+    """Deterministic bootstrap seed of one unit from the run seed and a textual key."""
+    return (base * 1_000_003 + zlib.crc32('|'.join(str(p) for p in parts).encode())) % (2 ** 63)
+
+
+def long_gene_index(mean_expr: np.ndarray, spans: np.ndarray, n_each: int = LONG_GENE_N) -> Optional[np.ndarray]:
+    """Mean log2 CPM of the ``n_each`` longest minus the ``n_each`` shortest genes, per replicate.
+
+    Args:
+        mean_expr: (replicates, genes) log2 CPM.
+        spans: (genes,) genomic span in bp, NaN where unannotated.
+
+    Returns:
+        (replicates,) index (an RNA integrity proxy: nuclear long gene capture falls with degradation), or None when
+        fewer than ``2 * n_each`` genes are annotated.
+    """
+    annotated = np.flatnonzero(np.isfinite(spans))
+    if len(annotated) < 2 * n_each:
+        return None
+    order = annotated[np.argsort(spans[annotated])]
+    return mean_expr[:, order[-n_each:]].mean(axis=1) - mean_expr[:, order[:n_each]].mean(axis=1)
+
+
+def ambient_score(group_counts: np.ndarray, library: np.ndarray) -> np.ndarray:
+    """Mean log2(CPM + 1) of the ambient marker genes per replicate (NaN when no panel gene exists).
+
+    Args:
+        group_counts: (replicates, panel genes) counts.
+        library: (replicates,) total counts.
+    """
+    if group_counts.shape[1] == 0:
+        return np.full(group_counts.shape[0], np.nan)
+    return np.log2(group_counts / library[:, None] * 1e6 + 1.0).mean(axis=1)
+
+
+def composition_matrix(cells: pd.DataFrame, donors: List[str], column: str) -> Optional[pd.DataFrame]:
+    """Replicate x author cluster proportions of the cells of one stratum (None without 2 to 200 clusters)."""
+    frame = cells[cells['donor'].isin(set(donors)) & cells[column].notna()]
+    if frame.empty or not 2 <= frame[column].nunique() <= MAX_CLUSTERS:
+        return None
+    table = pd.crosstab(frame['donor'], frame[column]).reindex(donors).fillna(0.0)
+    return table.div(table.sum(axis=1).replace(0, np.nan), axis=0).fillna(0.0)
+
+
+def float32_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Float columns as float32 (the parquet files are large; the estimates carry about 6 digits of information)."""
+    out = frame.copy()
+    for column in out.columns:
+        if out[column].dtype == np.float64:
+            out[column] = out[column].astype(FLOAT_COLUMNS_DTYPE)
+    return out
+
+
+def package_versions() -> Dict[str, str]:
+    """Versions recorded in the manifest."""
+    return {'python': platform.python_version(), 'numpy': np.__version__, 'scipy': scipy.__version__,
+            'pandas': pd.__version__, 'duckdb': duckdb.__version__}
+
+
+# --------------------------------------------------------------------------
+# Data access
+# --------------------------------------------------------------------------
+
+def pseudobulk_quarters(conn: duckdb.DuckDBPyConnection, counts_parquet: Path, group_map: pd.DataFrame) -> None:
+    """Create the TEMP table ``pb(group_id, gene_id, s, nnz)``: summed counts and detected cells per (group, gene)."""
+    conn.register('group_map_df', group_map[['cell_id', 'group_id']])
+    conn.execute('CREATE OR REPLACE TEMP TABLE group_map AS SELECT * FROM group_map_df')
+    conn.unregister('group_map_df')
+    quoted = str(counts_parquet).replace("'", "''")
+    conn.execute('DROP TABLE IF EXISTS pb')
+    conn.execute(f"CREATE TEMP TABLE pb AS SELECT m.group_id, p.gene_id, SUM(p.value) AS s, COUNT(*) AS nnz "
+                 f"FROM read_parquet('{quoted}') p JOIN group_map m ON p.cell_id = m.cell_id "
+                 f"GROUP BY m.group_id, p.gene_id")
+
+
+def quarter_arrays(conn: duckdb.DuckDBPyConnection, n_replicates: int, min_total_per_replicate: float
+                   ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Read ``pb`` into arrays.
+
+    Returns:
+        ``(quarter_lib (n, 4), quarter_nnz (n, 4), candidate gene ids, quarter_counts (n, 4, candidates))`` where a
+        candidate gene has at least ``min_total_per_replicate`` counts per replicate on average.
+    """
+    totals = conn.execute('SELECT group_id, SUM(s) AS total, SUM(nnz) AS nnz FROM pb GROUP BY group_id').fetchnumpy()
+    quarter_lib = np.zeros(n_replicates * dv.N_QUARTERS)
+    quarter_nnz = np.zeros(n_replicates * dv.N_QUARTERS)
+    group = np.asarray(totals['group_id'])
+    quarter_lib[group] = np.asarray(totals['total'])
+    quarter_nnz[group] = np.asarray(totals['nnz'])
+    threshold = float(min_total_per_replicate) * n_replicates
+    candidates = np.asarray(conn.execute(
+        'SELECT gene_id FROM pb GROUP BY gene_id HAVING SUM(s) >= ? ORDER BY gene_id', [threshold]).fetchnumpy()['gene_id'])
+    position = pd.Series(np.arange(len(candidates)), index=candidates)
+    quarter_counts = np.zeros((n_replicates * dv.N_QUARTERS, len(candidates)), dtype=np.float32)
+    cursor = conn.execute('SELECT group_id, gene_id, s FROM pb WHERE gene_id IN '
+                          '(SELECT gene_id FROM pb GROUP BY gene_id HAVING SUM(s) >= ?)', [threshold])
+    while True:
+        chunk = cursor.fetch_df_chunk(vectors_per_chunk=250)
+        if len(chunk) == 0:
+            break
+        quarter_counts[chunk['group_id'].to_numpy(), position.reindex(chunk['gene_id']).to_numpy()] = \
+            chunk['s'].to_numpy(dtype=np.float32)
+    return (quarter_lib.reshape(n_replicates, dv.N_QUARTERS), quarter_nnz.reshape(n_replicates, dv.N_QUARTERS),
+            candidates, quarter_counts.reshape(n_replicates, dv.N_QUARTERS, len(candidates)))
+
+
+def panel_counts(conn: duckdb.DuckDBPyConnection, gene_ids: List[int], n_replicates: int) -> np.ndarray:
+    """Counts of the given genes per replicate (quarters summed): (replicates, genes)."""
+    out = np.zeros((n_replicates, len(gene_ids)))
+    if not gene_ids:
+        return out
+    frame = conn.execute(f'SELECT group_id // {dv.N_QUARTERS} AS replicate, gene_id, SUM(s) AS s FROM pb '
+                         f'WHERE gene_id IN ({",".join(str(int(g)) for g in gene_ids)}) GROUP BY 1, 2').df()
+    column = pd.Series(np.arange(len(gene_ids)), index=gene_ids)
+    out[frame['replicate'].to_numpy(), column.reindex(frame['gene_id']).to_numpy()] = frame['s'].to_numpy()
+    return out
+
+
+def cell_mean_quarters(conn: duckdb.DuckDBPyConnection, sidecar: Path, sources: Tuple[str, ...], n_replicates: int
+                       ) -> Tuple[List[Tuple[str, str, str]], np.ndarray, np.ndarray]:
+    """Sum and count of the per-cell module scores per (replicate, quarter) for the cells of ``group_map``.
+
+    Returns:
+        ``(keys, sums (n, 4, modules), counts (n, 4, modules))`` with keys ``(source, catalog, module)``.
+    """
+    quoted = str(sidecar).replace("'", "''")
+    source_list = ','.join("'" + s.replace("'", "''") + "'" for s in sources)
+    frame = conn.execute(
+        f"SELECT m.group_id, s.source, s.catalog, s.module, SUM(s.score) AS total, COUNT(s.score) AS n "
+        f"FROM read_parquet('{quoted}') s JOIN group_map m ON s.cell_id = m.cell_id WHERE s.source IN ({source_list}) "
+        f"GROUP BY m.group_id, s.source, s.catalog, s.module").df()
+    keys = sorted(set(zip(frame['source'], frame['catalog'], frame['module'])))
+    index = {key: i for i, key in enumerate(keys)}
+    sums = np.zeros((n_replicates * dv.N_QUARTERS, len(keys)))
+    counts = np.zeros_like(sums)
+    columns = np.array([index[key] for key in zip(frame['source'], frame['catalog'], frame['module'])], dtype=int)
+    sums[frame['group_id'].to_numpy(), columns] = frame['total'].to_numpy()
+    counts[frame['group_id'].to_numpy(), columns] = frame['n'].to_numpy()
+    return (keys, sums.reshape(n_replicates, dv.N_QUARTERS, len(keys)),
+            counts.reshape(n_replicates, dv.N_QUARTERS, len(keys)))
+
+
+def gene_spans(symbols: pd.Series) -> np.ndarray:
+    """Genomic span (bp) of each symbol from the GENCODE GTF of ``lib/gene_classes.py`` (NaN when unannotated or no GTF)."""
+    path = gene_classes.gtf_path()
+    if path is None:
+        return np.full(len(symbols), np.nan)
+    try:
+        annotation = gene_classes._load(path)  # noqa: SLF001
+    except OSError:
+        return np.full(len(symbols), np.nan)
+    return np.array([annotation.get(str(symbol).upper(), (None, np.nan))[1] for symbol in symbols], dtype=float)
+
+
+# --------------------------------------------------------------------------
+# One stratum
+# --------------------------------------------------------------------------
+
+def unit_columns(frame: pd.DataFrame, keys: Dict[str, Any]) -> pd.DataFrame:
+    """Prepend the unit key columns to a result frame."""
+    out = frame.copy()
+    for position, (name, value) in enumerate(keys.items()):
+        out.insert(position, name, value)
+    return out
+
+
+def analyse_stratum(conn: duckdb.DuckDBPyConnection, *, entry: Any, stratum: str, label: str, source: str,
+                    stratum_cells: pd.DataFrame, donors: List[str], donor_table: pd.DataFrame, counts_parquet: Path,
+                    symbols: pd.DataFrame, facet_scope: str, replicate_unit: str, cluster_column: Optional[str],
+                    all_cells: pd.DataFrame, registry: Optional[GenesetRegistry], sidecar: Optional[Path],
+                    n_boot: int, seed: int, min_cells: int, span_of_gene: pd.Series
+                    ) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Dict[str, Any]]:
+    """Genes and modules of one stratum.
+
+    Returns:
+        ``(gene rows, module rows, unit record)``; the frames are None when the unit could not be analysed (the
+        record says why).
+    """
+    started = time.time()
+    n_replicates = len(donors)
+    record: Dict[str, Any] = {'cell_type': label, 'celltype_source': source, 'stratum': stratum,
+                              'celltype_group': group_of(label), 'n_replicates': n_replicates}
+    replicate_of = pd.Series(np.arange(n_replicates), index=donors)
+    cells = stratum_cells[stratum_cells['donor'].isin(set(donors))]
+    replicate_index = replicate_of.reindex(cells['donor']).to_numpy()
+    quarters = dv.assign_quarters(replicate_index, cells['cell_id'].to_numpy(), seed)
+    group_map = pd.DataFrame({'cell_id': cells['cell_id'].to_numpy(),
+                              'group_id': (replicate_index * dv.N_QUARTERS + quarters).astype(np.int64)})
+    n_cells = np.bincount(replicate_index, minlength=n_replicates).astype(float)
+    pseudobulk_quarters(conn, counts_parquet, group_map)
+    quarter_lib, quarter_nnz, candidates, quarter_counts = quarter_arrays(conn, n_replicates, 1.0)
+    full_lib = quarter_lib.sum(axis=1)
+    if (full_lib <= 0).any() or len(candidates) < 200:
+        record.update(status='skipped', reason='no counts for some replicates or fewer than 200 candidate genes')
+        return None, None, record
+    half_q70, expressed, gate = dv.gene_masks(quarter_counts.sum(axis=1))
+    if gate.sum() < 200:
+        record.update(status='skipped', reason=f'only {int(gate.sum())} genes pass the expected count gate')
+        return None, None, record
+    gene_ids = candidates[expressed]
+    counts_expressed = quarter_counts[:, :, expressed]
+    gate_in_expressed = gate[expressed]
+    halves = dv.normalised_halves(counts_expressed, quarter_lib, gate_in_expressed)
+    symbol_table = symbols.set_index('gene_id').reindex(gene_ids)
+    gene_symbols = symbol_table['symbol'].astype(str).to_numpy()
+
+    # ---- technical block
+    mito_ids = symbols.loc[symbols['symbol'].astype(str).str.upper().str.startswith('MT-'), 'gene_id'].tolist()
+    mito = panel_counts(conn, mito_ids, n_replicates).sum(axis=1) / full_lib
+    upper_symbols = symbols['symbol'].astype(str).str.upper()
+    ambient = {}
+    for lineage, panel_symbols in dv.foreign_panels(group_of(label)).items():
+        panel_ids = symbols.loc[upper_symbols.isin(panel_symbols), 'gene_id'].tolist()
+        ambient[lineage] = ambient_score(panel_counts(conn, panel_ids, n_replicates), full_lib)
+    spans_here = np.where(gate_in_expressed, span_of_gene.reindex(gene_ids).to_numpy(), np.nan)
+    long_index = long_gene_index(halves.full, spans_here)
+    composition = None
+    if cluster_column and cluster_column in all_cells and cluster_column != source:
+        proportions = composition_matrix(stratum_cells, donors, cluster_column)
+        composition = dv.composition_pcs(proportions) if proportions is not None else None
+    terms = dv.technical_terms(n_cells, full_lib, quarter_nnz.sum(axis=1), mito, ambient, long_index, composition)
+    donor_rows = donor_table.set_index('donor').reindex(donors).reset_index()
+    covariates, omitted = dv.covariate_terms(donor_rows, facet_scope == aft.facet_scopes.SCOPE_XENOGRAFT)
+    terms = terms + covariates
+    technical_used = next((term.names for term in terms if term.name == 'technical'), [])
+    record.update(terms=[term.name for term in terms], terms_omitted=omitted,
+                  technical_covariates=technical_used, composition_pcs=0 if composition is None else composition.shape[1],
+                  n_cells=int(n_cells.sum()), median_cells_per_replicate=float(np.median(n_cells)),
+                  n_genes_expressed=int(expressed.sum()), n_genes_gate=int(gate.sum()),
+                  tmm_factor_range=[float(halves.norm_factors.min()), float(halves.norm_factors.max())])
+
+    # ---- genes
+    gate_columns = np.flatnonzero(gate_in_expressed)
+    gene_pairings = [(first[:, gate_columns], second[:, gate_columns]) for first, second in halves.pairings]
+    full_gate = halves.full[:, gate_columns]
+    mean_expr = full_gate.mean(axis=0)
+    result = dv.estimate_variability(gene_pairings, terms, mean_expr=mean_expr, full=full_gate, n_boot=n_boot,
+                                     seed=seed)
+    table = result.table
+    table.insert(0, 'ave_expr', mean_expr)
+    table.insert(1, 'half_count_q70', half_q70[expressed][gate_columns])
+    composition_term = next((term for term in terms if term.name == 'composition'), None)
+    if composition_term is not None and n_replicates >= dv.RANK_MIN_REPLICATES:
+        pc1 = composition_term.matrix()[:, 0]
+        centred = full_gate - full_gate.mean(axis=0)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            table['r_composition_pc1'] = (centred * (pc1 - pc1.mean())[:, None]).sum(axis=0) / (
+                np.sqrt((centred ** 2).sum(axis=0)) * np.sqrt(((pc1 - pc1.mean()) ** 2).sum()))
+    table.insert(0, 'gene', gene_symbols[gate_columns])
+    keys = {'db_id': entry.db_id, 'dataset': entry.stem, 'cell_type': label, 'celltype_source': source,
+            'celltype_group': group_of(label), 'facet_scope': facet_scope, 'replicate_unit': replicate_unit,
+            'n_replicates': n_replicates, 'rung_deepest': result.deepest or ''}
+    gene_rows = unit_columns(table, keys)
+    record.update(status='ok', rung_deepest=result.deepest, n_boot=result.n_boot,
+                  rungs=[info.__dict__ for info in result.rungs],
+                  lmg_rung=table.attrs.get('lmg_rung'),
+                  n_factors=0 if result.factors is None else int(result.factors.shape[1]),
+                  median_v_donor=float(np.nanmedian(table['v_donor'])),
+                  median_reliability=float(np.nanmedian(table['reliability'])))
+
+    # ---- modules
+    module_rows = None
+    if registry is not None and sidecar is not None and n_replicates >= dv.MIN_REPLICATES:
+        module_rows, module_record = analyse_modules(
+            conn, registry=registry, sidecar=sidecar, label=label, stratum=stratum, halves=halves, terms=terms,
+            gene_ids=gene_ids, symbols=symbols, factors=result.factors, n_replicates=n_replicates, n_boot=n_boot,
+            seed=seed, keys=keys)
+        record['modules'] = module_record
+    record['runtime_seconds'] = round(time.time() - started, 1)
+    return gene_rows, module_rows, record
+
+
+def analyse_modules(conn: duckdb.DuckDBPyConnection, *, registry: GenesetRegistry, sidecar: Path, label: str,
+                    stratum: str, halves: 'dv.Halves', terms: List['dv.Term'], gene_ids: np.ndarray,
+                    symbols: pd.DataFrame, factors: Optional[np.ndarray], n_replicates: int, n_boot: int, seed: int,
+                    keys: Dict[str, Any]) -> Tuple[Optional[pd.DataFrame], Dict[str, Any]]:
+    """Module variability of one stratum: variant B (pseudobulk, primary) and variant A (cell mean, secondary)."""
+    record: Dict[str, Any] = {}
+    frames: List[pd.DataFrame] = []
+    modules = aftm.sidecar_modules(sidecar, MODULE_SOURCES)
+    if modules.empty:
+        record['reason'] = 'no scored modules'
+        return None, record
+    expressed_symbols = symbols.set_index('gene_id').reindex(gene_ids).reset_index()
+    module_genes, gene_counts = aftm.load_module_genes(registry, modules, expressed_symbols)
+    in_scope = {key: genes for key, genes in module_genes.items()
+                if aftm.module_in_stratum(registry, key[1], key[2], label)}
+    gene_average = halves.full.mean(axis=0)
+    n_genes = len(gene_ids)
+    if in_scope:
+        selected, controls = [], []
+        for key, genes in in_scope.items():
+            rng = np.random.default_rng(aftm.unit_seed(stratum, *key))
+            control = aftm.control_gene_indices(gene_average, genes, N_BINS, CTRL_SIZE, rng)
+            if len(control):
+                selected.append(key)
+                controls.append(control)
+        weights = dv.module_weights([in_scope[key] for key in selected], controls, n_genes)
+        pairings = [(first @ weights, second @ weights) for first, second in halves.pairings]
+        outcome = dv.estimate_variability(pairings, terms, factors=factors, n_boot=n_boot, seed=seed + 1, rank=False)
+        table = outcome.table
+        table.insert(0, 'module', [key[2] for key in selected])
+        table.insert(0, 'catalog', [key[1] for key in selected])
+        table.insert(0, 'source', aftm.GENE_LIST_SOURCE)
+        table.insert(0, 'method', aftm.METHOD_B)
+        table['n_genes_found'] = [len(in_scope[key]) for key in selected]
+        table['n_control_genes'] = [len(control) for control in controls]
+        frames.append(table)
+        record['pseudobulk'] = {'n_modules': len(selected)}
+    # variant A
+    keys_a, sums, counts = cell_mean_quarters(conn, sidecar, MODULE_SOURCES, n_replicates)
+    wanted = [i for i, (source, catalog, module) in enumerate(keys_a)
+              if aftm.module_in_stratum(registry, catalog, module, label)]
+    dropped = 0
+    if wanted:
+        pairings = dv.half_means(sums[:, :, wanted], counts[:, :, wanted])
+        finite = np.all([np.isfinite(first).all(axis=0) & np.isfinite(second).all(axis=0) for first, second in pairings],
+                        axis=0)
+        dropped = int((~finite).sum())
+        wanted = [i for i, ok in zip(wanted, finite) if ok]
+        pairings = [(first[:, finite], second[:, finite]) for first, second in pairings]
+        if wanted:
+            outcome = dv.estimate_variability(pairings, terms, factors=factors, n_boot=n_boot, seed=seed + 2,
+                                              rank=False)
+            table = outcome.table
+            table.insert(0, 'module', [keys_a[i][2] for i in wanted])
+            table.insert(0, 'catalog', [keys_a[i][1] for i in wanted])
+            table.insert(0, 'source', [keys_a[i][0] for i in wanted])
+            table.insert(0, 'method', aftm.METHOD_A)
+            table['n_genes_found'] = [gene_counts.get((keys_a[i][1], keys_a[i][2]), {}).get('found') for i in wanted]
+            table['n_control_genes'] = np.nan
+            frames.append(table)
+    record['cell_mean'] = {'n_modules': len(wanted), 'n_dropped_missing_halves': dropped}
+    if not frames:
+        return None, record
+    return unit_columns(pd.concat(frames, ignore_index=True), keys), record
+
+
+# --------------------------------------------------------------------------
+# One dataset
+# --------------------------------------------------------------------------
+
+def process_dataset(entry: Any, store_root: Path, out_root: Path, registry: Optional[GenesetRegistry], *,
+                    seed: int = SEED, n_boot: int = dv.N_BOOT, min_cells: int = dv.MIN_CELLS_PER_REPLICATE,
+                    run_modules: bool = True, threads: int = 4, memory_limit_gb: int = 24, keep_work: bool = False,
+                    only_strata: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Analyse every stratum of one dataset; write the parquet files and the manifest.
+
+    Returns the manifest dict; ``status`` is ``done`` or ``skipped`` (with a ``reason``).
+    """
+    started = time.time()
+    md_yaml, _ = aft.parse_md_file(entry.md_path)
+    api_config = aft.get_api_config(md_yaml)
+    annotation = aft.mus.resolve_annotation(entry.h5ad_path, root=store_root)
+    md_rule = aft.donor_exclusions.rule_from_md(md_yaml)
+    manifest: Dict[str, Any] = {
+        'tool': TOOL_VERSION, 'db_id': entry.db_id, 'group': entry.study, 'file': entry.stem,
+        'md_sha256': aft.md_file_sha256(entry.md_path), 'dataset_sha256': md_yaml.get('sha256'),
+        'anthive4_git': aft.git_head(script_dir.parent.parent), 'h5adstore_git': aft.git_head(store_root),
+        'timestamp_utc': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds'),
+        'seed': seed, 'versions': package_versions(), 'method': dv.TOOL_METHOD,
+        'parameters': {
+            'min_replicates': dv.MIN_REPLICATES, 'min_cells_per_replicate': min_cells,
+            'rank_min_replicates': dv.RANK_MIN_REPLICATES, 'share_min_residual_df': dv.SHARE_MIN_RESIDUAL_DF,
+            'term_share_min_residual_df': dv.TERM_SHARE_MIN_RESIDUAL_DF,
+            'cross_cohort_min_replicates': dv.CROSS_COHORT_MIN_REPLICATES, 'factor_min_replicates': dv.FACTOR_MIN_REPLICATES,
+            'count_gate_half': dv.COUNT_GATE_HALF, 'expressed_gate_half': dv.EXPRESSED_GATE_HALF,
+            'count_gate_quantile': dv.COUNT_GATE_QUANTILE,
+            'reliability_floor': dv.RELIABILITY_FLOOR, 'prior_count': dv.PRIOR_COUNT,
+            'pairings': [list(map(list, pair)) for pair in dv.PAIRINGS], 'n_boot_max': n_boot,
+            'rungs': {'D0': 'technical block + composition PCs', 'D1': '+ sex, age, PMI, batch',
+                      'D2': '+ disease (xenograft: host genotype)', 'D3': '+ APOE e4 carrier', 'D4': '+ Braak',
+                      'F': '+ latent factors (3 to 5)'},
+            'quarters': 'rank of hash(cell id, seed) within the replicate, modulo 4',
+            'normalisation': 'TMM of the full replicate on the gate genes, applied to both halves; edgeR log2 CPM, prior 2',
+            'modules': {'primary': 'pseudobulk (module genes minus expression matched controls, bins ' f'{N_BINS}, controls {CTRL_SIZE})',
+                        'secondary': 'cell_mean of the per-cell scores', 'sources': list(MODULE_SOURCES)},
+        },
+    }
+    eligible, reason = aft.dataset_eligibility(entry, md_yaml, annotation, api_config)
+    if not eligible:
+        manifest.update(status='skipped', reason=reason)
+        return manifest
+    facet_scope = aft.dataset_scope(entry, annotation, api_config)
+    manifest['facet_scope'] = facet_scope
+    counts_layer, counts_parquet = aft.counts_layer_for(entry, md_yaml)
+    manifest['counts_layer'] = counts_layer
+    sidecar = scores_path(entry.duckdb_path)
+    do_modules = run_modules and registry is not None and sidecar.exists()
+    manifest['modules_run'] = do_modules
+    work_dir = Path(tempfile.mkdtemp(prefix='ant_donvar_', dir=os.environ.get('ANT_FACET_TMP')))
+    conn = aft.open_dataset(entry, api_config, threads=threads, memory_limit_gb=memory_limit_gb, temp_dir=work_dir,
+                            store_root=store_root)
+    try:
+        cat_columns = aft.view_columns(conn, 'obscat') if aft._has_view(conn, 'obscat') else {}
+        wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_host_sex', 'ant_disease', 'ant_apoe',
+                  'ant_apoe4_carrier', 'ant_apoe_carrier', 'ant_app_nlgf', 'ant_braak', 'ant_age', 'ant_pmi',
+                  'ant_cell_type', 'ant_author_cell_type', 'ant_tissue', 'tissue_uberon', 'ant_region',
+                  *aft.AUTHOR_CLUSTER_COLUMNS]
+        extra = [c for c in cat_columns if (aft.CELLTYPE_CANDIDATE_RE.match(c) or aft.BATCH_NAME_RE.search(c))
+                 and not c.startswith('ant_')]
+        exclusion_columns = [c for c in (md_rule.obs_columns if md_rule else [])
+                             + aft.donor_exclusions.declared_columns(md_yaml) if c not in wanted and c not in extra]
+        member_columns = set(cat_columns) | set(aft.view_columns(conn, 'obsnum') if aft._has_view(conn, 'obsnum') else {})
+        replicate = aft.replicates.resolve_replicate(md_yaml, annotation, member_columns)
+        manifest.update(replicate_unit=replicate['replicate_unit'], replicate_column=replicate['replicate_column'],
+                        replicate_basis=replicate['basis'])
+        if replicate['replicate_unit'] == 'none' or not replicate['replicate_column']:
+            manifest.update(status='skipped', reason='replicate_unit is none: cell-level, descriptive only')
+            return manifest
+        if replicate['replicate_column'] not in wanted:
+            wanted.append(replicate['replicate_column'])
+        cells = aft.cell_table(conn, wanted + extra + exclusion_columns)
+        if replicate['replicate_column'] not in cells:
+            manifest.update(status='skipped', reason=f'replicate_column {replicate["replicate_column"]} is not an obs column')
+            return manifest
+        if replicate['replicate_column'] != 'ant_donor':
+            cells['ant_donor'] = cells[replicate['replicate_column']]
+        if replicate['replicate_unit'] != 'donor' and 'ant_donor_uid' in cells:
+            cells['ant_donor_uid'] = None
+        cells, exclusion_report = aft.donor_exclusions.apply_rule(cells, md_rule, aft.donor_exclusions.VARIANT_COUNTED)
+        if exclusion_report is not None:
+            manifest['donor_exclusion'] = exclusion_report
+        batch_column = aft.donor_exclusions.declared_batch_column(md_yaml, cells) or aft.find_batch_column(conn, cells)
+        if batch_column is not None:
+            cells['batch'] = cells[batch_column]
+        manifest['batch_column'] = batch_column
+        manifest['n_cells'] = int(len(cells))
+        manifest['n_replicates_all'] = int(cells['ant_donor'].dropna().astype(str).nunique())
+        if manifest['n_replicates_all'] < dv.MIN_REPLICATES:
+            manifest.update(status='skipped', reason=f'{manifest["n_replicates_all"]} replicates (< {dv.MIN_REPLICATES})')
+            return manifest
+        donor_table, conflicts = aft.build_donor_table(cells)
+        manifest['donor_conflicts'] = conflicts
+        membership, strata_note = aft.choose_strata(cells, cat_columns)
+        manifest['celltype_note'] = strata_note
+        cell_frame = cells.assign(pos=np.arange(len(cells)))[['pos', 'cell_id', 'ant_donor']]
+        usable = membership.merge(cell_frame, on='pos', how='inner')
+        usable = usable[usable['ant_donor'].notna()].copy()
+        usable['donor'] = usable['ant_donor'].astype(str)
+        usable['stratum'] = usable['source'] + '::' + usable['label']
+        cluster_column = aft.author_cluster_column(cells)
+        if cluster_column:
+            usable = usable.merge(cells.assign(pos=np.arange(len(cells)))[['pos', cluster_column]], on='pos', how='left')
+        sizes = usable.groupby(['stratum', 'source', 'label', 'donor']).size().rename('n_cells').reset_index()
+        sizes = sizes[sizes['n_cells'] >= min_cells]
+        replicate_counts = sizes.groupby('stratum')['donor'].nunique()
+        eligible_strata = sorted(replicate_counts[replicate_counts >= dv.MIN_REPLICATES].index)
+        if only_strata:
+            eligible_strata = [s for s in eligible_strata if s in only_strata]
+        manifest['n_strata_total'] = int(replicate_counts.shape[0])
+        manifest['n_strata_analysed'] = len(eligible_strata)
+        symbols = aft.gene_symbols(conn)
+        span_of_gene = pd.Series(gene_spans(symbols['symbol']), index=symbols['gene_id'].to_numpy())
+        gene_frames: List[pd.DataFrame] = []
+        module_frames: List[pd.DataFrame] = []
+        units: List[Dict[str, Any]] = []
+        for stratum in eligible_strata:
+            stratum_sizes = sizes[sizes['stratum'] == stratum]
+            donors = sorted(stratum_sizes['donor'])
+            stratum_cells = usable[(usable['stratum'] == stratum) & usable['donor'].isin(set(donors))]
+            label = str(stratum_sizes['label'].iloc[0])
+            source = str(stratum_sizes['source'].iloc[0])
+            print(f'  [{entry.db_id}] {stratum}: {len(donors)} replicates, {len(stratum_cells)} cells', flush=True)
+            try:
+                genes, modules, record = analyse_stratum(
+                    conn, entry=entry, stratum=stratum, label=label, source=source, stratum_cells=stratum_cells,
+                    donors=donors, donor_table=donor_table, counts_parquet=counts_parquet, symbols=symbols,
+                    facet_scope=facet_scope, replicate_unit=replicate['replicate_unit'], cluster_column=cluster_column,
+                    all_cells=usable, registry=registry if do_modules else None, sidecar=sidecar if do_modules else None,
+                    n_boot=n_boot, seed=unit_seed(entry.db_id, stratum, base=seed), min_cells=min_cells,
+                    span_of_gene=span_of_gene)
+            except Exception as exc:  # noqa: BLE001  one failing stratum must not lose the others
+                print(f'  [error] {entry.db_id} {stratum}: {type(exc).__name__}: {exc}', file=sys.stderr)
+                genes = modules = None
+                record = {'cell_type': label, 'celltype_source': source, 'stratum': stratum, 'n_replicates': len(donors),
+                          'status': 'error', 'reason': f'{type(exc).__name__}: {exc}'[:300]}
+            units.append(record)
+            if genes is not None:
+                gene_frames.append(genes)
+            if modules is not None:
+                module_frames.append(modules)
+        manifest['units'] = units
+        out_dir = out_root / entry.study
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = result_stem(entry.stem, min_cells)
+        for suffix in RESULT_SUFFIXES[:2]:
+            (out_dir / f'{stem}{suffix}').unlink(missing_ok=True)
+        # sorted by gene (module), small row groups: the API looks one gene up across datasets without reading the file
+        if gene_frames:
+            genes_table = pd.concat(gene_frames, ignore_index=True).sort_values(
+                ['gene', 'cell_type', 'celltype_source'], kind='mergesort')
+            float32_frame(genes_table).to_parquet(out_dir / f'{stem}{RESULT_SUFFIXES[0]}', index=False,
+                                                  compression='zstd', row_group_size=ROW_GROUP_SIZE)
+        if module_frames:
+            modules_table = pd.concat(module_frames, ignore_index=True).sort_values(
+                ['module', 'catalog', 'method', 'source', 'cell_type', 'celltype_source'], kind='mergesort')
+            float32_frame(modules_table).to_parquet(out_dir / f'{stem}{RESULT_SUFFIXES[1]}', index=False,
+                                                    compression='zstd', row_group_size=ROW_GROUP_SIZE)
+        manifest.update(status='done', n_gene_rows=int(sum(len(f) for f in gene_frames)),
+                        n_module_rows=int(sum(len(f) for f in module_frames)),
+                        runtime_seconds=round(time.time() - started, 1))
+        (out_dir / f'{stem}{RESULT_SUFFIXES[2]}').write_text(json.dumps(manifest, indent=2, default=aft._json_default))
+        return manifest
+    finally:
+        conn.close()
+        if not keep_work:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# Command line
+# --------------------------------------------------------------------------
+
+def manifest_is_current(manifest_path: Path, md_path: Path) -> bool:
+    """True when the manifest exists and was made from the current ``.md`` by this tool version."""
+    try:
+        recorded = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        return False
+    return recorded.get('md_sha256') == aft.md_file_sha256(md_path) and recorded.get('tool') == TOOL_VERSION
+
+
+def cmd_run(args: argparse.Namespace) -> None:
+    """``run``: analyse the selected datasets."""
+    store_root = Path(args.h5adstore_root).resolve()
+    out_root = Path(args.out_root) if args.out_root else store_root / '_facet_tests'
+    entries = {e.db_id: e for e in aft.iter_h5adstore(store_root) if not e.study.startswith('_')}
+    targets = sorted(entries) if args.all else [t.strip() for t in (args.db_id or '').split(',') if t.strip()]
+    if not targets:
+        sys.exit('give --db-id or --all')
+    registry = None
+    if not args.no_modules:
+        geneset_store = Path(args.genesetstore) if args.genesetstore else aftm.default_geneset_store()
+        registry = GenesetRegistry(geneset_store)
+        registry.scan()
+        if registry.errors:
+            print(f'genesetstore {geneset_store}: {len(registry.errors)} problem(s), first: {registry.errors[0]}', file=sys.stderr)
+    summary = []
+    for db_id in targets:
+        entry = entries.get(db_id)
+        if entry is None:
+            print(f'unknown db_id {db_id}', file=sys.stderr)
+            continue
+        manifest_path = out_root / entry.study / f'{result_stem(entry.stem, args.min_cells)}{RESULT_SUFFIXES[2]}'
+        if args.all and not args.force and manifest_is_current(manifest_path, entry.md_path):
+            print(f'[skip existing] {db_id}')
+            continue
+        aft.wait_for_load(args.max_load)
+        begin = time.time()
+        try:
+            manifest = process_dataset(entry, store_root, out_root, registry, seed=args.seed, n_boot=args.n_boot,
+                                       min_cells=args.min_cells, run_modules=not args.no_modules,
+                                       threads=args.threads, memory_limit_gb=args.memory_gb, keep_work=args.keep_work)
+        except Exception as exc:  # noqa: BLE001
+            print(f'[error] {db_id}: {type(exc).__name__}: {exc}', file=sys.stderr)
+            summary.append({'db_id': db_id, 'status': 'error', 'reason': str(exc)[:300]})
+            continue
+        if manifest['status'] == 'skipped':
+            print(f'[skip] {db_id}: {manifest["reason"]}')
+        else:
+            print(f'[done] {db_id}: {manifest["n_strata_analysed"]} strata, {manifest["n_gene_rows"]} gene rows, '
+                  f'{manifest["n_module_rows"]} module rows, {time.time() - begin:.0f}s')
+        summary.append({'db_id': db_id, 'status': manifest['status'], 'reason': manifest.get('reason', '')})
+    if summary:
+        print(pd.DataFrame(summary)['status'].value_counts().to_string())
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Command line parser."""
+    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    sub = parser.add_subparsers(dest='command', required=True)
+    run = sub.add_parser('run', help='estimate donor variability')
+    run.add_argument('--h5adstore-root', default=None)
+    group = run.add_mutually_exclusive_group()
+    group.add_argument('--db-id', help='comma-separated db_ids (e.g. G24/MMG)')
+    group.add_argument('--all', action='store_true')
+    run.add_argument('--out-root', default=None, help='default <h5adstore>/_facet_tests')
+    run.add_argument('--genesetstore', default=None)
+    run.add_argument('--seed', type=int, default=SEED)
+    run.add_argument('--n-boot', type=int, default=dv.N_BOOT, help='bootstrap replicates for the intervals (reduced for big units)')
+    run.add_argument('--min-cells', type=int, default=dv.MIN_CELLS_PER_REPLICATE,
+                     help='cells a replicate needs in a stratum (default 40; 20 is the sensitivity run, written with a .min20 marker)')
+    run.add_argument('--no-modules', action='store_true')
+    run.add_argument('--threads', type=int, default=4)
+    run.add_argument('--memory-gb', type=int, default=24)
+    run.add_argument('--max-load', type=float, default=12.0)
+    run.add_argument('--force', action='store_true')
+    run.add_argument('--keep-work', action='store_true')
+    return parser
+
+
+def main() -> None:
+    """Entry point."""
+    args = build_parser().parse_args()
+    if args.h5adstore_root is None:
+        args.h5adstore_root = str(aft.default_store_root())
+    {'run': cmd_run}[args.command](args)
+
+
+if __name__ == '__main__':
+    main()
