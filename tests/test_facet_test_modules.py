@@ -517,3 +517,109 @@ def test_module_in_stratum_rules(tmp_path):
     assert mod.module_in_stratum(registry, 'S/Everywhere', 'm', 'anything at all')
     assert not mod.module_in_stratum(registry, 'S/Panel', 'm', 'microglial cell')  # markers: never
     assert mod.module_in_stratum(registry, 'Unknown/Catalog', 'm', 'astrocyte')    # no declared scope
+
+
+# ---------------------------------------------------------------------------
+# app_nlgf in the module tool (2026-10-09): same design as the gene tool
+# ---------------------------------------------------------------------------
+
+NLGF_DERIVE = ('  obs_derive:\n    ant_app_nlgf:\n      source: dx\n      dtype: categorical\n'
+               '      map:\n        nlgf: nlgf\n        control: control\n')
+ANIMALS = 'replicate_unit: animal\nreplicate_column: ant_donor\n'
+
+
+def make_xenograft_dataset(tmp_path: Path, design: str, timepoint_aligned: bool = False):
+    """The synthetic dataset as a human xenograft: males are ``nlgf`` (the planted module effect), females ``control``.
+
+    ``tp`` is an animal-level column with two timepoints, each holding 5 animals per genotype; with
+    ``timepoint_aligned`` it equals the genotype instead (a fully confounded design column).
+    """
+    store, geneset_root, entry = make_module_dataset(
+        tmp_path, extra_md=NLGF_DERIVE + ANIMALS + design, celltype_names=('T1', 'T2'))
+    (store / 'Syn2026' / 'Syn_mod.h5ad.mus').write_text('organism=human\nexperimental_system=xenograft\n')
+    conn = duckdb.connect(str(entry.duckdb_path))
+    conn.execute("ALTER TABLE __obscat ADD COLUMN dx VARCHAR")
+    conn.execute("ALTER TABLE __obscat ADD COLUMN tp VARCHAR")
+    conn.execute("UPDATE __obscat SET dx = CASE WHEN Sex = 'M' THEN 'nlgf' ELSE 'control' END")
+    if timepoint_aligned:
+        conn.execute("UPDATE __obscat SET tp = CASE WHEN dx = 'nlgf' THEN '6m' ELSE '12m' END")
+    else:
+        conn.execute("UPDATE __obscat SET tp = CASE WHEN CAST(substr(donor_id, 2) AS INTEGER) % 2 = 0 "
+                     "THEN '6m' ELSE '12m' END")
+    conn.close()
+    return store, geneset_root, entry
+
+
+def test_app_nlgf_modules_are_tested_per_timepoint_with_the_design_recorded(tmp_path):
+    store, geneset_root, entry = make_xenograft_dataset(
+        tmp_path, 'control_basis: humanised_app_host\napp_nlgf_design:\n  timepoint_column: tp\n')
+    manifest, out_root = _run(tmp_path, entry, store, geneset_root, facets=('app_nlgf',))
+    assert manifest['status'] == 'done' and 'app_nlgf' in manifest['facets_tested_in_scope']
+    assert manifest['control_basis'] == 'humanised_app_host' and manifest['app_nlgf_design'] == {'timepoint': 'tp'}
+    units = [u for u in manifest['units'] if u['facet'] == 'app_nlgf' and u['status'] == 'ok']
+    assert {u['celltype_source'] for u in units} == {'ant_author_cell_type@timepoint=12m',
+                                                     'ant_author_cell_type@timepoint=6m'}
+    assert {u['design_subset'] for u in units} == {'timepoint=12m', 'timepoint=6m'}
+    assert all(u['control_basis'] == 'humanised_app_host' and u['level_counts'] == {'control': 5, 'nlgf': 5}
+               for u in units)
+    table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet')
+    assert set(table['celltype_source']) == {u['celltype_source'] for u in units}
+    assert set(table['design_subset']) == {'timepoint=12m', 'timepoint=6m'}
+    assert set(table['contrast']) == {'nlgf_vs_control'} and set(table['level_ref']) == {'control'}
+    plant = table[(table['module'] == 'PLANT') & (table['method'] == 'cell_mean')]
+    assert len(plant) == 2 and (plant['estimate'] > 0.3).all() and (plant['p_param'] < 0.05).all()
+    # the permutation seeds of the two strata differ: the unit key carries the subset
+    assert mod.unit_seed('d', 's', 'app_nlgf', 'timepoint=6m') != mod.unit_seed('d', 's', 'app_nlgf', 'timepoint=12m')
+    assert mod.unit_seed('d', 's', 'app_nlgf') != mod.unit_seed('d', 's', 'app_nlgf', 'timepoint=6m')
+    # the stratified units are the ones the sample sidecar and its staleness check key on
+    samples = pd.read_parquet(out_root / 'Syn2026' / 'Syn_mod.facet_module_samples.parquet')
+    assert set(samples['celltype_source']) == {u['celltype_source'] for u in units}
+
+
+def test_app_nlgf_modules_without_a_design_run_one_unit(tmp_path):
+    store, geneset_root, entry = make_xenograft_dataset(tmp_path, '')
+    manifest, out_root = _run(tmp_path, entry, store, geneset_root, facets=('app_nlgf',))
+    units = [u for u in manifest['units'] if u['facet'] == 'app_nlgf' and u['status'] == 'ok']
+    assert manifest['status'] == 'done' and [u['celltype_source'] for u in units] == ['ant_author_cell_type']
+    assert units[0]['design_subset'] is None and units[0]['level_counts'] == {'control': 10, 'nlgf': 10}
+    table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_mod.facet_module_tests.parquet')
+    assert table['design_subset'].isna().all()
+
+
+def test_app_nlgf_modules_refuse_a_design_covariate_confounded_with_the_genotype(tmp_path):
+    store, geneset_root, entry = make_xenograft_dataset(
+        tmp_path, 'control_basis: other\napp_nlgf_design:\n  covariate_columns: [tp]\n', timepoint_aligned=True)
+    manifest, _ = _run(tmp_path, entry, store, geneset_root, facets=('app_nlgf',))
+    statuses = {u['status'] for u in manifest['units'] if u['facet'] == 'app_nlgf'}
+    assert statuses and all('confounded with tp' in status for status in statuses)
+
+
+def test_app_nlgf_modules_skip_the_dataset_when_a_design_column_is_missing_or_the_design_malformed(tmp_path):
+    store, geneset_root, entry = make_xenograft_dataset(tmp_path, 'app_nlgf_design:\n  timepoint_column: nope\n')
+    manifest, _ = _run(tmp_path, entry, store, geneset_root, facets=('app_nlgf',))
+    assert manifest['status'] == 'skipped' and 'nope' in manifest['reason']
+    store, geneset_root, entry = make_xenograft_dataset(tmp_path / 'bad', 'control_basis: sideways\n')
+    manifest, _ = _run(tmp_path / 'bad', entry, store, geneset_root, facets=('app_nlgf',))
+    assert manifest['status'] == 'skipped' and 'sideways' in manifest['reason']
+
+
+def test_app_nlgf_is_in_the_default_facets_and_sensitivity_facets_are_not():
+    default = mod.build_parser().parse_args(['run', '--all']).facets.split(',')
+    assert 'app_nlgf' in default and not set(default) & set(aft.SENSITIVITY_FACETS)
+
+
+def test_design_subset_of_reads_the_celltype_source_suffix():
+    import facet_module_results
+    assert facet_module_results.design_subset_of('ant_cell_type@timepoint=6m|line=A') == 'timepoint=6m|line=A'
+    assert facet_module_results.design_subset_of('ant_cell_type') is None
+
+
+@pytest.mark.parametrize('n_cohorts, n_family, expected', [
+    (0, 0, 'no counted cohort'), (1, 0, 'only 1 cohort'), (3, 0, 'no feature is tested in at least 2'), (3, 40, None)])
+def test_not_tested_reason(n_cohorts, n_family, expected):
+    import facet_results
+    reason = facet_results.not_tested_reason('app_nlgf', 'xenograft_human_in_mouse', n_cohorts, n_family)
+    if expected is None:
+        assert reason is None
+    else:
+        assert expected in reason and 'app_nlgf' in reason and 'xenograft_human_in_mouse' in reason

@@ -247,6 +247,23 @@ def gate_words(facet: Optional[str]) -> str:
     return '10%'
 
 
+def not_tested_reason(facet: Optional[str], scope: Optional[str], n_cohorts: int, n_family: int) -> Optional[str]:
+    """Why a facet view lists nothing because it was not tested, else None.
+
+    Replication needs at least two counted cohorts with a tested unit in the cell type group. An empty list from a
+    family that does not exist must not read as "no effect", so the views carry this text next to
+    ``n_cohorts_tested``.
+    """
+    where = f'{facet or "this facet"} in the {scope or "default"} scope'
+    if n_cohorts == 0:
+        return f'not tested: no counted cohort has a tested unit for {where} in this cell type group'
+    if n_cohorts == 1:
+        return f'not tested for replication: only 1 cohort has a tested unit for {where} (at least 2 are needed)'
+    if n_family == 0:
+        return f'not tested for replication: no feature is tested in at least 2 of the {n_cohorts} cohorts for {where}'
+    return None
+
+
 def source_priority(celltype_source: Any) -> int:
     """0 dataset constant, 1 derived group pool (all labels of a cell type group),
     2 per-cell ant_cell_type, 3 author cell type column, 4 author clusters, 5 all cells pooled."""
@@ -2381,6 +2398,8 @@ class FacetResults:
             'scope': scope,
             'scopes': self.scopes_with_results(facet, datasets),
             'cohorts_in_cell_type': n_cohorts,
+            'n_cohorts_tested': n_cohorts,
+            'not_tested': not_tested_reason(facet, scope, n_cohorts, n_family),
             'n_replicated': n_replicated,
             'n_r_significant': n_r_significant,
             'n_effect_gate': n_effect_gate,

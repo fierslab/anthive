@@ -39,7 +39,7 @@ from facet_aliases import canonical_facet
 from facet_results import (
     FAMILY_CACHE_ENTRIES, PC_METHOD, POOL_PREFIX, READ_WORKERS, FacetResults, PreparedDatasets, _as_int, _clean_text,
     _file_key, _finite, _is_small, _not_counted_reason, _rename_deprecated_facets, _rounded, cohort_display,
-    forest_view, json_safe, result_paths)
+    forest_view, json_safe, not_tested_reason, result_paths)
 
 log = logging.getLogger(__name__)
 
@@ -67,8 +67,15 @@ MODULE_UNIT_COLUMNS = (
     'unit', 'db_id', 'title', 'cell_type', 'celltype_source', 'n_donors', 'n_donors_ref', 'n_donors_test',
     'level_ref', 'level_test', 'descriptive_only', 'cohort', 'cohort_label', 'role', 'counted', 'independence',
     'overlap_unknown', 'pooled', 'disease_basis', 'exclusion_missing', 'is_secondary', 'celltype_group',
-    'facet_scope', 'modality', 'modality_note', 'has_counts', 'analysis_level')
+    'facet_scope', 'modality', 'modality_note', 'has_counts', 'analysis_level', 'design_subset')
 _FLOAT_COLUMNS = ('estimate', 'se', 'ci_low', 'ci_high', 'std_effect', 'p_param', 'q_param', 'p_perm', 'q_perm')
+
+
+def design_subset_of(celltype_source: Any) -> Optional[str]:
+    """The ``app_nlgf`` design stratum of a unit (``timepoint=6m|line=APOE33``) from its ``celltype_source``
+    (``ant_cell_type@timepoint=6m|line=APOE33``), or None for an unstratified unit."""
+    text = str(celltype_source)
+    return text.split('@', 1)[1] if '@' in text else None
 
 
 def module_key(catalog: Any, module: Any) -> str:
@@ -193,6 +200,7 @@ class ModuleResults:
                 'facet_scope': scope, 'modality': dataset.get('modality'), 'modality_note': dataset.get('modality_note'),
                 'has_counts': not bool(group['no_counts'].astype(bool).all()),
                 'analysis_level': 'replicate' if not descriptive else 'cell',
+                'design_subset': design_subset_of(celltype_source),
             }
             catalog = group['catalog'].astype(str)
             part = pd.DataFrame({
@@ -381,7 +389,7 @@ class ModuleResults:
         return {
             'cohort_label': _clean_text(record.get('cohort_label')), 'db_id': record['db_id'],
             'title': record.get('title'), 'cell_type': record['cell_type'], 'celltype_source': record['celltype_source'],
-            'anchor_counted': bool(record.get('counted_effective')),
+            'design_subset': design_subset_of(record['celltype_source']), 'anchor_counted': bool(record.get('counted_effective')),
             'n_donors': _as_int(record.get('n_donors')), 'n_donors_ref': _as_int(record.get('n_donors_ref')),
             'n_donors_test': _as_int(record.get('n_donors_test')), 'small_sample': _is_small(record.get('n_donors')),
             'estimate': _rounded(record.get('estimate'), 5), 'ci_low': _rounded(record.get('ci_low'), 5),
@@ -618,6 +626,9 @@ class ModuleResults:
             'facet': facet, 'scope': scope, 'scopes': self.scopes_with_module_results(facet, prepared),
             'cell_type': chosen, 'celltype_group': chosen, 'labels': chosen_labels,
             'cohorts_in_cell_type': chosen_counts.get('n_cohorts', 0),
+            'n_cohorts_tested': chosen_counts.get('n_cohorts', 0),
+            'not_tested': not_tested_reason(facet, scope, chosen_counts.get('n_cohorts', 0),
+                                            chosen_counts.get('n_modules_in_family', 0)),
             'n_modules_in_family': chosen_counts.get('n_modules_in_family', 0),
             'n_replicated': chosen_counts.get('n_replicated', 0), 'n_effect_gate': chosen_counts.get('n_effect_gate', 0),
             'offset': offset, 'n_matching': n_matching, 'n_returned': len(out_rows),

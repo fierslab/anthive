@@ -17,6 +17,8 @@ the `.h5ad`).
 
 Facet engine v3b (2026-10-06, review): the effect gate is a separate field (at least 2 cohorts with log2FC >= tau), `r_treat` is the second tier, units carry lambda / inflated / notes / covariates_dropped / sex-discordance, `age` and `age_adjusted` run side by side (age floor 60), `app_nlgf` is stratified by timepoint and graft line from the `.md` (`control_basis`, `app_nlgf_design`), limma uses quality weights and robust eBayes, residual df floor 4.
 
+Modules and `app_nlgf` (2026-10-09): `ant-facet-test-modules` runs `app_nlgf` with the gene tool's design (`app_nlgf_design_from_md`, `split_by_design`, `@subset` in `celltype_source`, `design_subset`, `control_basis`); it used to strip it, leaving the xenograft module layer empty. Facet views carry `n_cohorts_tested` and `not_tested`.
+
 Donor plots (2026-10-09): both facet tools write per-sample sidecars next to the results (`<stem>.facet_samples.parquet` and
 `.facet_sample_cells.parquet`; `.facet_module_samples.parquet` and `.facet_module_sample_scores.parquet`) that `lib/facet_donor_values.py`
 turns into the replicate-level values of a result cell. `facet_test_limma.R` writes `sample_norm.csv` (library size after

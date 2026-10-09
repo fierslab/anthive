@@ -14,14 +14,20 @@
 What it does
 ------------
 Module-level sibling of ``ant-facet-test`` (which tests single genes). For
-every eligible dataset (human, primary, not xenograft / in vitro / bulk, at
-least 6 donors) and every cell type stratum, tests the same four donor-level
-facets (sex m vs f, disease AD vs control [provisional], apoe4_carrier e4 vs
-non-carrier, braak numeric) for every module of every catalog present in
-the dataset's ``<stem>.scores.parquet`` sidecar. Strata, donor tables,
-covariates, batch rules, minimum donors and the n_lt5 rule are the ones of
-the gene tool (they are literally its functions, imported from
-``ant-facet-test``).
+every eligible dataset (not in vitro, bulk, spatial or mass spectrometry; at
+least 6 replicates; facet scopes of ``lib/facet_scopes.py``) and every cell
+type stratum, tests the facets of the dataset's scope (sex, disease,
+apoe4_carrier, braak, age and, in xenograft and mouse knock-in datasets,
+app_nlgf; never the sensitivity facets such as age_adjusted) for every module
+of every catalog present in the dataset's ``<stem>.scores.parquet`` sidecar.
+Strata, donor tables, covariates, batch rules, minimum donors and the n_lt5
+rule are the ones of the gene tool (they are literally its functions, imported
+from ``ant-facet-test``). ``app_nlgf`` follows the gene tool exactly: the
+``.md`` ``control_basis`` and ``app_nlgf_design`` (timepoint, graft line,
+covariate columns) split a stratum into one unit per timepoint and graft line
+(``celltype_source`` suffix ``@timepoint=6m|line=APOE33``, ``design_subset`` on
+the rows and the unit record), and a unit confounded with a design covariate is
+refused rather than tested.
 
 Two variants, reported side by side (column ``method``):
 
@@ -701,9 +707,16 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         return manifest
     facet_scope = aft.dataset_scope(entry, annotation, api_config)
     manifest['facet_scope'] = facet_scope
-    # the modules tool has no pathology-adjusted age model and no app_nlgf timepoint / graft-line strata (gene tool only)
-    facets = [f for f in aft.facets_for_scope(facet_scope, facets) if f not in (*aft.SENSITIVITY_FACETS, 'app_nlgf')]
+    # the modules tool has no pathology-adjusted age model (sensitivity facets); app_nlgf runs with the gene tool's design
+    facets = [f for f in aft.facets_for_scope(facet_scope, facets) if f not in aft.SENSITIVITY_FACETS]
     manifest['facets_tested_in_scope'] = facets
+    try:
+        app_design = aft.app_nlgf_design_from_md(md_yaml)
+    except ValueError as exc:
+        manifest.update(status='skipped', reason=str(exc))
+        return manifest
+    manifest['control_basis'] = app_design['control_basis']
+    manifest['app_nlgf_design'] = {k: v for k, v in app_design.items() if k != 'control_basis' and v}
     if all_donors and md_rule is None:
         manifest.update(status='skipped', reason='--all-donors: this dataset has no facet_donor_exclusions '
                                                   'rule, its counted run already uses every donor')
@@ -725,8 +738,10 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                   'ant_tissue', 'tissue_uberon', 'ant_region', *aft.AUTHOR_CLUSTER_COLUMNS]
         extra = [c for c in cat_columns if (aft.CELLTYPE_CANDIDATE_RE.match(c) or aft.BATCH_NAME_RE.search(c))
                  and not c.startswith('ant_')]
+        design_columns = aft.design_columns_of(app_design) if 'app_nlgf' in facets else []
         exclusion_columns = [c for c in (exclusion_rule.obs_columns if exclusion_rule else [])
-                             + aft.donor_exclusions.declared_columns(md_yaml) if c not in wanted and c not in extra]
+                             + aft.donor_exclusions.declared_columns(md_yaml) + design_columns
+                             if c not in wanted and c not in extra]
         member_columns = set(cat_columns) | set(aft.view_columns(conn, 'obsnum') if aft._has_view(conn, 'obsnum') else {})
         replicate = aft.replicates.resolve_replicate(md_yaml, annotation, member_columns)
         manifest.update(replicate_unit=replicate['replicate_unit'], replicate_column=replicate['replicate_column'],
@@ -734,6 +749,11 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         if replicate['replicate_column'] and replicate['replicate_column'] not in wanted:
             wanted.append(replicate['replicate_column'])
         cells = aft.cell_table(conn, wanted + extra + exclusion_columns)
+        missing_design = [c for c in design_columns if c not in cells]
+        if missing_design:
+            manifest.update(status='skipped',
+                            reason=f'app_nlgf_design column(s) {missing_design} are not obs columns of the view')
+            return manifest
         if replicate['replicate_unit'] == 'none' or not replicate['replicate_column']:
             manifest.update(status='skipped', reason='replicate_unit is none: cell-level, descriptive only')
             return manifest
@@ -761,7 +781,9 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                                                       f'the smallest numeric test)')
             return manifest
 
-        donor_table, conflicts = aft.build_donor_table(cells)
+        donor_table, conflicts = aft.build_donor_table(cells, {
+            'timepoint': app_design['timepoint'], 'graft_line': app_design['graft_line'],
+            'covariates': app_design['covariates']})
         manifest['donor_conflicts'] = conflicts
         floors = aft.donor_exclusions.min_age_floors(md_yaml)
         floors.setdefault('age', aft.AGE_FACET_MIN_AGE)
@@ -807,12 +829,20 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
         jobs: List[Dict[str, Any]] = []
         for stratum, frame in sample_sizes.groupby('stratum'):
             for facet in facets:
-                plan = aft.plan_job(donor_table, facet,
-                                    aft.donor_exclusions.stratum_donors(frame['donor'], facet, below_floor),
-                                    scope=facet_scope)
-                plan.update(stratum=str(stratum), source=str(frame['source'].iloc[0]),
-                            label=str(frame['label'].iloc[0]))
-                jobs.append(plan)
+                stratum_donor_labels = aft.donor_exclusions.stratum_donors(frame['donor'], facet, below_floor)
+                subsets: List[Tuple[Optional[str], Iterable[str]]] = [(None, stratum_donor_labels)]
+                table, refuse = donor_table, None
+                if facet == 'app_nlgf':
+                    subsets = aft.split_by_design(donor_table, stratum_donor_labels, app_design)
+                    if app_design['covariates']:
+                        table = donor_table.assign(batch=donor_table['design_cov'])
+                        refuse = ' and '.join(app_design['covariates'])
+                for subset_label, subset_donors in subsets:
+                    plan = aft.plan_job(table, facet, subset_donors, scope=facet_scope,
+                                        replicate_unit=replicate['replicate_unit'], refuse_confounded=refuse)
+                    plan.update(stratum=str(stratum), label=str(frame['label'].iloc[0]), design_subset=subset_label,
+                                source=str(frame['source'].iloc[0]) + (f'@{subset_label}' if subset_label else ''))
+                    jobs.append(plan)
         needed = {(job['stratum'], donor) for job in jobs if job['status'] == 'ok'
                   for donor in job['design']['donor']}
         keep = sample_sizes[[(s, d) in needed for s, d in zip(sample_sizes['stratum'], sample_sizes['donor'])]] \
@@ -894,7 +924,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                                       'level_counts': job.get('level_counts'),
                                       'replicate_unit': replicate['replicate_unit'],
                                       'replicate_column': replicate['replicate_column'],
-                                      'facet_scope': facet_scope}
+                                      'facet_scope': facet_scope, 'design_subset': job.get('design_subset'),
+                                      'control_basis': app_design['control_basis'] if job['facet'] == 'app_nlgf' else None}
             if job['status'] != 'ok':
                 record.update(analysis_level=aft.replicates.LEVEL_CELL,
                               analysis_level_label=aft.replicates.CELL_LEVEL_LABEL,
@@ -919,7 +950,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             proportions = pd.Series(stratum_cells / donor_totals.reindex(design['donor']).to_numpy(),
                                     index=design['donor'])
             composition_p = aft.composition_test(proportions, design.set_index('donor'), job['facet'])
-            unit_key = (entry.db_id, job['stratum'], job['facet'])
+            # the subset joins the key only when there is one, so the seeds of every other unit stay as they were
+            unit_key = (entry.db_id, job['stratum'], job['facet'], *([job['design_subset']] if job['design_subset'] else []))
             record.update(
                 n_lt5=bool(job['n_lt5']), small_sample=bool(job['n_lt5']), descriptive_only=below_floor,
                 batch_used=job['batch_used'], batch_confounded=job['batch_confounded'],
@@ -988,6 +1020,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 frame['facet'] = job['facet']
                 frame['cell_type'] = job['label']
                 frame['celltype_source'] = job['source']
+                frame['design_subset'] = job['design_subset']
                 level_counts = job['level_counts']
                 if job['facet'] in aft.NUMERIC_FACETS:
                     frame['contrast'] = aft.NUMERIC_CONTRAST[job['facet']]
@@ -1379,7 +1412,7 @@ def build_parser() -> argparse.ArgumentParser:
     group = run.add_mutually_exclusive_group(required=True)
     group.add_argument('--db-id', help='comma-separated db_ids (e.g. G24/MMG)')
     group.add_argument('--all', action='store_true')
-    run.add_argument('--facets', default=','.join(f for f in aft.FACETS if f not in (*aft.SENSITIVITY_FACETS, 'app_nlgf')))
+    run.add_argument('--facets', default=','.join(f for f in aft.FACETS if f not in aft.SENSITIVITY_FACETS))
     run.add_argument('--sources', default=','.join(DEFAULT_SOURCES),
                      help='sidecar sources to test (geneset = scanpy score_genes, ucell = UCell); one BH family per source')
     run.add_argument('--geneset-store', default=None)

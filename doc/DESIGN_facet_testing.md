@@ -156,7 +156,7 @@ the age floor default (60 years) and the age tau; the "tested and counted at 3 p
   X: not tested") when the genotype is confounded with them. A missing declared column skips the dataset with a reason. Units
   carry the notes "detects large effects only", the control basis and, for xenografts, "live-cell isolation:
   dissociation-response genes are suspect". Secondaries (`renzo_mg_fixed`, `Village.6M.WGCNA_modules`) are never tested or
-  counted. The modules tool does not run `app_nlgf` or `age_adjusted`.
+  counted. The modules tool runs `app_nlgf` with the same design (strata by timepoint and graft line, covariate refusal, `control_basis`, `design_subset` on the rows and unit records) but not the sensitivity facets (`age_adjusted`, `braak_threshold`, `apoe4_dose`). Until 2026-10-09 it silently skipped `app_nlgf`, which left the xenograft module layer empty and read as "no effect"; the facet views now report `n_cohorts_tested` and a `not_tested` reason when a family does not exist.
 * **M6, M7, S2, S4, S6, S7, S9, C7 (data side).** Per unit: `covariates_dropped` (with reasons), `notes`, `n_sex_checked` /
   `n_sex_discordant` (replicates whose XIST and Y-gene expression disagree with their sex label; counts only), `age_top_coded`.
   Per gene (cards and recurring rows): `gene_flags` (`mitochondrial`, `ribosomal`, `lncrna_or_clone`, `sex_chromosome`,
