@@ -775,6 +775,48 @@ is counted only over datasets that the DRAFT cohort selection table marks as
 independent (anchor / primary roles), with the same donor-overlap caveat as the
 gene tests: ROSMAP, SEA-AD, MADRC and Lu files share persons.
 
+### Statistical fixes of the module layer (2026-10-09)
+
+An independent review of the module replication (recomputation of the parametric p values, null behaviour per cohort
+size) led to six changes. The number of cohorts counted in m, the primary variant and the scope of
+`LuChen2025/nbb_cellstates` were NOT changed and await a decision.
+
+1. **Effect gate per facet, on the confidence bound.** The flat 0.2 SD point-estimate gate passed 26 to 43 percent of
+   null tests in cohorts of fewer than 20 donors. The gate unit is now per facet (`facet_rules.module_gate`): 0.2 SD
+   for a two-group contrast, 0.2/3 SD per Braak stage, 0.2 SD per decade (`age`, `age_adjusted`), 0.1 SD per APOE e4
+   allele (`apoe4_dose`). A cohort carries the gate when the LOWER bound of the 95 percent confidence interval of its
+   standardised effect (interval over the SD of the donor-level score, `score_sd`; older files: estimate over
+   std_effect), in the replicated direction, reaches the gate. We chose the confidence bound over "only cohorts with
+   residual df >= 30" because the bound controls the pass rate at every cohort size, while a df filter would leave the
+   two-group null pass rate at about 59 percent at df 30 and silence every small cohort. A unit without an interval
+   falls back to its point estimate. `passes_effect_gate` in the result rows stays a descriptive point-estimate flag
+   with the per-facet gate. The A/B disagreement rule keeps its own 0.2 (`AB_EFFECT`).
+2. **Parametric p from 30 residual df.** The cohort p of a module unit is the OLS (t test) p when the unit's residual df
+   (`df`) is at least `facet_rules.MODULE_PARAMETRIC_MIN_DF` (30), else the permutation p (10,000 shuffles); the q used
+   for `k` is chosen the same way. This matches the gene layer (parametric limma p). The permutation p and the
+   parametric p stay served on every forest point (`p_perm`, `p_param`, `p_used`, `p_basis`, `df_resid`). A unit is
+   flagged `p_check_flag` when at least 10 percent of its modules disagree strongly (a 10 fold gap between the two p
+   values, the parametric p floored at the permutation resolution 1/10,001, with the smaller one below 0.05); the
+   point carries `p_disagree` and `p_check_fraction`, the entry `p_check_cohorts`.
+3. **Directionless sets.** GWAS or MAGMA lists and sets with `direction: bidirectional` (`directionless_reason`) are
+   left out of the module BH families and out of the replicated and top lists. `ant-facet-test-modules` still fits
+   them and writes `directionless` true with NaN q values, the reader (`ModuleResults(directionless=...)`, in
+   `ant-serve` the geneset registry) drops them from the families, also for result files written before this change.
+   Their cards stay descriptive (`directionless` true, `nt_label` "no expected direction", forest rows kept) next to
+   the member-gene counts.
+4. **Agreement and small.** Every module entry serves `agreement` (share of the tested cohorts whose sign of the
+   effect matches the replicated direction; null without a direction) and `n_cohorts_tested` (= m). Forest points
+   serve `n_ref` and `n_test` for two-group facets; `small` (cohort) and `small_sample` (point) come from
+   min(n_ref, n_test) < 10 (`facet_rules.SMALL_LEVEL_REPLICATES`), trends keep fewer than 20 replicates. Flag only; the
+   cohort stays in m.
+5. **Pooled anchors (SEA-AD, MADRC).** The module tool has no donor-pooled units: pooling would need the per-cell scores
+   and counts of several files combined per donor, which the gene tool does through its own count merge and which
+   the sidecar scores do not allow cheaply. The module layer counts the one regional anchor file of these cohorts
+   (SEA-AD: MTG; MADRC: the anchor file with most donors). Units of cohorts pooled for genes carry `per_region_only`
+   and every entry names them (`per_region_only_cohorts`, `module_scope_note`).
+6. **Web route.** `/facets/braak` redirects (307) to `/facets/ant_braak`; bare names of tested facets used to reach
+   the API and fail with 400.
+
 ### Limitations specific to modules
 
 * The per-cell scores were computed once per dataset on all cells; the donor mean

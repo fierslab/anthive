@@ -3653,6 +3653,8 @@ async def facet_detail_view(request: Request, facet_name: str):
     ``tag_column == facet``. A deprecated facet name redirects to the current one.
     """
     current_name = canonical_facet(facet_name)
+    if not current_name.startswith('ant_') and current_name in _FACET_TEST_LABELS:
+        current_name = 'ant_' + current_name       # the bare name of a tested facet (braak) means its column
     if current_name != facet_name:
         return RedirectResponse(f"/facets/{url_quote(current_name, safe='')}", status_code=307)
     api_url = _api_url(request)

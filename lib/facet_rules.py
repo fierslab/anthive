@@ -106,8 +106,36 @@ def gate_tau(facet: str) -> float:
             'apoe4_dose': TAU_TWO_GROUP / 2.0}.get(facet, TAU_TWO_GROUP)   # apoe4_dose: per e4 allele, 10 percent over two
 
 
-#: Effect gate of a replicated module: |standardised effect| (estimate / SD of the donor-level score).
+#: Effect gate of a replicated module, in standard deviations (SD) of the donor-level score, per facet unit
+#: (decided 2026-10-09, review of the flat 0.2 gate): 0.2 SD for a two-group contrast, 0.2 / 3 SD per Braak stage
+#: (the same size spread over three stages), 0.2 SD per decade of age, 0.1 SD per APOE e4 allele (two alleles
+#: span the same 0.2 SD). A cohort carries the gate when the LOWER bound of the 95 percent confidence interval of
+#: its standardised effect, in the replicated direction, reaches the number (not the point estimate: the flat point
+#: gate passed 26 to 43 percent of null tests in cohorts of fewer than 20 donors).
 MODULE_STD_EFFECT_GATE = 0.2
+MODULE_GATE_PER_BRAAK_STAGE = MODULE_STD_EFFECT_GATE / 3
+MODULE_GATE_PER_DECADE = MODULE_STD_EFFECT_GATE
+MODULE_GATE_PER_E4_ALLELE = MODULE_STD_EFFECT_GATE / 2
+#: Residual degrees of freedom from which the parametric (t test) p value of a module unit is trusted and used for
+#: replication; below it the permutation p value is used (decided 2026-10-09). The other one stays served as a check.
+MODULE_PARAMETRIC_MIN_DF = 30
+#: A cohort of a two-group facet with fewer replicates than this in its smaller level is flagged ``small``
+#: (flag only; the cohort still counts towards m).
+SMALL_LEVEL_REPLICATES = 10
+
+
+def module_gate(facet: str) -> float:
+    """Effect gate of a module facet in SD of the donor-level score: per Braak stage, per decade, per e4 allele or per contrast."""
+    return {'braak': MODULE_GATE_PER_BRAAK_STAGE, 'age': MODULE_GATE_PER_DECADE,
+            'age_adjusted': MODULE_GATE_PER_DECADE, 'apoe4_dose': MODULE_GATE_PER_E4_ALLELE}.get(
+                facet, MODULE_STD_EFFECT_GATE)
+
+
+def module_gate_words(facet: str) -> str:
+    """Plain wording of ``module_gate(facet)`` for the views."""
+    unit = {'braak': ' per Braak stage', 'age': ' per decade of age', 'age_adjusted': ' per decade of age',
+            'apoe4_dose': ' per APOE e4 allele'}.get(facet, '')
+    return f'{module_gate(facet):.3g} standard deviations of the donor-level score{unit} (lower 95% confidence bound)'
 
 __all__ = [
     'MIN_CELLS_PER_SAMPLE', 'MIN_DONORS_DATASET', 'MIN_DONORS_PER_LEVEL', 'MIN_REPLICATES_PER_LEVEL',
@@ -116,5 +144,5 @@ __all__ = [
     'p_floor_per_level', 'p_floor_numeric',
     'LAMBDA_INFLATED', 'AGE_FACET_MIN_AGE', 'min_per_level', 'min_numeric', 'MIN_DONORS_FOR_AGE_PMI', 'MIN_COVARIATE_COVERAGE', 'BRAAK_MIN_DONORS',
     'BRAAK_MIN_DISTINCT', 'TAU_TWO_GROUP', 'TAU_BRAAK_PER_STAGE', 'TAU_AGE_PER_DECADE', 'AGE_UNIT_YEARS',
-    'MODULE_STD_EFFECT_GATE', 'gate_tau', 'strong_tau',
+    'MODULE_STD_EFFECT_GATE', 'gate_tau', 'strong_tau',   # the module gates (``module_gate``) are used by the module tool and reader only
 ]
