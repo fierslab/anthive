@@ -12640,11 +12640,59 @@ def _require_geneset_registry() -> GenesetRegistry:
     return geneset_registry
 
 
+_SIDECAR_TRIPLE_CACHE: Dict[str, Tuple[float, List[Tuple[str, str, str]]]] = {}
+_SIDECAR_TRIPLE_LOCK = threading.Lock()
+
+
+def _sidecar_score_triples(sidecar_path: str) -> List[Tuple[str, str, str]]:
+    """Distinct (source, catalog, module) rows of a ``.scores.parquet`` sidecar.
+
+    Cached per path and invalidated by the sidecar mtime, so rescans only
+    re-read sidecars that changed (ant-score-ext / ant-ucell rewrite them).
+
+    Args:
+        sidecar_path: Local path of the sidecar.
+
+    Returns:
+        The distinct triples; empty when the file is missing or unreadable.
+    """
+    try:
+        mtime = os.path.getmtime(sidecar_path)
+    except OSError:
+        return []
+    with _SIDECAR_TRIPLE_LOCK:
+        cached = _SIDECAR_TRIPLE_CACHE.get(sidecar_path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        reader = duckdb.connect(':memory:')
+        try:
+            triples = [
+                (str(source), str(catalog), str(module))
+                for source, catalog, module in reader.execute(
+                    "SELECT DISTINCT source, catalog, module FROM read_parquet(?)",
+                    [sidecar_path],
+                ).fetchall()
+            ]
+        finally:
+            reader.close()
+    except duckdb.Error as exc:
+        log.warning("score-index: cannot read sidecar %s: %s", sidecar_path, exc)
+        return []
+    with _SIDECAR_TRIPLE_LOCK:
+        _SIDECAR_TRIPLE_CACHE[sidecar_path] = (mtime, triples)
+    return triples
+
+
 def _build_score_index() -> None:
     """
-    Walk every database in the registry, find columns matching
-    <study>::<experiment>::<geneset> in obsnum, and build the bidirectional
-    index. Cheap (one information_schema query per db).
+    Walk every database in the registry and build the bidirectional index of
+    pre-scored gene sets. Two sources are merged and de-duplicated: legacy
+    obs columns named <study>::<experiment>::<geneset> in obsnum (one
+    information_schema query per db), and the distinct geneset rows of the
+    ``<stem>.scores.parquet`` sidecar written by ant-score-ext / ant-ucell
+    (cached by sidecar mtime). ``scores_index.parquet`` is not used: it can
+    lag the sidecars.
     """
     _MODULE_INFO_CACHE.clear()
     _GENE_CONTEXT_STATE.clear()
@@ -12682,6 +12730,18 @@ def _build_score_index() -> None:
                 connection_pool.return_connection(db_url, conn)
             except Exception:
                 pass
+        if not db_url.startswith('s3://'):
+            sidecar_path = db_url.replace('file://', '').replace('.duckdb', '.scores.parquet')
+            for source, catalog, module in _sidecar_score_triples(sidecar_path):
+                if source != 'geneset':
+                    continue
+                column = f"{catalog.replace('/', '::')}::{module}"
+                geneset_id = parse_score_column(column)
+                if not geneset_id or geneset_id in new_by_db.get(db_id, []):
+                    continue
+                new_by_db.setdefault(db_id, []).append(geneset_id)
+                new_by_geneset.setdefault(geneset_id, []).append(db_id)
+                new_columns[(db_id, geneset_id)] = column
 
     # Sort for deterministic output
     for ids in new_by_db.values():
