@@ -55,7 +55,8 @@ permutation p value from 10,000 shuffles of the facet labels across donors
 shuffles for every module of the unit and for both methods, seed derived from
 the base seed and the unit key). Benjamini-Hochberg across the modules of one
 (dataset, stratum, facet, method), separately for the parametric and the
-permutation p values. Units with n_lt5 are descriptive only (estimates and SE
+permutation p values. Directionless sets (GWAS or MAGMA lists, ``directionless_reason``) are fitted and written with
+``directionless`` true but are left out of the BH families (their q values are NaN). Units with n_lt5 are descriptive only (estimates and SE
 kept, p / q / t / CI NULL). A vs B effect-estimate correlation per unit is
 written to the manifest (calibration check).
 
@@ -68,7 +69,11 @@ family of a (dataset, stratum, facet, method) is the set of modules in scope for
 that stratum. The scores of a module exist only for the cells of its scope
 (``ant-score-ext`` / ``ant-ucell``), so the donor means are taken over those cells.
 There are no donor-pooled units in this tool, so the pooled (``--pool``) runs of
-``ant-facet-test`` have no module counterpart.
+``ant-facet-test`` have no module counterpart: for the cohorts that are pooled for genes (SEA-AD, MADRC) the module
+layer counts the one regional anchor file (``per_region_only`` on the unit in the views).
+Replication of the modules (``lib/facet_module_results.py``, ``replicated_modules``) uses the parametric p of a unit
+whose residual df is at least 30 and the permutation p otherwise, and a per-facet effect gate on the lower 95 percent
+confidence bound of the standardised effect (``facet_rules.module_gate``).
 
 Inputs: the h5adstore (read only: .md, .h5ad.mus, .duckdb, scores sidecar,
 counts by_gene sidecar) and the genesetstore (module gene lists).
@@ -98,7 +103,7 @@ import tempfile
 import time
 import zlib
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import duckdb
 import numpy as np
@@ -122,7 +127,9 @@ def _load_gene_tool():
 
 
 aft = _load_gene_tool()
+import facet_module_results  # type: ignore  # noqa: E402
 import facet_results  # type: ignore  # noqa: E402
+import facet_rules  # type: ignore  # noqa: E402
 import facet_scopes  # type: ignore  # noqa: E402
 import replication  # type: ignore  # noqa: E402
 from celltype_groups import group_of  # type: ignore  # noqa: E402
@@ -130,8 +137,8 @@ from celltype_scope import module_scope  # type: ignore  # noqa: E402
 from geneset import GenesetRegistry  # type: ignore  # noqa: E402
 from scores_parquet import scores_path  # type: ignore  # noqa: E402
 
-TOOL_VERSION = 'ant-facet-test-modules/2.0'
-EFFECT_GATE_STD = 0.2                # |std_effect| gate of a module hit (configurable in summarize)
+TOOL_VERSION = 'ant-facet-test-modules/2.1'
+EFFECT_GATE_STD = facet_rules.MODULE_STD_EFFECT_GATE   # two-group gate; per facet: facet_rules.module_gate
 SEED = aft.SEED                     # 20261004, base seed; unit seeds derive from it
 N_PERMUTATIONS = 10000              # default shuffles (was 1,000 until 2026-10-05; floor of p_perm is 1 / 10,001)
 N_BINS = 25                         # scanpy score_genes defaults, as ant-score
@@ -278,7 +285,8 @@ def unit_seed(*parts: Any) -> List[int]:
 
 
 def fit_modules(scores: pd.DataFrame, design: pd.DataFrame, batch_used: bool, descriptive_only: bool,
-                 unit_key: Sequence[Any], n_permutations: int = N_PERMUTATIONS) -> pd.DataFrame:
+                 unit_key: Sequence[Any], n_permutations: int = N_PERMUTATIONS,
+                 directionless: Optional[Callable[[Any], bool]] = None) -> pd.DataFrame:
     """Facet effect, parametric and permutation tests for every module of one unit.
 
     Args:
@@ -288,10 +296,12 @@ def fit_modules(scores: pd.DataFrame, design: pd.DataFrame, batch_used: bool, de
         descriptive_only: n_lt5 unit; p, q, t and CI are returned as NaN.
         unit_key: seed key (same for both methods so both see identical shuffles).
         n_permutations: number of label shuffles.
+        directionless: predicate on the frame index (a module key); True modules are fitted but left out of the
+            BH families (q NaN) and flagged in the ``directionless`` column.
 
     Returns:
         frame indexed by module with estimate, se, t, df, p_param, ci_low, ci_high,
-        std_effect, residual_sd, p_perm, q_param, q_perm, n_perm_effective.
+        std_effect, residual_sd, p_perm, q_param, q_perm, n_perm_effective, directionless.
         Modules with any non-finite donor score are dropped.
     """
     facet, nuisance, _ = build_design(design, batch_used)
@@ -315,8 +325,12 @@ def fit_modules(scores: pd.DataFrame, design: pd.DataFrame, batch_used: bool, de
     if descriptive_only:
         for column in ('t', 'p_param', 'p_perm', 'ci_low', 'ci_high'):
             frame[column] = np.nan
-    frame['q_param'] = benjamini_hochberg(frame['p_param'].to_numpy())
-    frame['q_perm'] = benjamini_hochberg(frame['p_perm'].to_numpy())
+    frame['directionless'] = np.array([bool(directionless(key)) for key in frame.index], dtype=bool) \
+        if directionless is not None else False
+    in_family = ~frame['directionless'].to_numpy(dtype=bool)
+    for source, target in (('p_param', 'q_param'), ('p_perm', 'q_perm')):
+        frame[target] = np.nan
+        frame.loc[in_family, target] = benjamini_hochberg(frame.loc[in_family, source].to_numpy())
     return frame
 
 
@@ -498,6 +512,17 @@ def load_module_genes(registry: GenesetRegistry, modules: pd.DataFrame, symbols:
         if len(found) >= MIN_MODULE_GENES:
             indices[(GENE_LIST_SOURCE, catalog, module)] = np.array(found, dtype=int)
     return indices, counts
+
+
+def module_is_directionless(registry: GenesetRegistry, catalog: str, module: str) -> bool:
+    """Whether a gene set has no expected direction (``facet_module_results.directionless_reason``: GWAS or MAGMA
+    list, bidirectional). A module the registry does not know falls back to the study name."""
+    geneset = registry.genesets.get(f'{catalog}/{module}')
+    if geneset is None:
+        return facet_module_results.default_directionless(f'{catalog}/{module}')
+    return facet_module_results.directionless_reason(
+        geneset.experiment.study, geneset.experiment.method, geneset.metadata.get('direction'),
+        geneset.experiment.metadata.get('software')) is not None
 
 
 def module_in_stratum(registry: GenesetRegistry, catalog: str, module: str, stratum_label: str) -> bool:
@@ -696,8 +721,10 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             'min_donors_for_age_pmi': aft.MIN_DONORS_FOR_AGE_PMI,
             'min_covariate_coverage': aft.MIN_COVARIATE_COVERAGE, 'disease_provisional': True,
             'effect_gate_std_effect': EFFECT_GATE_STD,
-            'effect_gate': 'passes_effect_gate = |std_effect| >= effect_gate_std_effect; modules count '
-                           'as hits only when they pass it as well as q < 0.05',
+            'effect_gate_std_effect_by_facet': {name: facet_rules.module_gate(name) for name in aft.FACETS},
+            'effect_gate': 'passes_effect_gate = |std_effect| >= the facet gate (point estimate, descriptive); '
+                           'replication gates on the lower 95 percent confidence bound of the standardised effect',
+            'parametric_p_min_df': facet_rules.MODULE_PARAMETRIC_MIN_DF,
             'duckdb_threads': threads, 'duckdb_memory_limit_gb': memory_limit_gb,
         },
     }
@@ -976,8 +1003,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                     if sub.shape[1] == 0:
                         continue
                     try:
-                        a_frame = fit_modules(sub, design, job['batch_used'], below_floor,
-                                              unit_key, n_permutations)
+                        a_frame = fit_modules(sub, design, job['batch_used'], below_floor, unit_key, n_permutations,
+                                              directionless=lambda key: module_is_directionless(registry, key[1], key[2]))
                     except ValueError as exc:
                         record[f'method_A_{source}_error'] = str(exc)
                         continue
@@ -988,7 +1015,8 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
             if scores_b is not None and len(scores_b.columns):
                 try:
                     b_frame = fit_modules(scores_b.reindex(sample_ids).reset_index(drop=True), design,
-                                          job['batch_used'], below_floor, unit_key, n_permutations)
+                                          job['batch_used'], below_floor, unit_key, n_permutations,
+                                          directionless=lambda key: module_is_directionless(registry, key[1], key[2]))
                     b_frame['n_control_genes'] = [control_counts[job['stratum']].get(tuple(k)) for k in b_frame.index]
                     per_method[(METHOD_B, GENE_LIST_SOURCE)] = b_frame
                 except ValueError as exc:
@@ -1039,7 +1067,7 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 frame['small_sample'] = bool(job['n_lt5'])
                 frame['descriptive_only'] = below_floor
                 frame['facet_scope'] = facet_scope
-                frame['passes_effect_gate'] = frame['std_effect'].abs() >= EFFECT_GATE_STD
+                frame['passes_effect_gate'] = frame['std_effect'].abs() >= facet_rules.module_gate(job['facet'])
                 frame['batch_used'] = job['batch_used']
                 frame['batch_confounded'] = job['batch_confounded']
                 frame['covariates'] = ','.join(job['covariates'])
@@ -1084,20 +1112,23 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
 # --------------------------------------------------------------------------
 
 def replicated_modules(table: pd.DataFrame, out_root: Path, cohort_table: Path,
-                       min_std_effect: float = EFFECT_GATE_STD) -> pd.DataFrame:
+                       min_std_effect: Optional[float] = None) -> pd.DataFrame:
     """Partial-conjunction replication of modules per facet scope, facet, method, source and cell type group.
 
     The same structure as the gene replication (``lib/facet_results.py``): one anchor unit per cohort and cell type
-    group (``FacetResults.counting_units``), the cohort p value of a direction is the two-sided permutation p halved
-    when the estimate has that sign (1 minus the half otherwise), the m - 1 largest are combined by Simes, BH over
-    the modules of the family gives ``r_value``; ``replicated`` is r < 0.05. The effect gate is a separate served
-    condition: at least 2 cohorts each with a signed ``std_effect`` of at least ``min_std_effect`` in the replicated
-    direction (``effect_gate_passed``, ``n_cohorts_ge_gate``); the median ``std_effect`` is descriptive. Units that are not
+    group (``FacetResults.counting_units``), the cohort p value of a direction is the two-sided p halved
+    when the estimate has that sign (1 minus the half otherwise), where p is the parametric p of a unit with at least
+    30 residual df and the permutation p otherwise (``facet_module_results.select_p``), the m - 1 largest are combined
+    by Simes, BH over the modules of the family gives ``r_value``; ``replicated`` is r < 0.05. Directionless sets are
+    left out. The effect gate is a separate served condition: at least 2 cohorts whose lower 95 percent confidence
+    bound of the standardised effect, in the replicated direction, reaches ``min_std_effect`` (default the facet's
+    ``facet_rules.module_gate``: 0.2 per contrast, 0.2/3 per Braak stage, 0.2 per decade, 0.1 per e4 allele)
+    (``effect_gate_passed``, ``n_cohorts_ge_gate``); the median ``std_effect`` is descriptive. Units that are not
     descriptive only and whose dataset is in the cohort table with a counted role take part.
 
     Returns:
         One row per (family, module): ``facet_scope, facet, method, source, celltype_group, catalog, module, r_value,
-        p_pc, m, k (cohorts with q_perm < 0.05 in the direction), direction, median_std_effect, effect_gate_passed,
+        p_pc, m, k (cohorts with q < 0.05 in the direction, on the p basis above), direction, median_std_effect, effect_gate_passed,
         replicated``.
     """
     reader = facet_results.FacetResults(cohort_table.parent)
@@ -1129,16 +1160,25 @@ def replicated_modules(table: pd.DataFrame, out_root: Path, cohort_table: Path,
                                  on=['db_id', 'cell_type', 'celltype_source'], how='inner')
             if keyed['cohort'].nunique() < 2:
                 continue
-            half = keyed['p_perm'] / 2.0
+            keyed['directionless'] = (keyed['directionless'].fillna(False).astype(bool).to_numpy()
+                                      if 'directionless' in keyed.columns else False) \
+                | (keyed['catalog'].astype(str) + '/' + keyed['module'].astype(str)).map(
+                    facet_module_results.default_directionless).to_numpy()
+            keyed = keyed[~keyed['directionless']].copy()
+            keyed['p_use'], keyed['q_use'], _parametric = facet_module_results.select_p(keyed)
+            keyed['std_ci_low'], keyed['std_ci_high'] = facet_module_results.standardised_bounds(keyed)
+            gate = facet_rules.module_gate(facet) if min_std_effect is None else min_std_effect
+            half = keyed['p_use'] / 2.0
             keyed['p_up'] = np.where(keyed['estimate'] >= 0, half, 1.0 - half)
             keyed['p_down'] = np.where(keyed['estimate'] <= 0, half, 1.0 - half)
             keyed['module_key'] = keyed['catalog'].astype(str) + '/' + keyed['module'].astype(str)
-            keyed['up'] = (keyed['q_perm'] * keyed['n_siblings']).clip(upper=1.0).lt(Q_THRESHOLD) & (keyed['estimate'] > 0)
-            keyed['down'] = (keyed['q_perm'] * keyed['n_siblings']).clip(upper=1.0).lt(Q_THRESHOLD) & (keyed['estimate'] < 0)
+            keyed['up'] = (keyed['q_use'] * keyed['n_siblings']).clip(upper=1.0).lt(Q_THRESHOLD) & (keyed['estimate'] > 0)
+            keyed['down'] = (keyed['q_use'] * keyed['n_siblings']).clip(upper=1.0).lt(Q_THRESHOLD) & (keyed['estimate'] < 0)
             per_cohort = keyed.groupby(['module_key', 'cohort']).agg(
                 catalog=('catalog', 'first'), module=('module', 'first'), p_up=('p_up', 'min'), p_down=('p_down', 'min'),
                 n_siblings=('n_siblings', 'max'), up=('up', 'any'), down=('down', 'any'),
-                effect=('std_effect', 'mean')).reset_index()
+                effect=('std_effect', 'mean'), bound_low=('std_ci_low', 'mean'),
+                bound_high=('std_ci_high', 'mean')).reset_index()
             per_cohort['p_up'] = (per_cohort['p_up'] * per_cohort['n_siblings']).clip(upper=1.0)
             per_cohort['p_down'] = (per_cohort['p_down'] * per_cohort['n_siblings']).clip(upper=1.0)
             p_up = per_cohort.pivot(index='module_key', columns='cohort', values='p_up')
@@ -1152,8 +1192,10 @@ def replicated_modules(table: pd.DataFrame, out_root: Path, cohort_table: Path,
             frame['k'] = np.maximum(k_up, k_down).astype(int)
             frame['median_std_effect'] = per_cohort.groupby('module_key')['effect'].median().reindex(frame.index)
             direction_sign = frame['direction'].map({'up': 1.0, 'down': -1.0})
-            signed = per_cohort.assign(_signed=per_cohort['effect'] * per_cohort['module_key'].map(direction_sign)) \
-                .groupby('module_key')['_signed'].apply(lambda s: int((s >= min_std_effect).sum()))
+            sign_of = per_cohort['module_key'].map(direction_sign)
+            bound = np.where(sign_of > 0, per_cohort['bound_low'], -per_cohort['bound_high'])
+            signed = per_cohort.assign(_signed=bound).groupby('module_key')['_signed'].apply(
+                lambda values: int((values >= gate).sum()))
             frame['n_cohorts_ge_gate'] = signed.reindex(frame.index).fillna(0).astype(int)
             frame['effect_gate_passed'] = frame['n_cohorts_ge_gate'] >= replication.DEFAULT_U
             frame['replicated'] = frame['r_value'] < replication.R_THRESHOLD
@@ -1173,7 +1215,7 @@ def replicated_modules(table: pd.DataFrame, out_root: Path, cohort_table: Path,
 
 
 def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path],
-                      min_std_effect: float = 0.2) -> None:
+                      min_std_effect: Optional[float] = None) -> None:
     """Tables over all module result parquets: units, hits, recurring modules.
 
     Recurrence counts (dataset, stratum) units where a module is significant at
@@ -1183,7 +1225,7 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
     design note): datasets with a role of duplicate / supplement / do not pool /
     never alongside / alternative B are dropped, and recurrence is counted over
     distinct cohorts (``n_cohorts``), not files (``n_datasets``). A hit also needs
-    ``|std_effect| >= min_std_effect`` (default 0.2, the effect-size gate).
+    ``|std_effect| >= min_std_effect`` (default: the per-facet gate of ``facet_rules.module_gate``).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     files = sorted(out_root.glob('*/*.facet_module_tests.parquet'))
@@ -1197,7 +1239,8 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
     if 'descriptive_only' not in table:
         table['descriptive_only'] = table['n_lt5']
     table['unit'] = table['db_id'] + '|' + table['celltype_source'] + '::' + table['cell_type']
-    gate = (table['std_effect'].abs() >= min_std_effect)
+    gate = (table['std_effect'].abs() >= (table['facet'].map(facet_rules.module_gate)
+                                          if min_std_effect is None else min_std_effect))
     table['significant'] = (table['q_param'] < Q_THRESHOLD) & (table['q_perm'] < Q_THRESHOLD) & gate
     table['sign'] = np.sign(table['estimate'])
     units = (table.groupby(['facet_scope', 'facet', 'method', 'source', 'unit', 'db_id', 'cell_type', 'celltype_source'])
@@ -1435,8 +1478,10 @@ def build_parser() -> argparse.ArgumentParser:
     summarize = sub.add_parser('summarize', parents=[common], help='cross-dataset tables (exploratory)')
     summarize.add_argument('--out-dir', required=True)
     summarize.add_argument('--cohort-table', default=None)
-    summarize.add_argument('--min-std-effect', type=float, default=EFFECT_GATE_STD,
-                           help='effect-size gate on |std_effect| for a hit (default 0.2)')
+    summarize.add_argument('--min-std-effect', type=float, default=None,
+                           help='flat effect-size gate in SD for every facet (default: the facet gate of '
+                                'lib/facet_rules.py, 0.2 per contrast, 0.2/3 per Braak stage, 0.2 per decade, '
+                                '0.1 per e4 allele)')
     return parser
 
 

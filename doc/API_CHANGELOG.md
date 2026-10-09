@@ -214,6 +214,24 @@ Changed (additive):
 - Caches: module tables and families are built single flight like the gene tables (`FAMILY_CACHE_ENTRIES` bound) and
   warmed at start together with the detection table.
 
+Module statistics fixes (2026-10-09, additive fields; module replication values change on the next module run):
+
+- `/facets/{facet}/modules/top` and the module cards of `/genesets/{study}/{experiment}/{name}/facet-effects`: the
+  effect gate is per facet (0.2 SD per contrast, 0.2/3 per Braak stage, 0.2 per decade, 0.1 per e4 allele) and is
+  read on the lower 95 percent confidence bound of the standardised effect; `effect_gate_tau` and `effect_gate_unit`
+  follow the facet, `effect_gate: {std_effect, wording}` on the top list, `effect_gate.per_facet` on the card.
+- Cohort p values for module replication are the parametric p when the unit has at least 30 residual df, else the
+  permutation p. New on every forest point: `df_resid`, `p_used`, `p_basis` (`parametric` | `permutation`),
+  `p_disagree`, `p_check_flag`, `p_check_fraction`, `n_ref`, `n_test`, `per_region_only`; `small_sample` is true when
+  the smaller level of a two-group facet has fewer than 10 replicates (trends: fewer than 20).
+- New on every module entry (variant, top row): `n_cohorts_tested`, `p_check_cohorts`, `p_check_flag`,
+  `per_region_only_cohorts`, `module_scope_note`; `agreement` is the share of tested cohorts pointing the replicated
+  way (null without a direction).
+- Directionless sets (GWAS, MAGMA, bidirectional) are left out of the module families, replicated and top lists; their
+  cards carry `directionless: true` and variants with `call: not_tested`, `nt_label: no expected direction`.
+- Web: `/facets/{bare name}` (for example `/facets/braak`) redirects to `/facets/ant_braak`.
+- Clients: no change needed (new fields are optional); `vark` and `pyvark` pass module fields through.
+
 ## 2.44.0 (2026-10-07)
 
 Release summary. Facet engine v3: facet scopes, ordinary-p partial-conjunction replication with an effect filter

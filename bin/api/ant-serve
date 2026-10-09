@@ -103,8 +103,8 @@ import help_content
 import facet_scopes as facet_scopes_lib
 import gene_classes as gene_classes_lib
 import gene_detection as gene_detection_lib
-from facet_module_results import (DIRECTIONLESS_NOTE, ModuleResults, directionless_reason, module_card_forest,
-                                  quality_flags)
+from facet_module_results import (DIRECTIONLESS_NOTE, ModuleResults, default_directionless as default_module_directionless,
+                                  directionless_reason, module_card_forest, quality_flags)
 import facet_rules as facet_rules_lib
 from facet_results import FacetResults
 from modality import modality_of_metadata
@@ -4070,13 +4070,20 @@ def _facet_results() -> FacetResults:
 _module_results_instance: Optional[ModuleResults] = None
 
 
+def _module_is_directionless(module_key: str) -> bool:
+    """True for a gene set without an expected direction (GWAS or MAGMA list, bidirectional): the module
+    replication leaves it out of every family. Falls back to the study name when the set is not in the store."""
+    info = _module_info(module_key)
+    return bool(info['directionless']) if info else default_module_directionless(module_key)
+
+
 def _module_results() -> ModuleResults:
     """The shared module replication layer over ``_facet_results()`` (its tables and families are cached there)."""
     global _module_results_instance
     reader = _facet_results()
     with _facet_results_lock:
         if _module_results_instance is None or _module_results_instance.reader is not reader:
-            _module_results_instance = ModuleResults(reader)
+            _module_results_instance = ModuleResults(reader, directionless=_module_is_directionless)
         return _module_results_instance
 
 
@@ -13757,7 +13764,7 @@ def get_facet_top_modules(
     cell_type: Optional[str] = Query(None, description="Cell type group (e.g. 'microglia') or a raw stratum label; default: the group with most cohorts"),
     n: int = Query(50, ge=1, le=100000, description="Rows returned (no practical cap; page with offset)"),
     offset: int = Query(0, ge=0, description="Ranked rows to skip"),
-    effect_gate: bool = Query(False, description="Only modules with at least 2 cohorts at |std_effect| >= 0.2 in the replicated direction"),
+    effect_gate: bool = Query(False, description="Only modules with at least 2 cohorts whose standardised effect has its lower 95% confidence bound in the replicated direction at or above the facet gate (0.2 SD per contrast, 0.2/3 per Braak stage, 0.2 per decade, 0.1 per e4 allele)"),
     include_not_replicated: bool = Query(False, description="Also list modules with r >= 0.05 (the whole family, ranked)"),
     catalog: Optional[str] = Query(None, description="Only modules of this catalog, e.g. Mancuso2024/Cell_states"),
     exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged is_secondary, but not counted towards replication"),
@@ -13895,7 +13902,8 @@ def get_geneset_facet_effects(
         'directionless_note': info['directionless_note'] if info else None,
         'member_match': 'gene symbols, case-insensitive, within one facet scope',
         'scored_in': scored, 'scope': scope, 'facets': facets,
-        'effect_gate': {'std_effect': facet_rules_lib.MODULE_STD_EFFECT_GATE}}
+        'effect_gate': {'std_effect': facet_rules_lib.MODULE_STD_EFFECT_GATE,
+                        'per_facet': {name: facet_rules_lib.module_gate(name) for name in wanted}}}
     if scope is None:
         result['by_scope'] = by_scope
     return _with_help(result, *_FACET_HELP_TOPICS, 'module-replication')

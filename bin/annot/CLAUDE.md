@@ -18,6 +18,12 @@ the `.h5ad`).
 
 Donor variability (2026-10-09, `doc/DESIGN_donor_variability.md`): `ant-donor-variability` writes `<stem>.donor_variability.parquet` (genes, sorted by gene, row groups of 20000 rows), `.donor_variability_modules.parquet` and `.donor_variability_manifest.json` next to the facet results (synced by the `_facet_tests/` prefix of `ant-sync`). Quarters come from the hash of the cell id and the seed, so a rerun is bitwise identical. `--min-cells 20` is the sensitivity run (files carry a `.min20` marker). No donor id is written anywhere.
 
+Module statistics fixes (2026-10-09, `doc/DESIGN_facet_testing.md`): per-facet effect gate on the 95 percent lower confidence bound
+(`facet_rules.module_gate`), parametric p from 30 residual df else permutation p, directionless (GWAS/MAGMA) sets out of the BH
+families (`directionless` column, q NaN), `ant-facet-test-modules` is `/2.1`. SEA-AD and MADRC count their regional anchor file
+(`per_region_only`); there are still no pooled module units. Existing result files need no rerun for the reader changes, a rerun
+(`run --all --force`) refreshes the `directionless` column.
+
 Facet engine v3b (2026-10-06, review): the effect gate is a separate field (at least 2 cohorts with log2FC >= tau), `r_treat` is the second tier, units carry lambda / inflated / notes / covariates_dropped / sex-discordance, `age` and `age_adjusted` run side by side (age floor 60), `app_nlgf` is stratified by timepoint and graft line from the `.md` (`control_basis`, `app_nlgf_design`), limma uses quality weights and robust eBayes, residual df floor 4.
 
 Modules and `app_nlgf` (2026-10-09): `ant-facet-test-modules` runs `app_nlgf` with the gene tool's design (`app_nlgf_design_from_md`, `split_by_design`, `@subset` in `celltype_source`, `design_subset`, `control_basis`); it used to strip it, leaving the xenograft module layer empty. Facet views carry `n_cohorts_tested` and `not_tested`.

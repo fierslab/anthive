@@ -5,13 +5,20 @@ module scores, permutation p values). This module combines those results across 
 ``lib/facet_results.py`` does for genes:
 
 - one anchor unit per cohort and cell type group (``FacetResults.counting_units``), per facet scope;
-- the cohort p value of a direction is the two-sided permutation p halved when the estimate has that sign (1 minus
-  the half otherwise);
+- the cohort p value of a direction is the two-sided p halved when the estimate has that sign (1 minus the half
+  otherwise); the p is the parametric OLS (t test) p of the unit when its residual df is at least
+  ``facet_rules.MODULE_PARAMETRIC_MIN_DF`` (30), else the permutation p; the other stays served as a calibration
+  check and units where the two disagree strongly are flagged (``p_check_flag``);
 - the m - 1 largest of the m cohort p values are combined by Simes (partial conjunction, u = 2), x 2 for the two
   directions, Benjamini-Hochberg over the modules of one family gives ``r_value``; ``replicated`` is r < 0.05;
-- the effect filter is separate and descriptive: at least 2 cohorts with a signed standardised effect
-  (``std_effect``) of at least ``facet_rules.MODULE_STD_EFFECT_GATE`` (0.2) in the replicated direction. There is
-  no strict tier for modules (``strict`` stays null).
+- the effect filter is separate and descriptive: at least 2 cohorts whose standardised effect has its lower 95 percent
+  confidence bound in the replicated direction at or above the facet's gate (``facet_rules.module_gate``: 0.2 SD per
+  contrast, 0.2/3 per Braak stage, 0.2 per decade, 0.1 per e4 allele). There is no strict tier for modules
+  (``strict`` stays null);
+- directionless sets (GWAS or MAGMA lists, ``directionless_reason``) are left out of every family: no BH family
+  membership, no replicated or top list entry; their cards stay descriptive;
+- a cohort is ``small`` when the smaller level of a two-group facet has fewer than 10 replicates (other facets: fewer
+  than 20 replicates); flag only.
 
 A family is one (facet scope, facet, cell type group, method, source): the two variants of a module are the
 pseudobulk of raw counts (B, ``pseudobulk`` / ``gene_list``, needs a counts layer) and the mean of per-cell scores
@@ -27,7 +34,7 @@ import logging
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -54,21 +61,94 @@ VARIANT_LABELS = {
     ('cell_mean', 'geneset'): 'mean of per-cell scores (A)',
 }
 #: Effect size (standardised) at which both variants must reach the gate for an opposite-sign call to count.
-AB_EFFECT = facet_rules.MODULE_STD_EFFECT_GATE
+AB_EFFECT = 0.2
+#: Smallest permutation p value a run of 10,000 shuffles can give; a parametric p below it is floored before the
+#: two p values are compared.
+PERMUTATION_P_FLOOR = 1.0 / 10001
+#: The parametric and the permutation p values of a module disagree strongly when they differ by this factor
+#: (after the floor) and the smaller one is below ``P_DISAGREE_ALPHA``.
+P_DISAGREE_FOLD = 10.0
+P_DISAGREE_ALPHA = 0.05
+#: A unit is flagged (``p_check_flag``) when at least this share of its modules disagree strongly.
+UNIT_P_CHECK_FRACTION = 0.10
 #: Share of mitochondrial (or ribosomal) member genes from which a module is flagged quality-sensitive.
 QUALITY_SHARE = 0.5
 
 MODULE_ROW_COLUMNS = (
     'facet', 'cell_type', 'celltype_source', 'method', 'source', 'catalog', 'module', 'estimate', 'se', 'ci_low',
-    'ci_high', 'std_effect', 'p_param', 'q_param', 'p_perm', 'q_perm', 'n_genes_requested', 'n_genes_found',
-    'no_counts', 'n_donors', 'n_donors_ref', 'n_donors_test', 'descriptive_only', 'small_sample', 'n_lt5',
+    'ci_high', 'std_effect', 'score_sd', 'df', 'p_param', 'q_param', 'p_perm', 'q_perm', 'n_genes_requested',
+    'n_genes_found', 'directionless', 'no_counts', 'n_donors', 'n_donors_ref', 'n_donors_test', 'descriptive_only', 'small_sample', 'n_lt5',
     'facet_scope', 'contrast', 'level_ref', 'level_test')
 MODULE_UNIT_COLUMNS = (
     'unit', 'db_id', 'title', 'cell_type', 'celltype_source', 'n_donors', 'n_donors_ref', 'n_donors_test',
     'level_ref', 'level_test', 'descriptive_only', 'cohort', 'cohort_label', 'role', 'counted', 'independence',
     'overlap_unknown', 'pooled', 'disease_basis', 'exclusion_missing', 'is_secondary', 'celltype_group',
-    'facet_scope', 'modality', 'modality_note', 'has_counts', 'analysis_level', 'design_subset')
-_FLOAT_COLUMNS = ('estimate', 'se', 'ci_low', 'ci_high', 'std_effect', 'p_param', 'q_param', 'p_perm', 'q_perm')
+    'facet_scope', 'modality', 'modality_note', 'has_counts', 'analysis_level', 'design_subset', 'per_region_only',
+    'p_check_fraction', 'p_check_flag')
+_FLOAT_COLUMNS = ('estimate', 'se', 'ci_low', 'ci_high', 'std_effect', 'score_sd', 'df', 'p_param', 'q_param', 'p_perm',
+                  'q_perm')
+
+
+def default_directionless(module_key: str) -> bool:
+    """Fallback for ``ModuleResults(directionless=...)``: a catalog whose study name contains ``GWAS``."""
+    return 'gwas' in str(module_key).split('/', 1)[0].lower()
+
+
+def select_p(frame: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The p and q a unit contributes to replication: parametric when its residual df (``df``) is at least
+    ``facet_rules.MODULE_PARAMETRIC_MIN_DF``, else permutation (also when ``df`` is missing).
+
+    Returns:
+        ``(p, q, parametric)``: two-sided p, BH q of the unit and whether the parametric basis was used.
+    """
+    degrees = pd.to_numeric(frame['df'], errors='coerce').to_numpy(dtype='float64') if 'df' in frame.columns \
+        else np.full(len(frame), np.nan)
+    parametric = np.nan_to_num(degrees, nan=-1.0) >= facet_rules.MODULE_PARAMETRIC_MIN_DF
+    def column(name: str) -> np.ndarray:
+        return frame[name].to_numpy(dtype='float64') if name in frame.columns else np.full(len(frame), np.nan)
+
+    p_param, p_perm, q_param, q_perm = (column(name) for name in ('p_param', 'p_perm', 'q_param', 'q_perm'))
+    return np.where(parametric, p_param, p_perm), np.where(parametric, q_param, q_perm), parametric
+
+
+def p_methods_disagree(p_param: np.ndarray, p_perm: np.ndarray) -> np.ndarray:
+    """Strong disagreement of the parametric and the permutation p: a fold of ``P_DISAGREE_FOLD`` or more (the
+    parametric p floored at the permutation resolution) with the smaller one below ``P_DISAGREE_ALPHA``."""
+    floored = np.maximum(p_param, PERMUTATION_P_FLOOR)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        fold = np.abs(np.log10(floored / np.maximum(p_perm, PERMUTATION_P_FLOOR)))
+    wide = np.nan_to_num(fold, nan=0.0) >= np.log10(P_DISAGREE_FOLD)
+    return wide & (np.fmin(floored, p_perm) < P_DISAGREE_ALPHA)
+
+
+def standardised_bounds(frame: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+    """95 percent confidence bounds of the standardised effect (``ci / SD of the donor-level score``).
+
+    The SD is ``score_sd`` or, in older files, ``estimate / std_effect``. A row without an interval (or SD) falls
+    back to its point estimate on both sides, so the gate is then evaluated on the point estimate.
+    """
+    effect = frame['std_effect'].to_numpy(dtype='float64')
+    with np.errstate(divide='ignore', invalid='ignore'):
+        deviation = np.abs(frame['estimate'].to_numpy(dtype='float64') / effect)
+    if 'score_sd' in frame.columns:
+        recorded = frame['score_sd'].to_numpy(dtype='float64')
+        deviation = np.where(np.isfinite(recorded), recorded, deviation)
+    missing = np.full(len(frame), np.nan)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        low = (frame['ci_low'].to_numpy(dtype='float64') if 'ci_low' in frame.columns else missing) / deviation
+        high = (frame['ci_high'].to_numpy(dtype='float64') if 'ci_high' in frame.columns else missing) / deviation
+    usable = np.isfinite(low) & np.isfinite(high)
+    return np.where(usable, low, effect), np.where(usable, high, effect)
+
+
+def unit_is_small(n_donors: Any, n_ref: Any = None, n_test: Any = None) -> bool:
+    """A cohort is small (flag only, still counted) when the smaller level of a two-group facet has fewer than
+    ``facet_rules.SMALL_LEVEL_REPLICATES`` replicates; without level counts (a trend) when it has fewer than
+    ``SMALL_COHORT_REPLICATES`` replicates in all."""
+    reference, tested = _as_int(n_ref), _as_int(n_test)
+    if reference is not None and tested is not None:
+        return min(reference, tested) < facet_rules.SMALL_LEVEL_REPLICATES
+    return _is_small(n_donors)
 
 
 def design_subset_of(celltype_source: Any) -> Optional[str]:
@@ -116,10 +196,14 @@ class ModuleResults:
 
     Args:
         reader: The shared ``FacetResults`` (its cohort table, summaries, file keys and single flight builds).
+        directionless: ``module_key -> bool``, True for a set without an expected direction (left out of every
+            family); default ``default_directionless`` (GWAS studies). A ``directionless`` column of the result file
+            (written by ``ant-facet-test-modules``) counts as well.
     """
 
-    def __init__(self, reader: FacetResults):
+    def __init__(self, reader: FacetResults, directionless: Optional[Callable[[str], bool]] = None):
         self.reader = reader
+        self.directionless = directionless or default_directionless
         self._tables: "OrderedDict[Tuple, Tuple[Tuple, Any]]" = OrderedDict()
         self._families: "OrderedDict[Tuple, Tuple[Tuple, Any]]" = OrderedDict()
         self._cards: "OrderedDict[Tuple, Tuple[Tuple, Any]]" = OrderedDict()
@@ -163,7 +247,7 @@ class ModuleResults:
             if column not in frame.columns:
                 frame[column] = np.nan
         for column, default in (('no_counts', False), ('small_sample', False), ('descriptive_only', False),
-                                ('n_lt5', False)):
+                                ('n_lt5', False), ('directionless', False)):
             if column not in frame.columns:
                 frame[column] = default
         manifest = self.reader._read_json(result_paths(self.reader.results_dir, dataset['group_folder'],
@@ -175,11 +259,18 @@ class ModuleResults:
             applied = (manifest.get('donor_exclusion') or {}).get('counted') is True
             exclusion_missing = not applied
             counted = counted and applied
+        pool_members = {member for record in cohorts.values() for member in record.get('pool_members') or []}
         out: Dict[str, Tuple[List[Dict[str, Any]], List[pd.DataFrame]]] = {}
         for (facet, cell_type, celltype_source), group in frame.groupby(
                 ['facet', 'cell_type', 'celltype_source'], sort=False, observed=True):
             first = group.iloc[0]
             descriptive = bool(group['descriptive_only'].astype(bool).any())
+            p_used, q_used, parametric = select_p(group)
+            std_low, std_high = standardised_bounds(group)
+            disagree = p_methods_disagree(group['p_param'].to_numpy(dtype='float64'),
+                                          group['p_perm'].to_numpy(dtype='float64'))
+            comparable = group['p_param'].notna().to_numpy() & group['p_perm'].notna().to_numpy()
+            p_check_fraction = float(disagree.sum() / comparable.sum()) if comparable.any() else None
             scope = first['facet_scope'] if 'facet_scope' in group.columns and isinstance(first['facet_scope'], str) \
                 else dataset['facet_scope']
             unit = {
@@ -201,6 +292,9 @@ class ModuleResults:
                 'has_counts': not bool(group['no_counts'].astype(bool).all()),
                 'analysis_level': 'replicate' if not descriptive else 'cell',
                 'design_subset': design_subset_of(celltype_source),
+                'per_region_only': dataset['db_id'] in pool_members,
+                'p_check_fraction': p_check_fraction,
+                'p_check_flag': bool(p_check_fraction is not None and p_check_fraction >= UNIT_P_CHECK_FRACTION),
             }
             catalog = group['catalog'].astype(str)
             part = pd.DataFrame({
@@ -214,6 +308,9 @@ class ModuleResults:
                 'n_genes_requested': pd.to_numeric(group.get('n_genes_requested'), errors='coerce').to_numpy(
                     dtype='float64') if 'n_genes_requested' in group.columns else np.nan,
                 'no_counts': group['no_counts'].astype(bool).to_numpy(),
+                'p_use': p_used, 'q_use': q_used, 'p_parametric': parametric, 'p_disagree': disagree,
+                'std_ci_low': std_low, 'std_ci_high': std_high,
+                'directionless': group['directionless'].fillna(False).astype(bool).to_numpy(),
             })
             entry = out.setdefault(str(facet), ([], []))
             entry[0].append(unit)
@@ -241,6 +338,9 @@ class ModuleResults:
             for column in ('method', 'source', 'catalog', 'module'):
                 rows[column] = rows[column].astype('category')
             rows['module_key'] = rows['module_key'].astype('category')
+            flagged = {name: bool(self.directionless(name)) for name in rows['module_key'].cat.categories}
+            rows['directionless'] = rows['directionless'].to_numpy(dtype=bool) \
+                | rows['module_key'].map(flagged).astype(bool).to_numpy()
             for scope in sorted(set(units['facet_scope'])):
                 scope_units = units[units['facet_scope'] == scope]
                 tables[(facet, scope)] = (rows if len(scope_units) == len(units)
@@ -272,31 +372,33 @@ class ModuleResults:
             counted = units[units['counted_effective']]
             with self.reader._family_slots:
                 for group, group_units in counted.groupby('celltype_group'):
-                    sub = rows[rows['unit'].isin(group_units['unit'])]
+                    sub = rows[rows['unit'].isin(group_units['unit']) & ~rows['directionless']]
                     for (method, source), part in sub.groupby(['method', 'source'], observed=True):
-                        families[(group, str(method), str(source))] = self._family(part, group_units)
+                        families[(group, str(method), str(source))] = self._family(part, group_units, facet)
             return families
 
         return self.reader._cached_build(self._families, (facet, scope, bool(exclude_secondary)), prepared.signature,
                                          build, max_entries=FAMILY_CACHE_ENTRIES)
 
     @staticmethod
-    def _family(sub: pd.DataFrame, group_units: pd.DataFrame) -> Dict[str, Any]:
-        """Replicability table of one (group, method, source) family (see ``families``)."""
+    def _family(sub: pd.DataFrame, group_units: pd.DataFrame, facet: str = '') -> Dict[str, Any]:
+        """Replicability table of one (group, method, source) family (see ``families``) of ``facet``."""
+        gate = facet_rules.module_gate(facet)
         sub = sub.merge(group_units[['unit', 'cohort', 'n_siblings']], on='unit', how='left')
         key_codes, key_names = pd.factorize(sub['module_key'].astype(str))
         sub = sub.assign(key=key_codes)
-        p_two = sub['p_perm']
+        p_two = sub['p_use']
         half = p_two / 2.0
         estimate = sub['estimate']
         sub['p_up'] = np.where(p_two.isna(), np.nan, np.where(estimate >= 0, half, 1.0 - half))
         sub['p_down'] = np.where(p_two.isna(), np.nan, np.where(estimate <= 0, half, 1.0 - half))
-        q_adjusted = (sub['q_perm'] * sub['n_siblings']).clip(upper=1.0)
+        q_adjusted = (sub['q_use'] * sub['n_siblings']).clip(upper=1.0)
         sub['up'] = (q_adjusted < Q_THRESHOLD) & (estimate > 0)
         sub['down'] = (q_adjusted < Q_THRESHOLD) & (estimate < 0)
         per_cohort = sub.groupby(['key', 'cohort'], observed=True).agg(
             p_up=('p_up', 'min'), p_down=('p_down', 'min'), n_siblings=('n_siblings', 'max'),
-            up=('up', 'any'), down=('down', 'any'), effect=('std_effect', 'mean'), raw=('estimate', 'mean')
+            up=('up', 'any'), down=('down', 'any'), effect=('std_effect', 'mean'), raw=('estimate', 'mean'),
+            bound_low=('std_ci_low', 'mean'), bound_high=('std_ci_high', 'mean'), disagree=('p_disagree', 'any')
         ).reset_index()
         for column in ('p_up', 'p_down'):
             per_cohort[column] = (per_cohort[column] * per_cohort['n_siblings']).clip(upper=1.0)
@@ -310,16 +412,23 @@ class ModuleResults:
             frame[target] = per_cohort.groupby('key')[source].sum().reindex(frame.index).fillna(0).astype(int)
         frame['k'] = frame[['k_up', 'k_down']].max(axis=1)
         direction_sign = frame['r_direction'].map({'up': 1.0, 'down': -1.0})
+        tested = per_cohort['p_up'].notna().to_numpy()
         sign = np.sign(per_cohort['effect'])
-        agree = pd.Series(sign.to_numpy() == direction_sign.reindex(per_cohort['key']).to_numpy(), index=per_cohort.index)
-        frame['agreement'] = (agree.groupby(per_cohort['key']).sum()
-                              / per_cohort.groupby('key')['effect'].size()).reindex(frame.index)
+        matches = pd.Series(sign.to_numpy() == direction_sign.reindex(per_cohort['key']).to_numpy() * 1.0,
+                            index=per_cohort.index) & tested
+        n_tested = pd.Series(tested, index=per_cohort.index).groupby(per_cohort['key']).sum()
+        frame['agreement'] = (matches.groupby(per_cohort['key']).sum() / n_tested.where(n_tested > 0)
+                              ).reindex(frame.index).where(direction_sign.notna())
         frame['median_std_effect'] = per_cohort.groupby('key')['effect'].median().reindex(frame.index)
         frame['median_estimate'] = per_cohort.groupby('key')['raw'].median().reindex(frame.index)
-        effects = per_cohort.pivot(index='key', columns='cohort', values='effect').reindex(
+        low = per_cohort.pivot(index='key', columns='cohort', values='bound_low').reindex(
             index=p_up.index, columns=p_up.columns)
-        signed = effects.mul(direction_sign.reindex(p_up.index), axis=0)
-        carries = signed >= facet_rules.MODULE_STD_EFFECT_GATE
+        high = per_cohort.pivot(index='key', columns='cohort', values='bound_high').reindex(
+            index=p_up.index, columns=p_up.columns)
+        # the gate is read on the confidence bound nearer to zero in the replicated direction
+        up_rows = (frame['r_direction'] == 'up').to_numpy()[:, None]
+        signed = pd.DataFrame(np.where(up_rows, low.to_numpy(), -high.to_numpy()), index=p_up.index, columns=p_up.columns)
+        carries = (signed >= gate) & direction_sign.notna().to_numpy()[:, None]
         frame['n_cohorts_ge_gate'] = carries.sum(axis=1).astype(int)
         frame['effect_gate_passed'] = frame['n_cohorts_ge_gate'] >= replication.DEFAULT_U
         names = np.asarray(p_up.columns, dtype=object)
@@ -327,6 +436,9 @@ class ModuleResults:
         carried = carries.to_numpy()
         frame['effect_gate_cohorts'] = [[names[i] for i in row_order if row_carries[i]]
                                         for row_order, row_carries in zip(order, carried)]
+        flagged_cohorts = per_cohort.pivot(index='key', columns='cohort', values='disagree').reindex(
+            index=p_up.index, columns=p_up.columns).fillna(False).astype(bool)
+        frame['p_check_cohorts'] = [[names[i] for i in np.flatnonzero(row)] for row in flagged_cohorts.to_numpy()]
         best = np.where((frame['r_direction'] == 'up').to_numpy()[:, None], p_up.to_numpy(), p_down.to_numpy())
         best = np.nan_to_num(best, nan=np.inf)
         carriers = np.argsort(best, axis=1, kind='stable')[:, :replication.DEFAULT_U]
@@ -339,18 +451,25 @@ class ModuleResults:
         per_cohort['key'] = key_names[per_cohort['key'].to_numpy(dtype=int)]
         tested_by_key = per_cohort[per_cohort['p_up'].notna()].groupby('key')['cohort'].agg(set).to_dict()
         return {'frame': frame.sort_index(), 'per_cohort': per_cohort, 'units': group_units,
-                'tested_cohorts': tested_by_key}
+                'tested_cohorts': tested_by_key, 'gate': gate, 'facet': facet}
 
     # ── entries ────────────────────────────────────────────────────────────
 
     @staticmethod
-    def _entry(record: pd.Series, units_of_group: pd.DataFrame, tested: Sequence[Any] = ()) -> Dict[str, Any]:
+    def _entry(record: pd.Series, units_of_group: pd.DataFrame, tested: Sequence[Any] = (),
+               gate_sd: float = facet_rules.MODULE_STD_EFFECT_GATE, facet: str = '') -> Dict[str, Any]:
         """The replication entry of one module in one family from its ``frame`` row (JSON-safe values).
 
-        ``tested`` are the cohorts that have a p value for the module (``family['tested_cohorts']``).
+        ``tested`` are the cohorts that have a p value for the module (``family['tested_cohorts']``); ``gate_sd`` is the
+        facet's effect gate in SD (``family['gate']``) and ``facet`` names its unit for the wording.
         """
         label_of = dict(zip(units_of_group['cohort'], units_of_group['cohort_label']))
-        donors_of = dict(zip(units_of_group['cohort'], units_of_group['n_donors']))
+        small_of = {cohort: unit_is_small(donors, n_ref, n_test) for cohort, donors, n_ref, n_test in zip(
+            units_of_group['cohort'], units_of_group['n_donors'], units_of_group['n_donors_ref'],
+            units_of_group['n_donors_test'])}
+        per_region = sorted({str(label_of.get(c) or c) for c, flag in zip(
+            units_of_group['cohort'], units_of_group['per_region_only']) if flag and c in set(tested)}) \
+            if 'per_region_only' in units_of_group.columns else []
 
         def labels(cohorts: Any) -> List[str]:
             return [str(label_of.get(c) or c) for c in (cohorts if isinstance(cohorts, list) else [])]
@@ -358,7 +477,7 @@ class ModuleResults:
         r_value = _finite(record.get('r_value'))
         m = _as_int(record.get('m')) or 0
         k = _as_int(record.get('k'))
-        small = sorted({str(label_of.get(c) or c) for c in tested if _is_small(donors_of.get(c))})
+        small = sorted({str(label_of.get(c) or c) for c in tested if small_of.get(c)})
         call = ('replicated' if r_value < replication.R_THRESHOLD else 'not_replicated') if (m >= 2 and r_value is not None) \
             else 'not_tested'
         gate = bool(call == 'replicated' and record.get('effect_gate_passed'))
@@ -371,14 +490,19 @@ class ModuleResults:
             'replicated': call == 'replicated', 'r_significant': call == 'replicated', 'call': call,
             'nt_label': None if call != 'not_tested' else ('1 cohort' if m == 1 else 'not tested'),
             'effect_gate_passed': gate if call == 'replicated' else None, 'gate': gate,
-            'effect_gate_tau': facet_rules.MODULE_STD_EFFECT_GATE,
-            'effect_gate_unit': f'{facet_rules.MODULE_STD_EFFECT_GATE:g} standard deviations of the donor-level score',
+            'effect_gate_tau': gate_sd,
+            'effect_gate_unit': facet_rules.module_gate_words(facet) if facet else f'{gate_sd:g} standard deviations of the donor-level score',
             'effect_gate_cohorts': labels(record.get('effect_gate_cohorts')),
             'n_cohorts_ge_gate': _as_int(record.get('n_cohorts_ge_gate')),
             'strict': None, 'r_strong': None, 'replicated_strong': None, 'r_treat': None, 'replicated_effect': None,
             'median_std_effect': _finite(record.get('median_std_effect')),
             'median_estimate': _finite(record.get('median_estimate')),
-            'agreement': _finite(record.get('agreement')),
+            'agreement': _finite(record.get('agreement')), 'n_cohorts_tested': m,
+            'p_check_cohorts': labels(record.get('p_check_cohorts')),
+            'p_check_flag': bool(len(record.get('p_check_cohorts') or []) > 0) if 'p_check_cohorts' in record else False,
+            'per_region_only_cohorts': per_region,
+            'module_scope_note': ('Module results come from one regional file of these cohorts (their gene results are '
+                                  'donor-pooled over regions): ' + ', '.join(per_region)) if per_region else None,
             'r_cohorts': labels(record.get('r_cohorts')), 'n_small': len(small), 'small_cohorts': small,
             'k_over_m': f'{k}/{m}' if k is not None and m else None, 'cohorts_label': label,
         }
@@ -391,11 +515,18 @@ class ModuleResults:
             'title': record.get('title'), 'cell_type': record['cell_type'], 'celltype_source': record['celltype_source'],
             'design_subset': design_subset_of(record['celltype_source']), 'anchor_counted': bool(record.get('counted_effective')),
             'n_donors': _as_int(record.get('n_donors')), 'n_donors_ref': _as_int(record.get('n_donors_ref')),
-            'n_donors_test': _as_int(record.get('n_donors_test')), 'small_sample': _is_small(record.get('n_donors')),
+            'n_donors_test': _as_int(record.get('n_donors_test')),
+            'n_ref': _as_int(record.get('n_donors_ref')), 'n_test': _as_int(record.get('n_donors_test')),
+            'small_sample': unit_is_small(record.get('n_donors'), record.get('n_donors_ref'), record.get('n_donors_test')),
             'estimate': _rounded(record.get('estimate'), 5), 'ci_low': _rounded(record.get('ci_low'), 5),
             'ci_high': _rounded(record.get('ci_high'), 5), 'std_effect': _rounded(record.get('std_effect'), 4),
             'p_param': _finite(record.get('p_param')), 'q_param': _finite(record.get('q_param')),
             'p_perm': _finite(record.get('p_perm')), 'q_perm': _finite(record.get('q_perm')),
+            'df_resid': _finite(record.get('df')), 'p_used': _finite(record.get('p_use')),
+            'p_basis': 'parametric' if record.get('p_parametric') is True else 'permutation',
+            'p_disagree': bool(record.get('p_disagree') is True), 'p_check_flag': bool(record.get('p_check_flag') is True),
+            'p_check_fraction': _rounded(record.get('p_check_fraction'), 4),
+            'per_region_only': bool(record.get('per_region_only') is True),
             'has_counts': bool(record.get('has_counts')), 'descriptive_only': bool(record.get('descriptive_only')),
             'modality': record.get('modality'), 'modality_note': record.get('modality_note'),
             'n_genes_found': _as_int(record.get('n_genes_found')),
@@ -497,9 +628,13 @@ class ModuleResults:
                         family = families.get((group, method, source))
                         record = family['frame'].loc[key] if family is not None and key in family['frame'].index else None
                         if record is None:
-                            entry = self._entry(pd.Series({'m': 0}), counting[counting['celltype_group'] == group])
+                            entry = self._entry(pd.Series({'m': 0}), counting[counting['celltype_group'] == group],
+                                                gate_sd=facet_rules.module_gate(facet), facet=facet)
+                            if sub['directionless'].any():
+                                entry.update(directionless=True, nt_label='no expected direction')
                         else:
-                            entry = self._entry(record, family['units'], family['tested_cohorts'].get(key, ()))
+                            entry = self._entry(record, family['units'], family['tested_cohorts'].get(key, ()),
+                                                gate_sd=family['gate'], facet=facet)
                         variants.append({
                             'method': method, 'source': source, 'label': variant_label(method, source),
                             'basis': 'pseudobulk' if method == 'pseudobulk' else 'cell_mean',
@@ -527,6 +662,7 @@ class ModuleResults:
         return json_safe({
             'catalog': key.rsplit('/', 1)[0] if '/' in key else catalog, 'module': key.rsplit('/', 1)[-1],
             'module_key': key, 'facet': facet, 'scope': scope, 'cell_type': cell_type,
+            'directionless': bool(self.directionless(key)), 'effect_gate': facet_rules.module_gate(facet),
             'replication': replication_entries, 'n_units': len(unit_cards), 'units': unit_cards})
 
     def scored_in(self, catalog: str, module: str, datasets: "Sequence[Dict[str, Any]] | PreparedDatasets"
@@ -633,7 +769,7 @@ class ModuleResults:
             'n_replicated': chosen_counts.get('n_replicated', 0), 'n_effect_gate': chosen_counts.get('n_effect_gate', 0),
             'offset': offset, 'n_matching': n_matching, 'n_returned': len(out_rows),
             'has_more': offset + len(out_rows) < n_matching, 'cell_types': option_list, 'rows': out_rows,
-            'effect_gate': {'std_effect': facet_rules.MODULE_STD_EFFECT_GATE},
+            'effect_gate': {'std_effect': facet_rules.module_gate(facet), 'wording': facet_rules.module_gate_words(facet)},
             'exclude_secondary': exclude_secondary})
 
     def scopes_with_module_results(self, facet: str, datasets: "Sequence[Dict[str, Any]] | PreparedDatasets"
@@ -671,7 +807,8 @@ class ModuleResults:
         for variant, family in variants.items():
             if key in family['frame'].index:
                 entries[variant] = self._entry(family['frame'].loc[key], family['units'],
-                                               family['tested_cohorts'].get(key, ()))
+                                               family['tested_cohorts'].get(key, ()), gate_sd=family['gate'],
+                                               facet=family['facet'])
         chosen = (record['method'], record['source'])
         main = entries[chosen]
         side_a = next((entries[v] for v in VARIANT_ORDER[1:] if v in entries), None)

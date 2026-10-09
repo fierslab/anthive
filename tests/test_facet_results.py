@@ -34,7 +34,7 @@ import facet_rules
 import facet_scopes
 import gene_classes
 import gene_detection
-from facet_module_results import (DIRECTIONLESS_NOTE, ModuleResults, directionless_reason, module_card_forest,
+from facet_module_results import (DIRECTIONLESS_NOTE, ModuleResults, default_directionless, directionless_reason, module_card_forest,
                                   quality_flags)
 from modality import modality_of_metadata
 from facet_aliases import canonical_facet
@@ -639,7 +639,7 @@ _SERVE_WANTED = {
     'get_facet_recurring_genes', 'get_facet_gene_effects', 'get_gene_facet_effects', 'get_facet_cohorts',
     '_scope_param', '_facet_scope_of', '_SCOPE_QUERY_DESC', '_with_help', '_FACET_HELP_TOPICS', '_no_scope_reason',
     # 2.45: gene detection, modality, module and gene set views
-    '_module_results_instance', '_module_results', '_DETECTION_STATE', '_DETECTION_BUILD_LOCK', '_detection_tables',
+    '_module_results_instance', '_module_results', '_module_is_directionless', '_DETECTION_STATE', '_DETECTION_BUILD_LOCK', '_detection_tables',
     '_detection_lookup', '_with_gene_context', '_gene_context', '_context_gene_flags', '_GENE_CONTEXT_STATE', '_forest_mode', '_FOREST_QUERY_DESC', 'get_gene_detection', 'get_facet_effects_overview',
     'get_facet_top_modules', '_MODULE_INFO_CACHE', '_module_info', 'get_geneset_facet_effects',
     # 2.45: donor-level values and plots behind a facet cell
@@ -734,7 +734,7 @@ def build_serve(results: Path, geneset_registry: Any = None, stats_rows: Optiona
         'log': logging.getLogger('test-facet-results'), 'Lock': Lock, 'Path': Path, 'pd': pd,
         'facet_scopes_lib': facet_scopes, 'gene_detection_lib': gene_detection, 'gene_classes_lib': gene_classes, 'facet_rules_lib': facet_rules,
         'ModuleResults': ModuleResults, 'quality_flags': quality_flags, 'module_card_forest': module_card_forest, 'DIRECTIONLESS_NOTE': DIRECTIONLESS_NOTE,
-        'directionless_reason': directionless_reason, 'modality_of_metadata': modality_of_metadata,
+        'directionless_reason': directionless_reason, 'default_module_directionless': default_directionless, 'modality_of_metadata': modality_of_metadata,
         'GeneStatsCache': _FakeStatsCache, 'geneset_registry': geneset_registry, 'threading': threading,
         'canonical_facet': canonical_facet, 'Response': Response, 'HTTPException': HTTPException, 'Query': Query,
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,

@@ -1683,6 +1683,15 @@ def test_facet_detail_renders(client):
     assert 'id="tvg-dataset"' not in resp.text
 
 
+def test_facet_detail_accepts_bare_tested_facet_name(client):
+    # /facets/disease (bare name of a tested facet) redirects to the column page instead of a 400
+    resp = client.get("/facets/disease", follow_redirects=False)
+    assert resp.status_code == 307
+    assert resp.headers["location"] == "/facets/ant_disease"
+    assert client.get("/facets/braak", follow_redirects=False).headers["location"] == "/facets/ant_braak"
+    assert client.get("/facets/ant_disease", follow_redirects=False).status_code == 200
+
+
 def test_facets_pages_carry_experimental_notice(client, monkeypatch):
     monkeypatch.setenv("ANTHIVE_ISSUE_TRACKER_URL", "https://tracker.example/issues")
     for path in ("/facets", "/facets/ant_disease"):
