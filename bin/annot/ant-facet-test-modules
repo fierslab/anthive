@@ -542,13 +542,110 @@ def package_versions() -> Dict[str, str]:
             'pandas': pd.__version__, 'duckdb': duckdb.__version__}
 
 
+MODULE_SAMPLES_SUFFIX = '.facet_module_samples.parquet'
+MODULE_SCORES_SUFFIX = '.facet_module_sample_scores.parquet'
+
+
+def _long_scores(matrix: pd.DataFrame, sample_ids: Sequence[int], method: str, label: str,
+                 registry: GenesetRegistry) -> pd.DataFrame:
+    """Per-sample module scores of one stratum as a long table (modules in scope of the stratum only)."""
+    rows = matrix.reindex(list(sample_ids))
+    columns = [tuple(column) for column in rows.columns]
+    keep = [position for position, (_source, catalog, module) in enumerate(columns)
+            if module_in_stratum(registry, catalog, module, label)]
+    if not keep or rows.empty:
+        return pd.DataFrame()
+    values = rows.to_numpy(dtype=float)[:, keep]
+    kept = [columns[position] for position in keep]
+    frame = pd.DataFrame({
+        'sample_idx': np.repeat(rows.index.to_numpy().astype('int64'), len(kept)),
+        'source': np.tile([c[0] for c in kept], len(rows)), 'catalog': np.tile([c[1] for c in kept], len(rows)),
+        'module': np.tile([c[2] for c in kept], len(rows)), 'score': values.ravel()})
+    frame['method'] = method
+    return frame.dropna(subset=['score'])
+
+
+def write_module_sample_sidecars(out_dir: Path, stem: str, jobs: List[Dict[str, Any]],
+                                 sample_key: Dict[Tuple[str, str], int], sample_n_cells: pd.Series,
+                                 mean_scores: pd.DataFrame, background_scores: Dict[str, pd.DataFrame],
+                                 registry: GenesetRegistry) -> int:
+    """Write the replicate scores the module tests fitted (read by ``lib/facet_donor_values.py``).
+
+    ``<stem>.facet_module_samples.parquet``: one row per (unit, replicate): ``facet``, ``cell_type``,
+    ``celltype_source``, ``sample_idx``, ``facet_value``, the covariates as fitted, ``batch_code``, ``n_cells``.
+    ``<stem>.facet_module_sample_scores.parquet``: ``sample_idx``, ``method``, ``source``, ``catalog``, ``module``,
+    ``score`` for the modules in the cell type scope of the stratum (variant A: mean of the per-cell scores;
+    variant B: the pseudobulk score). Replicate ids are never written. Returns the number of unit rows.
+    """
+    sample_rows: List[Dict[str, Any]] = []
+    score_frames: List[pd.DataFrame] = []
+    sample_ids_of_stratum: Dict[str, set] = {}
+    label_of_stratum: Dict[str, str] = {}
+    for job in jobs:
+        if job['status'] != 'ok':
+            continue
+        design = job['design'].reset_index(drop=True)
+        batch_codes = (pd.factorize(design['batch_value'].astype(str))[0]
+                       if design['batch_value'].notna().all() and job['batch_used'] else np.full(len(design), -1))
+        for position, row in enumerate(design.itertuples()):
+            sample_idx = sample_key[(job['stratum'], row.donor)]
+            sample_ids_of_stratum.setdefault(job['stratum'], set()).add(sample_idx)
+            sample_rows.append({
+                'facet': job['facet'], 'cell_type': job['label'], 'celltype_source': job['source'],
+                'sample_idx': sample_idx, 'facet_value': row.facet_value, 'cov_sex': row.cov_sex,
+                'cov_age': row.cov_age, 'cov_pmi': row.cov_pmi, 'cov_path': row.cov_path,
+                'batch_code': int(batch_codes[position]), 'n_cells': int(sample_n_cells.loc[sample_idx])})
+        label_of_stratum[job['stratum']] = job['label']
+    if not sample_rows:
+        for suffix in (MODULE_SAMPLES_SUFFIX, MODULE_SCORES_SUFFIX):
+            (out_dir / f'{stem}{suffix}').unlink(missing_ok=True)
+        return 0
+    for stratum, ids in sample_ids_of_stratum.items():
+        label = label_of_stratum[stratum]
+        if len(mean_scores):
+            score_frames.append(_long_scores(mean_scores, sorted(ids), METHOD_A, label, registry))
+        if stratum in background_scores:
+            score_frames.append(_long_scores(background_scores[stratum], sorted(ids), METHOD_B, label, registry))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(sample_rows).to_parquet(out_dir / f'{stem}{MODULE_SAMPLES_SUFFIX}', index=False)
+    scores = pd.concat([f for f in score_frames if len(f)], ignore_index=True) if any(len(f) for f in score_frames) \
+        else pd.DataFrame(columns=['sample_idx', 'source', 'catalog', 'module', 'score', 'method'])
+    for column in ('source', 'catalog', 'module', 'method'):
+        scores[column] = scores[column].astype('category')
+    scores.to_parquet(out_dir / f'{stem}{MODULE_SCORES_SUFFIX}', index=False)
+    return len(sample_rows)
+
+
+def samples_only_problem(out_dir: Path, stem: str, md_sha256: str, jobs: List[Dict[str, Any]]) -> Optional[str]:
+    """Why ``--samples-only`` must not write sidecars next to the stored module results (None: it may).
+
+    The existing manifest must exist, come from the same ``.md`` and list the same tested units as this run.
+    """
+    try:
+        existing = json.loads((out_dir / f'{stem}.facet_module_run_manifest.json').read_text())
+    except (OSError, ValueError):
+        return 'no readable module manifest; run the full module test first'
+    if existing.get('md_sha256') != md_sha256:
+        return 'the stored results were made from another .md; rerun the full module test'
+    now = {(job['facet'], job['label'], job['source']) for job in jobs if job['status'] == 'ok'}
+    before = {(unit['facet'], unit['cell_type'], unit['celltype_source']) for unit in existing.get('units', [])
+              if unit.get('status') == 'ok'}
+    if now != before:
+        return f'the tested units differ from the stored results ({len(now ^ before)} units); rerun the full module test'
+    return None
+
+
 def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[str],
                     registry: GenesetRegistry, sources: Sequence[str], n_permutations: int,
                     threads: int = 4, memory_limit_gb: int = 24, run_pseudobulk: bool = True,
                     keep_work: bool = False, null_control_seed: Optional[int] = None,
                     exclusion_from: Optional[List[str]] = None, exclusion_where: Optional[List[str]] = None,
-                    all_donors: bool = False) -> Dict[str, Any]:
+                    all_donors: bool = False, samples_only: bool = False) -> Dict[str, Any]:
     """Run variants A and B over all strata and facets of one dataset; write parquet + manifest.
+
+    ``samples_only``: compute the replicate scores and write only the sample sidecars
+    (``write_module_sample_sidecars``) next to the stored results; no test is fitted, nothing else is
+    written, and it refuses when the stored manifest does not match (``samples_only_problem``).
 
     Donor exclusions as in ``ant-facet-test`` (``facet_donor_exclusions`` of the .md,
     ``lib/donor_exclusions.py``); ``all_donors`` writes the full-donor run to the supplementary folder.
@@ -774,6 +871,19 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
                 pb_error = f'{type(exc).__name__}: {exc}'
                 background_scores = {}
         manifest['pseudobulk_error'] = pb_error
+
+        sidecar_dir = aft.donor_exclusions.result_dir(out_root, entry.study, md_rule is not None, all_donors)
+        if samples_only:
+            stale = samples_only_problem(sidecar_dir, entry.stem, manifest['md_sha256'], jobs)
+            if stale:
+                manifest.update(status='skipped', reason=f'--samples-only: {stale}')
+                return manifest
+        n_sample_rows = write_module_sample_sidecars(sidecar_dir, entry.stem, jobs, sample_key, sample_n_cells,
+                                                     mean_scores, background_scores, registry)
+        manifest['sample_sidecar_rows'] = n_sample_rows
+        if samples_only:
+            manifest.update(status='samples_only', units=[], runtime_seconds=round(time.time() - started, 1))
+            return manifest
 
         frames: List[pd.DataFrame] = []
         unit_records: List[Dict[str, Any]] = []
@@ -1180,7 +1290,14 @@ def cmd_run(args: argparse.Namespace) -> None:
             print(f'[skip] {db_id}: {reason}')
             summary_rows.append({'db_id': db_id, 'status': 'skipped', 'reason': reason})
             continue
-        if out_manifest.exists() and not args.force and args.all:
+        if args.samples_only:
+            if not out_manifest.exists():
+                print(f'[skip] {db_id}: no stored module results to backfill')
+                continue
+            if not args.force and (out_manifest.parent / f'{entry.stem}{MODULE_SAMPLES_SUFFIX}').exists():
+                print(f'[skip existing samples] {db_id}')
+                continue
+        elif out_manifest.exists() and not args.force and args.all:
             previous = json.loads(out_manifest.read_text())
             now_has_counts = aft.counts_layer_for(entry, md_yaml) is not None
             mapping_current = previous.get('md_sha256') == aft.md_file_sha256(entry.md_path)
@@ -1199,7 +1316,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                                        run_pseudobulk=not args.no_pseudobulk, keep_work=args.keep_work,
                                        null_control_seed=args.null_control_seed,
                                        exclusion_from=args.exclude_donors_from,
-                                       exclusion_where=args.exclude_donors_where, all_donors=args.all_donors)
+                                       exclusion_where=args.exclude_donors_where, all_donors=args.all_donors,
+                                       samples_only=args.samples_only)
         except Exception as exc:
             import traceback
             traceback.print_exc()
@@ -1208,6 +1326,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             continue
         if manifest['status'] == 'skipped':
             print(f'[skip] {db_id}: {manifest["reason"]}')
+        elif manifest['status'] == 'samples_only':
+            print(f'[samples] {db_id}: {manifest["sample_sidecar_rows"]} sample rows, {time.time() - begin:.0f}s', flush=True)
         else:
             n_ok = sum(1 for u in manifest['units'] if u['status'] == 'ok')
             print(f'[done] {db_id}: {n_ok}/{len(manifest["units"])} units, {manifest.get("n_result_rows", 0)} rows, '
@@ -1269,6 +1389,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--max-load', type=float, default=12.0)
     run.add_argument('--force', action='store_true')
     run.add_argument('--no-pseudobulk', action='store_true', help='variant A only')
+    run.add_argument('--samples-only', action='store_true',
+                     help='write only the replicate score sidecars next to the stored results (no tests, no manifest); '
+                          'refuses when the stored results do not match. Backfills the donor value plots of modules')
     run.add_argument('--keep-work', action='store_true')
     aft.donor_exclusions.add_cli_arguments(run)
     run.add_argument('--wait-for-convert', action='store_true',

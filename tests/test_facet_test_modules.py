@@ -311,6 +311,54 @@ def test_planted_module_effect_recovered_by_both_methods(tmp_path):
     assert on_disk['catalogs']['geneset::SynStudy/Exp']['n_modules_sidecar'] == 6
 
 
+def test_sample_sidecars_hold_the_scores_the_tests_fitted_and_no_donor_ids(tmp_path):
+    """The stored replicate scores reproduce the stored estimate (the module test is an unweighted OLS) and
+    ``--samples-only`` rewrites them without touching the results."""
+    from facet_donor_values import DonorValues, _covariate_matrix
+    store, geneset_root, entry = make_module_dataset(tmp_path)
+    manifest, out_root = _run(tmp_path, entry, store, geneset_root, sources=['geneset', 'ucell'])
+    folder = out_root / 'Syn2026'
+    samples_path = folder / 'Syn_mod.facet_module_samples.parquet'
+    scores_path = folder / 'Syn_mod.facet_module_sample_scores.parquet'
+    assert manifest['sample_sidecar_rows'] == 20
+    samples, scores = pd.read_parquet(samples_path), pd.read_parquet(scores_path)
+    assert not {'donor', 'ant_donor'} & set(samples.columns)
+    for path in (samples_path, scores_path):
+        assert b'D00' not in path.read_bytes()
+    table = pd.read_parquet(folder / 'Syn_mod.facet_module_tests.parquet')
+    unit = samples[(samples['facet'] == 'sex') & (samples['cell_type'] == 'T1')]
+    covariates, _ = _covariate_matrix(unit)
+    design = np.column_stack([np.ones(len(unit)), unit['facet_value'].to_numpy(), covariates])
+    for method, source in (('cell_mean', 'geneset'), ('cell_mean', 'ucell'), ('pseudobulk', 'gene_list')):
+        stored = table[(table['facet'] == 'sex') & (table['cell_type'] == 'T1') & (table['method'] == method)
+                       & (table['source'] == source) & (table['module'] == 'PLANT')].iloc[0]
+        answer = DonorValues(out_root).module_unit('Syn2026', 'Syn_mod', 'sex', 'T1', stored['celltype_source'],
+                                                   'SynStudy/Exp', 'PLANT', method, source, ('f', 'm'))
+        assert answer['available'] and answer['n_donors'] == 20
+        coefficient = np.linalg.lstsq(design, scores[(scores['method'] == method) & (scores['source'] == source)
+                                                     & (scores['module'] == 'PLANT')]
+                                      .set_index('sample_idx')['score'].reindex(unit['sample_idx']).to_numpy(),
+                                      rcond=None)[0][1]
+        assert coefficient == pytest.approx(stored['estimate'], abs=1e-9)
+    # backfill: same sidecars, results untouched; a changed .md is refused
+    results_stamp = (folder / 'Syn_mod.facet_module_tests.parquet').stat().st_mtime_ns
+    samples_path.unlink(), scores_path.unlink()
+    registry = mod.GenesetRegistry(geneset_root)
+    registry.scan()
+    backfill = mod.process_dataset(entry, store, out_root, ['sex'], registry, ['geneset', 'ucell'], n_permutations=300,
+                                   threads=1, memory_limit_gb=2, samples_only=True)
+    assert backfill['status'] == 'samples_only'
+    pd.testing.assert_frame_equal(pd.read_parquet(samples_path), samples)
+    pd.testing.assert_frame_equal(pd.read_parquet(scores_path), scores)
+    assert (folder / 'Syn_mod.facet_module_tests.parquet').stat().st_mtime_ns == results_stamp
+    samples_path.unlink(), scores_path.unlink()
+    entry.md_path.write_text(entry.md_path.read_text() + '\n')
+    refused = mod.process_dataset(entry, store, out_root, ['sex'], registry, ['geneset', 'ucell'], n_permutations=300,
+                                  threads=1, memory_limit_gb=2, samples_only=True)
+    assert refused['status'] == 'skipped' and 'another .md' in refused['reason']
+    assert not samples_path.exists()
+
+
 def test_both_sidecar_sources_are_separate_bh_families_and_b_is_not_duplicated(tmp_path):
     store, geneset_root, entry = make_module_dataset(tmp_path)
     manifest, out_root = _run(tmp_path, entry, store, geneset_root, sources=['geneset', 'ucell'])

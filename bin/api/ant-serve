@@ -56,6 +56,7 @@ import os
 import re
 import sys
 import threading
+from urllib.parse import urlencode
 import time
 import uuid
 from collections import OrderedDict
@@ -95,6 +96,7 @@ from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
 from library_service import LIBRARY_S3_PREFIX, LibraryService
 from facet_aliases import canonical_facet, is_deprecated_facet_column
 import facet_results as facet_results_lib
+import facet_donor_values as donor_values_lib
 import help_content
 import facet_scopes as facet_scopes_lib
 import gene_classes as gene_classes_lib
@@ -13532,7 +13534,9 @@ def _with_gene_context(card: Dict[str, Any], gene: str, tables: Dict[Tuple[str, 
         pill = gene_detection_lib.pill(tables.get((scope, group)), gene)
         entries.append({**entry, 'detection': pill, 'low_detection': None if pill is None else pill['low_detection'],
                         'gene_flags': _context_gene_flags(gene, group, scope, base),
-                        'forest': facet_results_lib.forest_view(entry.get('forest') or [], forest)})
+                        'forest': facet_results_lib.forest_view(entry.get('forest') or [], forest),
+                        'links': _donor_links((card.get('facet') or {}).get('name'), scope, group, gene=gene,
+                                              anchors=entry.get('anchors') or [])})
     return {**card, 'gene_flags': _context_gene_flags(gene, None, scope, base), 'replication': entries}
 
 
@@ -13697,7 +13701,7 @@ def get_geneset_facet_effects(
     def card(facet_name: str, facet_scope: str) -> Dict[str, Any]:
         entry = modules.module_effects(catalog, name, datasets, facet_name, exclude_secondary=exclude_secondary,
                                        scope=facet_scope, cell_type=cell_type)
-        entry = module_card_forest(entry, forest)
+        entry = module_card_forest(_with_module_links(entry, facet_name, geneset_id), forest)
         if not include_units:
             entry = {**entry, 'units': []}
         member_entry = reader.member_replication(facet_name, members, datasets, exclude_secondary=exclude_secondary,
@@ -13939,6 +13943,393 @@ def get_gene_facet_effects(
         result['by_scope'] = by_scope
     return _with_help(result, *_FACET_HELP_TOPICS)
 
+
+
+# ── Donor-level values and plots behind a facet cell (2.45) ───────────────────
+
+_donor_values_instance: Optional[donor_values_lib.DonorValues] = None
+_DONOR_PLOT_FORMATS = ('png', 'svg', 'pdf')
+_DONOR_PLOT_CACHE: "OrderedDict[Tuple, Tuple[bytes, Dict[str, str]]]" = OrderedDict()
+_DONOR_PLOT_CACHE_LOCK = threading.Lock()
+_DONOR_PLOT_CACHE_ENTRIES = 64
+_DONOR_SCALE_NOTE = ('values are unadjusted: the test fits {covariates}, so the drawn trend can differ from the reported '
+                     'estimate (it also weights replicates by voom precision weights); `adjusted=true` removes the '
+                     'covariate part by ordinary least squares')
+
+
+def _donor_values() -> donor_values_lib.DonorValues:
+    """The shared reader of the per-replicate sidecars next to the facet results."""
+    global _donor_values_instance
+    reader = _facet_results()
+    with _facet_results_lock:
+        if _donor_values_instance is None or _donor_values_instance.results_dir != reader.results_dir:
+            _donor_values_instance = donor_values_lib.DonorValues(reader.results_dir)
+        return _donor_values_instance
+
+
+def _sidecar_exists(group_folder: str, stem: str, kind: str = 'genes') -> bool:
+    suffix = donor_values_lib.GENE_SAMPLES_SUFFIX if kind == 'genes' else donor_values_lib.MODULE_SAMPLES_SUFFIX
+    return (_facet_results().results_dir / group_folder / f'{stem}{suffix}').exists()
+
+
+def _per_cell_link(db_id: str, facet: str, gene: str, celltype_source: str, cell_type: str) -> Optional[str]:
+    """URL of the per-cell plot of a gene by the facet within one cell type of one dataset (None when the dataset
+    has no such facet column or the stratum cannot be expressed as a subset). Violin for a two-group facet, a scatter
+    with a regression line for a numeric one. Per-cell, descriptive: cells are not independent replicates."""
+    meta = registry.metadata_cache.get(db_id) or {}
+    obs = meta.get('obs') or {}
+    column = f'ant_{facet}'
+    categorical = column in (obs.get('categorical') or [])
+    numerical = column in (obs.get('numerical') or [])
+    if not (categorical or numerical):
+        return None
+    params: List[Tuple[str, str]] = []
+    if celltype_source not in ('constant_all_cells', 'none', ''):
+        if (celltype_source.startswith('group_pool') or '@' in celltype_source or ',' in cell_type or '..' in cell_type
+                or ':' in cell_type or celltype_source not in (obs.get('categorical') or [])):
+            return None
+        params.append(('subset', f'{celltype_source}:{cell_type}'))
+    if facet in donor_values_lib.NUMERIC_FACETS and numerical:
+        geom = 'scatter'
+        params = [('x', column), ('y', gene), ('regline', 'global')] + params
+    elif categorical:
+        geom = 'violin'
+        params = [('x', column), ('y', gene)] + params
+    else:
+        return None
+    return f'/databases/{db_id}/plot/{geom}?' + urlencode(params)
+
+
+def _donor_links(facet: Optional[str], scope: Optional[str], cell_type: str, gene: Optional[str] = None,
+                 module: Optional[str] = None, method: Optional[str] = None, source: Optional[str] = None,
+                 anchors: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+    """The ``links`` object of one result cell (gene or module x facet x cell type group x scope).
+
+    ``donor_plot`` / ``donor_plot_svg`` / ``donor_plot_adjusted`` / ``donor_values`` open the replicate-level values the
+    test used (``/facets/{facet}/donor-plot.png``, ``.svg``, the same with ``adjusted=true``, ``/donor-values``);
+    ``donor_values_available`` is true when every counted anchor has its sidecar (false until the test is rerun or
+    backfilled). ``anchors`` (genes only) lists, per counted anchor dataset, the existing per-cell plot (labelled
+    ``per-cell, descriptive``). Paths are relative to the API root.
+    """
+    if not facet or not cell_type:
+        return None
+    params = [('gene', gene)] if gene else [('module', module)]
+    if method:
+        params += [('method', method), ('source', source or '')]
+    if scope:
+        params.append(('scope', scope))
+    params.append(('cell_type', cell_type))
+    query = urlencode(params)
+    base = f'/facets/{facet}'
+    kind = 'genes' if gene else 'modules'
+    located = [(a, _unit_location(a['db_id'])) for a in anchors or []]
+    counted = [a for a, location in located if location]
+    available = bool(counted) and all(_sidecar_exists(*location, kind) for _, location in located if location)
+    links: Dict[str, Any] = {
+        'donor_plot': f'{base}/donor-plot.png?{query}', 'donor_plot_svg': f'{base}/donor-plot.svg?{query}',
+        'donor_plot_adjusted': f'{base}/donor-plot.png?{query}&adjusted=true',
+        'donor_values': f'{base}/donor-values?{query}', 'donor_values_available': available,
+        'donor_plot_label': 'replicate-level values, one dot per replicate; the data the test used',
+    }
+    if gene:
+        per_cell = []
+        for anchor in counted:
+            url = _per_cell_link(anchor['db_id'], facet, gene, str(anchor.get('celltype_source') or ''),
+                                 str(anchor.get('cell_type') or ''))
+            if url:
+                per_cell.append({'db_id': anchor['db_id'], 'cohort': anchor.get('cohort_display'),
+                                 'cell_type': anchor.get('cell_type'), 'url': url,
+                                 'label': 'per-cell, descriptive'})
+        links['anchors'] = per_cell
+    return links
+
+
+def _unit_location(db_id: str) -> Optional[Tuple[str, str]]:
+    """(results folder, stem) of a unit's dataset: a served dataset or a donor-pooled ``pool:<id>``; None if unknown."""
+    if db_id.startswith(facet_results_lib.POOL_PREFIX):
+        return facet_results_lib.POOLED_DIRNAME, db_id[len(facet_results_lib.POOL_PREFIX):]
+    try:
+        return _facet_results_location(db_id)
+    except HTTPException:
+        return None
+
+
+def _gene_count_fetcher(db_id: str, layer: str):
+    """``(file_index, gene) -> DataFrame(cell_id, value)`` of raw counts of one gene in the member files of a unit.
+
+    ``db_id`` is a served dataset or ``pool:<id>`` (members from the pool manifest). Read from the counts parquet
+    (sorted by gene) through the connection pool; the same gene of the same file is read once per request.
+    """
+    reader = _facet_results()
+    if db_id.startswith(facet_results_lib.POOL_PREFIX):
+        manifest = reader.run_manifest(facet_results_lib.POOLED_DIRNAME, db_id[len(facet_results_lib.POOL_PREFIX):]) or {}
+        members = list((manifest.get('pool') or {}).get('members') or [])
+    else:
+        members = [db_id]
+    seen: Dict[Tuple[int, str], Optional[pd.DataFrame]] = {}
+
+    def fetch(file_index: int, gene: str) -> Optional[pd.DataFrame]:
+        key = (file_index, gene.upper())
+        if key in seen:
+            return seen[key]
+        result: Optional[pd.DataFrame] = None
+        if file_index < len(members) and members[file_index] in registry.databases:
+            with _pooled_db(members[file_index]) as db:
+                source = db._layer_source_for_gene_filter(layer)
+                try:
+                    frame = db._conn.execute(
+                        f'SELECT cell_id, value FROM {source} WHERE gene_id IN ('
+                        f'SELECT gene_id FROM __genes WHERE upper(gene_name) = upper(?))', [gene]).df()
+                    if frame.empty:
+                        frame = db._conn.execute(
+                            f'SELECT cell_id, value FROM {source} WHERE gene_id IN ('
+                            f'SELECT gene_id FROM __varcat WHERE upper(feature_name) = upper(?))', [gene]).df()
+                except duckdb.Error:
+                    frame = pd.DataFrame()
+                if not frame.empty:
+                    result = frame
+        seen[key] = result
+        return result
+    return fetch
+
+
+def _donor_units_payload(facet_name: str, gene: Optional[str], module: Optional[str], cell_type: str,
+                         scope: Optional[str], include_uncounted: bool, adjusted: bool,
+                         method: Optional[str], source: Optional[str], exclude_secondary: bool) -> Dict[str, Any]:
+    """The answer of ``/facets/{facet}/donor-values`` (the plot reads the same dict)."""
+    if bool(gene) == bool(module):
+        raise HTTPException(status_code=400, detail='give exactly one of gene or module')
+    test_facet = _tested_facet(facet_name)
+    scope = _scope_param(scope)
+    reader = _facet_results()
+    prepared = reader.prepare(_facet_test_datasets())
+    values = _donor_values()
+    variant: Optional[Dict[str, Any]] = None
+    if gene:
+        card = reader.gene_effects(test_facet, gene, prepared, cell_type=cell_type,
+                                   exclude_secondary=exclude_secondary, scope=scope)
+        subject: Dict[str, Any] = {'gene': card['gene']}
+        unit_rows = [dict(unit) for unit in card['units']]
+        estimate_name = 'logFC'
+    else:
+        catalog, _, module_name = module.rpartition('/')
+        if not catalog or not module_name:
+            raise HTTPException(status_code=400, detail='module must be Study/Experiment/name')
+        card = _module_results().module_effects(catalog, module_name, prepared, test_facet,
+                                                exclude_secondary=exclude_secondary, scope=scope, cell_type=cell_type)
+        entry = next((e for e in card['replication']), None)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f'module {module} has no result for this facet, scope and cell type')
+        wanted = (method, source) if method and source else (entry['primary']['method'], entry['primary']['source'])
+        variant = {'method': wanted[0], 'source': wanted[1]}
+        subject = {'module': f"{card['catalog']}/{card['module']}", **variant}
+        unit_rows = [dict(unit) for unit in card['units']
+                     if (unit['method'], unit['source']) == wanted and unit.get('celltype_group') == entry['celltype_group']]
+        estimate_name = 'estimate'
+    if not unit_rows:
+        raise HTTPException(status_code=404, detail='no tested unit for this facet, scope and cell type')
+    resolved_scope = card.get('scope') or scope
+    counted_rows = [u for u in unit_rows if u.get('counted')]
+    selected = unit_rows if include_uncounted else counted_rows
+    fetchers: Dict[str, Any] = {}
+    layers: Dict[str, str] = {}
+    out_units: List[Dict[str, Any]] = []
+    for unit in selected:
+        db_id = unit['db_id']
+        group_folder, stem = _unit_location(db_id) or (None, None)
+        base = {
+            'db_id': db_id, 'title': unit.get('title'), 'cohort': unit.get('cohort'),
+            'cohort_label': unit.get('cohort_label'),
+            'cohort_display': facet_results_lib.cohort_display(unit.get('cohort_label')),
+            'cell_type': unit['cell_type'], 'celltype_source': unit['celltype_source'],
+            'counted': bool(unit.get('counted')), 'not_counted_reason': unit.get('not_counted_reason'),
+            'pooled': bool(unit.get('pooled')), 'descriptive_only': bool(unit.get('descriptive_only')),
+            'replicate_unit': unit.get('replicate_unit') or 'donor', 'n_donors_test': unit.get('n_donors'),
+            'model': {'estimate': unit.get(estimate_name), 'ci_low': unit.get('ci_low'), 'ci_high': unit.get('ci_high'),
+                      'p_value': unit.get('p_value') if gene else unit.get('p_perm'),
+                      'q_value': unit.get('q_value') if gene else unit.get('q_perm'),
+                      'unit': donor_values_lib.NUMERIC_AXIS.get(test_facet, (None, None))[1] or 'per level contrast'},
+        }
+        if group_folder is None:
+            out_units.append({**base, 'available': False, 'reason': 'unit is not in the result folder', 'donors': []})
+            continue
+        labels = (unit.get('level_ref'), unit.get('level_test'))
+        if gene:
+            if db_id not in fetchers:
+                manifest = reader.run_manifest(group_folder, stem) or {}
+                layers[db_id] = manifest.get('counts_layer') or 'counts'
+                fetchers[db_id] = _gene_count_fetcher(db_id, layers[db_id])
+            answer = values.gene_unit(group_folder, stem, test_facet, unit['cell_type'], unit['celltype_source'],
+                                      card['gene'], fetchers[db_id], labels)
+        else:
+            answer = values.module_unit(group_folder, stem, test_facet, unit['cell_type'], unit['celltype_source'],
+                                        card['catalog'], card['module'], variant['method'], variant['source'], labels)
+        shown = [{**{k: v for k, v in donor.items() if k not in ('value', 'value_adjusted')},
+                  'value': round(donor['value_adjusted' if adjusted else 'value'], 5)} for donor in answer['donors']]
+        out_units.append({**base, 'available': answer['available'], 'reason': answer['reason'],
+                          'covariates': answer['covariates'], 'n_donors': answer['n_donors'], 'donors': shown,
+                          'scale': answer.get('scale'), 'facet_kind': answer['facet_kind'],
+                          'line': (donor_values_lib.fitted_line(
+                              answer['donors'], test_facet, unit.get(estimate_name), adjusted)
+                              if answer['available'] and answer['facet_kind'] == 'numeric' else None)})
+    kind = donor_values_lib.facet_kind(test_facet)
+    first = next((u for u in out_units if u.get('available')), None)
+    levels = next(((u.get('level_ref'), u.get('level_test')) for u in selected if u.get('level_ref')), ('reference', 'tested'))
+    covariates = list(dict.fromkeys(c for u in out_units for c in u.get('covariates') or []))
+    axis = donor_values_lib.NUMERIC_AXIS.get(test_facet)
+    note = (f'values are the covariate-adjusted part of the same scale (ordinary least squares on {", ".join(covariates) or "no covariates"})'
+            if adjusted else _DONOR_SCALE_NOTE.format(covariates=', '.join(covariates) or 'no covariates'))
+    return {
+        'facet': test_facet, 'scope': resolved_scope, 'subject': subject, 'cell_type': cell_type,
+        'facet_kind': kind, 'x_label': axis[0] if axis else None,
+        'levels': None if kind == 'numeric' else list(levels),
+        'scale': first['scale'] if first else None, 'adjusted': adjusted,
+        'n_units': len(out_units), 'n_counted': sum(1 for u in out_units if u['counted']),
+        'note': note, 'units': out_units,
+        'anonymisation': 'replicates carry sequential labels per unit (D01, D02, ...); no donor id, crosswalk id or '
+                         'covariate value is returned',
+    }
+
+
+def _with_module_links(card: Dict[str, Any], facet: str, module_id: str) -> Dict[str, Any]:
+    """A module card whose replication entries and variants carry ``links`` (``_donor_links``; a copy: the cached card
+    is shared). The entry's links are those of its primary variant."""
+    entries = []
+    for entry in card.get('replication') or []:
+        variants = []
+        for variant in entry.get('variants') or []:
+            anchors = [row['anchor'] for row in variant.get('forest') or [] if row.get('counted')]
+            variants.append({**variant, 'links': _donor_links(
+                facet, card.get('scope'), entry['celltype_group'], module=module_id, method=variant['method'],
+                source=variant['source'], anchors=anchors)})
+        primary = entry.get('primary') or {}
+        chosen = next((v for v in variants if (v['method'], v['source']) == (primary.get('method'), primary.get('source'))),
+                      variants[0] if variants else None)
+        entries.append({**entry, 'variants': variants, 'links': chosen['links'] if chosen else None})
+    return {**card, 'replication': entries}
+
+
+@app.get("/facets/{facet_name}/donor-values", tags=["facet-tests"])
+def get_facet_donor_values(
+    facet_name: str,
+    cell_type: str = Query(..., description="Cell type group (e.g. 'microglia') or raw stratum label"),
+    gene: Optional[str] = Query(None, description="Gene symbol (case-insensitive). Give exactly one of gene or module."),
+    module: Optional[str] = Query(None, description="Gene set, `Study/Experiment/name` (as `/genesets/{id}`)"),
+    method: Optional[str] = Query(None, description="Module variant: `cell_mean` or `pseudobulk` (default: the card's primary variant)"),
+    source: Optional[str] = Query(None, description="Module score source: `geneset`, `ucell` or `gene_list` (with `method`)"),
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC),
+    adjusted: bool = Query(False, description="true: values with the covariate part of an ordinary least squares fit removed"),
+    include_uncounted: bool = Query(False, description="true: also the units that do not carry a cohort's vote (`counted` false, with the reason)"),
+    exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged, but not counted"),
+):
+    """The replicate-level values a facet test used, per counted cohort: what the dots of the donor plot are.
+
+    One entry per counted anchor unit (`counted` true; `include_uncounted` adds the others). `donors[]` holds one
+    row per replicate (donor, animal or sample) with a sequential label (`D01` ...: no donor id, crosswalk id or
+    covariate value is ever returned), `facet_value` (group level 0/1 with `group`, Braak stage, age in years),
+    `value`, `n_cells` (cells summed into the pseudobulk, or averaged for a module). For genes `value` is the
+    pseudobulk expression on the exact scale the test fits: log2 CPM with the unit's TMM normalised library size
+    (the voom input; its mean per gene is the stored `ave_expr`). For modules it is the replicate score the module
+    test fitted (`scale` names it). `model` repeats the unit's estimate, interval and p / q (gene: limma; module:
+    permutation); `covariates` names what the model adjusts for; `line` (numeric facets) is the straight line with
+    the reported slope through the centre of the dots. Values are unadjusted by default (`adjusted=true` removes the
+    covariate part); the test also weights replicates, so the drawn trend can differ from the estimate.
+
+    A unit whose results predate the per-replicate sidecars answers `available: false` with a reason until the
+    test is rerun or `ant-facet-test run --samples-only` backfills it. Exploratory.
+    """
+    payload = _donor_units_payload(facet_name, gene, module, cell_type, scope, include_uncounted, adjusted,
+                                   method, source, exclude_secondary)
+    return _with_help(payload, 'donor-plots', 'facet-replicate-unit', 'facet-effects')
+
+
+def _donor_caption(payload: Dict[str, Any], panels: List[Dict[str, Any]]) -> str:
+    """The plain caption of a donor plot (header and image metadata, never drawn)."""
+    subject = payload['subject']
+    name = subject.get('gene') or subject.get('module')
+    unit_word = next((p['replicate_unit'] for p in panels), 'donor')
+    parts = [f'{name}, facet {payload["facet"]}, {payload["cell_type"]}, scope {payload["scope"]}.',
+             f'One dot per {unit_word}; one panel per cohort; {payload["scale"]}.',
+             payload['note'] + '.']
+    for panel in panels:
+        model = panel['model']
+        estimate = model['estimate']
+        if estimate is None:
+            continue
+        low, high = model.get('ci_low'), model.get('ci_high')
+        interval = f' (95% CI {low:.2f} to {high:.2f})' if low is not None and high is not None else ''
+        q_value = model.get('q_value')
+        parts.append(f'{panel["cohort_display"]}: effect {estimate:.3f}{interval}'
+                     + (f', q = {q_value:.3g}' if q_value is not None else '') + '.')
+    return ' '.join(parts)
+
+
+@app.get("/facets/{facet_name}/donor-plot.{fmt}", tags=["facet-tests"])
+def get_facet_donor_plot(
+    facet_name: str, fmt: str,
+    cell_type: str = Query(..., description="Cell type group (e.g. 'microglia') or raw stratum label"),
+    gene: Optional[str] = Query(None, description="Gene symbol. Give exactly one of gene or module."),
+    module: Optional[str] = Query(None, description="Gene set, `Study/Experiment/name`"),
+    method: Optional[str] = Query(None, description="Module variant: cell_mean or pseudobulk (default: primary)"),
+    source: Optional[str] = Query(None, description="Module score source (with method)"),
+    scope: Optional[str] = Query(None, description=_SCOPE_QUERY_DESC),
+    adjusted: bool = Query(False, description="true: covariate-adjusted values (least squares), same scale"),
+    include_uncounted: bool = Query(False, description="true: also panels for units that do not carry a cohort's vote"),
+    exclude_secondary: bool = Query(True),
+    width: float = Query(2.6, gt=1.0, le=8.0, description="Width of one panel in inches"),
+    height: float = Query(3.0, gt=1.0, le=8.0, description="Height of a panel row in inches"),
+    dpi: int = Query(150, ge=72, le=400),
+):
+    """Small multiples of the replicate-level values behind a facet cell (`png`, `svg` or `pdf`).
+
+    One panel per counted cohort on a shared y axis. Two-group facets: dots (one per replicate), the box of the
+    quartiles and a bar at each group mean. Numeric facets: scatter with the straight line of the reported slope.
+    Panel titles are the cohort and the number of replicates; estimates, q values and the model are in the
+    `X-Plot-Caption` header and the image metadata, never drawn into the picture. Same parameters and values as
+    `/facets/{facet}/donor-values`. 404 when no unit has stored replicate values (results from before the sidecars
+    existed need `ant-facet-test run --samples-only`).
+    """
+    if fmt not in _DONOR_PLOT_FORMATS:
+        raise HTTPException(status_code=404, detail=f'format must be one of {", ".join(_DONOR_PLOT_FORMATS)}')
+    prepared = _facet_results().prepare(_facet_test_datasets())
+    cache_key = (facet_name, cell_type, gene, module, method, source, scope, adjusted, include_uncounted,
+                 exclude_secondary, width, height, dpi, fmt, prepared.signature)
+    with _DONOR_PLOT_CACHE_LOCK:
+        cached = _DONOR_PLOT_CACHE.get(cache_key)
+        if cached is not None:
+            _DONOR_PLOT_CACHE.move_to_end(cache_key)
+    if cached is None:
+        payload = _donor_units_payload(facet_name, gene, module, cell_type, scope, include_uncounted, adjusted,
+                                       method, source, exclude_secondary)
+        panels = [u for u in payload['units'] if u.get('available') and u['donors']][:plotting.MAX_DONOR_PANELS]
+        if not panels:
+            reasons = sorted({str(u.get('reason')) for u in payload['units'] if u.get('reason')})
+            raise HTTPException(status_code=404, detail='no replicate values to plot: ' + '; '.join(reasons or ['no counted unit']))
+        numeric = payload['facet_kind'] == 'numeric'
+        group_order: Optional[List[str]] = payload['levels']
+        drawn = []
+        for unit in panels:
+            title = f"{unit['cohort_display'] if unit['counted'] else unit['title']} (n = {unit['n_donors']})"
+            entry: Dict[str, Any] = {'title': title, 'values': [d['value'] for d in unit['donors']]}
+            if numeric:
+                entry['x'] = [d['facet_value'] for d in unit['donors']]
+                entry['line'] = unit.get('line')
+            else:
+                entry['groups'] = [d['group'] for d in unit['donors']]
+            drawn.append(entry)
+        caption = _donor_caption(payload, panels)
+        image = plotting.plot_donor_values(
+            drawn, kind=payload['facet_kind'], y_label=payload['scale'].split(' (')[0] if payload['scale'] else 'value',
+            x_label=payload['x_label'], group_order=group_order, panel_width=width, panel_height=height, dpi=dpi,
+            output_format=fmt, caption=caption)
+        headers = {'X-Plot-Caption': caption.encode('latin-1', errors='replace').decode('latin-1'),
+                   'X-Plot-Format': fmt, 'Cache-Control': 'private, max-age=300'}
+        cached = (image, headers)
+        with _DONOR_PLOT_CACHE_LOCK:
+            _DONOR_PLOT_CACHE[cache_key] = cached
+            while len(_DONOR_PLOT_CACHE) > _DONOR_PLOT_CACHE_ENTRIES:
+                _DONOR_PLOT_CACHE.popitem(last=False)
+    return Response(content=cached[0], media_type=_PLOT_MIME_TYPES[fmt], headers=cached[1])
 
 
 @app.get("/facets/cohorts", tags=["facet-tests"])

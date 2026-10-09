@@ -533,6 +533,7 @@ def main() -> None:
             '  module_facet_effects  one gene set: does its score change with a facet, and which members do\n'
             '  facet_top_modules  gene sets whose score changes in the most cohorts, per cell type\n'
             '  facet_units      which units were tested, donors, model, flags; why others were not\n'
+            '  facet_donor_values  the donor-level values behind one result cell (one value per donor, per cohort) + plot link\n'
             '  get_facet_tests  gene or module rows of one dataset (limma-voom / OLS + permutations)\n'
             '  All of them take scope= (human_postmortem | xenograft_human_in_mouse): facets are\n'
             '  tested and counted per scope, human and mouse genes are never merged.\n'
@@ -1737,6 +1738,71 @@ def main() -> None:
                     f"{_fmt_number(unit.get('q_value'))} | {_fmt_number(unit.get('q_treat'))} | {donors} | "
                     f"{unit.get('analysis_level') or '-'} | {', '.join(flags) or '-'} | "
                     f"{unit.get('model')}{'; left out: ' + ', '.join(unit['covariates_left_out']) if unit.get('covariates_left_out') else ''}")
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def facet_donor_values(facet: str, cell_type: str, gene: Optional[str] = None, geneset: Optional[str] = None,
+                                 scope: Optional[str] = None, adjusted: bool = False,
+                                 include_uncounted: bool = False, method: Optional[str] = None,
+                                 source: Optional[str] = None) -> str:
+        """The values behind one facet result: one number per donor (or host animal), per counted cohort.
+
+        Use it to check what a replicated gene or gene set really looks like (outliers, a few donors carrying the
+        effect, overlap between groups) instead of trusting the estimate alone. Each line is one donor with a
+        sequential label (D01, D02 ...; not a donor id), the facet value (group, Braak stage or age in years), the
+        value and the number of cells. For a gene the value is log2 counts per million of the donor's summed counts
+        with TMM normalised library size, the scale the limma-voom test works on. For a gene set it is the donor's
+        score. Values are unadjusted unless adjusted=true (covariate part removed by ordinary least squares); the
+        test also weights donors, so a trend can differ a little from the reported estimate. A plot link is given
+        (relative to the API root: png or svg); open it for the small-multiples figure. Exploratory.
+
+        Args:
+            facet: sex, disease, apoe4_carrier, braak, age or app_nlgf (also apoe4_dose, braak_threshold, age_adjusted).
+            cell_type: A cell type group such as 'microglia' (as in facet_effects).
+            gene: Gene symbol, e.g. 'MEIS1'. Give exactly one of gene or geneset.
+            geneset: Gene set id 'Study/Experiment/name' (as in module_facet_effects).
+            scope: human_postmortem or xenograft_human_in_mouse (default as facet_effects).
+            adjusted: true for covariate-adjusted values.
+            include_uncounted: also list units that do not carry a cohort's vote (with the reason).
+            method: Gene sets only: cell_mean or pseudobulk (default: the variant the card shows).
+            source: Gene sets only: geneset, ucell or gene_list (with method).
+        """
+        params: dict = {'cell_type': cell_type, 'scope': scope, 'adjusted': str(bool(adjusted)).lower(),
+                        'include_uncounted': str(bool(include_uncounted)).lower(), 'method': method, 'source': source}
+        if gene:
+            params['gene'] = gene
+        if geneset:
+            params['module'] = geneset
+        try:
+            data = await _get(f'/facets/{facet}/donor-values', **params)
+        except httpx.HTTPStatusError as exc:
+            return f'error {exc.response.status_code}: {exc.response.text[:300]}'
+        subject = data['subject']
+        name = subject.get('gene') or f"{subject.get('module')} ({subject.get('method')}, {subject.get('source')})"
+        lines = [f"{name} / {data['facet']} [{data['scope']}] in {data['cell_type']}: one value per replicate, "
+                 f"scale: {data.get('scale') or 'n/a'}; {'adjusted' if data['adjusted'] else 'unadjusted'}.",
+                 data['note'] + '.', 'EXPLORATORY, descriptive. ' + data['anonymisation'] + '.']
+        query = '&'.join(f'{key}={value}' for key, value in params.items() if value is not None and key not in
+                         ('include_uncounted',))
+        lines.append(f"plot: /facets/{data['facet']}/donor-plot.png?{query} (svg and pdf also)")
+        for unit in data['units']:
+            model = unit['model']
+            header = (f"\n## {unit['cohort_display']}{'' if unit['counted'] else ' (not counted: ' + str(unit.get('not_counted_reason')) + ')'}"
+                      f" | {unit['db_id']} | {unit['cell_type']} | {unit.get('n_donors') or unit.get('n_donors_test')} "
+                      f"{unit['replicate_unit']}s")
+            lines.append(header)
+            if model.get('estimate') is not None:
+                lines.append(f"  model: effect {_fmt_number(model['estimate'])} {model['unit']} "
+                             f"[{_fmt_number(model.get('ci_low'))}, {_fmt_number(model.get('ci_high'))}], "
+                             f"q {_fmt_number(model.get('q_value'))}; adjusts for: {', '.join(unit.get('covariates') or []) or 'nothing'}")
+            if not unit['available']:
+                lines.append(f"  not available: {unit['reason']}")
+                continue
+            lines.append('  label | ' + ('group' if unit['facet_kind'] == 'two_group' else data['x_label'] or 'facet value')
+                         + ' | value | cells')
+            for donor in unit['donors']:
+                shown = donor.get('group') if unit['facet_kind'] == 'two_group' else _fmt_number(donor['facet_value'])
+                lines.append(f"  {donor['label']} | {shown} | {_fmt_number(donor['value'])} | {donor['n_cells']}")
         return '\n'.join(lines)
 
     def _donor_phrase(donors: Optional[dict]) -> str:

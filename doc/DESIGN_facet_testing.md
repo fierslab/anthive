@@ -34,6 +34,35 @@ Decisions of Mark on 2026-10-08 (mock-ups reviewed by Fable). Statistics are unc
   `n_matching`, `has_more`). `/facets/{f}/effects/overview` gives the headline and one card per cell type group with each
   gene shown once.
 
+## Donor plots (2.45, 2026-10-09): the values behind a result cell
+
+Mark, 2026-10-09: every facet cell (gene or module x facet x cell type group x scope) links to a plot of exactly what was
+tested, the replicate-level values of every counted cohort.
+
+* **Sidecars, not a recomputation.** TMM factors and the library size depend on every gene that passes `filterByExpr` in
+  the unit, so one gene's value cannot be rebuilt cheaply from the counts alone. `ant-facet-test` therefore writes, next to
+  the results, `<stem>.facet_samples.parquet` (per unit and replicate: `facet_value`, the covariates as fitted, `batch_code`,
+  `n_cells`, `lib_size` after `filterByExpr`, `norm_factor`; `facet_test_limma.R` writes them to `sample_norm.csv`) and
+  `<stem>.facet_sample_cells.parquet` (the cells summed into every sample). One gene's value is then a sum over the cells of
+  each sample for that gene only (one parquet read, the by_gene file is sorted by gene) on the exact voom input scale. No
+  replicate id is written. `ant-facet-test-modules` writes `<stem>.facet_module_samples.parquet` and
+  `<stem>.facet_module_sample_scores.parquet` (the replicate score of every module variant in scope of the stratum).
+* **Backfill.** `ant-facet-test run --samples-only` (and the modules tool) plan the same units, run only the pseudobulk and
+  filterByExpr + TMM (no voom, no fit) and write just the sidecars; they refuse when the stored manifest was made from another
+  `.md` or lists other tested units. Results from before this change have no donor values until backfilled (the API answers
+  `available: false` with that reason). The sidecars of the module scores describe the scores at the time they were written:
+  a later rescoring of the sidecar `scores.parquet` is not reflected until the modules are rerun.
+* **Scale check.** The mean of a gene's values over the samples of a unit equals the stored `ave_expr` (limma's `Amean`,
+  the mean of the voom matrix) to five decimals (tested against the real pipeline in `tests/test_facet_test.py`).
+* **What the dots do not show.** The test weights replicates (voom precision weights and sample quality weights) and adjusts
+  for covariates; the dots are unweighted. A trend by eye can differ from the reported estimate, rarely even in sign for a
+  low count gene. `adjusted=true` removes the covariate part with an unweighted least squares fit; it is not the limma model.
+* **Anonymisation.** Replicates get sequential labels per unit (`D01` ...) ordered by facet value and library size, never an id;
+  per-replicate covariates stay on the server. The sidecars hold no id, so none can leak, and the response is built from a
+  fixed list of fields.
+* **Links.** Gene and module cards carry `links` per cell (see `doc/API_CHANGELOG.md`), the per-cell plot of a gene
+  (existing violin or scatter endpoint) is labelled "per-cell, descriptive".
+
 ## v3c (2026-10-07): scopes, floors, exclusions, anatomy: what changed
 
 Decisions of Mark on 2026-10-07 (accepting the reassessment recommendations and the store audit). Where this section and
@@ -438,6 +467,8 @@ in git, never read by the catalogue scan):
 
 * `<file>.facet_tests.parquet`: one row per (cell type, facet, gene)
 * `<file>.facet_composition.parquet`
+* `<file>.facet_samples.parquet` and `<file>.facet_sample_cells.parquet`: per replicate library size, TMM factor, model
+  covariates and the cells summed into it, behind the donor plots (see "Donor plots"; `--samples-only` backfills them)
 * `<file>.facet_run_manifest.json`: dataset sha256 from the `.md`, git commits
   of anthive4 and h5adstore, R / limma / edgeR versions, all parameters, seed,
   timestamp, per-unit status, donors per level, flags and counts.

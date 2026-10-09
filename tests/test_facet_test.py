@@ -538,6 +538,87 @@ def test_planted_sex_effect_recovered(tmp_path):
     assert json.loads((out_root / 'Syn2026' / 'Syn_ds.facet_run_manifest.json').read_text())['seed']
 
 
+@needs_r
+def test_sample_sidecars_hold_the_voom_input_and_no_donor_ids(tmp_path):
+    """The per-sample sidecars reproduce the test input: the mean of a gene's log2 CPM over the samples is the stored
+    ave_expr (limma's Amean of the voom matrix), and no replicate id is written. ``--samples-only`` rewrites the same
+    sidecars without touching the results and refuses results that do not match."""
+    from facet_donor_values import voom_log2_cpm
+    store, entry = make_dataset(tmp_path, n_f=10, n_m=10, samples_per_donor=2)
+    out_root = tmp_path / 'out'
+    manifest = aft.process_dataset(entry, store, out_root, ['sex'], RSCRIPT, threads=1, memory_limit_gb=1)
+    assert manifest['status'] == 'done' and manifest['sample_sidecar_rows'] == 20
+    folder = out_root / 'Syn2026'
+    samples_path, cells_path = folder / 'Syn_ds.facet_samples.parquet', folder / 'Syn_ds.facet_sample_cells.parquet'
+    samples, cells = pd.read_parquet(samples_path), pd.read_parquet(cells_path)
+    assert not {'donor', 'ant_donor', 'sample_id'} & set(samples.columns)
+    assert set(cells.columns) == {'sample_idx', 'cell_id', 'file_index'}
+    for path in (samples_path, cells_path):
+        assert b'D00' not in path.read_bytes() and b'D19' not in path.read_bytes()
+    unit = samples[(samples['facet'] == 'sex') & (samples['cell_type'] == 'T1')]
+    assert len(unit) == 20 and unit['lib_size'].gt(0).all() and unit['norm_factor'].gt(0).all()
+    assert set(unit['facet_value']) == {0.0, 1.0} and unit['n_cells'].eq(30).all()
+    counts = duckdb.sql(
+        f"SELECT m.sample_idx, SUM(p.value) AS total FROM read_parquet('{store}/Syn2026/Syn_ds.layer.counts.by_gene.parquet') p "
+        f"JOIN read_parquet('{cells_path}') m ON p.cell_id = m.cell_id WHERE p.gene_id = 0 GROUP BY m.sample_idx").df()
+    summed = counts.set_index('sample_idx')['total'].reindex(unit['sample_idx']).fillna(0.0).to_numpy()
+    values = voom_log2_cpm(summed, unit['lib_size'].to_numpy(), unit['norm_factor'].to_numpy())
+    results = pd.read_parquet(folder / 'Syn_ds.facet_tests.parquet')
+    planted = results[(results['cell_type'] == 'T1') & (results['gene'] == PLANTED_GENE)].iloc[0]
+    assert values.mean() == pytest.approx(planted['ave_expr'], abs=1e-6)
+    # the planted effect is visible on the stored scale
+    male = unit['facet_value'].to_numpy() == 1.0
+    assert values[male].mean() - values[~male].mean() == pytest.approx(PLANTED_LOG2_FC, abs=0.6)
+    # backfill: same sidecars, results untouched
+    results_stamp = (folder / 'Syn_ds.facet_tests.parquet').stat().st_mtime_ns
+    samples_path.unlink(), cells_path.unlink()
+    backfill = aft.process_dataset(entry, store, out_root, ['sex'], RSCRIPT, threads=1, memory_limit_gb=1,
+                                   samples_only=True)
+    assert backfill['status'] == 'samples_only' and backfill['sample_sidecar_rows'] == 20
+    pd.testing.assert_frame_equal(pd.read_parquet(samples_path), samples)
+    pd.testing.assert_frame_equal(pd.read_parquet(cells_path), cells)
+    assert (folder / 'Syn_ds.facet_tests.parquet').stat().st_mtime_ns == results_stamp
+    # a changed .md or other units mean the stored results are stale: refused, nothing written
+    samples_path.unlink(), cells_path.unlink()
+    entry.md_path.write_text(entry.md_path.read_text() + '\n')
+    refused = aft.process_dataset(entry, store, out_root, ['sex'], RSCRIPT, threads=1, memory_limit_gb=1,
+                                  samples_only=True)
+    assert refused['status'] == 'skipped' and 'another .md' in refused['reason']
+    assert not samples_path.exists() and not cells_path.exists()
+
+
+def test_samples_only_refuses_without_stored_results(tmp_path):
+    problem = aft.samples_only_problem(tmp_path, 'nothing', 'abc', [], pd.DataFrame({'job_id': []}))
+    assert 'no readable manifest' in problem
+    (tmp_path / 'x.facet_run_manifest.json').write_text(json.dumps({
+        'md_sha256': 'abc', 'units': [{'facet': 'sex', 'cell_type': 'T1', 'celltype_source': 's', 'status': 'ok',
+                                       'r_status': 'ok'}]}))
+    job = {'facet': 'sex', 'label': 'T1', 'source': 's', 'status': 'ok', 'job_id': 1}
+    assert aft.samples_only_problem(tmp_path, 'x', 'abc', [job], pd.DataFrame({'job_id': [1]})) is None
+    assert 'another .md' in aft.samples_only_problem(tmp_path, 'x', 'zzz', [job], pd.DataFrame({'job_id': [1]}))
+    assert 'differ' in aft.samples_only_problem(tmp_path, 'x', 'abc', [dict(job, label='T2')], pd.DataFrame({'job_id': [1]}))
+
+
+def test_write_sample_sidecars_never_writes_donor_ids(tmp_path):
+    jobs = [{'job_id': 1, 'status': 'ok', 'facet': 'sex', 'label': 'T1', 'source': 'ant_cell_type'}]
+    sample_rows = pd.DataFrame({
+        'job_id': [1, 1], 'sample_idx': [0, 1], 'donor': ['ROSMAP_77', 'ROSMAP_78'], 'facet_value': [0.0, 1.0],
+        'cov_sex': [None, None], 'cov_age': [None, None], 'cov_pmi': [None, None], 'cov_path': [None, None],
+        'batch': ['bankA', 'bankB']})
+    norm = pd.DataFrame({'job_id': [1, 1], 'sample_idx': [0, 1], 'lib_size': [1e6, 2e6], 'norm_factor': [1.0, 1.1]})
+    pb_cells = pd.DataFrame({'cell_id': [10, 11, 12], 'sample_idx': [0, 0, 1], 'file_index': [0, 0, 0]})
+    written = aft.write_sample_sidecars(tmp_path, 'stem', jobs, sample_rows, norm, {0: 25, 1: 12}, pb_cells)
+    assert written == 2
+    samples = pd.read_parquet(tmp_path / 'stem.facet_samples.parquet')
+    assert list(samples['batch_code']) == [0, 1] and list(samples['n_cells']) == [25, 12]
+    assert not {'donor', 'batch'} & set(samples.columns)
+    for path in tmp_path.glob('*.parquet'):
+        assert b'ROSMAP' not in path.read_bytes() and b'bank' not in path.read_bytes()
+    # nothing to write removes stale sidecars of an earlier run
+    assert aft.write_sample_sidecars(tmp_path, 'stem', jobs, sample_rows, norm.iloc[0:0], {}, pb_cells) == 0
+    assert not list(tmp_path.glob('*.parquet'))
+
+
 EXCLUSION_MD = ('facet_donor_exclusions:\n  reason: shared persons\n  obs:\n'
                 '    sample_id: [D00_s0, D01_s0, D12_s0]\n')
 

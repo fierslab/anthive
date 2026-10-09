@@ -17,6 +17,12 @@ the `.h5ad`).
 
 Facet engine v3b (2026-10-06, review): the effect gate is a separate field (at least 2 cohorts with log2FC >= tau), `r_treat` is the second tier, units carry lambda / inflated / notes / covariates_dropped / sex-discordance, `age` and `age_adjusted` run side by side (age floor 60), `app_nlgf` is stratified by timepoint and graft line from the `.md` (`control_basis`, `app_nlgf_design`), limma uses quality weights and robust eBayes, residual df floor 4.
 
+Donor plots (2026-10-09): both facet tools write per-sample sidecars next to the results (`<stem>.facet_samples.parquet` and
+`.facet_sample_cells.parquet`; `.facet_module_samples.parquet` and `.facet_module_sample_scores.parquet`) that `lib/facet_donor_values.py`
+turns into the replicate-level values of a result cell. `facet_test_limma.R` writes `sample_norm.csv` (library size after
+`filterByExpr`, TMM factor). `run --samples-only` (both tools) backfills the sidecars of existing results without touching them and
+refuses results made from another `.md` or with other tested units. Never write a replicate id into a sidecar.
+
 Facet engine v3c (2026-10-07): `dataset_eligibility` also refuses datasets excluded from the facet layer
 (`facet_scopes.facet_exclusion_reason`: spatial or mass spectrometry technology, `facet_exclude: true` in the `.md`); `n_tissues` counts
 `ant_tissue`, `tissue_uberon` and `ant_region`; `ant_tissue` is a coarse facet (`lib/tissue_groups.yaml`). See the v3c section of

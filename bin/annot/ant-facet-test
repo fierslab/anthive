@@ -1191,10 +1191,13 @@ def r_versions(rscript: str) -> Dict[str, str]:
 NULL_PERMUTATIONS = 0
 
 
-def run_r(rscript: str, work_dir: Path) -> None:
+def run_r(rscript: str, work_dir: Path, samples_only: bool = False) -> None:
+    """Run ``facet_test_limma.R`` in ``work_dir``; ``samples_only`` stops after filterByExpr and TMM (no voom, no fit)."""
     env = dict(os.environ, OPENBLAS_NUM_THREADS='2', OMP_NUM_THREADS='1',
                MKL_NUM_THREADS='1')
-    command = [rscript, str(R_SCRIPT), str(work_dir), str(SEED), str(NULL_PERMUTATIONS)]
+    command = [rscript, str(R_SCRIPT), str(work_dir), str(SEED), str(0 if samples_only else NULL_PERMUTATIONS)]
+    if samples_only:
+        command.append('1')
     result = subprocess.run(command, capture_output=True, text=True, env=env)
     if result.returncode != 0:
         raise RuntimeError(f'R failed ({result.returncode}):\n{result.stdout[-2000:]}\n{result.stderr[-4000:]}')
@@ -1275,6 +1278,74 @@ def _stratum_derivation_note(strata_note: str, pooled: bool) -> str:
     return strata_note + ('; donor-pooled over member files' if pooled else '')
 
 
+def samples_only_problem(out_dir: Path, stem: str, md_sha256: str, jobs: List[Dict[str, Any]],
+                         sample_norm: pd.DataFrame) -> Optional[str]:
+    """Why a ``--samples-only`` run must not write sidecars next to the existing results (None: it may).
+
+    The sidecars have to describe exactly the units of the stored results: the existing manifest must exist, come
+    from the same ``.md`` and list the same tested units (facet, cell type, stratum source) as this run.
+    """
+    manifest_path = out_dir / f'{stem}.facet_run_manifest.json'
+    try:
+        existing = json.loads(manifest_path.read_text())
+    except (OSError, ValueError):
+        return f'no readable manifest at {manifest_path}; run the full test first'
+    if existing.get('md_sha256') != md_sha256:
+        return 'the stored results were made from another .md; rerun the full test'
+    normalised = set(sample_norm['job_id'])
+    now = {(job['facet'], job['label'], job['source']) for job in jobs
+           if job['status'] == 'ok' and job.get('job_id') in normalised}
+    before = {(unit['facet'], unit['cell_type'], unit['celltype_source']) for unit in existing.get('units', [])
+              if unit.get('status') == 'ok' and unit.get('r_status') == 'ok'}
+    if now != before:
+        return (f'the tested units differ from the stored results ({len(now ^ before)} units); '
+                'rerun the full test')
+    return None
+
+
+SAMPLES_SUFFIX = '.facet_samples.parquet'
+SAMPLE_CELLS_SUFFIX = '.facet_sample_cells.parquet'
+
+
+def write_sample_sidecars(out_dir: Path, stem: str, jobs: List[Dict[str, Any]], sample_rows: pd.DataFrame,
+                          sample_norm: pd.DataFrame, n_cells_of_sample: Dict[int, int], pb_cells: pd.DataFrame) -> int:
+    """Write the per-sample sidecars the donor value plots read (``lib/facet_donor_values.py``).
+
+    ``<stem>.facet_samples.parquet``: one row per (unit, replicate): ``facet``, ``cell_type`` (raw label),
+    ``celltype_source``, ``sample_idx`` (a number of this run, not an id), ``facet_value`` (the model's column: 0/1 for
+    two-group facets, stage, age in decades), the model covariates exactly as fitted (sex 0/1, z-scored age and PMI,
+    pathology, batch as an integer code), ``n_cells``, ``lib_size`` and ``norm_factor`` (library size after
+    ``filterByExpr`` and the TMM factor: the voom input scale). Replicate ids are never written.
+    ``<stem>.facet_sample_cells.parquet``: ``sample_idx``, ``cell_id``, ``file_index`` of the cells summed into every
+    sample, so one gene's pseudobulk can be summed on demand.
+
+    Returns:
+        Number of unit rows written (0 when R produced no normalisation, nothing is written then).
+    """
+    if not len(sample_norm) or not len(sample_rows):
+        for suffix in (SAMPLES_SUFFIX, SAMPLE_CELLS_SUFFIX):
+            (out_dir / f'{stem}{suffix}').unlink(missing_ok=True)
+        return 0
+    unit_of_job = pd.DataFrame([{'job_id': job['job_id'], 'facet': job['facet'], 'cell_type': job['label'],
+                                 'celltype_source': job['source']} for job in jobs if job['status'] == 'ok'])
+    table = sample_rows.merge(sample_norm, on=['job_id', 'sample_idx'], how='inner').merge(unit_of_job, on='job_id')
+    table['n_cells'] = table['sample_idx'].map(n_cells_of_sample).astype('int64')
+    table['batch_code'] = -1
+    for job_id, sub in table.groupby('job_id'):
+        labels = sub['batch'].fillna('').astype(str)
+        if (labels != '').any():
+            table.loc[sub.index, 'batch_code'] = pd.factorize(labels)[0]
+    table = table.drop(columns=['job_id', 'donor', 'batch'])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    table.to_parquet(out_dir / f'{stem}{SAMPLES_SUFFIX}', index=False)
+    used = pb_cells[pb_cells['sample_idx'].isin(set(table['sample_idx']))]
+    cells = pd.DataFrame({'sample_idx': used['sample_idx'].astype('int32').to_numpy(),
+                          'cell_id': used['cell_id'].to_numpy(),
+                          'file_index': used['file_index'].astype('int8').to_numpy()})
+    cells.to_parquet(out_dir / f'{stem}{SAMPLE_CELLS_SUFFIX}', index=False)
+    return int(len(table))
+
+
 def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: List[str],
                     rscript: str, threads: int = 4, memory_limit_gb: int = 24,
                     keep_work: bool = False, exclusion_from: Optional[List[str]] = None,
@@ -1282,7 +1353,7 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
                     all_donors: bool = False, tau_two_group: float = TAU_TWO_GROUP,
                     tau_braak_per_stage: float = TAU_BRAAK_PER_STAGE,
                     tau_age_per_decade: float = TAU_AGE_PER_DECADE,
-                    age_floor: float = AGE_FACET_MIN_AGE) -> Dict[str, Any]:
+                    age_floor: float = AGE_FACET_MIN_AGE, samples_only: bool = False) -> Dict[str, Any]:
     """Run all requested facets over all strata of one dataset.
 
     The donors listed by the ``facet_donor_exclusions`` rule of the dataset
@@ -1297,7 +1368,7 @@ def process_dataset(entry: H5adEntry, store_root: Path, out_root: Path, facets: 
                     members=[entry])
     return process_target(target, store_root, out_root, facets, rscript, threads, memory_limit_gb, keep_work,
                           exclusion_from, exclusion_where, all_donors, tau_two_group, tau_braak_per_stage,
-                          tau_age_per_decade, age_floor)
+                          tau_age_per_decade, age_floor, samples_only)
 
 
 def process_pool(pool_id: str, members: List[H5adEntry], store_root: Path, out_root: Path,
@@ -1305,7 +1376,7 @@ def process_pool(pool_id: str, members: List[H5adEntry], store_root: Path, out_r
                  keep_work: bool = False, tau_two_group: float = TAU_TWO_GROUP,
                  tau_braak_per_stage: float = TAU_BRAAK_PER_STAGE,
                  tau_age_per_decade: float = TAU_AGE_PER_DECADE,
-                    age_floor: float = AGE_FACET_MIN_AGE) -> Dict[str, Any]:
+                 age_floor: float = AGE_FACET_MIN_AGE, samples_only: bool = False) -> Dict[str, Any]:
     """Donor-pooled run over the member files of one cohort.
 
     A donor's cells are pooled across the member files (the regional files of
@@ -1319,7 +1390,8 @@ def process_pool(pool_id: str, members: List[H5adEntry], store_root: Path, out_r
     target = Target(db_id=f'pool:{pool_id}', study=POOLED_DIRNAME, stem=pool_id,
                     group_id=members[0].group_id, members=list(members), pool_id=pool_id)
     return process_target(target, store_root, out_root, facets, rscript, threads, memory_limit_gb, keep_work,
-                          None, None, False, tau_two_group, tau_braak_per_stage, tau_age_per_decade, age_floor)
+                          None, None, False, tau_two_group, tau_braak_per_stage, tau_age_per_decade, age_floor,
+                          samples_only)
 
 
 def process_target(target: Target, store_root: Path, out_root: Path, facets: List[str],
@@ -1327,8 +1399,15 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
                    exclusion_from: Optional[List[str]], exclusion_where: Optional[List[str]],
                    all_donors: bool, tau_two_group: float, tau_braak_per_stage: float,
                    tau_age_per_decade: float = TAU_AGE_PER_DECADE,
-                    age_floor: float = AGE_FACET_MIN_AGE) -> Dict[str, Any]:
-    """Shared implementation of ``process_dataset`` and ``process_pool``."""
+                   age_floor: float = AGE_FACET_MIN_AGE, samples_only: bool = False) -> Dict[str, Any]:
+    """Shared implementation of ``process_dataset`` and ``process_pool``.
+
+    ``samples_only`` (``run --samples-only``): plan the same units, sum the same pseudobulk, run only filterByExpr and
+    TMM in R and write just the sample sidecars (``write_sample_sidecars``) next to the existing results. The facet
+    tests, the manifest and the composition table are not touched; it refuses when the existing manifest was made from
+    another ``.md`` or holds other tested units (rerun the test instead). This backfills the sidecars for results
+    from before they existed.
+    """
     started = time.time()
     pooled = target.pool_id is not None
     first = target.members[0]
@@ -1645,13 +1724,31 @@ def process_target(target: Target, store_root: Path, out_root: Path, facets: Lis
                                'tau_strong': strong_from(tau_for_facet(j['facet'], tau_two_group, tau_braak_per_stage,
                                                                        tau_age_per_decade))}
                               for j in jobs if j['status'] == 'ok']).to_csv(work_dir / 'jobs.csv', index=False)
-                run_r(rscript, work_dir)
+                run_r(rscript, work_dir, samples_only)
                 results = pd.read_csv(work_dir / 'results.csv')
                 job_summary = pd.read_csv(work_dir / 'job_summary.csv')
+                sample_norm = pd.read_csv(work_dir / 'sample_norm.csv')
+                sidecar_dir = (out_root / POOLED_DIRNAME if pooled else
+                               donor_exclusions.result_dir(out_root, target.study, md_rule is not None, all_donors))
+                if samples_only:
+                    stale = samples_only_problem(sidecar_dir, target.stem, manifest['md_sha256'], jobs, sample_norm)
+                    if stale:
+                        manifest.update(status='skipped', reason=f'--samples-only: {stale}')
+                        return manifest
+                n_sample_rows = write_sample_sidecars(
+                    sidecar_dir, target.stem, jobs, pd.DataFrame(sample_rows), sample_norm,
+                    keep.set_index('sample_idx')['n_cells'].to_dict(), pb_cells)
+                manifest['sample_sidecar_rows'] = n_sample_rows
+                if samples_only:
+                    manifest.update(status='samples_only', units=[], runtime_seconds=round(time.time() - started, 1))
+                    return manifest
             else:
                 results, job_summary = pd.DataFrame(), pd.DataFrame()
         else:
             results, job_summary = pd.DataFrame(), pd.DataFrame()
+        if samples_only:
+            manifest.update(status='skipped', reason='--samples-only: no sample to normalise')
+            return manifest
 
         # assemble the output table
         frames: List[pd.DataFrame] = []
@@ -2030,7 +2127,14 @@ def cmd_run(args: argparse.Namespace) -> None:
             continue
         out_manifest = (donor_exclusions.result_dir(out_root, entry.study, rule_in_md, args.all_donors)
                         / f'{entry.stem}.facet_run_manifest.json')
-        if not args.force and args.all and manifest_is_current(out_manifest, entry.md_path):
+        if args.samples_only:
+            if not args.force and (out_manifest.parent / f'{entry.stem}{SAMPLES_SUFFIX}').exists():
+                print(f'[skip existing samples] {db_id}')
+                continue
+            if not out_manifest.exists():
+                print(f'[skip] {db_id}: no stored results to backfill')
+                continue
+        elif not args.force and args.all and manifest_is_current(out_manifest, entry.md_path):
             print(f'[skip existing] {db_id}')
             continue
         eligible, reason = dataset_eligibility(
@@ -2050,15 +2154,19 @@ def cmd_run(args: argparse.Namespace) -> None:
                                        exclusion_where=args.exclude_donors_where,
                                        all_donors=args.all_donors, tau_two_group=args.tau_two_group,
                                        tau_braak_per_stage=args.tau_braak_per_stage,
-                                       tau_age_per_decade=args.tau_age_per_decade, age_floor=args.age_floor)
+                                       tau_age_per_decade=args.tau_age_per_decade, age_floor=args.age_floor,
+                                       samples_only=args.samples_only)
         except Exception as exc:
             print(f'[error] {db_id}: {exc}', file=sys.stderr)
             summary_rows.append({'db_id': db_id, 'status': 'error', 'reason': str(exc)[:300]})
             continue
         if manifest['status'] == 'skipped':
             print(f'[skip] {db_id}: {manifest["reason"]}')
-            out_manifest.parent.mkdir(parents=True, exist_ok=True)
-            out_manifest.write_text(json.dumps(manifest, indent=2, default=_json_default))
+            if not args.samples_only:
+                out_manifest.parent.mkdir(parents=True, exist_ok=True)
+                out_manifest.write_text(json.dumps(manifest, indent=2, default=_json_default))
+        elif manifest['status'] == 'samples_only':
+            print(f'[samples] {db_id}: {manifest["sample_sidecar_rows"]} sample rows, {time.time() - begin:.0f}s')
         else:
             n_ok = sum(1 for u in manifest['units'] if u['status'] == 'ok')
             print(f'[done] {db_id}: {n_ok}/{len(manifest["units"])} units tested, '
@@ -2094,7 +2202,14 @@ def run_pools(args: argparse.Namespace, store_root: Path, out_root: Path, facets
             continue
         members = [entries[m] for m in member_ids if m in entries]
         out_manifest = out_root / POOLED_DIRNAME / f'{pool_id}.facet_run_manifest.json'
-        if not args.force and args.all and pool_manifest_current(out_manifest, members):
+        if args.samples_only:
+            if not args.force and (out_manifest.parent / f'{pool_id}{SAMPLES_SUFFIX}').exists():
+                print(f'[skip existing samples] pool:{pool_id}')
+                continue
+            if not out_manifest.exists():
+                print(f'[skip] pool:{pool_id}: no stored results to backfill')
+                continue
+        elif not args.force and args.all and pool_manifest_current(out_manifest, members):
             print(f'[skip existing] pool:{pool_id}')
             continue
         wait_for_load(args.max_load)
@@ -2104,15 +2219,19 @@ def run_pools(args: argparse.Namespace, store_root: Path, out_root: Path, facets
                                     threads=args.threads, memory_limit_gb=args.memory_gb,
                                     keep_work=args.keep_work, tau_two_group=args.tau_two_group,
                                     tau_braak_per_stage=args.tau_braak_per_stage,
-                                    tau_age_per_decade=args.tau_age_per_decade, age_floor=args.age_floor)
+                                    tau_age_per_decade=args.tau_age_per_decade, age_floor=args.age_floor,
+                                    samples_only=args.samples_only)
         except Exception as exc:
             print(f'[error] pool:{pool_id}: {exc}', file=sys.stderr)
             rows.append({'db_id': f'pool:{pool_id}', 'status': 'error', 'reason': str(exc)[:300]})
             continue
         if manifest['status'] == 'skipped':
             print(f'[skip] pool:{pool_id}: {manifest["reason"]}')
-            out_manifest.parent.mkdir(parents=True, exist_ok=True)
-            out_manifest.write_text(json.dumps(manifest, indent=2, default=_json_default))
+            if not args.samples_only:
+                out_manifest.parent.mkdir(parents=True, exist_ok=True)
+                out_manifest.write_text(json.dumps(manifest, indent=2, default=_json_default))
+        elif manifest['status'] == 'samples_only':
+            print(f'[samples] pool:{pool_id}: {manifest["sample_sidecar_rows"]} sample rows, {time.time() - begin:.0f}s')
         else:
             n_ok = sum(1 for u in manifest['units'] if u['status'] == 'ok')
             print(f'[done] pool:{pool_id}: {n_ok}/{len(manifest["units"])} units tested, '
@@ -2157,6 +2276,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument('--null-permutations', type=int, default=0,
                      help='label-permutation null shuffles per unit with fewer than 40 samples (0 = off, default; 10 shuffles cost about 7 times the fit)')
     run.add_argument('--keep-work', action='store_true', help='keep the temp work dir (debug)')
+    run.add_argument('--samples-only', action='store_true',
+                     help='write only the per-sample sidecars (library size, TMM factor, replicate values) next to the '
+                          'existing results; refuses when the stored results do not match. Backfills the donor value plots')
     donor_exclusions.add_cli_arguments(run)
     return parser
 

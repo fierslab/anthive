@@ -1,0 +1,22 @@
+id: donor-plots
+title: Donor plots
+summary: A donor plot shows the values the facet test actually compared, one dot per donor (or host animal) and one panel per cohort, on the scale the test uses.
+related:
+- facet-replicate-unit
+- per-cell-per-donor
+aliases:
+- donor plot
+- dots
+- donor values
+- replicate values
+- what is a dot
+body_html: |
+  <p>Every cell of the gene and gene set views (a gene or gene set, a facet, a cell type and a facet scope) can be opened as a <strong>donor plot</strong>. It draws the numbers behind the result, so you can see what the statistic was made from.</p>
+  <ul>
+    <li><strong>One dot is one replicate.</strong> In human cohorts a dot is a donor, in xenograft and mouse data it is the host animal. All cells of that donor in the chosen cell type were added up first, so a donor with ten thousand cells is still one dot. The label on a dot (D01, D02 and so on) only numbers the dots within one panel. It is not a donor id, and the same donor has no matching label in another panel or another gene.</li>
+    <li><strong>One panel is one cohort</strong>, the dataset that carries that cohort's vote (the counted anchor). All panels share one vertical axis so the cohorts can be compared. The panel title only gives the cohort and the number of dots; the effect, its confidence interval and the q value are in the text next to the picture and in the image metadata.</li>
+    <li><strong>The vertical axis is the test input.</strong> For a gene it is log2 counts per million of the donor's summed counts, with the library size normalised by the TMM method, which is the scale the limma-voom test works on. For a gene set it is the donor's gene set score, as named on the plot. The values are the same ones the test fitted, not a separate calculation.</li>
+    <li><strong>Two-group facets</strong> (sex, AD or control, APOE e4 carrier, App NL-G-F) show the dots of each group with a box for the quartiles and a short bar at the group mean. <strong>Numeric facets</strong> (Braak stage, age) show a scatter with a straight line. The slope of that line is the reported effect per Braak stage or per decade of age, and the line runs through the centre of the dots.</li>
+  </ul>
+  <p>The dots are <em>unadjusted</em> by default. The test also corrects for covariates such as sex, age and post-mortem interval (named in the text with the plot), and it gives each donor a weight based on how precisely its count could be measured. A trend you see by eye can therefore differ somewhat from the reported effect. The adjusted view removes the covariate part by ordinary least squares so you can see the picture after correction; it does not use the precision weights.</p>
+  <p>Donor plots are descriptive and exploratory like every facet result. For a gene, the per-cell plot of one dataset (linked next to the donor plot and labelled <em>per-cell, descriptive</em>) shows individual cells instead, which are not independent replicates, see <a href="#per-cell-per-donor">per cell vs per donor</a>. Results from before the donor values were stored have no donor plot until the test is run again.</p>

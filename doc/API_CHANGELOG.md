@@ -77,9 +77,42 @@ New endpoints:
   summary: [{scope, celltype_group, n_datasets, pct_median, pct_min, pct_max, n_cells, low_detection}], datasets:
   [{db_id, title, scope, celltype_group, cell_type, n_cells, pct, modality, modality_note, technology, mean, median_nonzero, q10_nonzero, q90_nonzero, rank_mean}]}` from the
   precomputed gene statistics and the per-gene cache (never a live scan).
+- `GET /facets/{facet}/donor-values` (`cell_type` required, exactly one of `gene` or `module` = `Study/Experiment/name`,
+  `method` and `source` for a module variant, `scope`, `adjusted`, `include_uncounted`, `exclude_secondary`): the replicate-level
+  values behind one result cell. Shape `{facet, scope, subject: {gene} | {module, method, source}, cell_type, facet_kind
+  (two_group | numeric), levels (two-group: [reference, tested]), x_label, scale, adjusted, n_units, n_counted, note,
+  anonymisation, units: [{db_id, title, cohort, cohort_label, cohort_display, cell_type, celltype_source, counted,
+  not_counted_reason, pooled, descriptive_only, replicate_unit, available, reason, covariates, n_donors, scale, facet_kind,
+  model: {estimate, ci_low, ci_high, p_value, q_value, unit}, line: {slope, intercept} | null (numeric facets), donors:
+  [{label, facet_value, group (two-group), value, n_cells}]}], help_topics}`. One unit per counted anchor (the units that
+  carry a cohort's vote; `include_uncounted` adds the rest with the reason). `label` is a sequential `D01`, `D02` ... per
+  unit, ordered by facet value; no donor id, crosswalk id or per-donor covariate value is ever returned (`covariates` names
+  what the model adjusts for). Gene `value` is the pseudobulk on the exact scale the test fits: `log2((count + 0.5) /
+  (library size * TMM factor + 1) * 1e6)`, library size after `filterByExpr` (the voom input; its mean over the units samples is
+  the stored `ave_expr`); module `value` is the replicate score the module test fitted (`scale` names it). `facet_value` is
+  the 0/1 group (with `group` naming it), the Braak stage, or age in years. `adjusted=true` removes the covariate part by
+  ordinary least squares on the same scale (the test itself also uses voom precision weights, so a drawn trend can differ
+  a little from `model.estimate`; `line` has the reported slope through the centre of the dots, per year for age). A unit
+  whose results predate the per-replicate sidecars answers `available: false` with a `reason` until it is rerun or
+  backfilled (`ant-facet-test run --samples-only`, `ant-facet-test-modules run --samples-only`; seconds to minutes per
+  dataset). Errors: 400 (both or neither of `gene` and `module`, bad `scope`, malformed `module`), 404 (not tested).
+- `GET /facets/{facet}/donor-plot.{png|svg|pdf}` (same parameters, plus `width`, `height` per panel, `dpi`): small multiples,
+  one panel per counted cohort on one shared y axis. Two-group facets: dots, the box of the quartiles and a bar at the group
+  mean per group. Numeric facets: scatter with the straight line of the reported slope. The image is clean: panel titles are
+  only the cohort and `n =`; the effect, interval and q of every cohort, the scale and the covariates of the model are in the
+  `X-Plot-Caption` header and the image metadata, never drawn. 404 with the reasons when no unit has stored values.
 
 Changed (additive):
 
+- Every gene card replication entry (`/facets/{facet}/effects`, `/genes/{gene}/facet-effects`) and every module card
+  replication entry and variant (`/genesets/{study}/{experiment}/{name}/facet-effects`) adds `links`: `{donor_plot,
+  donor_plot_svg, donor_plot_adjusted, donor_values, donor_values_available (all counted anchors have stored values),
+  donor_plot_label, anchors}`.
+  The URLs are relative to the API root and carry the gene or module, `scope` and `cell_type` of the cell (a module link also
+  `method` and `source`). `anchors` (genes only) is, per counted anchor dataset, `{db_id, cohort, cell_type, url, label:
+  "per-cell, descriptive"}` with the existing `/databases/{db_id}/plot/violin` (two-group facets) or `/plot/scatter` with a
+  regression line (numeric facets) of the gene by the facet within that cell type; omitted for datasets without the facet column
+  and for derived strata.
 - Gene cards (`/facets/{facet}/effects`, `/genes/{gene}/facet-effects`): every replication entry adds `forest`
   (one row per cohort: `{cohort, cohort_label, cohort_display, counted, in_m, small, anchor, more_units, n_more_units}`;
   `anchor` is a slim row `{cohort_label, db_id, title, cell_type, celltype_source, pooled, anchor_counted, n_donors,
@@ -106,6 +139,8 @@ Changed (additive):
   `modality`, `modality_note`, `suspension_type`, `technology`, `facet_scope`, `cell_type`.
 - Lambda per unit (`lambda_gc`, `inflated` above 1.3) was already served on unit cards; it is now also on every forest
   row and anchor.
+- MCP: new tool `facet_donor_values` (one number per donor per counted cohort, the model line and the plot link).
+- Help: new topic `donor-plots` (child of `facet-effects`).
 - MCP: `facet_effects` prints the call, the forest with intervals, inflation, modality and the low-detection warning;
   `facet_top_genes` takes `offset`, `effect_gate`, `strict` and has no row cap; new tools `module_facet_effects` (one
   gene set across facets, with member-gene counts) and `facet_top_modules`.

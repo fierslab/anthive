@@ -19,10 +19,15 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import duckdb
 import pandas as pd
 import pytest
+from collections import OrderedDict
+from urllib.parse import urlencode
 
 import config
+import facet_donor_values as donor_values
+import plotting
 import facet_results as fr
 import facet_rules
 import facet_scopes
@@ -636,6 +641,11 @@ _SERVE_WANTED = {
     '_module_results_instance', '_module_results', '_DETECTION_STATE', '_DETECTION_BUILD_LOCK', '_detection_tables',
     '_detection_lookup', '_with_gene_context', '_gene_context', '_context_gene_flags', '_GENE_CONTEXT_STATE', '_forest_mode', '_FOREST_QUERY_DESC', 'get_gene_detection', 'get_facet_effects_overview',
     'get_facet_top_modules', '_MODULE_INFO_CACHE', '_module_info', 'get_geneset_facet_effects',
+    # 2.45: donor-level values and plots behind a facet cell
+    '_donor_values_instance', '_DONOR_PLOT_FORMATS', '_DONOR_PLOT_CACHE', '_DONOR_PLOT_CACHE_LOCK',
+    '_DONOR_PLOT_CACHE_ENTRIES', '_DONOR_SCALE_NOTE', '_donor_values', '_sidecar_exists', '_per_cell_link',
+    '_donor_links', '_unit_location', '_gene_count_fetcher', '_donor_units_payload', 'get_facet_donor_values',
+    '_donor_caption', 'get_facet_donor_plot', '_with_module_links', '_PLOT_MIME_TYPES',
 }
 
 
@@ -684,8 +694,13 @@ class _FakeRegistry:
                                'M1/mus': {'title': 'Mouse dataset', 'facet_scope': 'xenograft_human_in_mouse'}}
 
 
+def _no_pooled_db(db_id: str):
+    raise RuntimeError('no counts database in this test')
+
+
 def build_serve(results: Path, geneset_registry: Any = None, stats_rows: Optional[List[Dict[str, Any]]] = None,
-                metadata: Optional[Dict[str, Dict[str, Any]]] = None, extra_databases: Sequence[str] = ()):
+                metadata: Optional[Dict[str, Dict[str, Any]]] = None, extra_databases: Sequence[str] = (),
+                pooled_db: Any = None):
     """A TestClient over the facet routes extracted from ant-serve (see ``_SERVE_WANTED``), with a fake registry.
 
     ``geneset_registry`` stands in for the geneset store, ``stats_rows`` for the gene statistics index (dicts with
@@ -719,7 +734,10 @@ def build_serve(results: Path, geneset_registry: Any = None, stats_rows: Optiona
         'GeneStatsCache': _FakeStatsCache, 'geneset_registry': geneset_registry, 'threading': threading,
         'canonical_facet': canonical_facet, 'Response': Response, 'HTTPException': HTTPException, 'Query': Query,
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,
+        'donor_values_lib': donor_values, 'plotting': plotting, 'OrderedDict': OrderedDict, 'urlencode': urlencode,
+        'duckdb': duckdb
     }
+    namespace['_pooled_db'] = pooled_db if pooled_db is not None else _no_pooled_db
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     client = TestClient(app)
     client.registry = registry

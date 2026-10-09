@@ -3267,6 +3267,112 @@ def plot_forest(
     return _render_figure(fig, dpi, output_format, caption, source_url)
 
 
+# ── donor-level small multiples: plot_donor_values ────────────────────────────
+
+_DONOR_PLOT_COLORS = ('#4c78a8', '#e45756')
+MAX_DONOR_PANELS = 16
+
+
+def plot_donor_values(
+    panels: List[Dict],
+    *,
+    kind: str,
+    y_label: str,
+    x_label: Optional[str] = None,
+    group_order: Optional[List[str]] = None,
+    columns: int = 4,
+    panel_width: float = 2.6,
+    panel_height: float = 3.0,
+    dpi: int = 150,
+    output_format: str = 'png',
+    caption: Optional[str] = None,
+    source_url: Optional[str] = None,
+    font_family: Optional[str] = None,
+    font_size: Optional[float] = None,
+) -> bytes:
+    """Small multiples of the replicate-level values a facet test used: one panel per cohort, one shared y axis.
+
+    Two-group facets (``kind='two_group'``): a strip of dots (one dot = one replicate) per group with the box of
+    the quartiles (median line) and a short bar at the group mean. Numeric facets (``kind='numeric'``): a scatter
+    with a straight line whose slope is the reported estimate (``line`` of the panel). Panel titles are only the
+    cohort name and the number of replicates; estimates, q values and the model go to the caption (header and image
+    metadata), never into the picture.
+
+    Args:
+        panels: One dict per panel: ``title`` (cohort, n), ``values`` (y per replicate), and for two-group facets
+            ``groups`` (group label per replicate), for numeric facets ``x`` (facet value per replicate) and
+            optionally ``line`` (``{slope, intercept}``).
+        kind: ``two_group`` or ``numeric``.
+        y_label: Axis text of the value (the scale).
+        x_label: Axis text of the numeric facet.
+        group_order: Group labels left to right (two-group), reference first.
+        columns: Panels per row (at most).
+        panel_width: Width of one panel in inches.
+        panel_height: Height of one panel in inches.
+        dpi: Raster resolution.
+        output_format: ``png`` | ``svg`` | ``pdf``.
+        caption: Provenance text for the PNG / SVG metadata (never drawn).
+        source_url: Provenance URL for the metadata.
+        font_family: Optional font family.
+        font_size: Optional base font size.
+
+    Returns:
+        The encoded figure. Panels beyond ``MAX_DONOR_PANELS`` are not drawn.
+    """
+    _setup_style(font_family, font_size)
+    panels = panels[:MAX_DONOR_PANELS]
+    if not panels:
+        fig, ax = plt.subplots(figsize=(panel_width * 1.5, panel_height))
+        ax.text(0.5, 0.5, 'no replicate values', transform=ax.transAxes, ha='center', va='center', color='#888')
+        ax.set_axis_off()
+        return _render_figure(fig, dpi, output_format, caption, source_url)
+    n_columns = min(columns, len(panels))
+    n_rows = -(-len(panels) // n_columns)
+    fig, axes = plt.subplots(n_rows, n_columns, figsize=(panel_width * n_columns, panel_height * n_rows),
+                             sharey=True, squeeze=False)
+    all_values = np.concatenate([np.asarray(panel['values'], dtype=float) for panel in panels])
+    margin = 0.08 * (np.nanmax(all_values) - np.nanmin(all_values) or 1.0)
+    jitter_generator = np.random.default_rng(20261009)   # fixed: the same request draws the same picture
+    for panel_index, panel in enumerate(panels):
+        ax = axes[panel_index // n_columns][panel_index % n_columns]
+        values = np.asarray(panel['values'], dtype=float)
+        if kind == 'numeric':
+            x_values = np.asarray(panel['x'], dtype=float)
+            ax.scatter(x_values, values, s=16, color=_DONOR_PLOT_COLORS[0], alpha=0.85, linewidths=0)
+            line = panel.get('line')
+            if line and len(x_values) > 1:
+                span = np.array([x_values.min(), x_values.max()])
+                ax.plot(span, line['intercept'] + line['slope'] * span, color='#333333', linewidth=1.2)
+            ax.set_xlabel(x_label or '')
+        else:
+            groups = list(group_order or sorted(set(panel['groups'])))
+            group_labels = np.asarray(panel['groups'])
+            for position, group in enumerate(groups):
+                group_values = values[group_labels == group]
+                if not len(group_values):
+                    continue
+                colour = _DONOR_PLOT_COLORS[position % len(_DONOR_PLOT_COLORS)]
+                ax.boxplot([group_values], positions=[position], widths=0.5, showfliers=False, showcaps=False,
+                           medianprops={'color': '#333333', 'linewidth': 1.2},
+                           boxprops={'color': '#777777', 'linewidth': 0.9},
+                           whiskerprops={'color': '#777777', 'linewidth': 0.9})
+                ax.scatter(position + jitter_generator.uniform(-0.17, 0.17, len(group_values)), group_values,
+                           s=16, color=colour, alpha=0.85, linewidths=0, zorder=3)
+                ax.hlines(group_values.mean(), position - 0.3, position + 0.3, color=colour, linewidth=2.4, zorder=4)
+            ax.set_xticks(range(len(groups)))
+            ax.set_xticklabels(groups)
+            ax.set_xlim(-0.6, len(groups) - 0.4)
+        ax.set_title(panel['title'], fontsize=8)
+        ax.set_ylim(np.nanmin(all_values) - margin, np.nanmax(all_values) + margin)
+        if panel_index % n_columns == 0:
+            ax.set_ylabel(y_label, fontsize=8)
+        sns.despine(ax=ax)
+    for empty_index in range(len(panels), n_rows * n_columns):
+        axes[empty_index // n_columns][empty_index % n_columns].set_axis_off()
+    fig.tight_layout()
+    return _render_figure(fig, dpi, output_format, caption, source_url)
+
+
 # ── 2-axis density geom: plot_kde2d ───────────────────────────────────────────
 
 

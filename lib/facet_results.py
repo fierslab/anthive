@@ -1053,6 +1053,11 @@ class FacetResults:
             'units': ordered,
         }
 
+    def run_manifest(self, group_folder: str, stem: str, kind: str = 'genes') -> Optional[dict]:
+        """The run manifest of a dataset (``kind`` ``genes`` or ``modules``); None when missing or unreadable."""
+        paths = result_paths(self.results_dir, group_folder, stem)
+        return self._read_json(paths['gene_manifest' if kind == 'genes' else 'module_manifest'])
+
     def _supplementary_run(self, group_folder: str, stem: str) -> Optional[Dict[str, Any]]:
         """Facts of the full-donor (non-counted) run of a dataset with a donor
         exclusion rule: ``{counted: False, n_donors, n_cells, timestamp_utc}``;

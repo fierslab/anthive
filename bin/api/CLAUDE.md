@@ -168,6 +168,16 @@ and `lib/config.py` (anthive.yaml loader).
   (`_gene_context`, cleared by `_build_score_index`). Gene cards are shared cached objects: add per-request fields on a copy
   (`_with_gene_context`). Modality is derived on the fly (`lib/modality.py`), not stored in the metadata cache.
 
+- **Donor plots** (2.45, `doc/DESIGN_facet_testing.md` "Donor plots"): `lib/facet_donor_values.py` (`DonorValues`) rebuilds the
+  replicate-level values of a unit from the per-sample sidecars the test tools write (`*.facet_samples.parquet`,
+  `*.facet_sample_cells.parquet`, `*.facet_module_samples.parquet`, `*.facet_module_sample_scores.parquet`); ant-serve adds
+  `GET /facets/{f}/donor-values` and `donor-plot.{png,svg,pdf}` (`_donor_units_payload`, `_gene_count_fetcher` reads one gene
+  from the counts parquet through the pool) and `links` on gene and module card entries (`_donor_links`, `_with_module_links`;
+  existence checks only, no sidecar is read for a card). Plots follow the clean-image rule: caption in the header and metadata,
+  titles are cohort and n only. Never return a donor id or a per-donor covariate; results without sidecars answer
+  `available: false` until `ant-facet-test[-modules] run --samples-only` backfills them. Tests: `tests/test_facet_donor_values.py`
+  (the ant-serve routes are listed in `_SERVE_WANTED` of `tests/test_facet_results.py`: add new helpers there).
+
 - **Lineage and secondaries** (unreleased): dataset metadata carries
   `designation`, `reanalysis_of`, `donor_group`, `has_donor_uid`
   (`_lineage_fields`); `GET /donor-groups` lists the groups. Pooled or
