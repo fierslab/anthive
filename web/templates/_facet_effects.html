@@ -507,7 +507,8 @@
   table.fxf tr.fxf-cohort td { background: #f8fafc; font-weight: 600; font-size: 11px; color: #334155; padding-top: 5px; }
   table.fxf tr.fxf-cohort td .muted { font-weight: normal; }
   table.fxf tr.not-counted td { color: #64748b; }
-  table.fxf td.fxf-bar, table.fxf th.fxf-bar { width: 38%; min-width: 160px; max-width: 460px; }
+  table.fxf td.fxf-bar, table.fxf th.fxf-bar { width: 34%; min-width: 150px; max-width: 420px; }
+  table.fxf th.fxf-bar { text-transform: none; letter-spacing: 0; font-weight: 400; }
   table.fxf td.fxf-ds { overflow-wrap: anywhere; min-width: 10em; }
   table.fxf td.fxf-ds > a { white-space: nowrap; }
   table.fxf td.fxf-donors { white-space: normal; min-width: 5.5em; }
@@ -516,31 +517,14 @@
   .fxf-more { background: none; border: 0; padding: 0; color: var(--link); cursor: pointer; font: inherit; font-size: 11.5px; }
   .fxf-more:hover { text-decoration: underline; }
   table.fxf tbody.fxf-hidden { display: none; }
-  .fxf-track { position: relative; height: 16px; }
-  .fxf-zero { position: absolute; top: 0; bottom: 0; width: 1px; background: #94a3b8; }
-  .fxf-ci { position: absolute; top: 7px; height: 2px; background: #334155; }
-  .fxf-pt { position: absolute; top: 50%; transform: translate(-50%, -50%); border-radius: 50%; border: 1.5px solid #334155; background: #fff; }
-  .fxf-pt.sig { background: #334155; }
-  .fxf-pt.up.sig { background: #b2182b; border-color: #b2182b; }
-  .fxf-pt.down.sig { background: #2166ac; border-color: #2166ac; }
-  /* axis labels sit at the same positions as the track: lo at the left edge,
-     0 at its data position, hi at the right edge */
-  .fxf-axis { position: relative; height: 12px; font-size: 10px; color: var(--text-muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
-  .fxf-axis span { position: absolute; top: 0; white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .fxf-axis .lo { left: 0; }
-  .fxf-axis .hi { right: 0; }
-  .fxf-axis .zero { transform: translateX(-50%); }
   table.fxf td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
   @media (max-width: 640px) {
-    /* the bar shows the interval; the CI text column is in each row's title */
-    table.fxf .fxf-ci-col { display: none; }
     table.fxf td.fxf-bar, table.fxf th.fxf-bar { width: auto; min-width: 80px; }
     table.fxf td, table.fxf th { padding: 2px 4px; }
     .fxs-name { flex: 0 1 auto; }
-    table.fxf .fxf-donors-col, table.fxf .fxf-q-col { display: none; }
+    table.fxf .fxf-donors-col { display: none; }
     .fxf-reason { max-width: none; }
     table.fxf td.fxf-ds { min-width: 0; }
-    .fxf-axis .zero { display: none; }
     details.fxs-group > .fxf-card { padding-left: 0; }
     .fxs-labels { padding-left: 0; }
     .fxf-anchors { padding-left: 0; }
@@ -690,7 +674,8 @@ window.antFx = window.antFx || (function () {
     function flagPills(u, facetName) {
         var f = u.flags || {}, out = [];
         if (u.descriptive_only && u.analysis_level !== 'below_floor') out.push('<span class="fx-pill warn" data-glossary="descriptive-only" title="Too few donors in a group for a p or q value; the estimate is shown for orientation.">descriptive only</span>');
-        if (f.small_sample && u.analysis_level === 'replicate') out.push('<span class="fx-pill" data-glossary="small-cohorts" title="Fewer than 5 replicates in a group (10 for a trend): tested, but with little power.">small sample</span>');
+        var stats = window.antEffectBar.pointStats(u, facetName);
+        if (stats.small && u.analysis_level === 'replicate') out.push('<span class="fx-pill" data-glossary="small-cohorts" title="' + (stats.twoGroup ? 'The smaller group has fewer than ' + window.antEffectBar.MIN_GROUP + ' donors' : 'Fewer than ' + window.antEffectBar.MIN_TREND + ' donors') + ': tested, but too small to be informative on its own.">small cohort</span>');
         if (u.inflated) out.push('<span class="fx-pill warn" data-glossary="lambda" title="Many genes shift together (lambda above 1.3): often a batch, depth or composition difference rather than biology. Read the p values with care.">inflated, lambda ' + num(u.lambda_gc) + '</span>');
         if ((u.covariates_dropped || []).length) out.push('<span class="fx-pill" data-glossary="covariates" title="Left out of the model to keep the test: ' + esc(u.covariates_dropped.join('; ')) + '">covariates dropped (' + u.covariates_dropped.length + ')</span>');
         if (u.control_basis) out.push('<span class="fx-pill" data-glossary="app-nlgf" title="What the control animals of this comparison are.">control: ' + esc(CONTROL_BASIS[u.control_basis] || String(u.control_basis).replace(/_/g, ' ')) + '</span>');
@@ -766,7 +751,7 @@ window.antFx = window.antFx || (function () {
             html += '<details class="fxs-rest"' + (rest.some(function (g) { return opts.open === g.name; }) ? ' open' : '') + '><summary>' + plural(rest.length, 'cell type group') + ' with no counted row (' + plural(nRest, 'dataset row') + '; unmapped labels, mixed groups, reanalyses, supplements or alternatives)</summary>' +
                 '<div class="fxs-list">' + rest.map(function (g) { return groupHtml(g, opts.open === g.name); }).join('') + '</div></details>';
         }
-        html += docBlock('About this forest', null, '<p>One anchor unit per cohort and cell type group is combined (a donor-pooled unit for multi-region cohorts); other rows of the group are supplementary and never counted. The median is over the anchors.</p><p>In a forest, a filled point means q (&ge;10% change) &lt; 0.05 (red up, blue down), an open point means not significant, no bar means descriptive only (no confidence interval), and point size grows with donors. Rows that do not count are folded under each forest with their reason. <a href="/help#facet-counting">How counting works</a></p>');
+        html += docBlock('About this forest', null, '<p>One anchor unit per cohort and cell type group is combined (a donor-pooled unit for multi-region cohorts); other rows of the group are supplementary and never counted. The median is over the anchors.</p><p>Each row is a bar from the zero line on a fixed scale for its unit, so bars compare between rows and pages. Warm is up and cool is down; a filled bar means the q of the cohort on its own is below 0.05 and an open bar means it is not; grey is not counted or descriptive only (no interval). The thin line is the 95 percent confidence interval. Rows that do not count are folded under each forest with their reason. <a href="/help#facet-counting">How counting works</a></p>');
         box.innerHTML = html;
         if (window.antDocRestore) window.antDocRestore(box);
         box.querySelectorAll('.fxf-more').forEach(function (btn) {
@@ -815,16 +800,18 @@ window.antFx = window.antFx || (function () {
             var rep = g.rep, anchors = rep.anchors || [];
             if (!anchors.length) return '';
             var showDisease = facet.name === 'disease';
+            var scaleKey = window.antEffectBar.scaleKey(facet.name, 'lfc');
             var unknown = rep.cohorts_overlap_unknown || [];
             var carriers = rep.r_cohorts || [], gateCohorts = rep.effect_gate_cohorts || [];
-            var out = '<div class="fxf-anchors"><div class="fxf-anchors-title">Anchors: the unit that counted for each cohort</div><div class="table-wrap"><table class="fxf fxa"><thead><tr><th>Cohort</th><th>Anchor unit</th><th>' + (unitNoun === 'animals' ? 'Animals' : 'Donors') + '</th><th>log2FC</th><th>p</th><th>q</th><th>p (≥10% change)</th><th>q (≥10% change)</th>' + (showDisease ? '<th>Disease definition</th>' : '') + '</tr></thead><tbody>';
+            var out = '<div class="fxf-anchors"><div class="fxf-anchors-title">Anchors: the unit that counted for each cohort</div><div class="table-wrap"><table class="fxf fxa"><thead><tr><th>Cohort</th><th>Anchor unit</th><th>' + (unitNoun === 'animals' ? 'Animals' : 'Donors') + '</th><th class="fxf-bar">' + window.antEffectBar.axisHtml(scaleKey) + '</th><th>log2FC</th><th>p</th><th>q</th><th>p (≥10% change)</th><th>q (≥10% change)</th>' + (showDisease ? '<th>Disease definition</th>' : '') + '</tr></thead><tbody>';
             anchors.forEach(function (a) {
                 var label = a.cohort_label || a.cohort;
                 var marks = (carriers.indexOf(label) >= 0 ? ' <span class="fx-pill" data-glossary="r-value" title="One of the two cohorts with the smallest p values: they carry the r-value.">carries r</span>' : '') +
                     (gateCohorts.indexOf(label) >= 0 ? ' <span class="fx-pill" data-glossary="effect-filter" title="This cohort shows a change of at least ' + esc(rep.effect_gate_unit || '10%') + ' in the replicated direction.">passes the effect filter</span>' : '');
                 out += '<tr><td>' + esc(label) + marks + (unknown.indexOf(a.cohort_label) >= 0 || a.independence === 'unknown' ? ' <span class="fx-pill warn" data-glossary="donor-overlap" title="It is not known whether this cohort shares donors with another one.">donor overlap not checked</span>' : '') + '</td>' +
                     '<td class="fxf-ds">' + datasetLink(a) + (a.pooled ? ' <span class="fx-pill" data-glossary="pooled-unit" title="Several files of this cohort were combined per donor into one unit.">pooled</span>' : '') + '</td>' +
-                    '<td class="num">' + esc(a.n_donors == null ? 'NA' : a.n_donors) + '</td><td class="num">' + signed(a.logFC) + '</td>' +
+                    '<td class="num"' + (window.antEffectBar.pointStats(a, facet.name).title ? ' title="' + esc(window.antEffectBar.pointStats(a, facet.name).title) + '"' : '') + '>' + esc(window.antEffectBar.pointStats(a, facet.name).donors || 'NA') + '</td>' +
+                    '<td class="fxf-bar">' + window.antEffectBar.barHtml({ scale: scaleKey, est: a.logFC, lo: a.ci_low, hi: a.ci_high, sig: a.q_value != null && a.q_value < 0.05, counted: true, title: 'Estimate ' + signed(a.logFC) }) + '</td><td class="num">' + signed(a.logFC) + '</td>' +
                     '<td class="num">' + qfmt(a.p_value) + '</td><td class="num">' + qfmt(a.q_value) + '</td>' +
                     '<td class="num">' + qfmt(a.p_treat) + '</td><td class="num">' + qfmt(a.q_treat) + '</td>' +
                     (showDisease ? '<td>' + esc(DISEASE_BASIS[a.disease_basis] || a.disease_basis || 'not recorded') + '</td>' : '') + '</tr>';
@@ -832,46 +819,34 @@ window.antFx = window.antFx || (function () {
             return out + '</tbody></table></div></div>';
         }
         function forestHtml(g) {
-            var rows = g.rows, lo = 0, hi = 0;
-            rows.forEach(function (u) {
-                [u.ci_low, u.ci_high, u.logFC].forEach(function (v) { if (v != null && !isNaN(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); } });
-            });
-            var pad = (hi - lo) * 0.06 || 0.1; lo -= pad; hi += pad;
-            function pos(v) { return ((v - lo) / (hi - lo) * 100).toFixed(2) + '%'; }
-            // hide the 0 label when it would collide with an end label
-            var zeroFrac = (0 - lo) / (hi - lo), zeroLabel = zeroFrac > 0.12 && zeroFrac < 0.88;
-            var out = '<div class="fxf-card"><div class="table-wrap"><table class="fxf"><thead><tr><th>Dataset</th><th>log2FC</th><th class="fxf-bar"><div class="fxf-axis"><span class="lo">' + num(lo) + '</span>' + (zeroLabel ? '<span class="zero" style="left:' + pos(0) + '">0</span>' : '') + '<span class="hi">' + num(hi) + '</span></div></th><th class="fxf-ci-col">95% CI</th><th class="fxf-q-col">q</th><th>q (≥10% change)</th><th class="fxf-donors-col">Donors</th><th>Flags</th></tr></thead><tbody>';
+            var rows = g.rows;
+            var scaleKey = window.antEffectBar.scaleKey(facet.name, 'lfc');
+            var twoGroup = rows.some(function (u) { return window.antEffectBar.pointStats(u, facet.name).twoGroup; });
+            var out = '<div class="fxf-card"><div class="table-wrap"><table class="fxf"><thead><tr><th>Dataset</th><th class="fxf-donors-col">' + (unitNoun === 'animals' ? 'Animals' : 'Donors') + (twoGroup ? ' <span class="info" title="Donors in the test group vs the reference group of the contrast, for example AD vs no AD.">ⓘ</span>' : '') + '</th><th class="fxf-bar">' + window.antEffectBar.axisHtml(scaleKey) + '</th><th>Effect and q <span class="info" data-glossary="fdr" title="q of this cohort on its own (false discovery rate over the genes tested in it). A filled bar means q below 0.05.">ⓘ</span></th><th>q (≥10% change)</th><th>Flags</th></tr></thead><tbody>';
             // Rows not counted towards replication are folded behind a toggle
             // (unless nothing is counted), so the counted cohorts stay in view.
             var fold = g.counted.length > 0 && g.counted.length < rows.length;
             var shown = fold ? g.counted : rows;
             var folded = fold ? rows.filter(function (u) { return !u.counted; }) : [];
-            out += rowsHtml(shown, pos, g.name) + '</tbody>';
+            out += rowsHtml(shown, scaleKey, g.name) + '</tbody>';
             if (folded.length) {
-                out += '<tbody><tr class="fxf-more-row"><td colspan="8"><button type="button" class="fxf-more" aria-expanded="false">show ' + plural(folded.length, 'row') + ' not counted towards replication</button></td></tr></tbody>';
-                out += '<tbody class="fxf-hidden">' + rowsHtml(folded, pos, g.name) + '</tbody>';
+                out += '<tbody><tr class="fxf-more-row"><td colspan="6"><button type="button" class="fxf-more" aria-expanded="false">show ' + plural(folded.length, 'row') + ' not counted towards replication</button></td></tr></tbody>';
+                out += '<tbody class="fxf-hidden">' + rowsHtml(folded, scaleKey, g.name) + '</tbody>';
             }
-            return out + '</table></div></div>';
+            return out + '</table></div>' + window.antEffectBar.legendHtml(scaleKey, 'forest') + '</div>';
         }
-        // pos maps a log2FC to a left offset on the group's track
-        function rowsHtml(list, pos, groupName) {
+        // scaleKey picks the fixed scale of the effect bar for this facet
+        function rowsHtml(list, scaleKey, groupName) {
             var out = '', lastCohort = null;
             list.forEach(function (u) {
                 var cohort = u.cohort_label || 'not in the cohort table';
                 if (cohort !== lastCohort) {
-                    out += '<tr class="fxf-cohort"><td colspan="8">' + esc(cohort) + '</td></tr>';
+                    out += '<tr class="fxf-cohort"><td colspan="6">' + esc(cohort) + '</td></tr>';
                     lastCohort = cohort;
                 }
-                var size = Math.max(6, Math.min(16, 4 + Math.sqrt(u.n_donors || 1)));
-                var dir = (u.logFC || 0) > 0 ? 'up' : 'down';
-                var significant = u.significant_treat != null ? u.significant_treat : u.significant;
-                var bar = '<div class="fxf-track"><div class="fxf-zero" style="left:' + pos(0) + '"></div>';
-                if (u.ci_low != null && u.ci_high != null) bar += '<div class="fxf-ci" style="left:' + pos(u.ci_low) + ';width:calc(' + pos(u.ci_high) + ' - ' + pos(u.ci_low) + ')"></div>';
-                if (u.logFC != null) bar += '<div class="fxf-pt ' + dir + (significant ? ' sig' : '') + '" style="left:' + pos(u.logFC) + ';width:' + size + 'px;height:' + size + 'px"></div>';
-                bar += '</div>';
+                var descriptive = !!(u.descriptive_only || (u.analysis_level && u.analysis_level !== 'replicate'));
+                var stats = window.antEffectBar.pointStats(u, facet.name);
                 var ciText = u.ci_low != null ? '[' + num(u.ci_low) + ', ' + num(u.ci_high) + ']' : 'no CI';
-                var qCell = qfmt(u.q_value);
-                if (u.n_sibling_strata > 1) qCell += '<div class="fxf-sub" title="' + u.n_sibling_strata + ' strata of this dataset share one vote, so their q values are multiplied by ' + u.n_sibling_strata + '">×' + u.n_sibling_strata + ': ' + qfmt(u.q_counted) + '</div>';
                 var sub = '';
                 if (u.cell_type && u.cell_type !== groupName) sub += '<div class="fxf-sub">' + esc(u.cell_type) + '</div>';
                 var stratum = u.design_subset || ((String(u.celltype_source || '').split('@')[1]) || '');
@@ -885,11 +860,14 @@ window.antFx = window.antFx || (function () {
                     (u.tau_log2 != null ? '; treat tau log2 ' + num(u.tau_log2, 3) + ', p ' + qfmt(u.p_treat) : '');
                 sub += '<details class="fxf-row-model"><summary>model</summary><div>' + esc(modelText) + '</div></details>';
                 var pills = (u.is_secondary ? '<span class="fx-pill warn" data-glossary="cohort" title="A reanalysis of cells another dataset serves; shown but never counted.">reanalysis, not counted</span>' : '') + flagPills(u, facet.name);
+                var tip = descriptive || u.logFC == null ? 'Descriptive only: no interval and no q value, not counted.' : 'Estimate ' + signed(u.logFC) + ', 95% CI ' + ciText + ', q of this cohort on its own ' + qfmt(u.q_value);
+                var bar = window.antEffectBar.barHtml({ scale: scaleKey, est: u.logFC, lo: u.ci_low, hi: u.ci_high, sig: u.q_value != null && u.q_value < 0.05, counted: !!u.counted, descriptive: descriptive, title: tip });
                 out += '<tr class="' + (u.counted ? '' : 'not-counted') + '">' +
                     '<td class="fxf-ds">' + datasetLink(u) + sub + '</td>' +
-                    '<td class="num">' + num(u.logFC) + '</td><td class="fxf-bar">' + bar + '</td>' +
-                    '<td class="num fxf-ci-col">' + ciText + '</td>' +
-                    '<td class="num fxf-q-col">' + qCell + '</td><td class="num">' + qfmt(u.q_treat) + '</td><td class="num fxf-donors fxf-donors-col">' + esc(donors(u)) + '</td><td>' + pills + '</td></tr>';
+                    '<td class="num fxf-donors fxf-donors-col" title="' + esc(stats.title || donors(u)) + '">' + esc(stats.donors || donors(u)) + '</td>' +
+                    '<td class="fxf-bar">' + bar + '</td>' +
+                    '<td class="num">' + window.antEffectBar.numberHtml(u.logFC, scaleKey, descriptive ? null : u.q_value) + (u.n_sibling_strata > 1 ? '<div class="fxf-sub" title="' + u.n_sibling_strata + ' strata of this dataset share one vote, so their q values are multiplied by ' + u.n_sibling_strata + '">×' + u.n_sibling_strata + ': ' + qfmt(u.q_counted) + '</div>' : '') + '</td>' +
+                    '<td class="num">' + qfmt(u.q_treat) + '</td><td>' + pills + '</td></tr>';
             });
             return out;
         }

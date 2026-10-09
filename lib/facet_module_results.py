@@ -508,6 +508,23 @@ class ModuleResults:
         }
 
     @staticmethod
+    def _family_ranks(family: Dict[str, Any]) -> Dict[str, int]:
+        """``module_key -> rank`` (1 = strongest) among the modules of one family that have an r-value.
+
+        Ordered by ``p_pc`` (the r-value is its Benjamini-Hochberg adjustment, so the order agrees with the top list
+        but is not tied where the r-value saturates at 1), then ``k``, ``agreement`` and the absolute median
+        standardised effect. Built once per family and kept in it.
+        """
+        ranks = family.get('ranks')
+        if ranks is None:
+            frame = family['frame']
+            usable = frame[frame['r_value'].notna()]
+            ordered = usable.assign(_abs=usable['median_std_effect'].abs()).sort_values(
+                ['p_pc', 'k', 'agreement', '_abs'], ascending=[True, False, False, False], kind='stable')
+            ranks = family['ranks'] = {key: position for position, key in enumerate(ordered.index, start=1)}
+        return ranks
+
+    @staticmethod
     def _point(record: Dict[str, Any]) -> Dict[str, Any]:
         """One forest row of a module result (slim): estimate with its interval, standardised effect and p values."""
         return {
@@ -635,6 +652,9 @@ class ModuleResults:
                         else:
                             entry = self._entry(record, family['units'], family['tested_cohorts'].get(key, ()),
                                                 gate_sd=family['gate'], facet=facet)
+                            ranks = self._family_ranks(family)
+                            entry['family_rank'] = ranks.get(key)
+                            entry['family_size'] = len(ranks)
                         variants.append({
                             'method': method, 'source': source, 'label': variant_label(method, source),
                             'basis': 'pseudobulk' if method == 'pseudobulk' else 'cell_mean',
@@ -816,12 +836,22 @@ class ModuleResults:
         catalog, _, name = key.rpartition('/')
         return {
             'geneset_id': key, 'catalog': catalog, 'module': name, 'method': chosen[0], 'source': chosen[1],
-            'variant_label': variant_label(*chosen), **main,
+            'variant_label': variant_label(*chosen), **main, **self._effect_range(variants.get(chosen), key),
             'other_variants': [{'method': v[0], 'source': v[1], 'label': variant_label(*v), 'call': e['call'],
                                 'r_value': e['r_value'], 'median_std_effect': e['median_std_effect'],
                                 'r_direction': e['r_direction'], 'cohorts_label': e['cohorts_label']}
                                for v, e in entries.items() if v != chosen],
             'ab': ab_disagreement(side_a, side_b)}
+
+    @staticmethod
+    def _effect_range(family: Optional[Dict[str, Any]], key: str) -> Dict[str, Optional[float]]:
+        """``min_effect`` / ``max_effect``: the smallest and largest per-cohort standardised effect of a module."""
+        effects = pd.Series(dtype=float)
+        if family is not None:
+            per_cohort = family['per_cohort']
+            effects = per_cohort.loc[per_cohort['key'] == key, 'effect'].dropna()
+        return {'min_effect': _rounded(effects.min(), 4) if len(effects) else None,
+                'max_effect': _rounded(effects.max(), 4) if len(effects) else None}
 
     def warm(self, datasets: "Sequence[Dict[str, Any]] | PreparedDatasets", exclude_secondary: bool = True) -> int:
         """Read the module tables and build every module family so the first request is a cache hit.

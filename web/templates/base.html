@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+{% from "_effect_bar.html" import effect_bar_assets %}<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -701,6 +701,7 @@
     <script>
     function initTable(id,o){o=o||{};var ps=o.pageSize||20,s=o.searchable!==false,t=document.getElementById(id);if(!t)return;var tb=t.querySelector('tbody');if(!tb)return;var c=document.createElement('div');c.className='tbl-controls';t.parentNode.insertBefore(c,t);var si=null;if(s){si=document.createElement('input');si.type='text';si.placeholder='Filter\u2026';si.addEventListener('input',function(){p=0;r()});c.appendChild(si)}var inf=document.createElement('span');inf.className='tbl-info';c.appendChild(inf);var pv=document.createElement('a');pv.className='tbl-pg';pv.href='#';pv.textContent='\u2039 prev';pv.style.display='none';pv.addEventListener('click',function(e){e.preventDefault();p--;r()});c.appendChild(pv);var nx=document.createElement('a');nx.className='tbl-pg';nx.href='#';nx.textContent='next \u203a';nx.style.display='none';nx.addEventListener('click',function(e){e.preventDefault();p++;r()});c.appendChild(nx);var p=0;function r(){var q=si?si.value.toLowerCase().trim():'',a=Array.from(tb.querySelectorAll('tr')),f=q?a.filter(function(r){return r.textContent.toLowerCase().includes(q)}):a,tp=Math.max(1,Math.ceil(f.length/ps));if(p>=tp)p=tp-1;if(p<0)p=0;var st=p*ps;a.forEach(function(r){r.style.display='none'});f.slice(st,st+ps).forEach(function(r){r.style.display=''});var sh=Math.min(ps,f.length-st);inf.textContent=f.length<=ps?f.length+' item'+(f.length!==1?'s':''):(st+1)+'\u2013'+(st+sh)+' of '+f.length;pv.style.display=p>0?'':'none';nx.style.display=p<tp-1?'':'none'}r()}
     </script>
+    {{ effect_bar_assets() }}
 </head>
 <body>
     <div id="topbar">

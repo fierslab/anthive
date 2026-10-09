@@ -820,3 +820,9 @@ starCAT modules/scores (`.description` on `/catalogs`). Wire each up when shippe
   shows nothing). **Never add HTTP Basic Auth to browser routes** — browsers
   resend stale creds and trip Authelia's rate-limiter/ban. See
   `doc/HANDOFF_authelia.md`.
+
+## Effect bar, ranked shifts, genes tab (2026-10)
+
+- **One effect bar for the site** (`_effect_bar.html`, loaded by `base.html`, `window.antEffectBar`): fixed scale per unit (log2FC two-group +/-1 with a faint 10 percent tick, per Braak stage and per decade +/-0.3, per e4 allele +/-0.5; SD units the same), arrowhead when capped, warm up / cool down / grey not counted, filled = cohort q < 0.05, whisker = 95% CI (forest) or min to max (summary tables). Used by `V.forestHtml`, the fxf forest and anchors in `_facet_effects.html`, and the replicated genes / gene sets tables in `_view_facet.html`. No page draws its own effect marks; point size by donors is gone. `antEffectBar.pointStats` gives the donors cell ("n_test vs n_ref" for two-group facets), the small marker (smaller group < 10, trend n < 30, served `small` as fallback) and `informative`.
+- **Geneset "What shifts it"**: matrix cells show the module result only; "Ranked shifts" (per scope, sorted by `p_pc`, top 5, rest folded) sits above the matrix and opens the cell on click; member genes are one line per facet under each matrix (`block.after`). API additions: `family_rank`/`family_size` on module variants, `min_effect`/`max_effect` on module top rows, `min_logFC`/`max_logFC` on gene top rows, `exclude_sex_chromosome` for the sex facet member counts.
+- **Geneset tabs**: `Genes` (#genes) lists members with their own facet calls, provenance sits in the header (`_geneset_provenance`), the Donor variability tab is `hidden` on gene and gene set pages until panel 3 exists.

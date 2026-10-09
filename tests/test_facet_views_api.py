@@ -345,6 +345,20 @@ def test_member_replication_counts_names_and_directions(reader):
     assert reader.member_replication('braak', [], VIEW_DATASETS)['groups']['microglia']['n_replicated'] == 0
 
 
+def test_member_replication_can_leave_out_sex_chromosome_members(reader, monkeypatch):
+    monkeypatch.setattr(fr.gene_classes, 'gtf_path', lambda: Path('annotation.gtf'))
+    monkeypatch.setattr(fr.gene_classes, '_load', lambda path: {'PTPRG': ('chr3', 1000), 'APOE': ('chrX', 1000)})
+    kept = reader.member_replication('sex', ['PTPRG', 'APOE'], VIEW_DATASETS, exclude_sex_chromosome=True)
+    assert kept['n_members'] == 1 and kept['n_sex_chromosome_excluded'] == 1
+    plain = reader.member_replication('sex', ['PTPRG', 'APOE'], VIEW_DATASETS)
+    assert plain['n_members'] == 2 and plain['n_sex_chromosome_excluded'] == 0
+
+
+def test_recurring_gene_rows_carry_the_smallest_and_largest_cohort_effect(reader):
+    row = reader.recurring_genes('braak', VIEW_DATASETS, cell_type='microglia')['rows'][0]
+    assert row['min_logFC'] <= row['median_logFC'] <= row['max_logFC']
+
+
 # ── modules: replication across cohorts ──────────────────────────────────────
 
 def test_module_tables_hold_both_cohorts_per_facet_and_scope(modules):
@@ -848,3 +862,12 @@ def test_version_and_changelog_name_2_45_0():
     changelog = (MCP_PATH.parent.parent.parent / 'doc' / 'API_CHANGELOG.md').read_text()
     assert '## 2.45.0' in changelog and changelog.index('## 2.45.0') < changelog.index('## 2.44.0')
     assert '—' not in changelog.split('## 2.45.0')[1].split('## 2.44.0')[0]
+
+
+def test_module_variants_carry_their_rank_in_the_family_and_top_rows_the_effect_range(modules):
+    best = _replication(modules.module_effects('Study/Exp', 'modA', VIEW_DATASETS, 'braak'))['variants'][0]
+    noise = _replication(modules.module_effects('Study/Exp', 'modC', VIEW_DATASETS, 'braak'))['variants'][0]
+    assert best['family_size'] == noise['family_size'] >= 3
+    assert 1 <= best['family_rank'] < noise['family_rank'] <= best['family_size']
+    row = modules.top_modules('braak', VIEW_DATASETS, cell_type='microglia', include_not_replicated=True)['rows'][0]
+    assert row['min_effect'] <= row['median_std_effect'] <= row['max_effect']

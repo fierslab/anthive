@@ -2356,6 +2356,8 @@ class FacetResults:
                         'p_pc': _finite(record['p_pc']), 'k': int(record['k']), 'k_treat': int(record['k_treat']),
                         'm': int(record['m']), 'replicated': True, 'direction': direction,
                         'median_logFC': _finite(record.get('median_logFC')),
+                        'min_logFC': _finite(gene_cohorts['effect'].min()),
+                        'max_logFC': _finite(gene_cohorts['effect'].max()),
                         'effect_gate_passed': bool(record.get('effect_gate_passed')),
                         'effect_gate_tau': _finite(record.get('effect_gate_tau')),
                         'effect_gate_cohorts': [labels.get(c) or c for c in record.get('effect_gate_cohorts') or []],
@@ -2419,7 +2421,8 @@ class FacetResults:
     # ── gene sets and the facet overview ───────────────────────────────────
 
     def member_replication(self, facet: str, members: Sequence[str], datasets: Sequence[Dict[str, Any]],
-                           exclude_secondary: bool = True, scope: Optional[str] = None) -> Dict[str, Any]:
+                           exclude_secondary: bool = True, scope: Optional[str] = None,
+                           exclude_sex_chromosome: bool = False) -> Dict[str, Any]:
         """The member genes of a gene set that replicate for one facet in one scope, per cell type group.
 
         Uses the gene replication families (the same r-values as ``/facets/{facet}/effects/top``), so the numbers are
@@ -2431,9 +2434,12 @@ class FacetResults:
             datasets: As for ``gene_effects``.
             exclude_secondary: Secondary datasets are not counted.
             scope: Facet scope; default ``default_scope(facet)``.
+            exclude_sex_chromosome: Drop members on chrX or chrY (``gene_classes`` flag ``sex_chromosome``) before
+                counting; for the sex facet they differ by sex for chromosomal reasons. ``n_sex_chromosome_excluded``
+                says how many were dropped. Without a gene annotation file nothing is dropped.
 
         Returns:
-            ``{facet, scope, scopes, n_members, groups}``; ``groups[group]`` has ``n_members``, ``n_tested`` (members
+            ``{facet, scope, scopes, n_members, n_sex_chromosome_excluded, groups}``; ``groups[group]`` has ``n_members``, ``n_tested`` (members
             tested in at least two cohorts), ``n_replicated`` (r < 0.05), ``n_up``, ``n_down``, ``n_effect_gate``
             (replicated and the effect gate passed), ``n_strict``, ``genes_up`` and ``genes_down`` (names of the
             replicated members by direction, best r first), ``genes_gate`` and ``genes`` (one dict per replicated
@@ -2444,6 +2450,16 @@ class FacetResults:
         prepared = self.prepare(datasets)
         families = self.replication_families(facet, prepared, exclude_secondary, scope)
         keys = {str(name).strip().upper() for name in members if str(name).strip()}
+        n_excluded = 0
+        if exclude_sex_chromosome:
+            path = gene_classes.gtf_path()
+            try:
+                annotation = gene_classes._load(path) if path else {}
+            except OSError:
+                annotation = {}
+            sex_linked = {name for name in keys if 'sex_chromosome' in gene_classes.flags(name, annotation)}
+            keys -= sex_linked
+            n_excluded = len(sex_linked)
         groups: Dict[str, Dict[str, Any]] = {}
         for group, entry in families.items():
             frame = entry['frame']
@@ -2470,7 +2486,7 @@ class FacetResults:
                 'genes_gate': [g['gene'] for g in genes if g['effect_gate_passed']],
                 'genes': genes}
         return json_safe({'facet': facet, 'scope': scope, 'scopes': self.scopes_with_results(facet, prepared),
-                          'n_members': len(keys), 'groups': groups})
+                          'n_members': len(keys), 'n_sex_chromosome_excluded': n_excluded, 'groups': groups})
 
     def effects_overview(self, facet: str, datasets: Sequence[Dict[str, Any]], exclude_secondary: bool = True,
                          scope: Optional[str] = None, n_per_group: int = 10) -> Dict[str, Any]:

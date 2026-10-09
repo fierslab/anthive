@@ -224,7 +224,7 @@ def test_facet_page_without_tests_keeps_the_old_page_only(client):
 
 # ── wording and scripts ────────────────────────────────────────────────────────
 
-_VIEW_TEMPLATES = ("_views.html", "_view_gene.html", "_view_geneset.html", "_view_facet.html")
+_VIEW_TEMPLATES = ("_views.html", "_view_gene.html", "_view_geneset.html", "_view_facet.html", "_effect_bar.html")
 
 
 @pytest.mark.parametrize("name", _VIEW_TEMPLATES)
@@ -286,7 +286,7 @@ def test_gene_page_uses_numbered_help_headers_and_drops_old_labels(client):
 
 
 @pytest.mark.parametrize("name, needles", [
-    ("_views.html", ("vw-dplot", "X-Plot-Caption", "adjusted for covariates", "per-cell view in", "donor values (JSON)", "table-layout: fixed", 'class="q"')),
+    ("_views.html", ("vw-dplot", "X-Plot-Caption", "adjusted for covariates", "per-cell view in", "donor values (JSON)", "table-layout: fixed", 'class="eb-cell"', "numberHtml")),
     ("_view_gene.html", ("plot by cell type", "dataset page", "linksHtml")),
     ("_view_geneset.html", ("plot by cell type", "linksHtml", "vws-p2-help")),
 ])
@@ -322,3 +322,76 @@ def test_view_page_templates_have_no_em_dash(name):
 ])
 def test_view_celltype_column(name, expected):
     assert browser._view_celltype_column(name) == expected
+
+
+# ── effect bar, ranked shifts, genes tab ───────────────────────────────────────
+
+def _effect_bar_script():
+    text = (_WEB_DIR / "templates" / "_effect_bar.html").read_text(encoding="utf-8")
+    return re.search(r"<script>(.*?)</script>", text, re.S).group(1)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_effect_bar_scales_arrowheads_fill_and_donor_stats(tmp_path):
+    script = tmp_path / "bar.js"
+    script.write_text("var window = {};\n" + _effect_bar_script() + """
+var bar = window.antEffectBar, out = {};
+out.keys = [bar.scaleKey('sex', 'lfc'), bar.scaleKey('ant_braak', 'lfc'), bar.scaleKey('age_adjusted', 'sd'), bar.scaleKey('apoe4_dose', 'lfc')];
+out.max = out.keys.map(function (k) { return bar.scaleOf(k).max; });
+out.faint = [bar.scaleOf('lfc_two').faint, bar.scaleOf('lfc_braak').faint];
+var capped = bar.barHtml({ scale: 'lfc_braak', est: 0.9, lo: 0.1, hi: 1.2, sig: true });
+out.capped = [capped.indexOf('eb-arrow r') >= 0, capped.indexOf(' up') >= 0, capped.indexOf('filled') >= 0, capped.indexOf('width:50%') >= 0];
+var open = bar.barHtml({ scale: 'lfc_two', est: -0.2, sig: false });
+out.open = [open.indexOf(' down') >= 0, open.indexOf('open') >= 0, open.indexOf('eb-arrow') < 0];
+out.grey = bar.barHtml({ scale: 'lfc_two', est: 0.5, counted: false }).indexOf('grey') >= 0;
+out.axis = bar.axisHtml('lfc_braak');
+out.two = bar.pointStats({ n_donors: 17, n_donors_test: 9, n_donors_ref: 8 }, 'sex');
+out.trend = [bar.pointStats({ n_donors: 29 }, 'braak').small, bar.pointStats({ n_donors: 30 }, 'braak').small];
+out.fallback = [bar.pointStats({ small: true }, 'sex').small, bar.pointStats({}, 'sex').small];
+console.log(JSON.stringify(out));
+""", encoding="utf-8")
+    done = subprocess.run(["node", str(script)], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    assert out["keys"] == ["lfc_two", "lfc_braak", "sd_decade", "lfc_e4"] and out["max"] == [1, 0.3, 0.3, 0.5]
+    assert out["faint"][0] == pytest.approx(0.1375) and out["faint"][1] is None
+    assert out["capped"] == [True, True, True, True] and out["open"] == [True, True, True] and out["grey"] is True
+    assert "per Braak stage" in out["axis"] and "+0.3" in out["axis"]
+    assert out["two"]["donors"] == "9 vs 8" and out["two"]["small"] is True and out["two"]["minGroup"] == 8
+    assert out["trend"] == [True, False] and out["fallback"] == [True, None]
+
+
+def test_every_page_carries_the_effect_bar(client):
+    assert "window.antEffectBar" in client.get("/genes/PTPRG").text
+
+
+def test_geneset_page_has_ranked_shifts_genes_tab_and_hides_donor_variability(client):
+    text = client.get("/genesets/Study1/Exp1/DAM").text
+    assert 'data-vtab="genes" data-hash="genes"' in text and 'id="vt-genes"' in text and 'id="vws-genes-body"' in text
+    assert re.search(r'data-vtab="variability"[^>]*\bhidden>', text)
+    for needle in ("Ranked shifts", "rankedShifts", "Member genes replicating", "family_rank", "Replication not possible: only one informative cohort",
+                   "after adjusting over", "just above the 0.05 line", "ranks low by construction", "vws-provenance"):
+        assert needle in text or needle in (_WEB_DIR / "templates" / "geneset.html").read_text(encoding="utf-8"), needle
+    assert 'class="gn"' not in text and "replicated, strict test passed" in text      # the strict swatch is dropped only for modules in the script
+    assert "Geneset page (old)" in text
+
+
+def test_gene_page_hides_donor_variability_tab(client):
+    assert re.search(r'data-vtab="variability"[^>]*\bhidden>', client.get("/genes/PTPRG").text)
+
+
+def test_geneset_provenance_lists_experiment_method_source_dataset_and_source_paper(monkeypatch):
+    monkeypatch.setattr(browser, "_dataset_papers", lambda api_url, db_id, scope="dataset": [
+        {"role": "source", "citation_line": "Smith et al., Nature, 2024", "url": "/papers/smith", "title": "T"},
+        {"role": "related", "citation_line": "Other", "url": "/papers/other", "title": "O"}])
+    payload = {"method": "WGCNA", "organism": "human", "parent_dataset": "S25/PhM",
+               "experiment_metadata": {"name": "Sierksma WGCNA", "description": " About it. ", "software": "WGCNA", "derived_by": "A. B."},
+               "geneset_metadata": {}}
+    info = browser._geneset_provenance("http://api", payload, "Sierksma2025", "WGCNA")
+    labels = {label: (text, href) for label, text, href in info["items"]}
+    assert labels["Experiment"] == ("Sierksma WGCNA", "/genesets/Sierksma2025/WGCNA")
+    assert labels["Method"][0] == "WGCNA" and labels["Source dataset"] == ("S25/PhM", "/browse/S25/PhM")
+    assert labels["Derived by"][0] == "A. B." and [p["citation_line"] for p in info["papers"]] == ["Smith et al., Nature, 2024"]
+    assert info["description"] == "About it."
+    bare = browser._geneset_provenance("http://api", {}, "S", "E")
+    assert bare["papers"] == [] and [item[0] for item in bare["items"]] == ["Experiment"]

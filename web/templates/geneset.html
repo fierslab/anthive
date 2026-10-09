@@ -19,19 +19,34 @@
 {% endif %}
 
 {% from "_views.html" import views_styles, views_core %}
-{% from "_view_geneset.html" import view_geneset_headline, view_geneset_score, view_geneset_shifts, view_geneset_variability, view_geneset_script %}
+{% from "_view_geneset.html" import view_geneset_headline, view_geneset_score, view_geneset_shifts, view_geneset_genes, view_geneset_variability, view_geneset_script %}
 {{ views_styles() }}
 {{ views_core() }}
+{% if provenance %}
+<div class="vw-prov" id="vws-provenance">
+  {% for label, text, href in provenance['items'] %}{% if not loop.first %}<span class="sep">&middot;</span>{% endif %}<span class="muted">{{ label }}</span> {% if href %}<a href="{{ href }}">{{ text }}</a>{% else %}{{ text }}{% endif %}{% endfor %}
+  <span class="sep">&middot;</span><span class="muted">genes</span> {{ payload.n_genes }}
+  {% for paper in provenance['papers'] %}<span class="sep">&middot;</span><span class="muted">paper</span> <a href="{{ paper.url }}" title="{{ paper.title }}">{{ paper.citation_line }}</a>{% endfor %}
+</div>
+{% if provenance['description'] or geneset_body_html %}
+<details class="vw-more" id="vws-about"><summary>About this gene set</summary>
+  {% if geneset_body_html %}<div class="md-body">{{ geneset_body_html|safe }}</div>{% endif %}
+  {% if provenance['description'] %}<p class="vw-fnote" style="white-space:pre-line">{{ provenance['description'] }}</p>{% endif %}
+</details>
+{% endif %}
+{% endif %}
 {{ view_geneset_headline() }}
 <div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
   <button type="button" class="tab-btn" data-vtab="score" data-hash="module-score" data-alias="geneset-view" role="tab">1. Module score</button>
   <button type="button" class="tab-btn" data-vtab="shifts" data-hash="shifts" role="tab">2. What shifts it</button>
-  <button type="button" class="tab-btn" data-vtab="variability" data-hash="variability" role="tab">3. Donor variability</button>
+  <button type="button" class="tab-btn" data-vtab="variability" data-hash="variability" role="tab" hidden>3. Donor variability</button>
+  <button type="button" class="tab-btn" data-vtab="genes" data-hash="genes" role="tab">Genes</button>
   <button type="button" class="tab-btn vw-old" data-vtab="page" data-hash="page" role="tab" title="The earlier geneset page: members, where the score varies most">Geneset page (old)</button>
 </div>
 <div class="tab-panel vw-panel" id="vt-score">{{ view_geneset_score(name) }}</div>
 <div class="tab-panel vw-panel" id="vt-shifts">{{ view_geneset_shifts(name) }}</div>
 <div class="tab-panel vw-panel" id="vt-variability">{{ view_geneset_variability() }}</div>
+<div class="tab-panel vw-panel" id="vt-genes">{{ view_geneset_genes(name) }}</div>
 <div class="tab-panel" id="vt-page">
 
 <div class="two-col" style="margin:8px 0 12px">

@@ -7240,12 +7240,13 @@ def test_fx_sex_control_renders_without_q_values():
 
 def test_fx_forest_folds_rows_not_counted():
     """The gene-page forest keeps counted cohort rows visible and folds the
-    'not counted' rows behind a toggle; the axis places 0 at its data position."""
+    'not counted' rows behind a toggle; the bars are the shared effect bar on a fixed scale."""
     macro = browser.templates.env.get_template("_facet_effects.html").module.fx_forest_assets
     html = str(macro())
     assert "fxf-more" in html and "fxf-hidden" in html
     assert "not counted towards replication" in html
-    assert 'class="zero" style="left:' in html
+    assert "antEffectBar.barHtml" in html and "antEffectBar.axisHtml" in html and "antEffectBar.scaleKey(facet.name, 'lfc')" in html
+    assert "fxf-pt" not in html and "fxf-track" not in html
 
 
 _DONOR_GROUPS = {"n_groups": 1, "n_ungrouped": 3, "groups": [
@@ -7392,7 +7393,7 @@ def test_fx_assets_show_replication_v2_wording():
                    "Simes", "fxf-row-model", "q (\u226510% change)", "About replication", "About this forest",
                    "fxf-caveat", "effect_gate_passed", "replicated_effect", "m includes "):
         assert phrase in forest, phrase
-    assert "table.fxf .fxf-donors-col, table.fxf .fxf-q-col { display: none; }" in forest
+    assert "table.fxf .fxf-donors-col { display: none; }" in forest
     assert ".fxf-reason" in forest and "fxf-reason { display: none" not in forest
     recurring = str(module.fx_recurring("ant_braak"))
     assert "No gene passes the replication rule for " in recurring and "r_value" in recurring

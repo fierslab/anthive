@@ -255,30 +255,29 @@
   }
 
   /* ---------- the opened cell ---------- */
-  function sentence(row, group, cell, scope) {
+  function sentence(row, group, cell, scope, rows) {
     var meta = V.facetMeta(scope, row.facet);
     var side = cell.dir === 'down' ? meta.phrase[1] : meta.phrase[0];
     var subject = V.esc(GENE);
     var where = V.esc(V.plain(group));
     if (V.cellKind(cell) === 'rep') return '<b>Replicated.</b> ' + subject + ' is ' + side + ' in ' + where + ': the same direction in at least 2 cohorts, ' + cell.k + ' of ' + cell.m + ' significant on their own. Median effect ' + V.signed(cell.median) + ' ' + V.esc(row.effectUnit || 'log2 fold change') + '.';
     if (V.cellKind(cell) === 'single') return 'Tested in 1 cohort only. Replication needs at least 2. The estimate of that cohort is in the row below.';
-    return '<b>Not replicated.</b> No consistent effect of ' + V.esc(row.label.toLowerCase()) + ' on ' + subject + ' in ' + where + ' across ' + cell.m + ' cohorts (' + cell.k + ' significant on their own). This is not evidence that there is none: few or small cohorts cannot reach it.';
+    if (rows.some(function (r) { return r.counted; }) && V.informativeCount(rows) <= 1) return '<b>Replication not possible: only one informative cohort.</b> A cohort is informative with at least ' + V.MIN_GROUP + ' donors in the smaller group (' + V.MIN_TREND + ' donors for a trend). The estimates are in the table below.';
+    return '<b>Not replicated.</b> ' + V.replicationLine(cell, rows, { noun: 'genes' }) + ' This is not evidence that there is no effect: few or small cohorts cannot reach it.';
   }
-  function rowNotes(replicate, small, noun, inflated, lambda) {
+  function rowNotes(replicate, inflated, lambda) {
     var notes = [];
     if (!replicate) notes.push('descriptive only (no interval, not counted)');
-    if (small) notes.push('small cohort, under 20 ' + noun);
     if (inflated) notes.push('inflated, lambda ' + V.num(lambda, 1));
     return notes;
   }
   function withNotes(link, notes) { return link + (notes.length ? ' <span class="muted">' + V.esc(notes.join('; ')) + '</span>' : ''); }
-  function unitRows(units, group, scope) {
-    var noun = V.SCOPES[scope].noun;
+  function unitRows(units, group, scope, facet) {
     return units.filter(function (u) { return (u.celltype_group || 'unmapped') === group; }).map(function (u) {
       var replicate = u.analysis_level === 'replicate';
-      var notes = rowNotes(replicate, u.n_donors != null && u.n_donors < 20 && replicate, noun, u.inflated, u.lambda_gc);
+      var notes = rowNotes(replicate, u.inflated, u.lambda_gc);
       var cohort = u.cohort_label && u.cohort_label !== 'None' ? u.cohort_label.replace(/^Xenograft:\s*/, '') : 'unassigned';
-      return { name: cohort, title: u.title || u.db_id, sub: withNotes('<a href="/browse/' + V.esc(u.db_id) + '">' + V.esc(u.db_id) + '</a>', notes), n: u.n_donors, est: u.logFC,
+      return { name: cohort, title: u.title || u.db_id, sub: withNotes('<a href="/browse/' + V.esc(u.db_id) + '">' + V.esc(u.db_id) + '</a>', notes), stats: V.pointStats(u, facet), est: u.logFC, descriptive: !replicate,
                lo: replicate ? u.ci_low : null, hi: replicate ? u.ci_high : null, q: replicate ? u.q_value : null, sig: replicate && u.q_value != null && u.q_value < 0.05,
                counted: !!u.counted, anchor: !!u.anchor, reason: u.not_counted_reason, inflated: !!u.inflated, db_id: u.db_id };
     }).sort(function (a, b) { return (b.counted - a.counted) || (b.anchor - a.anchor) || ((b.n || 0) - (a.n || 0)); }).map(function (row, index, all) {
@@ -290,19 +289,19 @@
     }).sort(function (a, b) { return (b.counted - a.counted) || (b.anchor - a.anchor) || ((b.n || 0) - (a.n || 0)); });
   }
   // API 2.45: every replication entry carries `forest` (one row per cohort: its counted anchor and the other units under more_units).
-  function pointRow(point, entry, noun, isAnchor) {
+  function pointRow(point, entry, facet, isAnchor) {
     var replicate = point.analysis_level == null || point.analysis_level === 'replicate';
-    var notes = rowNotes(replicate, point.small_sample, noun, point.inflated, point.lambda_gc);
+    var notes = rowNotes(replicate, point.inflated, point.lambda_gc);
     var name = (entry.cohort_display || entry.cohort_label || 'unassigned').replace(/^Xenograft:\s*/, '');
-    return { name: name, title: point.title || point.db_id, sub: withNotes('<a href="/browse/' + V.esc(point.db_id) + '">' + V.esc(point.db_id) + '</a>', notes), n: point.n_donors, est: point.logFC,
+    return { name: name, title: point.title || point.db_id, sub: withNotes('<a href="/browse/' + V.esc(point.db_id) + '">' + V.esc(point.db_id) + '</a>', notes), stats: V.pointStats(point, facet, entry), est: point.logFC, descriptive: !replicate,
              lo: replicate ? point.ci_low : null, hi: replicate ? point.ci_high : null, q: replicate ? point.q_value : null, sig: replicate && point.q_value != null && point.q_value < 0.05,
              counted: isAnchor && !!(point.anchor_counted != null ? point.anchor_counted : entry.counted), anchor: isAnchor, reason: point.not_counted_reason, inflated: !!point.inflated, db_id: point.db_id };
   }
-  function forestRowsFromServed(forest, noun) {
+  function forestRowsFromServed(forest, facet) {
     var rows = [];
     forest.forEach(function (entry) {
-      if (entry.anchor) rows.push(pointRow(entry.anchor, entry, noun, true));
-      (entry.more_units || []).forEach(function (point) { rows.push(pointRow(point, entry, noun, false)); });
+      if (entry.anchor) rows.push(pointRow(entry.anchor, entry, facet, true));
+      (entry.more_units || []).forEach(function (point) { rows.push(pointRow(point, entry, facet, false)); });
     });
     return rows.sort(function (a, b) { return (b.counted - a.counted) || (b.anchor - a.anchor) || ((b.n || 0) - (a.n || 0)); });
   }
@@ -327,18 +326,18 @@
   }
   function detailHtml(block, row, group, cell, card) {
     var scope = block.scope;
-    var rows = card.rows || unitRows(card.units || [], group, scope);
+    var rows = card.rows || unitRows(card.units || [], group, scope, row.facet);
     var title = V.esc(GENE) + ', ' + V.esc(row.label) + ', ' + V.esc(V.plain(group));
-    var html = '<div class="vw-detail"><div class="dc-title">' + title + '</div><div class="dc-line">' + (cell ? sentence(row, group, cell, scope) : 'This facet was not tested in this cell type group (too few cohorts or too few replicates).') + '</div>';
+    var html = '<div class="vw-detail"><div class="dc-title">' + title + '</div><div class="dc-line">' + (cell ? sentence(row, group, cell, scope, rows) : 'This facet was not tested in this cell type group (too few cohorts or too few replicates).') + '</div>';
     html += V.linksHtml(cell && cell.rep ? cell.rep.links : null);
-    if (rows.length) html += V.forestHtml(rows, { noun: V.SCOPES[scope].noun, unit: row.effectUnit || 'log2 fold change' });
+    if (rows.length) html += V.forestHtml(rows, { noun: V.SCOPES[scope].noun, scale: window.antEffectBar.scaleKey(row.facet, 'lfc') });
     var extra = extraHtml(block, row, group, cell, rows);
     if (extra) html += '<details class="vw-more"><summary>More detail</summary>' + extra + '</details>';
     return html + '</div>';
   }
   function detail(block, row, group, cell) {
     if (!cell) return Promise.resolve(detailHtml(block, row, group, null, {}));
-    if (cell.rep && cell.rep.forest && cell.rep.forest.length) return Promise.resolve(detailHtml(block, row, group, cell, { rows: forestRowsFromServed(cell.rep.forest, V.SCOPES[block.scope].noun) }));
+    if (cell.rep && cell.rep.forest && cell.rep.forest.length) return Promise.resolve(detailHtml(block, row, group, cell, { rows: forestRowsFromServed(cell.rep.forest, row.facet) }));
     var url = V.API + '/facets/' + enc(row.facet) + '/effects?gene=' + enc(GENE) + '&scope=' + enc(block.scope) + '&cell_type=' + enc(group);
     return V.cached(url).then(function (card) { return detailHtml(block, row, group, cell, card); });
   }

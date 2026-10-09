@@ -4197,6 +4197,42 @@ async def geneset_experiment_view(request: Request, study: str, experiment: str)
     })
 
 
+def _geneset_provenance(api_url: str, payload: Dict[str, Any], study: str, experiment: str) -> Dict[str, Any]:
+    """Where a gene set comes from, for the header of its page.
+
+    Args:
+        api_url: Base URL of the REST API.
+        payload: The ``/genesets/{study}/{experiment}/{name}`` answer.
+        study: Study folder of the gene set.
+        experiment: Experiment (catalog) folder of the gene set.
+
+    Returns:
+        ``{items, papers, description}``: ``items`` are ``(label, text, href)`` rows (href may be empty) for
+        experiment, method, organism, source dataset and who derived it; ``papers`` the source-paper cards of the
+        source dataset (empty when the library is off); ``description`` the experiment description.
+    """
+    experiment_meta = payload.get('experiment_metadata') or {}
+    geneset_meta = payload.get('geneset_metadata') or {}
+    parent = payload.get('parent_dataset') or experiment_meta.get('parent_dataset') or ''
+    items: List[Tuple[str, str, str]] = []
+    experiment_name = experiment_meta.get('name') or f'{study}/{experiment}'
+    items.append(('Experiment', experiment_name, f'/genesets/{study}/{experiment}'))
+    method = payload.get('method') or experiment_meta.get('method')
+    software = experiment_meta.get('software')
+    if method:
+        items.append(('Method', f'{method}' + (f' ({software})' if software and software != method else ''), ''))
+    if payload.get('organism'):
+        items.append(('Organism', str(payload['organism']), ''))
+    if parent:
+        parts = str(parent).split('/')
+        items.append(('Source dataset', str(parent), f'/browse/{parts[0]}/{parts[1]}' if len(parts) == 2 else ''))
+    derived = experiment_meta.get('derived_by') or geneset_meta.get('derived_by')
+    if derived:
+        items.append(('Derived by', str(derived), ''))
+    papers = [card for card in _dataset_papers(api_url, str(parent)) if card.get('role') == 'source'][:2] if parent else []
+    return {'items': items, 'papers': papers, 'description': (experiment_meta.get('description') or '').strip()}
+
+
 @router.get("/genesets/{study}/{experiment}/{name}", response_class=HTMLResponse)
 async def geneset_view(request: Request, study: str, experiment: str, name: str):
     api_url = _api_url(request)
@@ -4231,7 +4267,8 @@ async def geneset_view(request: Request, study: str, experiment: str, name: str)
         # chips can render a `(2)` badge for secondary datasets.
         "dataset_annotations": dataset_annotations,
         "view_dbs": _view_db_map(api_url),
-        "view_payload": {k: payload.get(k) for k in ('scored_in', 'column_name', 'direction', 'n_genes', 'quality_sensitive')},
+        "view_payload": {k: payload.get(k) for k in ('scored_in', 'column_name', 'direction', 'n_genes', 'quality_sensitive', 'genes', 'ranks', 'format')},
+        "provenance": _geneset_provenance(api_url, payload, study, experiment),
         "mv_ctx": {
             "scope": "module",
             "module_catalog": catalog,

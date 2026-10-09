@@ -1,0 +1,152 @@
+{# The one effect bar of the whole site (window.antEffectBar), loaded by base.html.
+   A horizontal diverging bar from a zero line on a FIXED scale per unit, so bars of different rows, pages and
+   facets compare by eye.  Used by the forests of the gene view, the gene set view and the dataset Facets tab and
+   by the summary tables of the facet overview.  No page draws its own effect marks.
+
+   Scales (full half-width of the track):
+     log2 fold change   two-group +/-1 (faint tick at 10 percent = 0.14), per Braak stage +/-0.3, per decade +/-0.3, per e4 allele +/-0.5
+     SD of the donor score   two-group +/-1, per Braak stage +/-0.3, per decade +/-0.3, per e4 allele +/-0.5
+   Values beyond the scale are capped: the bar runs to the edge and ends in an arrowhead.
+   Colour is the sign (up warm, down cool, the same two hues everywhere), grey when the row is not counted or only
+   descriptive.  Filled means the cohort's own q is below 0.05, open means it is not.  The thin whisker is the 95
+   percent CI in a forest and the min to max over the counted cohorts in a summary table.
+
+   API:  antEffectBar.scaleKey(facet, measure)   measure 'lfc' or 'sd'
+         antEffectBar.barHtml({scale, est, lo, hi, sig, counted, descriptive, whisker: 'ci' | 'range', title})
+         antEffectBar.axisHtml(scale)           header cell content: unit, then -max, 0, +max once
+         antEffectBar.numberHtml(est, scale, q) signed number with q beside it
+         antEffectBar.legendHtml(scale, kind)   one footnote line, kind 'forest' or 'summary' #}
+{% macro effect_bar_assets() -%}
+<style>
+  .eb { position: relative; display: block; height: 18px; min-width: 70px; }
+  .eb .eb-zero { position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: #8b949e; }
+  .eb .eb-tick { position: absolute; top: 5px; bottom: 5px; width: 1px; background: #d3d8de; }
+  .eb .eb-bar { position: absolute; top: 5px; height: 8px; min-width: 2px; box-sizing: border-box; border: 1.5px solid var(--eb-color); background: var(--eb-color); border-radius: 1px; }
+  .eb .eb-bar.open { background: #fff; }
+  .eb.up { --eb-color: #cf5a2e; }
+  .eb.down { --eb-color: #2c6fb0; }
+  .eb.grey { --eb-color: #9aa1a9; }
+  .eb .eb-whisker { position: absolute; top: 8px; height: 2px; background: #3b4754; opacity: .85; }
+  .eb .eb-whisker.range { background: none; border-top: 2px solid #3b4754; height: 0; top: 8px; }
+  .eb .eb-whisker.range::before, .eb .eb-whisker.range::after { content: ""; position: absolute; top: -5px; height: 8px; width: 0; border-left: 1.5px solid #3b4754; }
+  .eb .eb-whisker.range::before { left: 0; } .eb .eb-whisker.range::after { right: 0; }
+  .eb .eb-arrow { position: absolute; top: 3px; width: 0; height: 0; border-top: 6px solid transparent; border-bottom: 6px solid transparent; }
+  .eb .eb-arrow.r { right: -1px; border-left: 8px solid var(--eb-color); }
+  .eb .eb-arrow.l { left: -1px; border-right: 8px solid var(--eb-color); }
+  .eb-axis { position: relative; display: block; height: 11px; margin-top: 2px; font-size: 9.5px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .eb-axis span { position: absolute; top: 0; white-space: nowrap; }
+  .eb-axis .l { left: 0; } .eb-axis .z { left: 50%; transform: translateX(-50%); } .eb-axis .r { right: 0; }
+  .eb-unit { display: block; font-size: 10px; font-weight: 400; letter-spacing: 0; text-transform: none; color: var(--text-muted); white-space: normal; line-height: 1.25; }
+  .eb-row { display: flex; align-items: center; gap: 8px; }
+  .eb-row > .eb, .eb-row > .eb-axiswrap { flex: 1 1 auto; min-width: 60px; }
+  .eb-row > .eb-num, .eb-row > .eb-spacer { flex: none; width: 58px; text-align: right; }
+  .eb-axiswrap { display: block; }
+  .eb-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .eb-num .q { color: var(--text-muted); font-size: 10.5px; margin-left: 5px; }
+  .eb-legend { font-size: 11px; color: var(--text-muted); margin: 4px 0 0; max-width: 900px; line-height: 1.45; }
+  .eb-legend .sw { display: inline-block; width: 18px; height: 7px; vertical-align: 0; margin: 0 2px; box-sizing: border-box; border: 1.5px solid #9aa1a9; background: #9aa1a9; }
+  .eb-legend .sw.up { border-color: #cf5a2e; background: #cf5a2e; } .eb-legend .sw.down { border-color: #2c6fb0; background: #2c6fb0; }
+  .eb-legend .sw.open { background: #fff; }
+  @media (max-width: 640px) { .eb { min-width: 56px; } .eb-axis { font-size: 9px; } }
+</style>
+<script>
+window.antEffectBar = window.antEffectBar || (function () {
+  'use strict';
+  var TWO_GROUP_TICK = 0.1375;   // a 10 percent change on the log2 scale
+  var SHAPES = {
+    two: { lfc: { max: 1, unit: 'log2 fold change' }, sd: { max: 1, unit: 'SD of the donor score' } },
+    braak: { lfc: { max: 0.3, unit: 'log2 fold change per Braak stage' }, sd: { max: 0.3, unit: 'SD of the donor score per Braak stage' } },
+    decade: { lfc: { max: 0.3, unit: 'log2 fold change per decade' }, sd: { max: 0.3, unit: 'SD of the donor score per decade' } },
+    e4: { lfc: { max: 0.5, unit: 'log2 fold change per e4 allele' }, sd: { max: 0.5, unit: 'SD of the donor score per e4 allele' } }
+  };
+  function esc(value) { return String(value == null ? '' : value).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function finite(value) { return value != null && !isNaN(value); }
+  function shapeOf(facet) {
+    var name = String(facet || '').replace(/^ant_/, '');
+    if (name === 'braak') return 'braak';
+    if (name === 'age' || name === 'age_adjusted') return 'decade';
+    if (name === 'apoe4_dose') return 'e4';
+    return 'two';
+  }
+  // 'lfc_braak', 'sd_two', ...; unknown facets are two-group
+  function scaleKey(facet, measure) { return (measure === 'sd' ? 'sd' : 'lfc') + '_' + shapeOf(facet); }
+  function scaleOf(key) {
+    var parts = String(key || 'lfc_two').split('_');
+    var base = (SHAPES[parts[1]] || SHAPES.two)[parts[0] === 'sd' ? 'sd' : 'lfc'];
+    return { max: base.max, unit: base.unit, faint: parts[0] === 'lfc' && parts[1] === 'two' ? TWO_GROUP_TICK : null };
+  }
+  function percent(value, max) { return 50 + Math.max(-1, Math.min(1, value / max)) * 50; }
+  function digitsFor(scale) { return scale.max <= 0.3 ? 3 : 2; }
+  function signed(value, scale) { return finite(value) ? (value > 0 ? '+' : '') + Number(value).toFixed(digitsFor(scale)) : 'n/a'; }
+  function qText(q) {
+    if (!finite(q)) return 'n/a';
+    if (q === 0) return '< 1e-300';
+    return q < 0.001 ? Number(q).toExponential(1) : Number(q).toFixed(q < 0.01 ? 4 : 3);
+  }
+  function barHtml(opts) {
+    var scale = scaleOf(opts.scale);
+    var est = opts.est;
+    if (!finite(est)) return '<span class="eb grey" title="' + esc(opts.title || 'no estimate') + '"><span class="eb-zero"></span></span>';
+    var counted = opts.counted !== false && !opts.descriptive;
+    var tone = !counted ? 'grey' : est > 0 ? 'up' : est < 0 ? 'down' : 'grey';
+    var capped = Math.abs(est) > scale.max;
+    var end = percent(est, scale.max);
+    var left = Math.min(50, end), width = Math.abs(end - 50);
+    var html = '<span class="eb ' + tone + '" title="' + esc(opts.title || '') + '"><span class="eb-zero"></span>';
+    if (scale.faint) html += '<span class="eb-tick" style="left:' + percent(-scale.faint, scale.max) + '%"></span><span class="eb-tick" style="left:' + percent(scale.faint, scale.max) + '%"></span>';
+    html += '<span class="eb-bar ' + (opts.sig && counted ? 'filled' : 'open') + '" style="left:' + left + '%;width:' + width + '%"></span>';
+    if (finite(opts.lo) && finite(opts.hi) && !opts.descriptive) {
+      var lowEnd = percent(Math.min(opts.lo, opts.hi), scale.max), highEnd = percent(Math.max(opts.lo, opts.hi), scale.max);
+      html += '<span class="eb-whisker ' + (opts.whisker === 'range' ? 'range' : 'ci') + '" style="left:' + lowEnd + '%;width:' + Math.max(0.5, highEnd - lowEnd) + '%"></span>';
+    }
+    if (capped) html += '<span class="eb-arrow ' + (est > 0 ? 'r' : 'l') + '"></span>';
+    return html + '</span>';
+  }
+  function axisHtml(key) {
+    var scale = scaleOf(key);
+    return '<span class="eb-unit">' + esc(scale.unit) + '</span><span class="eb-axis"><span class="l">&minus;' + scale.max + '</span><span class="z">0</span><span class="r">+' + scale.max + '</span></span>';
+  }
+  function numberHtml(est, key, q) {
+    var scale = scaleOf(key);
+    return '<span class="eb-num">' + signed(est, scale) + (q === undefined ? '' : '<span class="q">q ' + qText(q) + '</span>') + '</span>';
+  }
+  // A bar with its signed number beside it (summary tables); headRowHtml is the matching header content.
+  function rowHtml(opts, q) { return '<span class="eb-row">' + barHtml(opts) + numberHtml(opts.est, opts.scale, q) + '</span>'; }
+  function headRowHtml(key) {
+    var scale = scaleOf(key);
+    return '<span class="eb-unit">' + esc(scale.unit) + '</span><span class="eb-row"><span class="eb-axiswrap"><span class="eb-axis"><span class="l">&minus;' + scale.max + '</span><span class="z">0</span><span class="r">+' + scale.max + '</span></span></span><span class="eb-spacer"></span></span>';
+  }
+  function legendHtml(key, kind) {
+    var mixed = key === 'mixed';
+    var scale = mixed ? { max: 1, unit: '', faint: null } : scaleOf(key);
+    var whisker = kind === 'summary' ? 'The thin line with end caps runs from the smallest to the largest cohort effect.' : 'The thin line is the 95 percent confidence interval.';
+    var fill = kind === 'summary' ? '<span class="sw up"></span> filled: the result replicates (r &lt; 0.05); <span class="sw up open"></span> open: it does not.' :
+      '<span class="sw up"></span> filled: q of the cohort on its own &lt; 0.05; <span class="sw up open"></span> open: it is not.';
+    var scaleText = mixed ? 'a fixed scale per unit, named under each bar (&plusmn;1 SD for two-group contrasts, &plusmn;0.3 per Braak stage or per decade, &plusmn;0.5 per e4 allele)' : 'a fixed scale of &plusmn;' + scale.max + ' (' + esc(scale.unit) + ')';
+    return '<p class="eb-legend">Bar from the zero line on ' + scaleText + '; an arrowhead means the value is beyond the scale' +
+      (scale.faint ? '; the faint ticks mark a 10 percent change (' + scale.faint.toFixed(2) + ')' : '') + '. Warm is up, cool is down, grey is not counted or descriptive only. ' + fill + ' ' + whisker + '</p>';
+  }
+  var TWO_GROUP = { sex: 1, disease: 1, apoe4_carrier: 1, app_nlgf: 1, braak_threshold: 1 };
+  var MIN_GROUP = 10, MIN_TREND = 30;       // informative cohort: smallest group >= 10 (two-group), n >= 30 (trends)
+  function isTwoGroup(facet) { return !!TWO_GROUP[String(facet || '').replace(/^ant_/, '')]; }
+  // The donors cell, the small-cohort marker and the "informative" flag of one cohort row. `point` carries n_donors and,
+  // where the API serves them, n_donors_test / n_donors_ref (two-group contrasts) and small; every field is optional.
+  // `served` is the entry that may carry its own small flag.
+  function pointStats(point, facet, served) {
+    var two = isTwoGroup(facet);
+    var test = point.n_donors_test, ref = point.n_donors_ref, total = point.n_donors;
+    var haveGroups = two && test != null && ref != null;
+    var small = null;       // from the smaller group (two-group) or the total (trends) where the counts exist, else the served flag
+    if (haveGroups) small = Math.min(test, ref) < MIN_GROUP;
+    else if (!two && total != null) small = total < MIN_TREND;
+    else if (point.small != null) small = !!point.small;
+    else if (served != null && served.small != null) small = !!served.small;
+    else if (point.small_sample != null) small = !!point.small_sample;
+    var levels = point.level_test != null && point.level_ref != null ? point.level_test + ' ' + test + ' vs ' + point.level_ref + ' ' + ref : null;
+    return { donors: haveGroups ? test + ' vs ' + ref : (total == null ? '' : String(total)), twoGroup: haveGroups, small: small, informative: small !== true,
+             title: haveGroups ? (levels || 'Donors in the test group vs the reference group') : '', minGroup: haveGroups ? Math.min(test, ref) : null };
+  }
+  return { isTwoGroup: isTwoGroup, pointStats: pointStats, MIN_GROUP: MIN_GROUP, MIN_TREND: MIN_TREND, scaleKey: scaleKey, scaleOf: scaleOf, barHtml: barHtml, rowHtml: rowHtml, headRowHtml: headRowHtml, axisHtml: axisHtml, numberHtml: numberHtml, legendHtml: legendHtml, signed: function (value, key) { return signed(value, scaleOf(key)); } };
+})();
+</script>
+{%- endmacro %}

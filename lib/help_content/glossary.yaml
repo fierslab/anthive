@@ -110,7 +110,7 @@ terms:
 - slug: small-cohorts
   term: Small cohorts and "m includes n cohorts below 20 donors"
   definition_html: |
-    Every cohort that tested a gene counts in m, however small, so a very small cohort cannot make a result look better than it is but also cannot detect much. The badge says how many of the m cohorts have fewer than 20 donors, because the result then rests on fewer, larger cohorts than m suggests. A unit with fewer than 5 replicates per group is flagged "small sample".
+    Every cohort that tested a gene counts in m, however small, so a very small cohort cannot make a result look better than it is but also cannot detect much. The badge says how many of the m cohorts have fewer than 20 donors, because the result then rests on fewer, larger cohorts than m suggests. A cohort is flagged small when the smaller group has fewer than 10 donors (two-group contrasts) or the cohort has fewer than 30 donors (trends); it is then not informative on its own. When only one counted cohort is informative, replication is not possible and the page says so.
 - slug: age-twins
   term: 'Age: not adjusted and adjusted for pathology'
   definition_html: |
@@ -169,3 +169,7 @@ terms:
   term: Rank among gene sets
   definition_html: |
     The percentile of the mean module score of one gene set among all gene sets scored on the same cells of the same dataset, shown as "top x%". Scores are taken from the scanpy score, which subtracts a matched control gene set, so the means of different sets in one dataset are comparable; UCell depends on the number of genes of a set and is not used. A set scored only on the cells of its cell type is compared with the sets scored on those cells, and a set that covers several cell types gets the cell-weighted mean of its per-cell-type ranks. At least 10 other sets scored on at least 20 cells are needed. The rank compares gene sets within one dataset only; it says nothing about how the same set scores in another dataset, and the mean over datasets in a cell type row is a summary of ranks, not a score.
+- slug: effect-bar
+  term: Effect bar
+  definition_html: |
+    The bar that shows an effect in forests and summary tables. It runs from a zero line on a fixed scale for its unit, so bars compare between rows, pages and facets: log2 fold change plus or minus 1 for two-group contrasts (a faint tick marks a 10 percent change), plus or minus 0.3 per Braak stage and per decade, plus or minus 0.5 per e4 allele; for gene sets the same scales in standard deviations of the donor score. A value beyond the scale ends in an arrowhead. Warm is up, cool is down, grey is not counted or descriptive only. In a forest a filled bar means the q of that cohort on its own is below 0.05 and an open bar means it is not, and the thin line is the 95 percent confidence interval. In a summary table the bar is the median over the counted cohorts, the whisker runs from the smallest to the largest cohort, and it is filled when the result replicates.

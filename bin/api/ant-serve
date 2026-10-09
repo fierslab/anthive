@@ -13841,7 +13841,7 @@ def get_facet_top_modules(
     cell-mean result (A), named in ``method`` / ``source`` / ``variant_label``; ``other_variants`` summarise the others
     and ``ab.disagree`` is true when A and B point in opposite directions and either is replicated or both reach the
     gate. Rows: ``geneset_id, catalog, module, r_value, p_pc, k, m, r_direction, call, gate, median_std_effect,
-    median_estimate, r_cohorts, effect_gate_cohorts, n_small, small_cohorts, k_over_m, cohorts_label``, plus
+    min_effect, max_effect (smallest and largest per-cohort standardised effect), median_estimate, r_cohorts, effect_gate_cohorts, n_small, small_cohorts, k_over_m, cohorts_label``, plus
     ``quality_sensitive`` (mitochondrial or ribosomal genes dominate the set) and ``directionless``. ``n_matching`` is the
     number of rows the filters keep; ``cell_types`` lists the groups with their counts. Exploratory.
     """
@@ -13906,7 +13906,9 @@ def get_geneset_facet_effects(
     ``estimate``, ``ci_low``, ``ci_high``, ``std_effect``, ``p_perm``, ``more_units``) and ``ab`` (A and B contradict:
     ``disagree``). ``members`` gives, per cell type group, how many member genes replicate for the same facet
     (plain r < 0.05 counts, the effect-gate subset, the strict subset) and names them (``genes_up``, ``genes_down``,
-    ``genes``), never truncated. The card also carries ``scored_in`` (datasets with module results),
+    ``genes``), never truncated; for the ``sex`` facet members on chrX or chrY are left out of ``members``
+    (``n_sex_chromosome_excluded``). Each module variant also carries ``family_rank`` and ``family_size`` (its
+    rank by ``p_pc`` among the modules of the same family, so "ranks 2nd of 122 gene sets"). The card also carries ``scored_in`` (datasets with module results),
     ``quality`` (``quality_sensitive`` when mitochondrial or ribosomal genes dominate), ``directionless`` with
     ``directionless_note`` (a mean score is not suited to GWAS-like sets; read the member counts) and the gene set's
     ``celltypes`` scope. Exploratory; scopes are never mixed.
@@ -13933,7 +13935,8 @@ def get_geneset_facet_effects(
         if not include_units:
             entry = {**entry, 'units': []}
         member_entry = reader.member_replication(facet_name, members, datasets, exclude_secondary=exclude_secondary,
-                                                 scope=facet_scope) if members else None
+                                                 scope=facet_scope, exclude_sex_chromosome=facet_name == 'sex'
+                                                 ) if members else None
         return {'facet': facet_name, 'scope': facet_scope, 'module': entry, 'members': member_entry}
 
     def scopes_of(facet_name: str) -> List[str]:
@@ -13999,7 +14002,8 @@ def get_facet_recurring_genes(
     BH-adjusted over the genes of the scope and group. Ranked by ``r_value``
     ascending, then ``k`` (cohorts with q_value < 0.05 in that direction),
     ``agreement`` and ``median_abs_logFC``
-    (``ranking`` states the rule). Rows: ``gene, r_value, p_pc, k, k_treat, m,
+    (``ranking`` states the rule); rows also carry ``min_logFC`` / ``max_logFC``, the smallest and largest
+    per-cohort effect. Rows: ``gene, r_value, p_pc, k, k_treat, m,
     replicated, direction, median_logFC, effect_gate_passed, effect_gate_tau,
     agreement, median_abs_logFC,
     cohorts, cohorts_tested_labels, overlap_unknown, cohorts_overlap_unknown,

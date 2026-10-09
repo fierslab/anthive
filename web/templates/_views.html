@@ -86,7 +86,6 @@
   .vw-cell.none { background: #e9ecef; color: #5b636b; }
   .vw-cell.nt { background: #fafbfc; color: #b0b6bd; border: 1px dashed #dde1e5; cursor: default; }
   .vw-cell.sel { outline: 2px solid #E09F3E; outline-offset: 1px; }
-  .vw-cell .gn { font-size: 9.5px; padding: 0 5px; border-radius: 6px; background: rgba(255,255,255,.8); color: #254850; }
   .vw-cell .flag { color: #9E2A2B; font-size: 11px; }
   .vw-notes { font-size: 11.5px; color: #5b4a2c; margin: 5px 0 0; max-width: 940px; line-height: 1.5; }
   .vw-notes .sep { color: #c9ced4; margin: 0 5px; }
@@ -120,8 +119,6 @@
   .vw-chip.sel { outline: 2px solid #E09F3E; outline-offset: 1px; }
   .vw-crow .rest { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
   .vw-crow .rest b { font-weight: 500; color: #4b5563; }
-  .vw-crow .genes-line { font-size: 11.5px; color: #254850; margin-top: 3px; }
-  .vw-crow .genes-line .g { display: inline-block; background: #e8f0f1; border: 1px solid #c4d8db; border-radius: 10px; padding: 0 7px; margin: 1px 3px 1px 0; font-size: 11px; }
 
   /* detail card, forest */
   .vw-detail { padding: 10px 14px 12px; border-left: 3px solid #E09F3E; background: #fbfcfd; }
@@ -129,25 +126,21 @@
   .vw-detail .dc-line { font-size: 12.5px; color: #374151; margin: 2px 0 6px; max-width: 860px; }
   .vw-detail .dc-pills { margin: 3px 0 5px; }
   .vw-forest { border: 1px solid var(--border-light); background: #fff; border-radius: 4px; padding: 4px 8px; max-width: 900px; }
-  .vw-frow { display: grid; grid-template-columns: minmax(130px, 230px) 44px minmax(120px, 1fr) 52px 96px 52px; gap: 8px; align-items: center;
+  .vw-frow { display: grid; grid-template-columns: minmax(130px, 230px) 74px minmax(150px, 1fr) 128px; gap: 8px; align-items: center;
              padding: 3px 0; border-bottom: 1px solid var(--border-light); font-size: 11.5px; }
   .vw-frow:last-child { border-bottom: none; }
   .vw-frow.head { font-size: 9.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
   .vw-frow.head > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vw-frow.head > div.eb-head { overflow: visible; white-space: normal; text-transform: none; letter-spacing: 0; }
+  .vw-frow.head > div.n { white-space: normal; line-height: 1.25; }
   .vw-frow.uncounted { color: #8a9199; }
   .vw-frow .nm { overflow: hidden; overflow-wrap: anywhere; }
   .vw-frow .nm small { color: var(--text-muted); display: block; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
   .vw-frow .nm .vw-pill { font-size: 9.5px; padding: 0 5px; margin: 0 0 0 3px; }
-  .vw-frow .n, .vw-frow .e, .vw-frow .ci, .vw-frow .q { text-align: right; font-variant-numeric: tabular-nums; }
-  .vw-frow .ci, .vw-frow .q { font-size: 10.5px; color: var(--text-muted); white-space: nowrap; }
+  .vw-frow .n, .vw-frow .e { text-align: right; font-variant-numeric: tabular-nums; }
+  .vw-frow .n { font-size: 11px; line-height: 1.25; }
+  .vw-frow .n .of { display: block; font-size: 9.5px; color: var(--text-muted); }
   .vw-frow.head .info { font-size: 10px; margin-left: 2px; text-transform: none; }
-  .vw-fplot { position: relative; height: 18px; }
-  .vw-fplot .zero { position: absolute; top: 0; bottom: 0; width: 1px; background: #9aa1a9; left: 50%; }
-  .vw-fplot .ci { position: absolute; top: 8px; height: 2px; background: #6b8a91; }
-  .vw-fplot .dot { position: absolute; top: 4px; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; background: #335C67; }
-  .vw-fplot .dot.ns { background: #fff; border: 2px solid #6b8a91; }
-  .vw-fplot .dot.b { width: 8px; height: 8px; margin-left: -4px; top: 5px; border-radius: 1px; background: #fff; border: 2px solid #E09F3E; }
-  .vw-frow.uncounted .dot { opacity: .55; }
   /* donor plot of an opened cell: a fixed-height box, so the panel does not jump while the image loads */
   .vw-dplot { margin: 8px 0 4px; max-width: 900px; }
   .vw-dplot .bar { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; font-size: 11.5px; color: #374151; margin-bottom: 4px; }
@@ -160,6 +153,31 @@
   .vw-mcg .g { display: inline-block; background: #e8f0f1; border: 1px solid #c4d8db; color: #254850; border-radius: 10px; padding: 0 7px; margin: 1px 3px 1px 0; font-size: 11.5px; }
   .vw-anchor-chips { margin: 6px 0 0; font-size: 11.5px; }
   .vw-anchor-chips .lbl { color: var(--text-muted); margin-right: 4px; }
+
+  /* ranked shifts and member genes (gene set view) */
+  .vw-ranked h3.vw-rk-head { font-size: 12.5px; font-weight: 600; margin: 8px 0 3px; color: var(--text); }
+  .vw-rk { display: grid; grid-template-columns: 22px minmax(150px, 1.1fr) minmax(150px, 190px) 62px minmax(240px, 2.2fr); gap: 10px; align-items: center; padding: 6px 8px;
+           border: 1px solid var(--border-light); border-radius: 5px; margin: 0 0 4px; background: #fff; cursor: pointer; max-width: 1000px; }
+  .vw-rk:hover { background: var(--hover); }
+  .vw-rk > span { display: block; min-width: 0; }
+  .vw-rk .barcell { display: flex; flex-direction: column; }
+  .vw-rk .barcell .eb-axis { order: 1; }
+  .vw-rk .barcell .eb-unit { order: 2; margin-top: 1px; }
+  .vw-rk .no { color: var(--text-muted); font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; }
+  .vw-rk .what b { font-weight: 600; font-size: 12.5px; }
+  .vw-rk .what .words { display: block; font-size: 11px; color: var(--text-muted); }
+  .vw-rk .txt { font-size: 11.5px; color: #374151; line-height: 1.45; }
+  .vw-rk .txt .rank { display: block; color: var(--text-muted); font-size: 11px; }
+  .vw-members { margin: 8px 0 2px; max-width: 980px; }
+  .vw-members .mh { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+  .vw-mrow { font-size: 12px; color: #374151; line-height: 1.6; }
+  .vw-mrow .fl { font-weight: 500; margin-right: 4px; }
+  .vw-mrow .ex { color: var(--text-muted); font-size: 11px; }
+  .vw-prov { font-size: 12px; color: #374151; margin: 2px 0 6px; max-width: 980px; }
+  .vw-prov .sep { color: #c9ced4; margin: 0 6px; }
+  .vw-genes-filter { margin: 4px 0 8px; font: inherit; font-size: 12px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 4px; width: 220px; }
+  .vw-gcalls .vw-call { display: inline-block; margin: 1px 4px 1px 0; padding: 0 7px; font-size: 11px; border-radius: 9px; background: #e8f0f1; border: 1px solid #c4d8db; color: #254850; white-space: nowrap; }
+  @media (max-width: 900px) { .vw-rk { grid-template-columns: 18px 1fr 64px; } .vw-rk .what { grid-column: 2 / 4; } .vw-rk .barcell { grid-column: 2 / 3; } .vw-rk .num { grid-column: 3 / 4; } .vw-rk .txt { grid-column: 1 / -1; } }
 
   /* facet overview */
   .vw-answer { border: 1px solid var(--border); border-left: 4px solid #335C67; border-radius: 5px; padding: 10px 14px; background: #fff; margin: 8px 0 10px; max-width: 980px; }
@@ -195,7 +213,7 @@
     col.c-name { width: 34%; } col.c-ds { width: 14%; } col.c-pct { width: 26%; } col.c-rank { width: 26%; }
     table.vw-table { font-size: 11.5px; }
     .vw-forest { overflow-x: auto; }
-    .vw-frow { grid-template-columns: 112px 30px 76px 40px 86px 52px; min-width: 430px; gap: 4px; font-size: 10.5px; }
+    .vw-frow { grid-template-columns: 84px 40px minmax(64px, 1fr) 84px; min-width: 300px; gap: 4px; font-size: 10.5px; }
     .vw-tabs-bar { flex-wrap: nowrap; overflow-x: auto; }
     .vw-tabs-bar .tab-btn { flex: none; white-space: nowrap; }
     col.c-ds { width: 14%; } 
@@ -359,7 +377,7 @@ window.antViews = window.antViews || (function () {
     var meta = facetMeta(ctx.scope, ctx.facet);
     var where = plain(ctx.group);
     if (kind === 'empty') return 'Not tested in ' + where + ': too few replicates, or no cohort has this facet.';
-    if (kind === 'genes') return 'The module score was not tested here (fewer than 2 cohorts). Member genes replicate on their own.';
+    if (kind === 'genes') return 'The module score was not tested here (fewer than 2 cohorts).' + (cell.genes && cell.genes.n ? ' ' + plural(cell.genes.n, 'member gene') + ' replicate' + (cell.genes.n === 1 ? 's' : '') + ' on their own; click to list them.' : '');
     var counts = cell.k + ' of ' + cell.m + ' ' + (cell.m === 1 ? 'cohort is' : 'cohorts are') + ' significant on its own';
     if (kind === 'single') return 'Tested in 1 cohort only, which is ' + (cell.k ? 'significant' : 'not significant') + ' on its own. Replication needs at least 2 cohorts.';
     if (kind === 'none') return 'Not replicated in ' + where + ': ' + counts + '. This is not evidence that there is no effect.';
@@ -372,40 +390,65 @@ window.antViews = window.antViews || (function () {
     var cls = cellClass(cell);
     if (kind === 'empty') return '<span class="vw-cell nt" title="' + esc(cellTitle(cell, ctx)) + '">' + cellText(cell) + '</span>';
     var attrs = ' data-scope="' + ctx.scope + '" data-facet="' + esc(ctx.facet) + '" data-group="' + esc(ctx.group) + '"';
-    var genes = cell.genes && cell.genes.n > 0 ? '<span class="gn" title="Member genes that replicate on their own for this facet and cell type">' + cell.genes.n + (cell.genes.more ? '+' : '') + (cell.genes.n === 1 ? ' gene' : ' genes') + '</span>' : '';
     var flag = cell.disagree ? '<span class="flag" title="Pseudobulk (A) and cell mean (B) disagree in at least one cohort">&#9888;</span>' : '';
-    return '<button type="button" class="vw-cell ' + cls + (ctx.selected ? ' sel' : '') + '"' + attrs + ' title="' + esc(cellTitle(cell, ctx)) + '">' + cellText(cell) + flag + genes + '</button>';
+    return '<button type="button" class="vw-cell ' + cls + (ctx.selected ? ' sel' : '') + '"' + attrs + ' title="' + esc(cellTitle(cell, ctx)) + '">' + cellText(cell) + flag + '</button>';
   }
 
-  /* ---------- forest (rows are normalised: name, sub, n, est, lo, hi, q, sig, counted, reason, pills) ---------- */
+  /* ---------- forest (rows are normalised: name, sub, est, lo, hi, q, sig, counted, descriptive, reason, pills, stats) ---------- */
+  var isTwoGroup = window.antEffectBar.isTwoGroup, pointStats = window.antEffectBar.pointStats;
+  var MIN_GROUP = window.antEffectBar.MIN_GROUP, MIN_TREND = window.antEffectBar.MIN_TREND;
+  function smallTitle(two) {
+    return two ? 'The smaller group has fewer than ' + MIN_GROUP + ' donors: the cohort is too small to be informative on its own.' : 'Fewer than ' + MIN_TREND + ' donors: the cohort is too small to be informative on its own.';
+  }
+  function smallPill(row) { return row.stats && row.stats.small ? pill('small', '', smallTitle(row.stats.twoGroup), 'small-cohorts') : ''; }
   function forestHtml(rows, opts) {
     opts = opts || {};
-    var extent = 0.2;
-    rows.forEach(function (row) { [row.est, row.lo, row.hi, row.estB].forEach(function (v) { if (v != null && !isNaN(v)) extent = Math.max(extent, Math.abs(v)); }); });
-    extent *= 1.08;
-    function pos(value) { return Math.max(1, Math.min(99, 50 + (value / extent) * 48)); }
+    var bar = window.antEffectBar;
     var counted = rows.filter(function (row) { return row.counted; });
     var rest = rows.filter(function (row) { return !row.counted; });
+    var twoGroup = rows.some(function (row) { return row.stats && row.stats.twoGroup; });
     function line(row) {
-      var plot = '<div class="vw-fplot"><span class="zero"></span>';
-      if (row.lo != null && row.hi != null) plot += '<span class="ci" style="left:' + pos(row.lo) + '%;width:' + (pos(row.hi) - pos(row.lo)) + '%"></span>';
-      if (row.est != null) plot += '<span class="dot ' + (row.sig ? 'sig' : 'ns') + '" style="left:' + pos(row.est) + '%"></span>';
-      if (row.estB != null) plot += '<span class="dot b" title="Cell-mean estimate (B): ' + signed(row.estB) + '" style="left:' + pos(row.estB) + '%"></span>';
-      plot += '</div>';
+      var stats = row.stats || { donors: row.n == null ? '' : row.n };
+      var ciText = row.lo != null && row.hi != null ? signed(row.lo, 2) + ' to ' + signed(row.hi, 2) : 'no interval';
+      var tip = row.est == null ? 'no estimate' : (row.descriptive ? 'Descriptive only: no interval and no q value, not counted.' :
+        'Estimate ' + signed(row.est, 3) + ', 95% CI ' + ciText + (row.q == null ? '' : ', q of this cohort on its own ' + pfmt(row.q)));
       var reason = row.reason ? '<small>not counted: ' + esc(row.reason) + '</small>' : '<small>' + (row.sub || '') + '</small>';
-      return '<div class="vw-frow' + (row.counted ? '' : ' uncounted') + '"><div class="nm" title="' + esc(row.title || row.name) + '">' + esc(row.name) + (row.pills || '') + reason + '</div><div class="n">' + (row.n == null ? '' : row.n) + '</div>' + plot +
-        '<div class="e">' + (row.est == null ? 'n/a' : signed(row.est, 2)) + '</div><div class="ci">' + (row.lo != null && row.hi != null ? signed(row.lo, 2) + ' to ' + signed(row.hi, 2) : 'no interval') + '</div>' +
-        '<div class="q" title="' + (row.q == null ? 'No p value: below the p-value floor or cell-level only.' : 'q of this cohort on its own: ' + pfmt(row.q)) + '">' + (row.q == null ? 'n/a' : pfmt(row.q)) + '</div></div>';
+      return '<div class="vw-frow' + (row.counted ? '' : ' uncounted') + '"><div class="nm" title="' + esc(row.title || row.name) + '">' + esc(row.name) + (row.pills || '') + smallPill(row) + reason + '</div>' +
+        '<div class="n"' + (stats.title ? ' title="' + esc(stats.title) + '"' : '') + '>' + esc(stats.donors) + '</div>' +
+        '<div class="eb-cell">' + bar.barHtml({ scale: opts.scale, est: row.est, lo: row.lo, hi: row.hi, sig: row.sig, counted: row.counted, descriptive: row.descriptive, title: tip }) + '</div>' +
+        '<div class="e" title="' + esc(row.q == null ? 'No p value: below the p-value floor or cell-level only.' : 'q of this cohort on its own: ' + pfmt(row.q)) + '">' + bar.numberHtml(row.est, opts.scale, row.descriptive ? null : row.q) + '</div></div>';
     }
-    var html = '<div class="vw-forest"><div class="vw-frow head"><div>Cohort and dataset</div><div class="n">' + esc(opts.noun || 'donors') + '</div><div>' + esc(opts.unit || 'log2 fold change') + '</div><div class="e">estimate</div><div class="ci">95% CI ' + info('Confidence interval from the model of that cohort. A unit below the p-value floor has none.') + '</div><div class="q">q ' + info(opts.qTip || 'False discovery rate (Benjamini-Hochberg) of this cohort on its own, over the genes tested in it. Below 0.05 the cohort is significant by itself, shown as a filled dot. It is not the replication result, which combines the cohorts (r-value).', 'fdr') + '</div></div>';
+    var donorsHead = esc(opts.noun || 'donors') + (twoGroup ? ' ' + info('Donors in the test group vs the reference group of the contrast, for example AD vs no AD.') : '');
+    var html = '<div class="vw-forest"><div class="vw-frow head"><div>Cohort and dataset</div><div class="n">' + donorsHead + '</div><div class="eb-head">' + bar.axisHtml(opts.scale) + '</div><div class="e">estimate and q ' +
+      info(opts.qTip || 'False discovery rate (Benjamini-Hochberg) of this cohort on its own, over the genes tested in it. Below 0.05 the cohort is significant by itself, shown as a filled bar. It is not the replication result, which combines the cohorts (r-value).', 'fdr') + '</div></div>';
     html += counted.map(line).join('');
     if (rest.length) {
       html += '<div class="vw-uncounted-wrap"><button type="button" class="vw-more-units" data-n="' + rest.length + '">+ ' + plural(rest.length, 'more unit') + ' (not counted)</button><div class="vw-uncounted" hidden>' + rest.map(line).join('') + '</div></div>';
     }
-    html += '</div>';
+    html += '</div>' + bar.legendHtml(opts.scale, 'forest');
     if (opts.note) html += '<p class="vw-fnote">' + opts.note + '</p>';
     return html;
   }
+  // "Same direction in 3 of 3 cohorts, 2 significant on their own; r = 0.064 after adjusting over 122 gene sets: just above the 0.05 line".
+  // `rows` are the forest rows (counted ones vote), `cell` the call, `family` {size, noun} what r was adjusted over.
+  function sameDirection(rows, direction) {
+    var voters = rows.filter(function (row) { return row.counted && row.est != null && row.est !== 0; });
+    var wanted = direction === 'down' ? -1 : 1;
+    return { same: voters.filter(function (row) { return (row.est > 0 ? 1 : -1) === wanted; }).length, of: voters.length };
+  }
+  function lineAboveThreshold(r) {
+    if (r == null) return '';
+    return r < 0.1 ? 'just above the 0.05 line' : r < 0.5 ? 'above the 0.05 line' : 'far above the 0.05 line';
+  }
+  function replicationLine(cell, rows, family) {
+    var votes = sameDirection(rows, cell.dir);
+    var parts = votes.of ? 'Same direction in ' + votes.same + ' of ' + plural(votes.of, 'cohort') + ', ' + cell.k + ' significant on their own' : cell.k + ' of ' + plural(cell.m, 'cohort') + ' significant on their own';
+    if (cell.r == null) return parts + '; no r-value.';
+    var adjusted = family && family.size ? ' after adjusting over ' + family.size + ' ' + family.noun : (family ? ' after adjusting over the ' + family.noun + ' tested' : '');
+    return parts + '; <a href="/help#glossary-r-value">r</a> = ' + pfmt(cell.r) + adjusted + (cell.r < 0.05 ? '' : ': ' + lineAboveThreshold(cell.r)) + '.';
+  }
+  // How many counted cohorts are informative (smallest group >= 10, or n >= 30 for trends).
+  function informativeCount(rows) { return rows.filter(function (row) { return row.counted && (!row.stats || row.stats.informative); }).length; }
   function bindForest(root) {
     root.querySelectorAll('.vw-more-units').forEach(function (button) {
       button.addEventListener('click', function () {
@@ -549,12 +592,6 @@ window.antViews = window.antViews || (function () {
       if (!tested.length) html += '<span class="rest">Not tested in any cell type.</span>';
       html += '</div>';
       if (untested.length && tested.length) html += '<div class="rest">not tested: ' + untested.map(plain).join(', ') + '</div>';
-      var geneParts = block.groups.filter(function (g) { return row.cells[g] && row.cells[g].genes && row.cells[g].genes.n > 0; }).map(function (g) {
-        var geneInfo = row.cells[g].genes;
-        var names = geneInfo.n <= 3 && geneInfo.genes ? ' (' + geneInfo.genes.map(function (x) { return esc(x.gene); }).join(', ') + ')' : '';
-        return plain(g) + ' ' + geneInfo.n + (geneInfo.more ? '+' : '') + names;
-      });
-      if (ctx.kind === 'module' && row.hasGenes) html += '<div class="genes-line">' + (geneParts.length ? 'Member genes that replicate: ' + geneParts.join(', ') : '<span class="muted">No member gene replicates for this facet.</span>') + '</div>';
       if (open) html += '<div data-detail="' + block.scope + '|' + row.facet + '|' + esc(selection.group) + '"><div class="vw-loading">Loading the cohorts...</div></div>';
       html += '</div>';
     });
@@ -563,7 +600,7 @@ window.antViews = window.antViews || (function () {
   function legendHtml(ctx) {
     return '<div class="vw-legend"><span><span class="swatch none"></span>not replicated</span>' +
       '<span><span class="swatch rep"></span>replicated</span>' +
-      '<span><span class="swatch strict"></span>replicated, strict test passed</span>' +
+      (ctx && ctx.module ? '' : '<span><span class="swatch strict"></span>replicated, strict test passed</span>') +
       '<span>&#9650; up &#9660; down</span>' +
       '<span>k/m: cohorts significant / cohorts tested</span>' + '<span>&ndash; not tested</span></div>';
   }
@@ -575,13 +612,15 @@ window.antViews = window.antViews || (function () {
       html += '<div class="vw-scope-block" id="vw-scope-' + block.scope + '">' + blockHeader(block, model);
       html += !block.groups.length ? '<div class="vw-placeholder">Not tested in any cell type in this system.</div>' : wide ? gridA(block, model, ctx) : listB(block, model, ctx);
       var notes = (block.notes || []).concat(block.footer ? [block.footer] : []);
+      if (block.after && block.groups.length) html += block.after;
       if (notes.length && block.groups.length) html += '<div class="vw-notes">' + notes.join('<span class="sep">&middot;</span>') + '</div>';
       html += '</div>';
     });
     if (!html) html = '<div class="vw-placeholder">' + (ctx.emptyHtml || 'No facet result is available for this subject.') + '</div>';
     host.innerHTML = html;
     host.querySelectorAll('[data-scope][data-facet]').forEach(function (el) {
-      el.addEventListener('click', function () {
+      el.addEventListener('click', function (event) {
+        event.preventDefault();
         var next = { scope: el.dataset.scope, facet: el.dataset.facet, group: el.dataset.group };
         selection = selection && selection.scope === next.scope && selection.facet === next.facet && selection.group === next.group ? null : next;
         renderPanel2(host, model, ctx);
@@ -656,6 +695,7 @@ window.antViews = window.antViews || (function () {
     LOW_DETECTION_PCT: LOW_DETECTION_PCT, esc: esc, num: num, signed: signed, pfmt: pfmt, plural: plural, arrow: arrow, plain: plain, median: median,
     gl: gl, pill: pill, GENE_FLAGS: GENE_FLAGS, getJson: getJson, cached: cached, docBlock: docBlock, afterRender: afterRender, facetMeta: facetMeta, geneFlagPills: geneFlagPills,
     info: info, helpBtn: helpBtn, compact: compact, CELLS: CELLS, cellFromRep: cellFromRep, cellKind: cellKind, cellHtml: cellHtml, forestHtml: forestHtml, bindForest: bindForest,
+    replicationLine: replicationLine, sameDirection: sameDirection, isTwoGroup: isTwoGroup, pointStats: pointStats, smallPill: smallPill, informativeCount: informativeCount, MIN_GROUP: MIN_GROUP, MIN_TREND: MIN_TREND,
     linksHtml: linksHtml, bindDonorPlot: bindDonorPlot, dbLink: dbLink, apiUrl: apiUrl, renderPanel2: renderPanel2, legendHtml: legendHtml, preselect: preselect, initTabs: initTabs
   };
 })();
