@@ -209,6 +209,23 @@
 <details class="doc-block"{% if id %} id="{{ id }}"{% endif %}{% if open %} open{% endif %}><summary>&#9432; {{ title }}</summary><div class="doc-body">{{ caller() }}</div></details>
 {%- endmacro %}
 
+{# Section header with a (?) help button (sitewide convention, see base.html).
+   Usage:  {% call section_help('1. Where is it expressed', 'vwg-p1-help') %}<p>...</p>{% endcall %}
+   Renders the h2.section-head, a (?) button and the larger help panel directly
+   below it, closed by default. The caller body is the panel content (HTML).
+   id: unique panel id; `<button class="help-btn inline" data-help-for="id">?</button>`
+       elsewhere on the page opens the same panel. #}
+{% macro section_help(title, id) -%}
+<h2 class="section-head">{{ title }}<button type="button" class="help-btn" data-help-for="{{ id }}" aria-expanded="false" aria-controls="{{ id }}" title="Show or hide the explanation">?</button></h2>
+<div class="help-panel" id="{{ id }}" hidden>{{ caller() }}</div>
+{%- endmacro %}
+
+{# (i) tooltip for a column header or label: short text on hover or tap.
+   glossary: optional slug, adds "More in the glossary" to the tap bubble. #}
+{% macro col_info(text, glossary=None) -%}
+<span class="info" title="{{ text }}"{% if glossary %} data-glossary="{{ glossary }}"{% endif %} tabindex="0" role="button">&#9432;</span>
+{%- endmacro %}
+
 {% macro experimental_notice(what) -%}
 {%- set _issue_url = issue_tracker_url() -%}
 <div class="exp-notice" role="note">

@@ -154,7 +154,7 @@ terms:
 - slug: low-detection
   term: Low detection
   definition_html: |
-    The gene has a count in fewer than 5 percent of the cells of the cell type (median over the datasets of that cell type and scope). Effects on such genes are fragile.
+    The median fraction of cells of a cell type in which the gene is detected, taken over the datasets of that cell type and scope, is below 5 percent. The gene views then add a plain note such as "Detected in only 3% of microglial cells: effects on rarely detected genes are fragile". With so few molecules per donor, effects on such genes are noisy and change easily.
 - slug: modality
   term: Modality (nuclei or cells)
   definition_html: |

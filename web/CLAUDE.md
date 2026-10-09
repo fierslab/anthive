@@ -198,10 +198,9 @@ and the list below it, the forest, tabs), `_view_gene.html`, `_view_geneset.html
 is client-side from the API; `browser.py` only passes `view_dbs` (`_view_db_map`: scope, cell type group, human flag,
 secondary flag, `modality` from `_view_modality`) and serves `GET /genes/{gene}/author-de` (JSON: the datasets with
 author DE are found once and cached for an hour, `_gene_author_de_rows`, plain labels from `_plain_de_label`).
-Rules the code follows: the main colour is the plain partial conjunction (r < 0.05), the effect filter is a separate
-pill, the star is the strict tier, no yellow "small" call, "cohorts" never "independent cohorts", the forest shows one
+Rules the code follows: the matrix cell shows only k/m (cohorts significant / tested, "0/1" for one cohort, a dash for not tested) in three colours: grey not replicated, light teal replicated (r < 0.05, at least 2 cohorts), dark teal also strict (no star), arrow for direction; pills live in one notes line under each matrix (low detection as a plain sentence, gene class, APOE, pathology axis, one lab pipeline) and in the (?) panel, the effect filter is under "More detail" of an opened cell, no yellow "small" call, "cohorts" never "independent cohorts", the forest shows one
 row per cohort with the rest under "+n more units (not counted)", intervals only from served `ci_low`/`ci_high`, a
-`low detection` pill below 5 percent, modality tags in panel 1, visible caveat lines (composition, one pathology axis,
+low detection note below 5 percent, modality tags in panel 1 (bars 0 to 100, dotted line = mean over datasets of the cell type), visible caveat lines (composition, one pathology axis,
 xenograft one lab pipeline, age floor). Every field the API may not serve yet is guarded; a missing one hides its element.
 Panel 3 is a placeholder.
 
@@ -480,6 +479,17 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   The quickstart, AI, programmatic access and account sections stay in the
   template. `test_help_page_renders_every_topic_and_glossary_term_from_help_content`
   checks that the page and the files agree.
+- **Help convention: (?) panels and (i) tooltips (2026-10, gene view first).**
+  Two devices, never mixed. A section header is numbered and minimal ("1. Where is
+  it expressed") with a filled teal round **(?)** button (`.help-btn`) that opens a
+  larger `.help-panel` directly below it, closed by default: Jinja macro
+  `section_help(title, id)` in `_macros.html` used with `{% call %}` (body = panel
+  HTML); JS equivalent `antViews.helpBtn(panelId)` for a small inline (?) that opens
+  the same panel. Column headers and labels get a plain circled **(i)** (`.info`,
+  macro `col_info(text, glossary)` / `antViews.info(text)`) with a short hover or tap
+  tooltip. No sub-labels in headers; their text goes into the (?) panel. Toggle JS
+  and `#hash` opening (`antHelpOpen`) are in base.html. Older pages still use
+  `doc_block`; migrate them to this pattern when touched.
 - **Help → hover `ⓘ`.** Verbose/explanatory prose hides behind a small `ⓘ`
   with a `title=` (the `.info` class is defined sitewide in `base.html`; `title`
   text must contain no `"`). Used in every view; plot.html also has a local

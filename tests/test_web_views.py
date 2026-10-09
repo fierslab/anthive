@@ -240,3 +240,25 @@ def test_help_has_the_view_topics_and_glossary_terms():
         assert help_content.get_term(slug) is not None
     assert "gene-view" in help_content.get_topic("genes").children
     assert "facet-overview" in help_content.get_topic("facet-effects").children
+
+
+def test_section_help_and_col_info_macros_render_the_shared_pattern():
+    template = browser.templates.env.from_string(
+        '{% from "_macros.html" import section_help, col_info %}'
+        '{% call section_help("1. Title", "x-help") %}<p>body</p>{% endcall %}{{ col_info("tip", "r-value") }}')
+    html = template.render()
+    assert '<h2 class="section-head">1. Title<button type="button" class="help-btn" data-help-for="x-help"' in html
+    assert '<div class="help-panel" id="x-help" hidden><p>body</p></div>' in html
+    assert '<span class="info" title="tip" data-glossary="r-value"' in html
+
+
+def test_gene_page_uses_numbered_help_headers_and_drops_old_labels(client):
+    text = client.get("/genes/PTPRG").text
+    for header in ("1. Where is it expressed", "2. What shifts it", "3. Donor variability"):
+        assert header in text, header
+    for panel in ("vwg-p1-help", "vwg-p2-help"):
+        assert f'id="{panel}" hidden' in text
+    for gone in ("panel 1, descriptive", "tested per donor or mouse", "Mean, log-normalised", "low det."):
+        assert gone not in text, gone
+    assert "without per-cell cell types" in text and "dataset-level label" in text
+    assert "Detected in only" in text and "percentile of the gene's mean (log-normalised)" in text

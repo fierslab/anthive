@@ -33,11 +33,18 @@
   .vw-modality.cells { background: #f6efe6; color: #6b4a1c; border-color: #e6d3b6; }
 
   /* ---- panel 1 ---- */
-  .vw-bar-track { position: relative; height: 10px; background: #e2e5e8; border-radius: 5px; min-width: 120px; }
-  .vw-bar-range { position: absolute; top: 3px; height: 4px; background: #9fb8bd; border-radius: 2px; }
-  .vw-bar-med { position: absolute; top: -1px; width: 3px; height: 12px; background: #335C67; border-radius: 1px; }
-  .vw-bar-cell { min-width: 170px; }
+  .vw-bar-cell { min-width: 200px; white-space: nowrap; }
+  td.vw-ds { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .vw-mods { margin-top: 2px; font-size: 11px; color: var(--text-muted); }
+  .vw-bar { position: relative; display: inline-block; width: 120px; height: 14px; vertical-align: middle; background: #e6e9ec; border-radius: 3px; border-right: 1px solid #b9c0c7; }
+  .vw-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; min-width: 2px; background: #1f6f80; border-radius: 3px 0 0 3px; }
+  .vw-bar.rank .vw-bar-fill { background: #3d5f94; }
+  .vw-bar-mark { position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 2px dotted #1b2127; }
+  .vw-bar-val { display: inline-block; margin-left: 7px; font-size: 11.5px; font-weight: 600; color: #1f2937; vertical-align: middle; font-variant-numeric: tabular-nums; }
+  .vw-bar-val .rng { font-weight: 400; color: var(--text-muted); font-size: 10.5px; margin-left: 4px; }
+  .vw-axis { display: flex; justify-content: space-between; width: 120px; font-size: 9px; color: #9aa1a9; letter-spacing: 0; text-transform: none; font-weight: 400; }
   table.vw-table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4; }
+  table.vw-table th .info { font-size: 11px; text-transform: none; margin-left: 3px; }
   table.vw-table th { text-align: left; padding: 5px 8px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-weight: 500;
                       font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
   table.vw-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-light); vertical-align: middle; }
@@ -55,25 +62,27 @@
   .vw-scope-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 3px; }
   .vw-scope-head h3 { font-size: 14px; font-weight: 600; color: var(--text); }
   .vw-scope-head .unit { font-size: 11.5px; color: var(--text-muted); }
-  .vw-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11.5px; color: #374151; margin: 6px 0 8px; align-items: center; }
+  .vw-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11.5px; color: #374151; margin: 4px 0 8px; align-items: center; }
   .vw-legend .swatch { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: -3px; margin-right: 4px; }
-  .vw-legend .swatch.rep { background: #335C67; }
-  .vw-legend .swatch.none { background: #eef0f2; }
-  .vw-legend .swatch.nt { background: #fff; border: 1px dashed #c9ced4; }
-  .vw-cell { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; min-width: 76px; padding: 3px 4px; font-family: var(--font);
+  .vw-legend .swatch.rep { background: #8dbcc6; }
+  .vw-legend .swatch.strict { background: #1f5560; }
+  .vw-legend .swatch.none { background: #e9ecef; }
+  .vw-cell { display: inline-flex; align-items: center; justify-content: center; gap: 3px; min-width: 54px; padding: 4px 6px; font-family: var(--font);
              border-radius: 4px; border: 1px solid transparent; cursor: pointer; line-height: 1.2; font-size: 12px; font-variant-numeric: tabular-nums; }
-  .vw-cell .sub { font-size: 10px; opacity: .9; }
-  .vw-cell .star { font-size: 10px; margin-left: 2px; }
-  .vw-cell.rep { background: #335C67; color: #fff; font-weight: 500; }
-  .vw-cell.none { background: #eef0f2; color: #6b737c; }
-  .vw-cell.nt { background: #fff; color: #7b838c; border: 1px dashed #c9ced4; }
-  .vw-cell.nt.empty { cursor: default; color: #a2a8af; }
+  .vw-cell .ar { font-size: 8px; }
+  .vw-cell.rep { background: #8dbcc6; color: #0e2a30; font-weight: 600; }
+  .vw-cell.strict { background: #1f5560; color: #fff; font-weight: 600; }
+  .vw-cell.none { background: #e9ecef; color: #5b636b; }
+  .vw-cell.nt { background: #fafbfc; color: #b0b6bd; border: 1px dashed #dde1e5; cursor: default; }
   .vw-cell.sel { outline: 2px solid #E09F3E; outline-offset: 1px; }
-  .vw-cell .lowdet { font-size: 9.5px; margin-top: 1px; padding: 0 5px; border-radius: 6px; background: #fdf3e1; color: #7a4b0c; }
-  .vw-cell .gn { font-size: 9.5px; margin-top: 1px; padding: 0 5px; border-radius: 6px; background: rgba(255,255,255,.8); color: #254850; }
-  .vw-cell.none .gn, .vw-cell.nt .gn { background: rgba(0,0,0,.06); }
-  .vw-cell .flag { color: #f6c5c6; font-size: 11px; margin-left: 2px; }
-  .vw-cell.none .flag, .vw-cell.nt .flag { color: #9E2A2B; }
+  .vw-cell .gn { font-size: 9.5px; padding: 0 5px; border-radius: 6px; background: rgba(255,255,255,.8); color: #254850; }
+  .vw-cell .flag { color: #9E2A2B; font-size: 11px; }
+  .vw-notes { font-size: 11.5px; color: #5b4a2c; margin: 5px 0 0; max-width: 940px; line-height: 1.5; }
+  .vw-notes .sep { color: #c9ced4; margin: 0 5px; }
+  details.vw-more { margin: 6px 0 2px; font-size: 12px; }
+  details.vw-more > summary { cursor: pointer; color: var(--text-muted); font-size: 11.5px; list-style: none; }
+  details.vw-more > summary::before { content: "\25B8  "; font-size: 9px; }
+  details.vw-more[open] > summary::before { content: "\25BE  "; }
   table.vw-grid { table-layout: fixed; min-width: 780px; width: 100%; border-collapse: collapse; font-size: 12px; }
   table.vw-grid th { text-align: center; font-size: 9.5px; padding: 5px 2px; vertical-align: bottom; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: .3px; border-bottom: 2px solid var(--border); }
   table.vw-grid th.fh { text-align: left; width: 200px; padding-left: 10px; }
@@ -81,13 +90,8 @@
   table.vw-grid td.fh { text-align: left; padding-left: 10px; position: sticky; left: 0; background: #fff; z-index: 1; border-right: 1px solid var(--border-light); }
   table.vw-grid td.fh .fl { font-size: 12.5px; font-weight: 500; }
   table.vw-grid td.fh .fc { font-size: 10.5px; color: var(--text-muted); }
-  table.vw-grid td.fh .ft { font-size: 10px; color: #7a4b0c; }
-  table.vw-grid tr.axis-top td.fh { border-left: 3px solid #E09F3E; }
-  table.vw-grid tr.axis-mid td.fh { border-left: 3px solid #E09F3E; }
-  table.vw-grid tr.axis-tag td.fh .axis-label { display: inline-block; font-size: 9.5px; color: #7a4b0c; background: #fdf3e1; border: 1px solid #f0d3a1; border-radius: 3px; padding: 0 4px; margin-top: 2px; }
   table.vw-grid tr.vw-detail-row > td { padding: 0; background: #fbfcfd; text-align: left; }
   .vw-detail-wrap { position: sticky; left: 0; width: min(920px, calc(100vw - 52px)); }
-  .vw-apoe { font-size: 10px; color: #7a4b0c; background: #fdf3e1; border: 1px solid #f0d3a1; border-radius: 3px; padding: 0 4px; margin-left: 4px; cursor: help; }
 
   /* variant B */
   .vw-clist { border: 1px solid var(--border); border-radius: 5px; background: #fff; }
@@ -96,20 +100,17 @@
   .vw-crow .chead { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   .vw-crow .fl { font-size: 13px; font-weight: 500; }
   .vw-crow .fc { font-size: 11px; color: var(--text-muted); }
-  .vw-crow .ft { font-size: 10px; color: #7a4b0c; }
   .vw-crow .cchips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; align-items: center; }
   .vw-chip { display: inline-flex; gap: 6px; align-items: baseline; padding: 2px 9px; border-radius: 12px; font-size: 12px; cursor: pointer; font-family: var(--font);
-             border: 1px solid transparent; font-variant-numeric: tabular-nums; background: #335C67; color: #fff; font-weight: 500; }
+             border: 1px solid transparent; font-variant-numeric: tabular-nums; background: #e9ecef; color: #5b636b; }
+  .vw-chip.rep { background: #8dbcc6; color: #0e2a30; font-weight: 600; }
+  .vw-chip.strict { background: #1f5560; color: #fff; font-weight: 600; }
   .vw-chip .k { font-size: 10.5px; opacity: .9; }
   .vw-chip.sel { outline: 2px solid #E09F3E; outline-offset: 1px; }
-  .vw-chip.one { background: #fff; color: #335C67; border-color: #c4d8db; font-weight: 400; }
   .vw-crow .rest { font-size: 11.5px; color: var(--text-muted); margin-top: 3px; }
   .vw-crow .rest b { font-weight: 500; color: #4b5563; }
   .vw-crow .genes-line { font-size: 11.5px; color: #254850; margin-top: 3px; }
   .vw-crow .genes-line .g { display: inline-block; background: #e8f0f1; border: 1px solid #c4d8db; border-radius: 10px; padding: 0 7px; margin: 1px 3px 1px 0; font-size: 11px; }
-  .vw-crow-group { border-left: 3px solid #E09F3E; background: #fffdf8; }
-  .vw-crow-group .gcap { font-size: 10.5px; color: #7a4b0c; padding: 4px 10px 0; }
-  .vw-crow-group .vw-crow { border-bottom: 1px solid var(--border-light); }
 
   /* detail card, forest */
   .vw-detail { padding: 10px 14px 12px; border-left: 3px solid #E09F3E; background: #fbfcfd; }
@@ -117,7 +118,7 @@
   .vw-detail .dc-line { font-size: 12.5px; color: #374151; margin: 2px 0 6px; max-width: 860px; }
   .vw-detail .dc-pills { margin: 3px 0 5px; }
   .vw-forest { border: 1px solid var(--border-light); background: #fff; border-radius: 4px; padding: 4px 8px; max-width: 900px; }
-  .vw-frow { display: grid; grid-template-columns: minmax(130px, 230px) 44px minmax(120px, 1fr) 58px 58px; gap: 8px; align-items: center;
+  .vw-frow { display: grid; grid-template-columns: minmax(130px, 230px) 44px minmax(120px, 1fr) 52px 96px; gap: 8px; align-items: center;
              padding: 3px 0; border-bottom: 1px solid var(--border-light); font-size: 11.5px; }
   .vw-frow:last-child { border-bottom: none; }
   .vw-frow.head { font-size: 9.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; }
@@ -127,6 +128,8 @@
   .vw-frow .nm small { color: var(--text-muted); display: block; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
   .vw-frow .nm .vw-pill { font-size: 9.5px; padding: 0 5px; margin: 0 0 0 3px; }
   .vw-frow .n, .vw-frow .e, .vw-frow .q { text-align: right; font-variant-numeric: tabular-nums; }
+  .vw-frow .q { font-size: 10.5px; color: var(--text-muted); white-space: nowrap; }
+  .vw-frow.head .info { font-size: 10px; margin-left: 2px; text-transform: none; }
   .vw-fplot { position: relative; height: 18px; }
   .vw-fplot .zero { position: absolute; top: 0; bottom: 0; width: 1px; background: #9aa1a9; left: 50%; }
   .vw-fplot .ci { position: absolute; top: 8px; height: 2px; background: #6b8a91; }
@@ -164,7 +167,15 @@
   .vw-expert td, .vw-expert th { font-size: 11.5px; }
 
   @media (max-width: 640px) {
-    .vw-frow { grid-template-columns: minmax(64px, 1fr) 30px 62px 40px 44px; gap: 4px; font-size: 10.5px; }
+    .vw-bar { width: 44px; }
+    .vw-axis { width: 44px; }
+    .vw-mods { display: none; }
+    td.vw-ds { white-space: normal; }
+    .vw-bar-cell { min-width: 0; }
+    .vw-bar-val .rng { display: none; }
+    table.vw-table th, table.vw-table td { padding: 4px 5px; }
+    table.vw-table { font-size: 11.5px; }
+    .vw-frow { grid-template-columns: minmax(64px, 1fr) 28px 54px 38px 70px; gap: 4px; font-size: 10.5px; }
     .vw-frow .nm .vw-pill { display: none; }
     .vw-forest { padding: 4px 4px; }
     .vw-detail { padding: 8px 8px 10px; overflow-x: auto; }
@@ -260,10 +271,23 @@ window.antViews = window.antViews || (function () {
       return pill(info[0], 'warn', info[1], 'gene-class-flags');
     }).join('');
   }
-  function lowDetectionPill(info) {
-    if (!info) return '';
-    return pill('low detection, ' + Math.round(info.pct) + '%', 'warn', 'Detected in only ' + num(info.pct, 1) + ' percent of cells of this cell type (median over ' + plural(info.n, 'dataset') + ', panel 1). Results for barely detected genes are fragile.', 'low-detection');
+  // (i): short hover or tap tooltip (column headers). (?): opens the help panel with that id (see base.html).
+  function info(text, slug) {
+    return '<span class="info" title="' + esc(text) + '"' + (slug ? ' data-glossary="' + slug + '"' : '') + ' tabindex="0" role="button">&#9432;</span>';
   }
+  function helpBtn(panelId) {
+    return '<button type="button" class="help-btn inline" data-help-for="' + panelId + '" aria-expanded="false" aria-controls="' + panelId + '" title="Show or hide the explanation">?</button>';
+  }
+  // 34060 -> "34k", 1200000 -> "1.2M"
+  function compact(count) {
+    if (count == null || isNaN(count)) return 'n/a';
+    if (count >= 1e6) return (Math.round(count / 1e5) / 10) + 'M';
+    if (count >= 1e4) return Math.round(count / 1e3) + 'k';
+    if (count >= 1e3) return (Math.round(count / 100) / 10) + 'k';
+    return String(Math.round(count));
+  }
+  var CELLS = { 'microglia': 'microglial cells', 'astrocyte': 'astrocytes', 'oligodendrocyte': 'oligodendrocytes', 'oligodendrocyte precursor cell': 'OPCs',
+                'endothelial cell': 'endothelial cells', 'excitatory neuron': 'excitatory neurons', 'inhibitory neuron': 'inhibitory neurons', 'perivascular macrophage': 'perivascular macrophages' };
 
   /* ---------- call logic ---------- */
   // A replication record (gene) or module record -> the cell model of the grid.
@@ -291,19 +315,39 @@ window.antViews = window.antViews || (function () {
   }
 
   /* ---------- the cell and the chip ---------- */
+  // One class decides the colour: none (grey), rep (replicated), strict (replicated and the strict minimum-effect test passed), nt (not tested).
+  function cellClass(cell) {
+    var kind = cellKind(cell);
+    if (kind === 'rep') return cell.strict ? 'strict' : 'rep';
+    return kind === 'empty' || kind === 'genes' ? 'nt' : 'none';
+  }
+  function cellText(cell) {
+    var kind = cellKind(cell);
+    if (kind === 'empty' || kind === 'genes') return '&ndash;';
+    return (kind === 'rep' ? '<span class="ar">' + arrow(cell.dir) + '</span>' : '') + cell.k + '/' + cell.m;
+  }
+  // The plain sentence behind a cell (hover text and chip title).
+  function cellTitle(cell, ctx) {
+    var kind = cellKind(cell);
+    var meta = facetMeta(ctx.scope, ctx.facet);
+    var where = plain(ctx.group);
+    if (kind === 'empty') return 'Not tested in ' + where + ': too few replicates, or no cohort has this facet.';
+    if (kind === 'genes') return 'The module score was not tested here (fewer than 2 cohorts). Member genes replicate on their own.';
+    var counts = cell.k + ' of ' + cell.m + ' ' + (cell.m === 1 ? 'cohort is' : 'cohorts are') + ' significant on its own';
+    if (kind === 'single') return 'Tested in 1 cohort only, which is ' + (cell.k ? 'significant' : 'not significant') + ' on its own. Replication needs at least 2 cohorts.';
+    if (kind === 'none') return 'Not replicated in ' + where + ': ' + counts + '. This is not evidence that there is no effect.';
+    var side = cell.dir === 'down' ? meta.phrase[1] : meta.phrase[0];
+    return 'Replicated in ' + where + ': ' + side + ', the same direction in at least 2 cohorts, median effect ' + signed(cell.median, 2) + '; ' + counts + '. ' +
+      (cell.strict ? 'The strict minimum-effect test also passes.' : 'The strict minimum-effect test does not pass.');
+  }
   function cellHtml(cell, ctx) {
     var kind = cellKind(cell);
+    var cls = cellClass(cell);
+    if (kind === 'empty') return '<span class="vw-cell nt" title="' + esc(cellTitle(cell, ctx)) + '">' + cellText(cell) + '</span>';
     var attrs = ' data-scope="' + ctx.scope + '" data-facet="' + esc(ctx.facet) + '" data-group="' + esc(ctx.group) + '"';
-    var sel = ctx.selected ? ' sel' : '';
-    if (kind === 'empty') return '<span class="vw-cell nt empty" title="Not tested in this cell type group (too few replicates, or no cohort has it)">not tested</span>';
     var genes = cell.genes && cell.genes.n > 0 ? '<span class="gn" title="Member genes that replicate on their own for this facet and cell type">' + cell.genes.n + (cell.genes.more ? '+' : '') + (cell.genes.n === 1 ? ' gene' : ' genes') + '</span>' : '';
     var flag = cell.disagree ? '<span class="flag" title="Pseudobulk (A) and cell mean (B) disagree in at least one cohort">&#9888;</span>' : '';
-    var low = cell.lowDet ? '<span class="lowdet" title="Detected in only ' + num(cell.lowDet.pct, 1) + ' percent of cells of this cell type">low det. ' + Math.round(cell.lowDet.pct) + '%</span>' : '';
-    if (kind === 'genes') return '<button type="button" class="vw-cell nt' + sel + '"' + attrs + ' title="The module score was not tested here (fewer than 2 cohorts). Member genes replicate on their own.">module not tested' + genes + '</button>';
-    if (kind === 'single') return '<button type="button" class="vw-cell nt' + sel + '"' + attrs + ' title="Tested in 1 cohort only; replication needs at least 2. Click for the estimate.">1 cohort' + genes + low + '</button>';
-    if (kind === 'none') return '<button type="button" class="vw-cell none' + sel + '"' + attrs + ' title="No evidence of replication: ' + cell.k + ' of ' + cell.m + ' cohorts individually significant (q &lt; 0.05, same direction)"><span>' + cell.k + '/' + cell.m + '</span>' + flag + genes + low + '</button>';
-    var small = cell.nSmall ? ', ' + cell.nSmall + ' small' : '';
-    return '<button type="button" class="vw-cell rep' + sel + '"' + attrs + ' title="Replicated: the same direction in at least 2 cohorts (r &lt; 0.05)' + (cell.strict ? '; strict minimum-effect test also passed' : '') + '"><span>' + arrow(cell.dir) + ' ' + signed(cell.median, 2) + (cell.strict ? '<span class="star" title="Strict tier: minimum-effect r-value &lt; 0.05">&#9733;</span>' : '') + flag + '</span><span class="sub">' + cell.k + '/' + cell.m + ' cohorts' + small + '</span>' + genes + low + '</button>';
+    return '<button type="button" class="vw-cell ' + cls + (ctx.selected ? ' sel' : '') + '"' + attrs + ' title="' + esc(cellTitle(cell, ctx)) + '">' + cellText(cell) + flag + genes + '</button>';
   }
 
   /* ---------- forest (rows are normalised: name, sub, n, est, lo, hi, q, sig, counted, reason, pills) ---------- */
@@ -323,15 +367,15 @@ window.antViews = window.antViews || (function () {
       plot += '</div>';
       var reason = row.reason ? '<small>not counted: ' + esc(row.reason) + '</small>' : '<small>' + (row.sub || '') + '</small>';
       return '<div class="vw-frow' + (row.counted ? '' : ' uncounted') + '"><div class="nm" title="' + esc(row.title || row.name) + '">' + esc(row.name) + (row.pills || '') + reason + '</div><div class="n">' + (row.n == null ? '' : row.n) + '</div>' + plot +
-        '<div class="e">' + (row.est == null ? 'n/a' : signed(row.est, 2)) + '</div><div class="q">' + (row.q == null ? 'n/a' : pfmt(row.q)) + '</div></div>';
+        '<div class="e" title="' + (row.q == null ? 'no p value (below the p-value floor or cell-level)' : 'q = ' + pfmt(row.q)) + '">' + (row.est == null ? 'n/a' : signed(row.est, 2)) + '</div><div class="q">' + (row.lo != null && row.hi != null ? signed(row.lo, 2) + ' to ' + signed(row.hi, 2) : 'no interval') + '</div></div>';
     }
-    var html = '<div class="vw-forest"><div class="vw-frow head"><div>Cohort and dataset</div><div class="n">' + esc(opts.noun || 'donors') + '</div><div>' + esc(opts.unit || 'log2 fold change') + '</div><div class="e">estimate</div><div class="q">q</div></div>';
+    var html = '<div class="vw-forest"><div class="vw-frow head"><div>Cohort and dataset</div><div class="n">' + esc(opts.noun || 'donors') + '</div><div>' + esc(opts.unit || 'log2 fold change') + '</div><div class="e">estimate</div><div class="q">95% CI ' + info('Confidence interval from the model of that cohort. A unit below the p-value floor has none. A filled dot means the cohort alone has q below 0.05; hover the estimate for its q.') + '</div></div>';
     html += counted.map(line).join('');
     if (rest.length) {
       html += '<div class="vw-uncounted-wrap"><button type="button" class="vw-more-units" data-n="' + rest.length + '">+ ' + plural(rest.length, 'more unit') + ' (not counted)</button><div class="vw-uncounted" hidden>' + rest.map(line).join('') + '</div></div>';
     }
     html += '</div>';
-    html += '<p class="vw-fnote">' + (opts.note || 'Filled dot: the cohort alone has q &lt; 0.05. Bars are 95% confidence intervals from the model; a unit below the p-value floor has none. Cohorts under 20 ' + esc(opts.noun || 'donors') + ' cannot reach significance for effects of this size.') + '</p>';
+    if (opts.note) html += '<p class="vw-fnote">' + opts.note + '</p>';
     return html;
   }
   function bindForest(root) {
@@ -351,28 +395,17 @@ window.antViews = window.antViews || (function () {
   var detailCache = {};
   function blockHeader(block, model) {
     var meta = SCOPES[block.scope];
-    var html = '<div class="vw-scope-head"><h3>' + esc(meta.title) + '</h3><span class="unit">' + esc(meta.unit) + ' ' + gl('scope', 'About scopes') + '</span></div>';
-    (block.notes || []).forEach(function (note) { html += '<div class="vw-note">' + note + '</div>'; });
-    return html;
+    return '<div class="vw-scope-head"><h3>' + esc(meta.title) + '</h3><span class="unit">' + esc(meta.unit) + '</span></div>';
   }
   function rowHeader(row) {
-    return '<div class="fl">' + esc(row.label) + (row.apoeLocus && /apoe4/.test(row.facet) ? '<span class="vw-apoe" title="APOE locus gene: an e4 effect here can come from allele-linked expression or read mapping">APOE locus</span>' : '') + '</div><div class="fc">' + esc(row.contrast) + '</div>' +
-      (row.tag ? '<div class="ft">' + esc(row.tag) + '</div>' : '');
+    return '<div class="fl">' + esc(row.label) + '</div><div class="fc">' + esc(row.contrast) + '</div>';
   }
   function gridA(block, model, ctx) {
-    var html = '<div class="vw-box"><table class="vw-grid"><thead><tr><th class="fh">Facet</th>' + block.groups.map(function (g) { return '<th>' + esc(SHORT[g] || g) + '</th>'; }).join('') + '</tr></thead><tbody>';
-    var rows = block.rows;
-    rows.forEach(function (row, index) {
+    var html = '<div class="vw-box"><table class="vw-grid"><thead><tr><th class="fh">Facet ' + info('The donor-level property that was tested, and the comparison made. Click a cell to see the cohorts behind it.') + '</th>' +
+      block.groups.map(function (g) { return '<th>' + esc(SHORT[g] || g) + '</th>'; }).join('') + '</tr></thead><tbody>';
+    block.rows.forEach(function (row) {
       var open = selection && selection.scope === block.scope && selection.facet === row.facet;
-      var cls = '';
-      if (row.axis) {
-        var prevAxis = index > 0 && rows[index - 1].axis, nextAxis = index < rows.length - 1 && rows[index + 1].axis;
-        cls = prevAxis ? 'axis-mid' : (nextAxis ? 'axis-top axis-tag' : '');
-        if (!prevAxis && nextAxis) cls = 'axis-top axis-tag';
-      }
-      var header = rowHeader(row);
-      if (cls.indexOf('axis-tag') >= 0) header += '<span class="axis-label" title="Braak stage and pathologic AD are the same pathology axis read two ways: where both replicate it is one finding, not two.">one pathology axis</span>';
-      html += '<tr class="' + cls + '"><td class="fh">' + header + '</td>';
+      html += '<tr><td class="fh">' + rowHeader(row) + '</td>';
       block.groups.forEach(function (group) {
         html += '<td>' + cellHtml(row.cells[group] || null, { scope: block.scope, facet: row.facet, group: group, selected: open && selection.group === group }) + '</td>';
       });
@@ -383,64 +416,39 @@ window.antViews = window.antViews || (function () {
   }
   function listB(block, model, ctx) {
     var html = '<div class="vw-clist">';
-    var index = 0;
-    function rowHtml(row) {
+    block.rows.forEach(function (row) {
       var open = selection && selection.scope === block.scope && selection.facet === row.facet;
-      var evidence = [], none = [], nt = [];
-      block.groups.forEach(function (group) {
+      var tested = [], untested = [];
+      block.groups.forEach(function (group) { (cellKind(row.cells[group]) === 'empty' ? untested : tested).push(group); });
+      html += '<div class="vw-crow"><div class="chead"><span class="fl">' + esc(row.label) + '</span><span class="fc">' + esc(row.contrast) + '</span></div><div class="cchips">';
+      tested.forEach(function (group) {
         var cell = row.cells[group];
         var kind = cellKind(cell);
-        if (kind === 'empty') nt.push(group);
-        else if (kind === 'none') none.push(group);
-        else evidence.push(group);
-      });
-      var out = '<div class="vw-crow"><div class="chead"><span class="fl">' + esc(row.label) + (row.apoeLocus && /apoe4/.test(row.facet) ? '<span class="vw-apoe" title="APOE locus gene">APOE locus</span>' : '') + '</span><span class="fc">' + esc(row.contrast) + '</span>' + (row.tag ? '<span class="ft">' + esc(row.tag) + '</span>' : '') + '</div><div class="cchips">';
-      evidence.forEach(function (group) {
-        var cell = row.cells[group];
         var selected = open && selection.group === group;
         var attrs = ' data-scope="' + block.scope + '" data-facet="' + esc(row.facet) + '" data-group="' + esc(group) + '"';
-        if (cellKind(cell) === 'genes') {
-          out += '<button type="button" class="vw-chip one' + (selected ? ' sel' : '') + '"' + attrs + ' title="The module score was not tested here; member genes replicate on their own"><span>' + esc(plain(group)) + '</span><span class="k">module not tested</span></button>';
-        } else if (cellKind(cell) === 'single') {
-          out += '<button type="button" class="vw-chip one' + (selected ? ' sel' : '') + '"' + attrs + ' title="Tested in 1 cohort only; replication needs at least 2"><span>' + esc(plain(group)) + '</span><span class="k">1 cohort</span></button>';
-        } else {
-          out += '<button type="button" class="vw-chip' + (selected ? ' sel' : '') + '"' + attrs + ' title="Replicated (r &lt; 0.05)' + (cell.strict ? ', strict test passed' : '') + '"><span>' + esc(plain(group)) + '</span><span>' + arrow(cell.dir) + ' ' + signed(cell.median, 2) + (cell.strict ? ' &#9733;' : '') + '</span><span class="k">' + cell.k + '/' + cell.m + ' cohorts' + (cell.nSmall ? ', ' + cell.nSmall + ' small' : '') + (cell.disagree ? ' &#9888;' : '') + '</span>' + (cell.lowDet ? '<span class="k">low det. ' + Math.round(cell.lowDet.pct) + '%</span>' : '') + '</button>';
-        }
+        html += '<button type="button" class="vw-chip ' + cellClass(cell) + (selected ? ' sel' : '') + '"' + attrs + ' title="' + esc(cellTitle(cell, { scope: block.scope, facet: row.facet, group: group })) + '"><span>' + esc(plain(group)) + '</span><span>' +
+          (kind === 'genes' ? 'module not tested' : cellText(cell)) + '</span>' + (cell.disagree ? '<span class="flag">&#9888;</span>' : '') + '</button>';
       });
-      if (!evidence.length) out += '<span class="rest"><b>No evidence in any tested cell type</b></span>';
-      var bits = [];
-      if (evidence.length && none.length) bits.push('No evidence in <b>' + none.length + '</b> other: ' + none.map(function (g) { var c = row.cells[g]; return plain(g) + ' ' + c.k + '/' + c.m; }).join(', '));
-      if (!evidence.length && none.length) bits.push('tested in ' + none.map(function (g) { var c = row.cells[g]; return plain(g) + ' ' + c.k + '/' + c.m; }).join(', '));
-      if (nt.length) bits.push('not tested: ' + nt.map(plain).join(', '));
-      out += '</div><div class="rest">' + bits.join('. ') + '</div>';
+      if (!tested.length) html += '<span class="rest">Not tested in any cell type.</span>';
+      html += '</div>';
+      if (untested.length && tested.length) html += '<div class="rest">not tested: ' + untested.map(plain).join(', ') + '</div>';
       var geneParts = block.groups.filter(function (g) { return row.cells[g] && row.cells[g].genes && row.cells[g].genes.n > 0; }).map(function (g) {
-        var info = row.cells[g].genes;
-        var names = info.n <= 3 && info.genes ? ' (' + info.genes.map(function (x) { return esc(x.gene); }).join(', ') + ')' : '';
-        return plain(g) + ' ' + info.n + (info.more ? '+' : '') + names;
+        var geneInfo = row.cells[g].genes;
+        var names = geneInfo.n <= 3 && geneInfo.genes ? ' (' + geneInfo.genes.map(function (x) { return esc(x.gene); }).join(', ') + ')' : '';
+        return plain(g) + ' ' + geneInfo.n + (geneInfo.more ? '+' : '') + names;
       });
-      if (ctx.kind === 'module' && row.hasGenes) out += '<div class="genes-line">' + (geneParts.length ? 'Member genes that replicate: ' + geneParts.join(', ') : '<span class="muted">No member gene replicates for this facet.</span>') + '</div>';
-      if (open) out += '<div data-detail="' + block.scope + '|' + row.facet + '|' + esc(selection.group) + '"><div class="vw-loading">Loading the cohorts...</div></div>';
-      return out + '</div>';
-    }
-    var rows = block.rows;
-    while (index < rows.length) {
-      var row = rows[index];
-      if (row.axis && index + 1 < rows.length && rows[index + 1].axis) {
-        html += '<div class="vw-crow-group"><div class="gcap">One pathology axis: Braak stage and pathologic AD are the same pathology read two ways.</div>' + rowHtml(row) + rowHtml(rows[index + 1]) + '</div>';
-        index += 2;
-      } else {
-        html += rowHtml(row);
-        index += 1;
-      }
-    }
+      if (ctx.kind === 'module' && row.hasGenes) html += '<div class="genes-line">' + (geneParts.length ? 'Member genes that replicate: ' + geneParts.join(', ') : '<span class="muted">No member gene replicates for this facet.</span>') + '</div>';
+      if (open) html += '<div data-detail="' + block.scope + '|' + row.facet + '|' + esc(selection.group) + '"><div class="vw-loading">Loading the cohorts...</div></div>';
+      html += '</div>';
+    });
     return html + '</div>';
   }
   function legendHtml(ctx) {
-    return '<div class="vw-legend"><span><span class="swatch rep"></span>Replicated (same direction in at least 2 cohorts, r &lt; 0.05)</span>' +
-      '<span>&#9733; strict test also passed</span>' +
-      '<span><span class="swatch none"></span>No evidence (k/m cohorts individually significant)</span>' +
-      '<span><span class="swatch nt"></span>Not tested, or 1 cohort</span>' +
-      '<span class="muted">&#9650; up, &#9660; down. The number is the median effect; colour shows the call, never the p value or the direction.</span></div>';
+    return '<div class="vw-legend"><span><span class="swatch none"></span>not replicated</span>' +
+      '<span><span class="swatch rep"></span>replicated</span>' +
+      '<span><span class="swatch strict"></span>replicated, strict test passed</span>' +
+      '<span>&#9650; up &#9660; down</span>' +
+      '<span>k/m: cohorts significant / cohorts tested</span>' + '<span>&ndash; not tested</span></div>';
   }
   function renderPanel2(host, model, ctx) {
     var wide = window.matchMedia('(min-width: 900px)').matches;
@@ -448,8 +456,9 @@ window.antViews = window.antViews || (function () {
     model.blocks.forEach(function (block) {
       if (!block.rows.length) return;
       html += '<div class="vw-scope-block" id="vw-scope-' + block.scope + '">' + blockHeader(block, model);
-      html += wide ? gridA(block, model, ctx) : listB(block, model, ctx);
-      if (block.footer) html += '<p class="vw-fnote">' + block.footer + '</p>';
+      html += !block.groups.length ? '<div class="vw-placeholder">Not tested in any cell type in this system.</div>' : wide ? gridA(block, model, ctx) : listB(block, model, ctx);
+      var notes = (block.notes || []).concat(block.footer ? [block.footer] : []);
+      if (notes.length && block.groups.length) html += '<div class="vw-notes">' + notes.join('<span class="sep">&middot;</span>') + '</div>';
       html += '</div>';
     });
     if (!html) html = '<div class="vw-placeholder">' + (ctx.emptyHtml || 'No facet result is available for this subject.') + '</div>';
@@ -528,8 +537,8 @@ window.antViews = window.antViews || (function () {
   return {
     API: API, GROUPS: GROUPS, SHORT: SHORT, SCOPES: SCOPES, HUMAN_FACETS: HUMAN_FACETS, XENO_FACETS: XENO_FACETS, FACETS: FACETS,
     LOW_DETECTION_PCT: LOW_DETECTION_PCT, esc: esc, num: num, signed: signed, pfmt: pfmt, plural: plural, arrow: arrow, plain: plain, median: median,
-    gl: gl, pill: pill, getJson: getJson, cached: cached, docBlock: docBlock, afterRender: afterRender, facetMeta: facetMeta, geneFlagPills: geneFlagPills,
-    lowDetectionPill: lowDetectionPill, cellFromRep: cellFromRep, cellKind: cellKind, cellHtml: cellHtml, forestHtml: forestHtml, bindForest: bindForest,
+    gl: gl, pill: pill, GENE_FLAGS: GENE_FLAGS, getJson: getJson, cached: cached, docBlock: docBlock, afterRender: afterRender, facetMeta: facetMeta, geneFlagPills: geneFlagPills,
+    info: info, helpBtn: helpBtn, compact: compact, CELLS: CELLS, cellFromRep: cellFromRep, cellKind: cellKind, cellHtml: cellHtml, forestHtml: forestHtml, bindForest: bindForest,
     renderPanel2: renderPanel2, legendHtml: legendHtml, preselect: preselect, initTabs: initTabs
   };
 })();
