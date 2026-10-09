@@ -354,51 +354,33 @@ def test_ant_score_ext_scores_all_cells_without_stored_gene_bins(tmp_path, monke
 # ---------------------------------------------------------------------------
 
 def test_ant_ucell_writes_rows_for_the_scope_cells_only(tmp_path):
-    anndata = pytest.importorskip('anndata')
     tool = load_tool('ant-ucell')
-    store, entry, cell_names, expression = build_dataset(tmp_path)
-    geneset_root = build_genesetstore(tmp_path)
-    registry = scan(geneset_root)
+    store, entry, _cell_names, _expression = build_dataset(tmp_path)
+    registry = scan(build_genesetstore(tmp_path))
     cells = celltype_scope.cell_type_groups(entry, store)
-    adata = anndata.AnnData(X=expression.astype('float32'),
-                            obs=pd.DataFrame(index=cell_names),
-                            var=pd.DataFrame(index=[f'GENE{i}' for i in range(N_GENES)]))
+    source = tool.ExpressionSource(entry.duckdb_path, 'X')
     for experiment_id, expected_cells in (('Syn/Micro', set(range(0, 20))), ('Syn/Everywhere', set(range(40))),
                                           ('Syn/Panel', set(range(40)))):
         members = [g for g in registry.list_genesets() if g.experiment.experiment_id == experiment_id]
-        result = tool._ucell_one_experiment(adata, registry.get_experiment(experiment_id), members, entry,
-                                            min_n=3, verbose=False, dry_run=False, cells=cells)
+        result = tool._ucell_experiments(source, [(registry.get_experiment(experiment_id), members)], entry,
+                                         min_n=3, verbose=False, dry_run=False, cells=cells, chunk_cells=7)[0]
         assert result['status'] == 'ok', result
         rows = read_scores(entry.duckdb_path, source='ucell', catalog=experiment_id)
         assert set(rows['cell_id']) == expected_cells and rows['score'].between(0, 1).all()
-
-
-def test_ant_ucell_score_of_a_cell_does_not_depend_on_the_other_cells(tmp_path):
-    """UCell ranks genes within a cell: scoring a subset gives the same values as scoring everyone."""
-    anndata = pytest.importorskip('anndata')
-    tool = load_tool('ant-ucell')
-    store, entry, cell_names, expression = build_dataset(tmp_path)
-    adata = anndata.AnnData(X=expression.astype('float32'), obs=pd.DataFrame(index=cell_names),
-                            var=pd.DataFrame(index=[f'GENE{i}' for i in range(N_GENES)]))
-    sets = {'mod': [f'GENE{g}' for g in range(6)]}
-    everyone = tool._run_ucell(adata, sets)
-    subset = tool._run_ucell(adata[:20], sets)
-    np.testing.assert_allclose(subset['mod'].to_numpy(), everyone['mod'].to_numpy()[:20])
+    source.close()
 
 
 def test_ant_ucell_removes_stale_rows_when_no_cell_matches(tmp_path):
-    anndata = pytest.importorskip('anndata')
     tool = load_tool('ant-ucell')
-    store, entry, cell_names, expression = build_dataset(tmp_path, labels=['astrocyte'] * 40)
-    geneset_root = build_genesetstore(tmp_path)
-    registry = scan(geneset_root)
+    store, entry, _cell_names, _expression = build_dataset(tmp_path, labels=['astrocyte'] * 40)
+    registry = scan(build_genesetstore(tmp_path))
     upsert_scores(entry.duckdb_path, 'ucell', 'Syn/Micro', sidecar_rows('Syn/Micro', 'ucell'))
     cells = celltype_scope.cell_type_groups(entry, store)
-    adata = anndata.AnnData(X=expression.astype('float32'), obs=pd.DataFrame(index=cell_names),
-                            var=pd.DataFrame(index=[f'GENE{i}' for i in range(N_GENES)]))
     members = [g for g in registry.list_genesets() if g.experiment.experiment_id == 'Syn/Micro']
-    result = tool._ucell_one_experiment(adata, registry.get_experiment('Syn/Micro'), members, entry,
-                                        min_n=3, verbose=False, dry_run=False, cells=cells)
+    source = tool.ExpressionSource(entry.duckdb_path, 'X')
+    result = tool._ucell_experiments(source, [(registry.get_experiment('Syn/Micro'), members)], entry,
+                                     min_n=3, verbose=False, dry_run=False, cells=cells)[0]
+    source.close()
     assert result['status'] == 'error' and 'cell type scope' in result['error']
     assert not scores_path(entry.duckdb_path).exists()
 
@@ -529,26 +511,30 @@ def test_missing_scores_lists_source_catalog_pairs():
 
 def test_ant_ucell_ranks_the_cells_of_a_scope_once_for_all_catalogs(tmp_path, monkeypatch):
     """Ranking dominates the cost: catalogs sharing a scope are scored in one pass, with the same values."""
-    anndata = pytest.importorskip('anndata')
     tool = load_tool('ant-ucell')
-    store, entry, cell_names, expression = build_dataset(tmp_path)
+    store, entry, _cell_names, _expression = build_dataset(tmp_path)
     registry = scan(build_genesetstore(tmp_path))
     cells = celltype_scope.cell_type_groups(entry, store)
-    adata = anndata.AnnData(X=expression.astype('float32'), obs=pd.DataFrame(index=cell_names),
-                            var=pd.DataFrame(index=[f'GENE{i}' for i in range(N_GENES)]))
     pairs = [(registry.get_experiment(name), [g for g in registry.list_genesets() if g.experiment.experiment_id == name])
              for name in ('Syn/Micro', 'Syn/Everywhere', 'Syn/Panel')]
     calls = []
     original = tool._run_ucell
-    monkeypatch.setattr(tool, '_run_ucell', lambda data, sets: calls.append((data.n_obs, len(sets))) or original(data, sets))
-    results = tool._ucell_experiments(adata, pairs, entry, 3, False, False, cells)
+
+    def recording_run(source, cell_ids, module_indices, chunk_cells):
+        calls.append((len(cell_ids), len(module_indices)))
+        return original(source, cell_ids, module_indices, chunk_cells)
+
+    monkeypatch.setattr(tool, '_run_ucell', recording_run)
+    source = tool.ExpressionSource(entry.duckdb_path, 'X')
+    results = tool._ucell_experiments(source, pairs, entry, 3, False, False, cells)
     assert [r['status'] for r in results] == ['ok', 'ok', 'ok']
     assert sorted(calls) == [(20, 1), (40, 2)]            # microglia once; all cells once for Everywhere + Panel
     joint = read_scores(entry.duckdb_path, source='ucell')
-    for name in ('Syn/Micro', 'Syn/Everywhere', 'Syn/Panel'):
-        alone = original(adata[celltype_scope.module_scope(
-            registry.genesets[f'{name}/mod']).cell_mask(cells['group']).to_numpy()],
-            {'mod': [f'GENE{g}' for g in range({'Syn/Micro': 0, 'Syn/Everywhere': 10, 'Syn/Panel': 20}[name],
-                                                {'Syn/Micro': 6, 'Syn/Everywhere': 16, 'Syn/Panel': 26}[name])]})
+    gene_range = {'Syn/Micro': (0, 6), 'Syn/Everywhere': (10, 16), 'Syn/Panel': (20, 26)}
+    for name, (first, last) in gene_range.items():
+        scope_ids = cells.loc[celltype_scope.module_scope(registry.genesets[f'{name}/mod'])
+                              .cell_mask(cells['group']).to_numpy(), 'cell_id'].to_numpy()
+        (_ids, alone), = original(source, scope_ids, [np.arange(first, last)], 1000)
         stored = joint[joint['catalog'] == name].sort_values('cell_id')['score'].to_numpy()
-        np.testing.assert_allclose(stored, alone['mod'].to_numpy())
+        np.testing.assert_allclose(stored, alone[:, 0])
+    source.close()

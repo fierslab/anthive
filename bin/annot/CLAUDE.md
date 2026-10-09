@@ -74,6 +74,12 @@ and 14 GB, AUCell (pyscenic, single thread) 13:44 and 45 GB (8.7 times slower); 
 took 10:01 and 40 GB, AUCell was not run (it scales to well over 100 GB, 45 GB at 40k cells). `ant-ucell` ranks the cells of a
 scope once for all catalogs of the call (ranking dominates the cost), so pass every catalog in one call.
 
+`ant-ucell` reads the duckdb layer (by-cell parquet sidecar, `--layer`, default the `.md` `default_layer`), not the h5ad, and ranks the
+cells of a scope in chunks (`--chunk-cells`, default 50000; sparse read per chunk, dense rank batches of 2000 cells). Scores do not
+depend on the chunk size (verified bitwise against the old whole-h5ad path on F24/MIC). Each catalog is written once at the end.
+Before this (2026-10-09) the whole h5ad was loaded, which was OOM-killed on RX4/ALL (433k cells) and G24/PEx (661k cells).
+`ant-score-ext` is not chunked: DuckDB computes the control bins once per scope and scores a module per query (3.8 GB peak on RX4/ALL).
+
 ## Write path (the shared contract)
 
 All three write-tools use `lib/anthive_db.AnnotationWriter`:
