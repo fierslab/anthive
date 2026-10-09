@@ -430,41 +430,40 @@ window.antViews = window.antViews || (function () {
   }
   function withParam(url, name, value) { return url + (url.indexOf('?') >= 0 ? '&' : '?') + name + '=' + encodeURIComponent(value); }
   function dbLink(dbId) { return '/browse/' + String(dbId).split('/').map(encodeURIComponent).join('/'); }
-  // per-cell descriptive plot of one anchor dataset, from the cell links or from the unit row
-  function anchorPlots(links, rows) {
+  // API anchors: one per counted dataset, {db_id, url, label}; url is an API path (/databases/<id>/plot/...), the page is /browse/<id>/plot/...
+  function anchorPlots(links) {
     var found = [], seen = {};
-    function add(dbId, value) {
-      var url = linkOf(value);
-      if (!url || !dbId || seen[dbId] || String(dbId).indexOf('pool:') === 0) return;
-      seen[dbId] = 1;
-      found.push({ db_id: dbId, url: url });
-    }
-    var served = links && (links.anchors || links.anchor_plots);
-    if (Array.isArray(served)) served.forEach(function (item) { add(item.db_id, item.plot || item.cell_plot || item.descriptive_plot || item.url || item.href); });
-    else if (served && typeof served === 'object') Object.keys(served).forEach(function (dbId) { add(dbId, served[dbId]); });
-    (rows || []).forEach(function (row) {
-      var own = row.links;
-      if (own) add(row.db_id, own.cell_plot || own.descriptive_plot || own.per_cell_plot || own.plot);
+    ((links && links.anchors) || []).forEach(function (item) {
+      var url = linkOf(item.url);
+      if (!url || !item.db_id || seen[item.db_id] || String(item.db_id).indexOf('pool:') === 0) return;
+      seen[item.db_id] = 1;
+      found.push({ db_id: item.db_id, url: url.replace(/^\/databases\//, '/browse/') });
     });
     return found;
   }
   // The block under the sentence of an opened cell. Renders nothing when the API served no links.
-  function linksHtml(links, rows, panelId) {
-    var plot = linkOf(links && links.donor_plot);
-    var values = linkOf(links && links.donor_values);
-    var anchors = anchorPlots(links, rows);
-    if (!plot && !values && !anchors.length) return '';
+  function linksHtml(links) {
+    if (!links) return '';
+    var plot = linkOf(links.donor_plot);
+    var available = links.donor_values_available !== false;
+    var anchors = anchorPlots(links);
+    if (!plot && !anchors.length) return '';
     var html = '';
-    if (plot) {
+    if (plot && available) {
       html += '<div class="vw-dplot" data-plot="' + esc(plot) + '"' + (linkOf(links.donor_plot_adjusted) ? ' data-plot-adjusted="' + esc(linkOf(links.donor_plot_adjusted)) + '"' : '') + '>' +
-        '<div class="bar"><b>Donor values</b> ' + info('Small multiples per cohort: each dot is one donor (one mouse in the xenograft block), the value that was tested. Descriptive view of the same donors as the table below.') +
+        '<div class="bar"><b>Donor values</b> ' + info('Small multiples per cohort: each dot is one donor (one mouse in the xenograft block), the value that went into the test. Descriptive view of the same donors as the table below.') +
         '<label><input type="checkbox" class="vw-adj"> adjusted for covariates</label></div>' +
         '<div class="vw-dplot-box"><span class="vw-loading">Loading the donor plot...</span></div><p class="cap"></p></div>';
+    } else if (plot) {
+      html += '<p class="vw-fnote vw-dplot-na"><b>Donor values</b>: the donor plot is available after the next facet-test run, which stores the values per donor.</p>';
     }
     var parts = [];
-    if (plot) parts.push('<a class="vw-dl-img" href="' + esc(apiUrl(plot)) + '" target="_blank" rel="noopener">open the donor plot</a>');
-    if (values) parts.push('<a href="' + esc(apiUrl(values)) + '" target="_blank" rel="noopener">donor values (JSON)</a>');
-    anchors.forEach(function (item) { parts.push('<a href="' + esc(item.url.charAt(0) === '/' && item.url.indexOf('/browse/') !== 0 ? apiUrl(item.url) : item.url) + '">per-cell view in ' + esc(item.db_id) + '</a>'); });
+    if (plot && available) {
+      parts.push('<a href="' + esc(apiUrl(plot)) + '" target="_blank" rel="noopener">open the donor plot</a>');
+      if (linkOf(links.donor_plot_svg)) parts.push('<a href="' + esc(apiUrl(linkOf(links.donor_plot_svg))) + '" target="_blank" rel="noopener">SVG</a>');
+      if (linkOf(links.donor_values)) parts.push('<a href="' + esc(apiUrl(linkOf(links.donor_values))) + '" target="_blank" rel="noopener">donor values (JSON)</a>');
+    }
+    anchors.forEach(function (item) { parts.push('<a href="' + esc(item.url) + '" title="Descriptive plot of the cells of this dataset, not the test">per-cell view in ' + esc(item.db_id) + '</a>'); });
     if (parts.length) html += '<div class="vw-dlinks">' + parts.join('') + '</div>';
     return html;
   }
@@ -489,7 +488,7 @@ window.antViews = window.antViews || (function () {
       holder.appendChild(image);
       caption.textContent = done.caption || '';
     }).catch(function () {
-      if (box._token === token) holder.innerHTML = '<span class="vw-error">The donor plot could not be loaded.</span>';
+      if (box._token === token) holder.innerHTML = '<span class="vw-loading">No donor plot for this cell yet: some cohorts have no stored donor values until the next facet-test run.</span>';
     });
   }
   // Called after a detail card is rendered; the image is fetched when the card is on screen.

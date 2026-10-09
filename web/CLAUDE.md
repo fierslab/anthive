@@ -204,8 +204,7 @@ the same table), so nothing shifts on expand (verified at 1440, 1024 and 390 by 
 colours, arrow for direction; caveats are one notes line under each matrix with a (?) into the help panel; no doc_block in the view tabs.
 Donor plot and links (API facet-donor-values): `V.linksHtml(links, rows)` renders nothing when the replication entry has no `links`; it shows
 the donor plot lazily (fetch + IntersectionObserver, caption from `X-Plot-Caption`), an "adjusted for covariates" toggle, "donor values (JSON)"
-and "per-cell view in <dataset>" links. Field names read: `links.donor_plot`, `donor_plot_adjusted` (else `adjusted=true` is appended),
-`donor_values`, `anchors` / `anchor_plots`, per unit `links.cell_plot`. Panel 1 dataset rows link the dataset page and a violin of the gene
+and "per-cell view in <dataset>" links. Fields read (API 2.45, `links` on every gene and module replication entry): `donor_plot`, `donor_plot_svg`, `donor_plot_adjusted`, `donor_values`, `donor_values_available` (false until the facet tests are rerun: the block then says the plot is available after the next run and shows no image), `anchors` (genes only, `{db_id, url}`; the API path `/databases/..` is turned into the `/browse/..` page). Panel 1 dataset rows link the dataset page and a violin of the gene
 (or module score) by the dataset's `celltype_col`. The forest shows estimate, 95% CI and the per-cohort q.
 
 **MCP links UI** talks to ant-serve's `GET /me/mcp`, `POST /me/mcp/links`,

@@ -1,4 +1,4 @@
-{# Sitewide Jinja macros — import with:
+{# Sitewide Jinja macros - import with:
        {% from "_macros.html" import col_label, breadcrumb, mff_styles %}
    in any template that renders obs column names or a breadcrumb trail.
 #}
@@ -75,7 +75,7 @@
     function updateLabel() {
       var checked = list.querySelectorAll('input[type="checkbox"]:checked');
       var total   = list.querySelectorAll('input[type="checkbox"]').length;
-      // Zero checked == "all" (empty selection means no filter — same as all).
+      // Zero checked == "all" (empty selection means no filter - same as all).
       // "N of N" checked also renders as "all" so the label reads sensibly
       // once the user hits select-all.
       if (!total || checked.length === 0 || checked.length === total) {
@@ -112,7 +112,7 @@
     function populate(opts, keepValues) {
       var prevValues = keepValues ? getValues() : null;
       options = opts;
-      // Options render UNCHECKED by default — zero-checked == "all", so the
+      // Options render UNCHECKED by default - zero-checked == "all", so the
       // popover opens without a filter. The user's first click narrows to
       // exactly that value (the common case: pick one).
       var html = opts.map(function (opt) {
@@ -196,7 +196,7 @@
      is_secondary: When True, appends a small `(2)` marker after the final
             (current) label. Same semantic as the sitewide `.badge-secondary`.
 
-   The home icon is the word "home" styled as a muted link — keeps it subtle
+   The home icon is the word "home" styled as a muted link - keeps it subtle
    and screen-reader-friendly.
 #}
 {# Collapsible documentation block, closed by default (sitewide pattern).

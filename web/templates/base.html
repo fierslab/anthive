@@ -10,20 +10,20 @@
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
     <link rel="manifest" href="/site.webmanifest">
     <meta name="theme-color" content="#335C67">
-    <!-- Roboto — swaps out the system-font stack for a single consistent
+    <!-- Roboto - swaps out the system-font stack for a single consistent
          typeface across pages. Falls back gracefully if the CDN is blocked. -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         :root {
-            /* Palette refresh — dark teal is the new primary, cream for warn
+            /* Palette refresh - dark teal is the new primary, cream for warn
                backgrounds, amber medium, red high, dark red high accent. */
             --bar-bg: #335C67;
             --bar-text: #f5f7f6;
             --bar-link: #e6ecec;
             --bar-link-hover: #ffffff;
-            --link: #335C67;                /* dark teal — the new anchor */
+            --link: #335C67;                /* dark teal - the new anchor */
             --text: #1a1a1a;
             --text-muted: #6b7280;
             --bg: #FFFFFF;                  /* white background */
@@ -62,7 +62,7 @@
         #topbar .brand:hover { text-decoration: none; color: #ffffff; }
         /* Force the topbar logo to render as (near-)white on the dark-teal bar.
            The source PNG is a dark-recoloured crop that reads as low-contrast on
-           the dark background — invert + brightness pushes it to white/cream so
+           the dark background - invert + brightness pushes it to white/cream so
            it clears WCAG AA contrast against #335C67. */
         #topbar .brand img { height: 30px; width: auto; display: block; filter: brightness(0) invert(1); }
         #topbar nav { display: flex; align-items: center; gap: 16px; }
@@ -195,7 +195,7 @@
 
         main { padding: 12px 18px; max-width: 1200px; margin: 0 auto; }
 
-        /* Table cells stay tight — don't inherit the bumped body line-height. */
+        /* Table cells stay tight - don't inherit the bumped body line-height. */
         table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4; }
         th { text-align: left; padding: 5px 8px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
         td { padding: 4px 8px; border-bottom: 1px solid var(--border-light); vertical-align: middle; }
@@ -214,7 +214,7 @@
         table.narrow { max-width: 480px; }
         table.auto { width: auto; }
 
-        /* Horizontal-scroll guard for wide tables on narrow viewports — keeps
+        /* Horizontal-scroll guard for wide tables on narrow viewports - keeps
            a many-column table from blowing out the page width and forcing a
            whole-page horizontal scroll. The table scrolls inside this box
            instead. Every page table is wrapped in one of these. */
@@ -268,13 +268,13 @@
         .dot-ok { background: #16a34a; } .dot-warn { background: #ea580c; } .dot-err { background: #dc2626; } .dot-pending { background: #2563eb; }
 
         /* ── Unified breadcrumb (all pages) ────────────────────────────────
-           .breadcrumb        — the row container
-           .bc-home           — home link (always leftmost, href="/")
-           .bc-sep            — "/" separator
-           .bc-current        — bold last/active crumb
-           .bc-ids            — right-aligned id-copy chip cluster
-           .bc-id-chip        — one copyable id (monospace grey, user-select:all)
-           .bc-id-chip.copied — brief green flash on copy
+           .breadcrumb        - the row container
+           .bc-home           - home link (always leftmost, href="/")
+           .bc-sep            - "/" separator
+           .bc-current        - bold last/active crumb
+           .bc-ids            - right-aligned id-copy chip cluster
+           .bc-id-chip        - one copyable id (monospace grey, user-select:all)
+           .bc-id-chip.copied - brief green flash on copy
         ───────────────────────────────────────────────────────────────── */
         .breadcrumb {
             font-size: 12px; color: var(--text-muted); margin-bottom: 2px;
@@ -287,7 +287,7 @@
         .breadcrumb .bc-current { font-size: 12px; font-weight: 700; color: var(--text); }
         .breadcrumb .bc-inert { font-size: 12px; color: var(--text-muted); }
         .breadcrumb .slug { color: #bbb; font-size: 11px; font-family: var(--font-mono); margin-left: 2px; }
-        /* ID-copy chips — float to the right of the trail */
+        /* ID-copy chips - float to the right of the trail */
         .breadcrumb .bc-ids { margin-left: auto; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
         .bc-id-chip {
             display: inline-flex; align-items: center; gap: 4px;
@@ -337,7 +337,7 @@
         @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } }
         .mk { color: var(--text-muted); font-size: 11px; width: 90px; white-space: nowrap; display: inline-block; }
 
-        /* Info block — biology + provenance side-by-side */
+        /* Info block - biology + provenance side-by-side */
         .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; margin: 4px 0 8px; }
         @media (max-width: 760px) { .info-grid { grid-template-columns: 1fr; } }
         .info-col-title { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 2px; padding-bottom: 2px; border-bottom: 1px dotted var(--border); }
@@ -359,7 +359,7 @@
         }
         .viz-btn:hover { background: #1e40af; color: #fff; text-decoration: none; }
 
-        /* Palette-amber Edit button — used on group + dataset pages to
+        /* Palette-amber Edit button - used on group + dataset pages to
            differentiate an admin-write affordance from the neutral action
            buttons. Colour is the amber from the site palette. */
         .btn-edit {
@@ -416,7 +416,7 @@
             .tab-btn { flex: none; }
         }
 
-        /* Sitewide utilities (DRY — replace scattered inline color styles). */
+        /* Sitewide utilities (DRY - replace scattered inline color styles). */
         .muted    { color: var(--text-muted); }
         .muted-2  { color: #94a3b8; }
         /* facet scope label (human post-mortem / xenograft): shown on every facet result block */
@@ -556,7 +556,7 @@
         #chat-head { display: flex; align-items: center; gap: 7px; height: 32px; padding: 0 10px; background: #0f172a; color: #fff; font-size: 12px; font-weight: 600; flex: none; }
         #chat-head .sub { font-weight: 400; font-size: 10px; color: #94a3b8; font-family: var(--font-mono); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         #chat-head .chat-logo-sm { height: 20px; width: auto; display: block; border-radius: 3px; flex: none; }
-        /* buttons never shrink/clip — the model area gives up space first */
+        /* buttons never shrink/clip - the model area gives up space first */
         #chat-head .hbtn { flex: none; cursor: pointer; color: #cbd5e1; font-size: 14px; background: none; border: none; line-height: 1; padding: 2px 3px; }
         #chat-head .hbtn:hover { color: #fff; }
         #chat-head .dock { margin-left: auto; }      /* pushes dock + reset + close to the right */
@@ -591,7 +591,7 @@
         .chat-msg.assistant.md blockquote { border-left: 3px solid #cbd5e1; margin: 4px 0; padding: 0 8px; color: var(--text-muted); }
         .chat-msg.assistant.md hr { border: none; border-top: 1px solid #cbd5e1; margin: 6px 0; }
         .chat-msg.action { align-self: flex-start; background: #fef3c7; color: #92400e; font-size: 11px; border-radius: 8px; font-family: var(--font-mono); }
-        /* subtle navigation breadcrumb (the bot moved the view) — deliberately quiet */
+        /* subtle navigation breadcrumb (the bot moved the view) - deliberately quiet */
         .chat-nav { align-self: flex-start; font-size: 10px; color: var(--text-muted); opacity: .8; padding: 1px 4px; }
         .chat-activity { align-self: flex-start; display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); font-style: italic; padding: 2px 4px; }
         .chat-activity .spin { width: 11px; height: 11px; flex: none; border: 2px solid #cbd5e1; border-top-color: var(--link); border-radius: 50%; animation: chatspin .7s linear infinite; }
@@ -625,7 +625,7 @@
         .chat-msg.error .ce-details { margin-top: 6px; padding: 6px 8px; background: #fff; border: 1px solid #fecaca; border-radius: 6px; font-family: var(--font-mono); font-size: 10px; color: #7f1d1d; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 140px; overflow-y: auto; }
         .chat-empty { margin: auto; color: var(--text-muted); font-size: 12px; text-align: center; padding: 14px; }
         .chat-empty .chat-privacy { margin-top: 14px; font-size: 10px; color: #94a3b8; line-height: 1.45; border-top: 1px solid var(--border); padding-top: 8px; }
-        /* one-time consent gate — covers the body until /chat/ack */
+        /* one-time consent gate - covers the body until /chat/ack */
         #chat-gate { display: none; flex: 1; flex-direction: column; gap: 9px; padding: 14px; overflow-y: auto; font-size: 12px; line-height: 1.5; color: var(--text); }
         #chat-gate p { margin: 0; }
         #chat-gate a { font-size: 11px; }
@@ -736,7 +736,7 @@
             <a href="/help" title="What's here & how to use it">Help</a>
             <a href="/api-guide" id="topbar-api-link" title="Use the REST API: signing in, first steps, pyvark and vark">API</a>
             <span class="dropdown topbar-auth">
-                <span class="dropdown-toggle" id="user-menu-toggle" tabindex="0" role="button" aria-haspopup="menu" aria-expanded="false" title="{% if _auth_user %}signed in{% if request.headers.get('remote-email') %} — {{ request.headers.get('remote-email') }}{% endif %}{% else %}account &amp; preferences{% endif %}">👤{% if _auth_user %} {{ _auth_user }}{% endif %}</span>
+                <span class="dropdown-toggle" id="user-menu-toggle" tabindex="0" role="button" aria-haspopup="menu" aria-expanded="false" title="{% if _auth_user %}signed in{% if request.headers.get('remote-email') %} - {{ request.headers.get('remote-email') }}{% endif %}{% else %}account &amp; preferences{% endif %}">👤{% if _auth_user %} {{ _auth_user }}{% endif %}</span>
                 <span class="dropdown-menu right">
                     {% if _auth_user %}
                     <div class="dropdown-header">signed in as <strong>{{ _auth_user }}</strong></div>
@@ -858,7 +858,7 @@
     <script>
     // Sitewide UI-state persistence: remember a control's last value across
     // reloads/navigation (localStorage). Selection state that isn't in the URL
-    // (dropdowns, filters) should survive a reload — use this everywhere.
+    // (dropdowns, filters) should survive a reload - use this everywhere.
     //   antRemember.get(key)            → stored string or null
     //   antRemember.set(key, value)     → persist
     //   antRemember.bindSelect(sel, key[, onApply]) → restore (if the option
@@ -918,7 +918,7 @@
     })();
     </script>
     <script>
-    // User settings — persistent, per-browser (localStorage). Set on /settings.
+    // User settings - persistent, per-browser (localStorage). Set on /settings.
     //
     //   window.antSettings.moduleAlgorithm()   → 'geneset' (scanpy, default) | 'ucell'
     //   window.antSettings.favouriteGenes()    → array of upper-case HGNC symbols (may be [])
@@ -946,7 +946,7 @@
                 var parsed = JSON.parse(raw);
                 if (!Array.isArray(parsed)) return [];
                 // Re-sanitise on read (defence-in-depth). Consumers concatenate
-                // these strings into raw HTML — an untrusted same-origin write
+                // these strings into raw HTML - an untrusted same-origin write
                 // (bookmarklet, extension) into localStorage would otherwise
                 // pass through settings.html's parseGenes filter. Apply the
                 // identical [A-Z0-9._-] gate here so a stored `<img …>` token
@@ -1027,7 +1027,7 @@
     })();
     </script>
     <script>
-    // Breadcrumb ID-copy chips — .bc-id-chip elements (rendered by the
+    // Breadcrumb ID-copy chips - .bc-id-chip elements (rendered by the
     // breadcrumb() macro). Click copies the chip's data-copy value to the
     // clipboard and flashes a "copied" state for 1 second.
     document.addEventListener('click', function (evt) {
@@ -1049,30 +1049,30 @@
         {% block content %}{% endblock %}
     </main>
 
-    <!-- ── EU ePrivacy / GDPR storage notice — informational only ──────────
+    <!-- ── EU ePrivacy / GDPR storage notice - informational only ──────────
          The data stored falls under "strictly necessary" / functional
          storage per ePrivacy Art. 5(3) and so does not require prior
          consent; this notice is purely informational, dismissable, and
-         offers a clear-data control. No "accept" wording — no consent is
+         offers a clear-data control. No "accept" wording - no consent is
          being collected. -->
     <div id="storage-notice" style="display:none">
       <div id="storage-details-body" style="display:none">
         <strong>What's stored, where, and why:</strong>
         <ul style="margin:4px 0 4px 16px;padding:0">
-          <li><code>anthive.plot.settings</code> — your figure size, DPI, font,
+          <li><code>anthive.plot.settings</code> - your figure size, DPI, font,
               palette. Written when you change a setting on a plot page.</li>
-          <li><code>anthive.storage.notice.ack</code> — that you closed this
+          <li><code>anthive.storage.notice.ack</code> - that you closed this
               notice (without it the notice would re-appear on every reload).</li>
           <li>If you visit <code>/jupyter/</code>, <strong>JupyterLite</strong>
               stores your notebook contents, kernel state, and
               <code>micropip</code>-installed Python packages locally
               (typically in IndexedDB and <code>localStorage</code>). This is
-              what lets the browser act as your "notebook server" — there is
+              what lets the browser act as your "notebook server" - there is
               no server-side notebook execution. None of this leaves your
               browser.</li>
         </ul>
         All entries are kept in your browser's <code>localStorage</code> /
-        <code>IndexedDB</code> — they are <strong>never</strong> sent to the
+        <code>IndexedDB</code> - they are <strong>never</strong> sent to the
         catalogue server, and no third party can read them. They persist until
         you clear browser data or click "clear my data" below.
 
@@ -1082,7 +1082,7 @@
         <code>Cache-Control</code> headers for cached plot images but no
         identifying cookies. The reverse proxy (Caddy) and any TLS-terminator
         in front of this site may set short-lived session cookies for their
-        own routing — those expire when you close the tab.</p>
+        own routing - those expire when you close the tab.</p>
 
         <p style="margin:6px 0 4px"><strong>Logs:</strong> the server records
         HTTP requests (URL, status, timestamp) for operational debugging. These
@@ -1094,7 +1094,7 @@
         usage above is functional / strictly necessary under ePrivacy Art. 5(3)
         and therefore does not require prior consent. This notice is
         informational. You can clear all stored data at any time using the
-        button below — the catalogue keeps working without it (you'll just see
+        button below - the catalogue keeps working without it (you'll just see
         plot defaults instead of your saved preferences).</p>
       </div>
 
@@ -1119,7 +1119,7 @@
       }
       try {
         if (localStorage.getItem(KEY) !== '1') show(true);
-      } catch (e) { /* localStorage unavailable — don't show notice */ }
+      } catch (e) { /* localStorage unavailable - don't show notice */ }
       var ack    = document.getElementById('storage-ack');
       var clear  = document.getElementById('storage-clear');
       var det    = document.getElementById('storage-details');
@@ -1159,7 +1159,7 @@
         <button class="hbtn x" id="chat-close" title="close" aria-label="close">✕</button></div>
       <div id="chat-gate">
         <strong>Before you start</strong>
-        <p>Messages you send to this assistant are <b>stored on this server</b> (linked to your login) and <b>sent to an external AI provider</b> (currently OpenRouter, which routes to Anthropic / OpenAI / others) to generate replies. Your single-cell <b>data itself is never sent</b> — only the summarised numbers the tools return.</p>
+        <p>Messages you send to this assistant are <b>stored on this server</b> (linked to your login) and <b>sent to an external AI provider</b> (currently OpenRouter, which routes to Anthropic / OpenAI / others) to generate replies. Your single-cell <b>data itself is never sent</b> - only the summarised numbers the tools return.</p>
         <p>Please don't enter anything you wouldn't share in a lab channel.</p>
         <a href="/privacy" target="_blank" rel="noopener">Read the full privacy note →</a>
         <button id="chat-ack-btn" type="button">I understand</button>
@@ -1251,7 +1251,7 @@
       function showEmpty() {
         var logo = CHAT_LOGO ? '<img class="chat-mascot" src="' + CHAT_LOGO + '" alt="">' : '';
         logBox.innerHTML = '<div class="chat-empty">' + logo +
-          'Ask about a gene, a dataset, or a plot — I can take you there.<br><br>' +
+          'Ask about a gene, a dataset, or a plot - I can take you there.<br><br>' +
           'e.g. <i>“show TREM2 across the microglia datasets”</i>' +
           '<div class="chat-privacy">Heads-up: your messages are stored on this server and sent to an external AI provider to generate replies.</div>' +
           '</div>';
@@ -1297,7 +1297,7 @@
           })
             .then(function (r) { return r.ok; })
             .then(function (ok) {
-              form.innerHTML = ok ? '<span class="flag-thanks">✓ thanks — flagged for review</span>' : '<span class="flag-thanks">⚠ couldn’t send</span>';
+              form.innerHTML = ok ? '<span class="flag-thanks">✓ thanks - flagged for review</span>' : '<span class="flag-thanks">⚠ couldn’t send</span>';
               if (ok) { var fb = el.querySelector('.msg-flag'); if (fb) { fb.classList.add('flagged'); fb.title = 'you flagged this reply for the dev team'; } }
             })
             .catch(function () { form.innerHTML = '<span class="flag-thanks">⚠ couldn’t send</span>'; });
@@ -1310,7 +1310,7 @@
       //    links). The bot's analytics answers are often markdown tables, so a
       //    plain-text bubble shows pipe-soup. Everything is HTML-escaped FIRST,
       //    then a known-safe subset of tags is produced (no raw model HTML), and
-      //    links are restricted to http(s)/relative — so this can't inject. ──
+      //    links are restricted to http(s)/relative - so this can't inject. ──
       function mdEsc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
       function mdInline(s) {
         var codes = [];
@@ -1430,9 +1430,9 @@
       }
       // Per-session usage/cost strip (GET /api/chat/usage). Refetched after each
       // turn ('done'), on open, and on load. Hidden until there's usage. The
-      // cached % is the headline — it climbs once prompt-cache lands server-side.
+      // cached % is the headline - it climbs once prompt-cache lands server-side.
       var usageEl = document.getElementById('chat-usage');
-      var USD_TO_EUR = 0.92;   // static approximation — the usage strip is indicative, not billing
+      var USD_TO_EUR = 0.92;   // static approximation - the usage strip is indicative, not billing
       function fmtCost(c) { var e = (c == null ? 0 : c) * USD_TO_EUR; return '≈€' + (e < 0.1 ? e.toFixed(4) : e.toFixed(2)); }
       function fmtTok(n) { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n); }
       function fetchUsage() {
@@ -1507,7 +1507,7 @@
       // Normalise an assistant-supplied navigation target: map REST API paths
       // to their web-UI equivalent (build_plot_url may hand back
       // /[api/]databases/{id}/… whereas the browser route is /browse/{id}/…),
-      // and only ever allow same-origin in-app relative paths — so a navigate
+      // and only ever allow same-origin in-app relative paths - so a navigate
       // action can never bounce the user off-site or to a non-page.
       function safeNavUrl(raw) {
         if (!raw || typeof raw !== 'string') return null;
@@ -1523,7 +1523,7 @@
         var l = localLog(); l.push({ role: 'action', content: text }); saveLocal(l);
       }
 
-      // Live activity indicator (spinner + label). Not persisted — purely a
+      // Live activity indicator (spinner + label). Not persisted - purely a
       // "the assistant is working" annunciator. Three triggers:
       //   • on send, before any frame arrives ("Thinking…")
       //   • a silence gap mid-turn (tool calls / the 120s SQL query) → "Working…"
@@ -1558,17 +1558,17 @@
         if (/\b429\b/.test(s) || low.indexOf('rate-limit') >= 0 || low.indexOf('rate limit') >= 0)
           return { head: 'The assistant is busy right now', body: 'It’s temporarily rate-limited upstream. Wait a few seconds and retry.', retry: true };
         if (/\b40[13]\b/.test(s) || low.indexOf('api key') >= 0 || low.indexOf('unauthor') >= 0 || low.indexOf('invalid x-api') >= 0)
-          return { head: 'The assistant isn’t set up correctly', body: 'An authentication problem with the model provider — an admin needs to check the key.', retry: false };
+          return { head: 'The assistant isn’t set up correctly', body: 'An authentication problem with the model provider - an admin needs to check the key.', retry: false };
         if (low.indexOf('timeout') >= 0 || low.indexOf('timed out') >= 0)
           return { head: 'The assistant timed out', body: 'That took too long. Try again, maybe with a simpler request.', retry: true };
         if (low.indexOf('failed to fetch') >= 0 || low.indexOf('networkerror') >= 0 || low.indexOf('unavailable') >= 0)
           return { head: 'Couldn’t reach the assistant', body: 'A network problem. Check your connection and retry.', retry: true };
         if (/\b5\d\d\b/.test(s) || low.indexOf('provider returned error') >= 0 || low.indexOf('upstream') >= 0 || low.indexOf('overloaded') >= 0)
-          return { head: 'The model provider had a problem', body: 'A temporary upstream error — retrying usually works.', retry: true };
+          return { head: 'The model provider had a problem', body: 'A temporary upstream error - retrying usually works.', retry: true };
         return { head: 'The assistant hit an error', body: 'Something went wrong handling that request.', retry: true };
       }
       // Headline by HTTP status when the server sends a structured error frame
-      // ({code, retry_after, message}) — the `message` is already a clean,
+      // ({code, retry_after, message}) - the `message` is already a clean,
       // user-safe string (raw payload + user_id stripped server-side), so we
       // show it as the body and skip the details toggle.
       function classifyByCode(code) {
@@ -1654,13 +1654,13 @@
       }
 
       // Pre-flight the target before committing the page change: if it isn't
-      // reachable we DON'T navigate — the user stays put (chat window intact)
+      // reachable we DON'T navigate - the user stays put (chat window intact)
       // and the failure is surfaced in the chat, then fed back to the assistant
       // once so it can self-correct. This is what keeps the window up on a
       // faulty redirect instead of dumping the user on a widget-less error page.
       // Short human label for a navigation breadcrumb (drops query noise like
       // dpi/colour params). Rendered as a subtle muted line, NOT the prominent
-      // amber action chip — the bot moving the view shouldn't shout.
+      // amber action chip - the bot moving the view shouldn't shout.
       function navLabel(url) {
         var path = String(url || '').split('?')[0];
         var s = path.split('/').filter(Boolean);
@@ -1694,11 +1694,11 @@
           .catch(function () { navFailed(url, 0); });
       }
       function navFailed(url, status) {
-        actionNote('⚠ couldn’t open ' + url + (status ? ' (HTTP ' + status + ')' : ' (unreachable)') + ' — staying here.');
+        actionNote('⚠ couldn’t open ' + url + (status ? ' (HTTP ' + status + ')' : ' (unreachable)') + ' - staying here.');
         if (navRetry < 1 && !streaming) {   // let the assistant fix it once; no loops
           navRetry++;
           send('[The page ' + url + ' could not be opened (HTTP ' + (status || 'error') +
-               '). Do not repeat that URL — pick a valid view or correct it.]', true);
+               '). Do not repeat that URL - pick a valid view or correct it.]', true);
         }
       }
 
@@ -1722,7 +1722,7 @@
       // tweak the current plot, etc.) instead of parsing a raw URL. Derived from
       // the path + query + page heading; a page may augment/override it by
       // setting window.__antPageContext (e.g. plot.html exposing live form
-      // state). Kept compact — the query object already captures plot params.
+      // state). Kept compact - the query object already captures plot params.
       function pageContext() {
         var q = {};
         try { new URLSearchParams(location.search).forEach(function (v, k) { q[k] = v; }); } catch (e) {}
@@ -1824,7 +1824,7 @@
           }
           return pump();
         })
-        .catch(function (err) { streaming = false; sendBtn.disabled = false; clearActivity(); stopIdle(); showError('failed to fetch — ' + (err && err.message || 'assistant unavailable')); });
+        .catch(function (err) { streaming = false; sendBtn.disabled = false; clearActivity(); stopIdle(); showError('failed to fetch - ' + (err && err.message || 'assistant unavailable')); });
       }
 
       form.addEventListener('submit', function (e) {

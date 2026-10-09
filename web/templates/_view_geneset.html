@@ -223,7 +223,7 @@
         rows.push({ name: entry.cohort_display || 'unassigned', title: point.title || point.db_id, sub: '<a href="/browse/' + V.esc(point.db_id) + '">' + V.esc(point.db_id) + '</a> <span class="muted">' + V.esc(variant.basis === 'pseudobulk' ? 'pseudobulk' : 'cell mean') + '</span>',
           n: point.n_donors, est: point.std_effect, lo: replicate && scale ? point.ci_low / scale : null, hi: replicate && scale ? point.ci_high / scale : null,
           q: replicate ? (point.q_perm != null ? point.q_perm : point.q_param) : null, sig: replicate && (point.q_perm != null ? point.q_perm : point.q_param) < 0.05,
-          counted: index === 0 && !!point.anchor_counted, reason: point.not_counted_reason, db_id: point.db_id, links: point.links,
+          counted: index === 0 && !!point.anchor_counted, reason: point.not_counted_reason, db_id: point.db_id,
           pills: (point.small_sample ? V.pill('small', '', 'Fewer than 20 donors: cannot reach significance for effects of this size.', 'small-cohorts') : '') });
       });
     });
@@ -252,7 +252,7 @@
     if (state.effects && state.effects.quality && state.effects.quality.quality_sensitive) html += V.pill('quality-sensitive', 'warn', 'Most member genes are mitochondrial or ribosomal: the score tracks RNA quality and cell damage, not regulation.', 'gene-class-flags');
     html += '</div>';
     var rows = forestRowsOf(cell);
-    html += V.linksHtml((cell.entry && cell.entry.links) || (cell.variant && cell.variant.links) || null, rows);
+    html += V.linksHtml((cell.entry && cell.entry.links) || (cell.variant && cell.variant.links) || null);
     if (rows.length) {
       html += V.forestHtml(rows, { noun: V.SCOPES[scope].noun, unit: 'standardised effect (SD of the donor-level score)', qTip: 'False discovery rate of this cohort on its own: permutation p value of the mean module score, Benjamini-Hochberg over the modules of the family. Below 0.05 the cohort is significant by itself (filled dot).', note: 'Intervals are the 95% interval of the mean-score difference in SD. Pseudobulk (B) where counts exist, else the mean of per-cell scores (A).' });
       var anchors = rows.filter(function (r) { return r.counted && r.db_id.indexOf('pool:') !== 0; });

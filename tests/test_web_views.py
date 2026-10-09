@@ -285,7 +285,7 @@ def test_gene_page_uses_numbered_help_headers_and_drops_old_labels(client):
 
 @pytest.mark.parametrize("name, needles", [
     ("_views.html", ("vw-dplot", "X-Plot-Caption", "adjusted for covariates", "per-cell view in", "donor values (JSON)", "table-layout: fixed", 'class="q"')),
-    ("_view_gene.html", ("plot by cell type", "dataset page", "links: point.links", "linksHtml")),
+    ("_view_gene.html", ("plot by cell type", "dataset page", "linksHtml")),
     ("_view_geneset.html", ("plot by cell type", "linksHtml", "vws-p2-help")),
 ])
 def test_view_scripts_carry_the_donor_plot_links_and_q_column(name, needles):
