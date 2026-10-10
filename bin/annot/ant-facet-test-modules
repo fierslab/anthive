@@ -420,6 +420,9 @@ def correlate_methods(frame_a: pd.DataFrame, frame_b: pd.DataFrame) -> Dict[str,
 # Data access
 # --------------------------------------------------------------------------
 
+SCORE_BATCH_VALUES = 40_000_000    # score values buffered per batch of the donor-mean query (about 0.5 GB)
+
+
 def sidecar_modules(sidecar: Path, sources: Sequence[str]) -> pd.DataFrame:
     """Distinct (source, catalog, module) of the scores sidecar."""
     conn = duckdb.connect(':memory:')
@@ -452,19 +455,38 @@ def cell_mean_scores(conn: duckdb.DuckDBPyConnection, sidecar: Path, sample_map:
     conn.unregister('score_sample_map_df')
     quoted = str(sidecar).replace("'", "''")
     source_list = ','.join("'" + s.replace("'", "''") + "'" for s in sources)
-    long = conn.execute(
-        # AVG over doubles is order dependent: a parallel hash aggregate adds the
-        # values in a thread and scheduling dependent order and the mean differs
-        # in the last bits between runs and thread counts. The ordered aggregate
-        # sums each group in cell_id order (unique within a group), so the result
-        # does not depend on threads or load.
-        f"SELECT m.sample_idx, s.source, s.catalog, s.module, "
-        f"AVG(s.score ORDER BY s.cell_id) AS mean_score, "
-        f"COUNT(s.score) AS n_scored FROM read_parquet('{quoted}') s "
-        f"JOIN score_sample_map m ON s.cell_id = m.cell_id WHERE s.source IN ({source_list}) "
-        f"GROUP BY m.sample_idx, s.source, s.catalog, s.module "
-        f"ORDER BY m.sample_idx, s.source, s.catalog, s.module").df()
-    conn.execute('DROP TABLE score_sample_map')
+    module_keys = conn.execute(
+        f"SELECT DISTINCT source, catalog, module FROM read_parquet('{quoted}') WHERE source IN ({source_list}) "
+        f"ORDER BY 1, 2, 3").fetchall()
+    # The ordered aggregate below buffers every value of a group and cannot spill to disk, so a
+    # dataset of 10^6 cells with hundreds of modules exhausted the memory limit when done in one
+    # query. Modules are processed in batches that bound the buffered values; the groups (and
+    # their cell_id order) are the same as in a single query, so the means are identical.
+    batch_size = max(1, SCORE_BATCH_VALUES // max(1, len(sample_map)))
+    batches = []
+    try:
+        for first in range(0, len(module_keys), batch_size):
+            batch = module_keys[first:first + batch_size]
+            conn.execute('CREATE OR REPLACE TEMP TABLE score_batch(source VARCHAR, catalog VARCHAR, module VARCHAR)')
+            conn.executemany('INSERT INTO score_batch VALUES (?, ?, ?)', batch)
+            batches.append(conn.execute(
+                # AVG over doubles is order dependent: a parallel hash aggregate adds the
+                # values in a thread and scheduling dependent order and the mean differs
+                # in the last bits between runs and thread counts. The ordered aggregate
+                # sums each group in cell_id order (unique within a group), so the result
+                # does not depend on threads or load.
+                f"SELECT m.sample_idx, s.source, s.catalog, s.module, "
+                f"AVG(s.score ORDER BY s.cell_id) AS mean_score, "
+                f"COUNT(s.score) AS n_scored FROM read_parquet('{quoted}') s "
+                f"JOIN score_batch b ON s.source = b.source AND s.catalog = b.catalog AND s.module = b.module "
+                f"JOIN score_sample_map m ON s.cell_id = m.cell_id "
+                f"GROUP BY m.sample_idx, s.source, s.catalog, s.module").df())
+    finally:
+        conn.execute('DROP TABLE IF EXISTS score_batch')
+        conn.execute('DROP TABLE IF EXISTS score_sample_map')
+    long = pd.concat(batches, ignore_index=True) if batches else pd.DataFrame(
+        columns=['sample_idx', 'source', 'catalog', 'module', 'mean_score', 'n_scored'])
+    long = long.sort_values(['sample_idx', 'source', 'catalog', 'module']).reset_index(drop=True)
     long['column'] = list(zip(long['source'], long['catalog'], long['module']))
     means = long.pivot(index='sample_idx', columns='column', values='mean_score')
     scored = long.pivot(index='sample_idx', columns='column', values='n_scored')
@@ -566,6 +588,17 @@ def module_eligibility(entry: Any, md_yaml: Dict[str, Any], annotation: Dict[str
     if not scores_path(entry.duckdb_path).exists():
         return False, 'no scores sidecar'
     return True, 'ok'
+
+
+def spill_base_dir() -> Path:
+    """Parent of the per-dataset DuckDB spill folder: ``ANT_FACET_TMP``, else the configured DuckDB temp dir."""
+    configured = os.environ.get('ANT_FACET_TMP')
+    if configured:
+        return Path(configured)
+    from config import get_duckdb_temp_dir  # type: ignore
+    base = get_duckdb_temp_dir()
+    base.mkdir(parents=True, exist_ok=True)
+    return base
 
 
 def package_versions() -> Dict[str, str]:
@@ -754,9 +787,10 @@ def process_dataset(entry: Any, store_root: Path, out_root: Path, facets: List[s
     manifest['no_counts'] = counts_info is None
     manifest['counts_layer'] = counts_info[0] if counts_info else None
 
-    work_dir = Path(tempfile.mkdtemp(prefix='ant_facet_mod_', dir=os.environ.get('ANT_FACET_TMP')))
+    work_dir = Path(tempfile.mkdtemp(prefix='ant_facet_mod_', dir=spill_base_dir()))
     conn = aft.open_dataset(entry, api_config, threads=threads, memory_limit_gb=memory_limit_gb,
                             temp_dir=work_dir, store_root=store_root)
+    conn.execute('SET preserve_insertion_order=false')
     try:
         cat_columns = aft.view_columns(conn, 'obscat') if aft._has_view(conn, 'obscat') else {}
         wanted = ['ant_donor', 'ant_donor_uid', 'ant_sex', 'ant_host_sex', 'ant_disease', 'ant_apoe',
@@ -1214,6 +1248,15 @@ def replicated_modules(table: pd.DataFrame, out_root: Path, cohort_table: Path,
     return pd.concat(output, ignore_index=True)
 
 
+def _run_is_done(result_file: Path) -> bool:
+    """False when the run manifest next to a result file says the run failed (stale results)."""
+    manifest_path = result_file.with_name(
+        result_file.name.replace('.facet_module_tests.parquet', '.facet_module_run_manifest.json'))
+    if not manifest_path.exists():
+        return True
+    return json.loads(manifest_path.read_text()).get('status', 'done') == 'done'
+
+
 def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path],
                       min_std_effect: Optional[float] = None) -> None:
     """Tables over all module result parquets: units, hits, recurring modules.
@@ -1228,7 +1271,7 @@ def summarize_results(out_root: Path, out_dir: Path, cohort_table: Optional[Path
     ``|std_effect| >= min_std_effect`` (default: the per-facet gate of ``facet_rules.module_gate``).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    files = sorted(out_root.glob('*/*.facet_module_tests.parquet'))
+    files = [f for f in sorted(out_root.glob('*/*.facet_module_tests.parquet')) if _run_is_done(f)]
     if not files:
         print('no module result files')
         return
@@ -1328,6 +1371,19 @@ def cmd_inventory(args: argparse.Namespace) -> None:
     print('eligible with counts:', int((frame['eligible_metadata'] & frame['has_counts'].fillna(False)).sum()))
 
 
+def write_failed_manifest(entry: Any, manifest_path: Path, exc: BaseException) -> None:
+    """Record a failed dataset run (status ``failed`` plus the reason) in its run manifest.
+
+    The reader and ``summarize`` ignore results whose manifest is not ``done``, so stale files of an
+    earlier run are not mixed into the new summary.
+    """
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps({
+        'tool': TOOL_VERSION, 'db_id': entry.db_id, 'group': entry.study, 'file': entry.stem,
+        'status': 'failed', 'reason': f'{type(exc).__name__}: {exc}'[:500],
+        'timestamp_utc': dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')}, indent=2))
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     store_root = Path(args.h5adstore_root).resolve()
     out_root = Path(args.out_root) if args.out_root else store_root / '_facet_tests'
@@ -1398,6 +1454,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             import traceback
             traceback.print_exc()
             print(f'[error] {db_id}: {exc}', file=sys.stderr)
+            if not args.samples_only:
+                write_failed_manifest(entry, out_manifest, exc)
             summary_rows.append({'db_id': db_id, 'status': 'error', 'reason': str(exc)[:300]})
             continue
         if manifest['status'] == 'skipped':

@@ -20,6 +20,8 @@ Xenograft sex facets (2026-10-10): `sex` is human post-mortem only; in a xenogra
 
 Donor variability (2026-10-09, `doc/DESIGN_donor_variability.md`): `ant-donor-variability` writes `<stem>.donor_variability.parquet` (genes, sorted by gene, row groups of 20000 rows), `.donor_variability_modules.parquet` and `.donor_variability_manifest.json` next to the facet results (synced by the `_facet_tests/` prefix of `ant-sync`). Quarters come from the hash of the cell id and the seed, so a rerun is bitwise identical. `--min-cells 20` is the sensitivity run (files carry a `.min20` marker). No donor id is written anywhere.
 
+Module run memory (2026-10-10): `ant-facet-test-modules` computes the donor means of the sidecar scores in module batches (`SCORE_BATCH_VALUES`; the ordered AVG buffers every value and cannot spill, a 1M-cell dataset with 348 module scores hit the 24 GB limit and aborted the whole `--all` run), spills to `ANT_FACET_TMP` or the configured DuckDB temp dir (`lib/config.get_duckdb_temp_dir`), and a failing dataset writes a run manifest with `status: failed` and the reason (reader and `summarize` ignore its stale results) instead of ending the run. CA6/QTL (817k cells): 172 s, 4.4 GB peak RSS.
+
 Module statistics fixes (2026-10-09, `doc/DESIGN_facet_testing.md`): per-facet effect gate on the 95 percent lower confidence bound
 (`facet_rules.module_gate`), parametric p from 30 residual df else permutation p, directionless (GWAS/MAGMA) sets out of the BH
 families (`directionless` column, q NaN), `ant-facet-test-modules` is `/2.1`. SEA-AD and MADRC count their regional anchor file

@@ -623,3 +623,47 @@ def test_not_tested_reason(n_cohorts, n_family, expected):
         assert reason is None
     else:
         assert expected in reason and 'app_nlgf' in reason and 'xenograft_human_in_mouse' in reason
+
+
+def _write_scores_sidecar(path, n_cells=40, n_modules=7):
+    rng = np.random.default_rng(3)
+    rows = [{'cell_id': f'c{i}', 'source': source, 'catalog': 'cat', 'module': f'm{j}',
+             'score': float(rng.normal())}
+            for source in ('geneset', 'ucell') for j in range(n_modules) for i in range(n_cells)]
+    pd.DataFrame(rows).to_parquet(path, index=False)
+    return pd.DataFrame({'cell_id': [f'c{i}' for i in range(n_cells)], 'sample_idx': [i % 4 for i in range(n_cells)]})
+
+
+def test_cell_mean_scores_batches_give_identical_means(tmp_path, monkeypatch):
+    sample_map = _write_scores_sidecar(tmp_path / 's.scores.parquet')
+    sizes = sample_map.groupby('sample_idx').size()
+    results = []
+    for batch_values in (10 ** 9, 1):      # one query, then one module per query
+        monkeypatch.setattr(mod, 'SCORE_BATCH_VALUES', batch_values)
+        conn = duckdb.connect(':memory:')
+        results.append(mod.cell_mean_scores(conn, tmp_path / 's.scores.parquet', sample_map, sizes,
+                                            ['geneset', 'ucell']))
+        conn.close()
+    pd.testing.assert_frame_equal(results[0][0], results[1][0], check_exact=True)
+    pd.testing.assert_frame_equal(results[0][1], results[1][1], check_exact=True)
+    assert results[0][0].shape == (4, 14)
+
+
+def test_failed_manifest_is_recorded_and_hides_stale_results(tmp_path):
+    entry = type('Entry', (), {'db_id': 'X/Y', 'study': 'X', 'stem': 'y'})()
+    manifest_path = tmp_path / 'X' / 'y.facet_module_run_manifest.json'
+    result_file = tmp_path / 'X' / 'y.facet_module_tests.parquet'
+    result_file.parent.mkdir()
+    assert mod._run_is_done(result_file)
+    mod.write_failed_manifest(entry, manifest_path, MemoryError('out of memory'))
+    stored = json.loads(manifest_path.read_text())
+    assert stored['status'] == 'failed' and 'MemoryError: out of memory' in stored['reason']
+    assert not mod._run_is_done(result_file)
+
+
+def test_spill_base_dir_prefers_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv('ANT_FACET_TMP', str(tmp_path))
+    assert mod.spill_base_dir() == tmp_path
+    monkeypatch.delenv('ANT_FACET_TMP')
+    monkeypatch.setenv('ANTHIVE_DUCKDB_TEMP_DIR', str(tmp_path / 'spill'))
+    assert mod.spill_base_dir() == tmp_path / 'spill' and (tmp_path / 'spill').is_dir()
