@@ -36,7 +36,13 @@
   /* ---- panel 1 ---- */
   .vw-bar-cell { white-space: nowrap; }
   td.vw-ds { white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .vw-mods { margin-top: 2px; font-size: 11px; color: var(--text-muted); }
+  .vw-cat { display: inline-block; padding: 0 6px; font-size: 10px; line-height: 1.5; border-radius: 3px; background: #eef2f5; color: #475569; border: 1px solid #cbd5e1; white-space: nowrap; }
+  .vw-cat.post_mortem { background: #eef5ee; color: #2f5d34; border-color: #c8dfc9; }
+  .vw-cat.xenograft { background: #f3eefb; color: #503a7a; border-color: #d8cdee; }
+  .vw-cat.biopsy { background: #fdf3e7; color: #8a5a1a; border-color: #efd5ae; }
+  .vw-cat.spatial { background: #e9f6f8; color: #1f5f6b; border-color: #bfe0e6; }
+  .vw-cat.in_vitro { background: #fdeef0; color: #8a2f3d; border-color: #f0c8cf; }
+  .vw-mods { white-space: normal; line-height: 1.9; margin-top: 2px; font-size: 11px; color: var(--text-muted); }
   .vw-bar { position: relative; display: inline-block; width: 120px; height: 14px; vertical-align: middle; background: #e6e9ec; border-radius: 3px; border-right: 1px solid #b9c0c7; }
   .vw-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; min-width: 2px; background: #1f6f80; border-radius: 3px 0 0 3px; }
   .vw-bar.rank .vw-bar-fill { background: #3d5f94; }
@@ -93,8 +99,8 @@
   details.vw-more > summary { cursor: pointer; color: var(--text-muted); font-size: 11.5px; list-style: none; }
   details.vw-more > summary::before { content: "\25B8  "; font-size: 9px; }
   details.vw-more[open] > summary::before { content: "\25BE  "; }
-  table.vw-grid { table-layout: fixed; min-width: 780px; width: 100%; border-collapse: collapse; font-size: 12px; }
-  table.vw-grid th { text-align: center; font-size: 9.5px; padding: 5px 2px; vertical-align: bottom; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: .3px; border-bottom: 2px solid var(--border); }
+  table.vw-grid { table-layout: fixed; min-width: 1040px; width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.vw-grid th { text-align: center; font-size: 9px; overflow-wrap: normal; word-break: normal; hyphens: none; padding: 5px 2px; vertical-align: bottom; color: var(--text-muted); font-weight: 500; text-transform: uppercase; letter-spacing: .3px; border-bottom: 2px solid var(--border); }
   table.vw-grid th.fh { text-align: left; width: 200px; padding-left: 10px; }
   table.vw-grid td { text-align: center; padding: 3px 2px; border-bottom: 1px solid var(--border-light); }
   table.vw-grid td.fh { text-align: left; padding-left: 10px; position: sticky; left: 0; background: #fff; z-index: 1; border-right: 1px solid var(--border-light); }
@@ -237,7 +243,7 @@ window.antViews = window.antViews || (function () {
   var API = '/api';
   var GROUPS = ['microglia', 'astrocyte', 'oligodendrocyte', 'oligodendrocyte precursor cell', 'endothelial cell',
                 'excitatory neuron', 'inhibitory neuron', 'perivascular macrophage'];
-  var SHORT = { 'oligodendrocyte precursor cell': 'OPC', 'oligodendrocyte': 'oligodendro-cyte', 'perivascular macrophage': 'perivascular macrophage' };
+  var SHORT = { 'oligodendrocyte precursor cell': 'OPC', 'perivascular macrophage': 'perivascular macrophage' };
   var SCOPES = {
     human_postmortem: { title: 'Human brain (post-mortem)', unit: 'The replicate is the donor.', noun: 'donors', nounOne: 'donor' },
     xenograft_human_in_mouse: { title: 'Human microglia in mouse hosts (xenograft)', unit: 'The replicate is the host mouse.', noun: 'mice', nounOne: 'mouse' }

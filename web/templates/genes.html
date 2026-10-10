@@ -123,20 +123,50 @@
   .gv-landing .gv-lookup input[type=search] { flex: 1 1 260px; font-size: 15px; padding: 7px 10px; }
   .gv-landing .gv-lookup button { font-size: 14px; padding: 7px 16px; }
   .gv-examples { font-size: 13px; color: var(--text-muted); }
-  .gv-examples a { margin-right: 8px; white-space: nowrap; }
+  .gv-examples { margin: 6px 0; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+  .gv-examples[hidden] { display: none; }
+  .gv-examples a { white-space: nowrap; }
+  .gv-ex-label { min-width: 7.5em; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
+  #gv-fav-list { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; }
+  .gv-ex-edit { font-size: 11px; }
 </style>
 {% if not gene %}
 {{ breadcrumb([("gene atlas", None)]) }}
 <div class="gv-landing">
 <h1 class="page-title">Gene atlas</h1>
-<p>Look up a gene to see where it is expressed across every dataset in the catalogue. Several genes separated by commas give a gene &times; dataset heatmap.</p>
+<p>Look up a gene to see where it is expressed across every dataset in the catalogue. Several genes separated by commas give an expression-only gene &times; dataset heatmap.</p>
 <form class="gv-lookup" id="gv-lookup" action="/genes" method="get" role="search">
   <input type="search" name="q" id="gv-lookup-q" placeholder="e.g. TREM2 or APOE,TREM2" aria-label="Gene symbol" autocomplete="off" spellcheck="false" autocapitalize="characters"{% if not gene %} autofocus{% endif %}>
   <button type="submit">look up</button>
 </form>
-<div class="gv-examples">examples:
-  <a href="/genes/TREM2">TREM2</a><a href="/genes/APOE">APOE</a><a href="/genes/P2RY12">P2RY12</a><a href="/genes/SPP1">SPP1</a><a href="/genes/APOE,TREM2,CX3CR1">APOE,TREM2,CX3CR1</a>
+<div class="gv-examples" id="gv-fav-block" hidden>
+  <span class="gv-ex-label">Your favourites</span>
+  <span id="gv-fav-list"></span>
+  <a class="gv-ex-edit" href="/settings">edit</a>
 </div>
+<div class="gv-examples" id="gv-example-block">
+  <span class="gv-ex-label">Examples</span>
+  {% for example in example_genes or [] %}<a href="/genes/{{ example }}">{{ example }}</a>{% endfor %}
+</div>
+<div class="gv-examples" id="gv-compare-block">
+  <span class="gv-ex-label">Compare several genes</span>
+  <a href="/genes/APOE,TREM2,CX3CR1">APOE,TREM2,CX3CR1</a>
+  <span class="info" title="Expression only, no facet results: a gene by dataset heatmap of the genes you list, separated by commas. For facet effects open one gene.">&#9432;</span>
+</div>
+{% if logged_in %}<script>
+(function () {
+  var favourites = (window.antSettings && window.antSettings.favouriteGenes()) || [];
+  if (!favourites.length) return;
+  var list = document.getElementById('gv-fav-list');
+  favourites.forEach(function (gene) {
+    var link = document.createElement('a');
+    link.href = '/genes/' + encodeURIComponent(gene);
+    link.textContent = gene;
+    list.appendChild(link);
+  });
+  document.getElementById('gv-fav-block').hidden = false;
+})();
+</script>{% endif %}
 </div>
 {% else %}
 {{ breadcrumb([("gene atlas", "/genes"), (gene, None)]) }}
@@ -292,6 +322,10 @@
 </div>
 
 {# ── multi-gene heatmap ── #}
+{% if gene and ',' in gene %}
+<p class="vw-fnote" id="gv-multi-note" style="max-width:none;margin:6px 0 8px">This comparison shows expression only. Facet results are per gene: open one gene for its facet effects, one gene at a time:
+  {% for single in gene.split(',') if single.strip() %}<a href="/genes/{{ single.strip()|urlencode }}">{{ single.strip() }}</a>{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+{% endif %}
 <div id="gv-hm-controls" class="gv-hm-controls" style="display:none">
   <span class="picks-label">cell value</span>
   <select id="hm-metric">
@@ -325,7 +359,7 @@
 {% endif %}
 </div>
 {% if _single %}
-{{ view_gene_script(gene, view_dbs or {}) }}
+{{ view_gene_script(gene, view_dbs or {}, view_categories or {}) }}
 <script>window.antViews.initTabs(document.getElementById('vw-tabs'), 'expression');</script>
 {% endif %}
 

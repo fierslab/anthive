@@ -22,8 +22,10 @@
     <p>The percentile of the gene's mean (log-normalised) expression among all genes in the same dataset, shown as "top x%". A longer bar means a more highly expressed gene. The rank is only compared within one dataset, so it does not depend on how a study normalised its counts, which is why the mean expression itself is not shown.</p>
     <h4>Nuclei and cells</h4>
     <p>Detection rates are not comparable between nuclei and cells: nuclei detect long and nuclear-enriched genes better, whole cells detect cytoplasmic genes better. The tag on each dataset tells which it is, and the xenograft datasets are sorted live cells.</p>
+    <h4>Grouping and dataset categories</h4>
+    <p>Rows are cell types, taken across all datasets, not split by system. Open a row to see its datasets; each carries a tag for its category: <strong>post-mortem</strong>, <strong>xenograft</strong> (human cells in a mouse brain) or <strong>biopsy</strong>. The facet panel (2. What shifts it) still keeps post-mortem and xenograft apart, because a facet effect must never be pooled across systems.</p>
     <h4>Datasets without per-cell cell types</h4>
-    <p>Some datasets get their cell type only from a dataset-level label: they are a whole-tissue object or a mix of several cell types without a per-cell cell-type annotation. Their cells cannot be assigned to microglia, astrocytes and so on, so they are not averaged into the cell type rows. They are not clean, per-cell annotated populations. Their number is shown in one line under the table.</p>
+    <p>The datasets under this header are listed one by one and are not averaged into a cell type row. Their cell type comes only from a dataset-level label (a whole-tissue object or a mix of cell types with no per-cell annotation), so their cells cannot be assigned to microglia, astrocytes and so on. The same holds for <strong>spatial</strong>, <strong>in vitro</strong> (cultured cells, iPSC derivatives), <strong>bulk</strong> and <strong>unclassified</strong> datasets, which are shown here too, each with its category tag, its number of cells, the percent expressing and the rank in the dataset over all its cells. Their numbers describe the whole dataset, so compare them with the cell type rows with care.</p>
     <h4>Low detection</h4>
     <p>A gene found in fewer than 5 percent of the cells of a cell type is called <a href="/help#glossary-low-detection">low detection</a> (the median over the datasets of that cell type). Facet effects on such genes are fragile; panel 2 says so when it applies.</p>
   {% endcall %}
@@ -74,12 +76,13 @@
 </div>
 {%- endmacro %}
 
-{% macro view_gene_script(gene, dbs) -%}
+{% macro view_gene_script(gene, dbs, categories) -%}
 <script>
 (function () {
   var V = window.antViews;
   var GENE = {{ gene|tojson }};
   var DBS = {{ dbs|tojson }};
+  var CATS = {{ categories|tojson }};
   var enc = encodeURIComponent;
   var state = { stats: null, effects: null, lowDet: {}, p1: null };
 
@@ -110,18 +113,26 @@
     if (!result.modality || result.modality === 'unknown') return '';
     return result.modality_note === 'sorted live cells' ? 'sorted live cells' : result.modality;
   }
+  function categoryOf(db) { return CATS[db.category] ? db.category : 'unclassified'; }
+  function categoryTag(key) {
+    var cat = CATS[key] || { label: key, tip: '' };
+    return '<span class="vw-cat ' + V.esc(key) + '" title="' + V.esc(cat.tip) + '">' + V.esc(cat.label) + '</span>';
+  }
+  // typed: datasets whose cells carry a cell type group that may be averaged into a cell type row;
+  // untyped: everything else (no per-cell cell type, or spatial, in vitro, bulk, unclassified).
   function collectRows(stats) {
-    var rows = [];
-    var other = 0;
+    var typed = [];
+    var untyped = [];
     (stats.results || []).forEach(function (result) {
       var db = DBS[result.db_id];
       var stat = (result.stats || [])[0];
       if (!db || result.is_secondary || db.secondary || !stat || stat.pct_nonzero == null || result.n_cells < 50 || !db.human) return;
-      if (db.scope !== 'human_postmortem' && db.scope !== 'xenograft_human_in_mouse') { other += 1; return; }
-      rows.push({ db_id: result.db_id, title: db.title || result.title, scope: db.scope, group: db.group, n_cells: result.n_cells, pct: stat.pct_nonzero, mean: stat.mean,
-                  celltype_col: db.celltype_col || '', rank: stat.rank_mean, q10: stat.q10_nonzero, q90: stat.q90_nonzero, modality: servedModality(result) || db.modality || '' });
+      var category = categoryOf(db);
+      var row = { db_id: result.db_id, title: db.title || result.title, scope: db.scope, group: db.group, category: category, n_cells: result.n_cells, pct: stat.pct_nonzero, mean: stat.mean,
+                  celltype_col: db.celltype_col || '', rank: stat.rank_mean, q10: stat.q10_nonzero, q90: stat.q90_nonzero, modality: servedModality(result) || db.modality || '' };
+      (CATS[category].typed && V.GROUPS.indexOf(db.group) >= 0 ? typed : untyped).push(row);
     });
-    return { rows: rows, other: other };
+    return { rows: typed, untyped: untyped };
   }
   function lowDetection(rows) {
     var out = {};
@@ -140,44 +151,47 @@
   function plotLink(row) {
     return V.dbLink(row.db_id) + '/plot/violin?' + (row.celltype_col ? 'x=' + enc(row.celltype_col) + '&' : '') + 'y=' + enc(GENE);
   }
+  function datasetCell(row, flat) {
+    return '<td title="' + V.esc(row.title) + '"><a href="' + V.dbLink(row.db_id) + '">' + V.esc(row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span> ' + categoryTag(row.category) + ' ' + modalityTag(row.modality) +
+      '<span class="vw-links"><a href="' + V.dbLink(row.db_id) + '">dataset page</a><a href="' + plotLink(row) + '" title="' + V.esc(GENE) + ' in this dataset' + (row.celltype_col ? ', by cell type' : '') + '">' + (row.celltype_col ? 'plot by cell type' : 'plot') + '</a></span></td>';
+  }
   function renderP1(host, collected) {
     var rows = collected.rows;
-    if (!rows.length) { host.innerHTML = '<div class="vw-placeholder">' + V.esc(GENE) + ' has no expression summary in the human post-mortem or xenograft datasets.</div>'; return; }
-    var named = rows.filter(function (row) { return V.GROUPS.indexOf(row.group) >= 0; });
-    var mixed = rows.filter(function (row) { return V.GROUPS.indexOf(row.group) < 0; });
+    var untyped = collected.untyped;
+    if (!rows.length && !untyped.length) { host.innerHTML = '<div class="vw-placeholder">' + V.esc(GENE) + ' has no expression summary in the human datasets.</div>'; return; }
     var html = '<div class="vw-box"><table class="vw-table fixed"><colgroup><col class="c-name"><col class="c-ds"><col class="c-pct"><col class="c-rank"></colgroup><thead><tr>' +
-      headerCell('Cell type', 'Cell type group, taken from the per-cell annotation of each dataset. Click a row to list its datasets.') +
-      headerCell('Datasets', 'Number of datasets of this cell type, and the cells in them (n). The tag says whether a dataset was made from nuclei or from whole cells.') +
+      headerCell('Cell type', 'Cell type group, taken from the cell type of each dataset. Click a row to list its datasets.') +
+      headerCell('Datasets', 'Number of datasets of this cell type, and the cells in them (n). Tags: the category of each dataset (post-mortem, xenograft, biopsy) and whether it was made from nuclei or from whole cells.') +
       headerCell('% expressing', 'Percent of the cells of this cell type with at least one count of the gene. The bar runs from 0 to 100 percent; the value is the mean over datasets with the range in brackets. In an opened row the dotted line is the mean over all datasets of the cell type.', ['0', '100%']) +
       headerCell('Rank in dataset', 'Percentile of the gene\'s mean (log-normalised) expression among all genes in that dataset, shown as top x%. A longer bar means more highly expressed. In an opened row the dotted line is the mean over all datasets of the cell type.', ['0', '100']) +
       '</tr></thead><tbody>';
     var index = 0;
-    ['human_postmortem', 'xenograft_human_in_mouse'].forEach(function (scope) {
-      var inScope = named.filter(function (row) { return row.scope === scope; });
-      var mixedHere = mixed.filter(function (row) { return row.scope === scope; });
-      if (!inScope.length && !mixedHere.length) return;
-      html += '<tr class="vw-scope-row"><td colspan="4">' + V.esc(V.SCOPES[scope].title) + '</td></tr>';
-      V.GROUPS.forEach(function (group) {
-        var members = inScope.filter(function (row) { return row.group === group; });
-        if (!members.length) return;
-        var pcts = members.map(function (row) { return row.pct; });
-        var meanPct = mean(pcts), meanRank = mean(members.map(function (row) { return row.rank; }));
-        var totalCells = members.reduce(function (sum, row) { return sum + row.n_cells; }, 0);
-        var counts = {};
-        members.forEach(function (row) { if (row.modality) counts[row.modality] = (counts[row.modality] || 0) + 1; });
-        var mods = Object.keys(counts).map(function (key) { return modalityTag(key) + ' ' + counts[key]; }).join(' ');
-        html += '<tr class="vw-toggle" data-i="' + index + '"><td><span class="caret">&#9656;</span>' + V.esc(V.plain(group)) + '</td><td class="vw-ds">' + members.length + ' <span class="muted">n=' + V.compact(totalCells) + '</span>' + (mods ? '<div class="vw-mods">' + mods + '</div>' : '') + '</td><td class="vw-bar-cell">' +
-          pctCell(meanPct, null, [Math.min.apply(null, pcts), Math.max.apply(null, pcts)]) + '</td><td class="vw-bar-cell">' + rankCell(meanRank, null) + '</td></tr>';
-        members.sort(function (a, b) { return b.pct - a.pct; }).forEach(function (row) {
-          html += '<tr class="vw-sub" data-p="' + index + '" hidden><td title="' + V.esc(row.title) + '"><a href="' + V.dbLink(row.db_id) + '">' + V.esc(row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span> ' + modalityTag(row.modality) +
-            '<span class="vw-links"><a href="' + V.dbLink(row.db_id) + '">dataset page</a><a href="' + plotLink(row) + '" title="' + V.esc(GENE) + ' in this dataset, by cell type">plot by cell type</a></span>' +
-            '</td><td class="vw-ds">n=' + V.compact(row.n_cells) + '</td><td class="vw-bar-cell">' + pctCell(row.pct, meanPct) + '</td><td class="vw-bar-cell">' + rankCell(row.rank, meanRank) + '</td></tr>';
-        });
-        index += 1;
+    V.GROUPS.forEach(function (group) {
+      var members = rows.filter(function (row) { return row.group === group; });
+      if (!members.length) return;
+      var pcts = members.map(function (row) { return row.pct; });
+      var meanPct = mean(pcts), meanRank = mean(members.map(function (row) { return row.rank; }));
+      var totalCells = members.reduce(function (sum, row) { return sum + row.n_cells; }, 0);
+      var counts = {}, catCounts = {};
+      members.forEach(function (row) {
+        if (row.modality) counts[row.modality] = (counts[row.modality] || 0) + 1;
+        catCounts[row.category] = (catCounts[row.category] || 0) + 1;
       });
-      if (mixedHere.length) html += '<tr><td colspan="4" class="muted">' + V.plural(mixedHere.length, 'dataset') + ' without per-cell cell types&nbsp;' + V.helpBtn('vwg-p1-help') + '</td></tr>';
+      var tags = Object.keys(catCounts).map(function (key) { return categoryTag(key) + ' ' + catCounts[key]; }).concat(Object.keys(counts).map(function (key) { return modalityTag(key) + ' ' + counts[key]; })).join(' ');
+      html += '<tr class="vw-toggle" data-i="' + index + '"><td><span class="caret">&#9656;</span>' + V.esc(V.plain(group)) + '</td><td class="vw-ds">' + members.length + ' <span class="muted">n=' + V.compact(totalCells) + '</span>' + (tags ? '<div class="vw-mods">' + tags + '</div>' : '') + '</td><td class="vw-bar-cell">' +
+        pctCell(meanPct, null, [Math.min.apply(null, pcts), Math.max.apply(null, pcts)]) + '</td><td class="vw-bar-cell">' + rankCell(meanRank, null) + '</td></tr>';
+      members.sort(function (a, b) { return b.pct - a.pct; }).forEach(function (row) {
+        html += '<tr class="vw-sub" data-p="' + index + '" hidden>' + datasetCell(row) + '<td class="vw-ds">n=' + V.compact(row.n_cells) + '</td><td class="vw-bar-cell">' + pctCell(row.pct, meanPct) + '</td><td class="vw-bar-cell">' + rankCell(row.rank, meanRank) + '</td></tr>';
+      });
+      index += 1;
     });
-    html += '</tbody></table></div>' + (collected.other ? '<p class="vw-fnote">' + V.plural(collected.other, 'dataset') + ' from in vitro or unclassified systems are on the Atlas tab and are not summarised here.</p>' : '');
+    if (untyped.length) {
+      html += '<tr class="vw-scope-row"><td colspan="4">Datasets without per-cell cell types <span class="muted">(' + untyped.length + ')</span>&nbsp;' + V.helpBtn('vwg-p1-help') + '</td></tr>';
+      untyped.sort(function (a, b) { return b.pct - a.pct; }).forEach(function (row) {
+        html += '<tr class="vw-sub vw-flat">' + datasetCell(row) + '<td class="vw-ds">n=' + V.compact(row.n_cells) + '</td><td class="vw-bar-cell">' + pctCell(row.pct, null) + '</td><td class="vw-bar-cell">' + rankCell(row.rank, null) + '</td></tr>';
+      });
+    }
+    html += '</tbody></table></div>';
     host.innerHTML = html;
     host.querySelectorAll('tr.vw-toggle').forEach(function (tr) {
       tr.addEventListener('click', function () {

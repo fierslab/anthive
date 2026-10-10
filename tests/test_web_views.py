@@ -106,7 +106,7 @@ def test_view_db_map_groups_scope_and_flags(monkeypatch):
     monkeypatch.setattr(browser, "_api_get", _fake)
     result = browser._view_db_map("http://x")
     assert result["A/n1"] == {"title": "Nuclei microglia", "celltype_col": "ant_cell_type", "scope": "human_postmortem", "group": "microglia",
-                              "human": True, "secondary": False, "modality": "nuclei"}
+                              "human": True, "secondary": False, "modality": "nuclei", "category": "post_mortem"}
     assert result["A/c1"]["modality"] == "cells"
     assert result["B/x1"]["secondary"] is True and result["B/x1"]["modality"] == "sorted live cells"
     assert result["B/mix"]["group"] == ""          # several cell types: not summarised
@@ -395,3 +395,58 @@ def test_geneset_provenance_lists_experiment_method_source_dataset_and_source_pa
     assert info["description"] == "About it."
     bare = browser._geneset_provenance("http://api", {}, "S", "E")
     assert bare["papers"] == [] and [item[0] for item in bare["items"]] == ["Experiment"]
+
+
+@pytest.mark.parametrize("db, expected", [
+    ({"experimental_system": "post_mortem_tissue", "technology": "10x_chromium"}, "post_mortem"),
+    ({"experimental_system": "postmortem_tissue"}, "post_mortem"),
+    ({"experimental_system": "xenograft", "technology": "10x_chromium"}, "xenograft"),
+    ({"experimental_system": "chimera"}, "xenograft"),
+    ({"experimental_system": "fresh_biopsy"}, "biopsy"),
+    ({"experimental_system": "live_biopsy", "facet_scope": "human_postmortem"}, "biopsy"),
+    ({"experimental_system": "in_vitro_2d", "technology": "10x_chromium"}, "in_vitro"),
+    ({"experimental_system": "post_mortem_tissue", "technology": "10x_visium"}, "spatial"),
+    ({"experimental_system": "xenograft", "technology": "CosMx"}, "spatial"),
+    ({"experimental_system": "bulk_tissue", "technology": "bulk_RNA-seq"}, "bulk"),
+    ({"experimental_system": "in_vitro_2d", "technology": "mass-spectrometry"}, "bulk"),
+    ({"facet_scope": "human_postmortem"}, "post_mortem"),
+    ({"facet_scope": "in_vitro"}, "in_vitro"),
+    ({}, "unclassified"),
+])
+def test_view_category(db, expected):
+    assert browser._view_category(db) == expected
+    assert expected in browser.VIEW_CATEGORIES
+
+
+def test_gene_expression_panel_groups_by_cell_type_with_category_tags(client):
+    text = client.get("/genes/PTPRG").text
+    for needle in ("var CATS", "vw-cat", "Datasets without per-cell cell types", "Grouping and dataset categories", "vw-flat"):
+        assert needle in text, needle
+    for gone in ("are on the Atlas tab and are not summarised here", "vw-scope-row\"><td colspan=\"4\">' + V.esc(V.SCOPES"):
+        assert gone not in text, gone
+
+
+def test_genes_landing_lists_examples_and_the_favourites_hook(client):
+    anonymous = client.get("/genes").text
+    for gene in browser.LANDING_EXAMPLE_GENES:
+        assert f'href="/genes/{gene}"' in anonymous
+    assert "Examples" in anonymous and "Your favourites" in anonymous
+    assert "favouriteGenes()" not in anonymous.split('id="gv-example-block"', 1)[1].split("</main>")[0]
+    signed_in = client.get("/genes", headers={"Remote-User": "mf"}).text
+    assert "antSettings.favouriteGenes()" in signed_in.split('id="gv-example-block"', 1)[1]
+
+
+def test_cell_type_names_are_never_hyphenated(client):
+    views = (_WEB_DIR / "templates" / "_views.html").read_text(encoding="utf-8")
+    assert "oligodendro-cyte" not in views and "&shy;" not in views and "hyphens: auto" not in views
+    text = client.get("/genes/PTPRG").text
+    assert "'oligodendrocyte'" in text and "oligodendro-" not in text
+
+
+def test_landing_keeps_the_multi_gene_comparison_separate_and_notes_it_on_the_page(client):
+    landing = client.get("/genes").text
+    examples = landing.split('id="gv-example-block"', 1)[1].split("</div>", 1)[0]
+    assert "," not in examples
+    assert "Compare several genes" in landing and 'href="/genes/APOE,TREM2,CX3CR1"' in landing
+    page = client.get("/genes/APOE,TREM2").text
+    assert 'id="gv-multi-note"' in page and 'href="/genes/TREM2"' in page and "Facet results are per gene" in page

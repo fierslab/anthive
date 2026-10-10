@@ -3375,6 +3375,10 @@ async def admin_mcp_links_view(request: Request):
     return RedirectResponse("/account/mcp#all", status_code=307)
 
 
+# Example genes on the /genes landing page: the one place to change them.
+LANDING_EXAMPLE_GENES = ('PTPRG', 'APOE', 'TREM2', 'GFAP', 'MEIS1', 'CD9', 'P2RY12', 'AQP4')
+
+
 @router.get("/genes", response_class=HTMLResponse)
 async def gene_index_view(request: Request, q: Optional[str] = None):
     """Gene atlas entry page: a search form that leads to /genes/{gene}.
@@ -3392,6 +3396,8 @@ async def gene_index_view(request: Request, q: Optional[str] = None):
         "pill_map": {},
         "filter_opts": {'organism': [], 'cell_type': [], 'tissue': []},
         "dataset_annotations": {},
+        "example_genes": LANDING_EXAMPLE_GENES,
+        "logged_in": bool(request.headers.get('remote-user')),
     })
 
 
@@ -3440,6 +3446,7 @@ async def gene_view(request: Request, gene: str):
         "filter_opts": filter_opts,
         "dataset_annotations": dataset_annotations,
         "view_dbs": _view_db_map(api_url) if ',' not in gene else {},
+        "view_categories": VIEW_CATEGORIES,
     })
 
 
@@ -3818,13 +3825,55 @@ def _view_celltype_column(db: Dict[str, Any]) -> str:
     return ''
 
 
+# One place for the dataset categories shown as tags in the gene view: key -> label, tooltip,
+# and whether the category has per-cell cell types that may be averaged into a cell type row.
+VIEW_CATEGORIES: Dict[str, Dict[str, Any]] = {
+    'post_mortem': {'label': 'post-mortem', 'typed': True,
+                    'tip': 'Human post-mortem brain tissue.'},
+    'xenograft': {'label': 'xenograft', 'typed': True,
+                  'tip': 'Human cells transplanted into a mouse brain (human in mouse).'},
+    'biopsy': {'label': 'biopsy', 'typed': True,
+               'tip': 'Fresh or live surgical biopsy tissue.'},
+    'spatial': {'label': 'spatial', 'typed': False,
+                'tip': 'Spatial transcriptomics: spots or segmented cells in a tissue section, no per-cell cell type call comparable to dissociated cells.'},
+    'in_vitro': {'label': 'in vitro', 'typed': False,
+                 'tip': 'Cultured cells, iPSC derivatives or organoids, not tissue.'},
+    'bulk': {'label': 'bulk', 'typed': False,
+             'tip': 'Bulk RNA-seq or proteomics: no single cells.'},
+    'unclassified': {'label': 'unclassified', 'typed': False,
+                     'tip': 'The experimental system of this dataset is not recorded.'},
+}
+_SPATIAL_TECHNOLOGIES = ('visium', 'xenium', 'slide-tags', 'slide_tags', 'novast', 'cosmx',
+                         'stereo', 'merfish', 'slide-seq', 'spatial')
+
+
+def _view_category(db: Dict[str, Any]) -> str:
+    """Key of ``VIEW_CATEGORIES`` for a dataset, from experimental_system, technology and facet_scope."""
+    system = _flatten_annotation_field(db.get('experimental_system')).lower()
+    technology = _flatten_annotation_field(db.get('technology')).lower()
+    scope = str(db.get('facet_scope') or '').lower()
+    if 'bulk' in system or 'bulk' in technology or 'mass-spec' in technology:
+        return 'bulk'
+    if any(name in technology for name in _SPATIAL_TECHNOLOGIES):
+        return 'spatial'
+    if system.startswith('in_vitro') or 'organoid' in system or scope == 'in_vitro':
+        return 'in_vitro'
+    if 'xenograft' in system or 'chimera' in system or scope == 'xenograft_human_in_mouse':
+        return 'xenograft'
+    if 'biopsy' in system:
+        return 'biopsy'
+    if 'post_mortem' in system or 'postmortem' in system or scope == 'human_postmortem':
+        return 'post_mortem'
+    return 'unclassified'
+
+
 def _view_db_map(api_url: str) -> Dict[str, Dict[str, Any]]:
     """Compact per-dataset facts the view panels need, keyed by db_id.
 
     ``celltype_col`` the per-cell cell type column (may be empty), ``scope`` is the facet scope, ``group`` the cell type group of the dataset-level
     cell type (empty when the dataset is mixed or has several cell types), ``human``
     whether the organism is human, ``secondary`` the reanalysis flag and ``modality``
-    nuclei versus cells (``_view_modality``). Empty when the API is unreachable.
+    nuclei versus cells (``_view_modality``), ``category`` the dataset category (``_view_category``). Empty when the API is unreachable.
     """
     result: Dict[str, Dict[str, Any]] = {}
     try:
@@ -3849,6 +3898,7 @@ def _view_db_map(api_url: str) -> Dict[str, Dict[str, Any]]:
             'human': 'human' in _flatten_annotation_field(db.get('organism')).lower(),
             'secondary': bool(db.get('is_secondary')),
             'modality': _view_modality(db),
+            'category': _view_category(db),
         }
     return result
 
