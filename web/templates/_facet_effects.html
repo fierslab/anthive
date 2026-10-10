@@ -908,7 +908,7 @@ window.antFx = window.antFx || (function () {
         human_postmortem: [['sex', 'sex'], ['disease', 'pathologic AD <span class="muted">(provisional)</span>'], ['apoe4_carrier', 'APOE e4 carrier'],
             ['apoe4_dose', 'APOE e4 dose'], ['braak', 'Braak stage'], ['braak_threshold', 'Braak III or higher'],
             ['age', 'age, not adjusted for pathology'], ['age_adjusted', 'age, adjusted for pathology']],
-        xenograft_human_in_mouse: [['sex', 'sex'], ['app_nlgf', 'App NL-G-F host']]
+        xenograft_human_in_mouse: [['graft_sex', 'sex of grafted cells (donor line)'], ['host_sex', 'sex of host mouse'], ['app_nlgf', 'App NL-G-F host']]
     };
     var cards = {}, activeScope = 'human_postmortem', activeFacet = 'sex', started = {}, userPicked = false;
     function key(scope, facet) { return scope + '|' + facet; }

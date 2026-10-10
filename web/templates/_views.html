@@ -249,7 +249,7 @@ window.antViews = window.antViews || (function () {
     xenograft_human_in_mouse: { title: 'Human microglia in mouse hosts (xenograft)', unit: 'The replicate is the host mouse.', noun: 'mice', nounOne: 'mouse' }
   };
   var HUMAN_FACETS = ['sex', 'disease', 'braak', 'age', 'age_adjusted', 'apoe4_carrier', 'apoe4_dose'];
-  var XENO_FACETS = ['app_nlgf', 'sex'];
+  var XENO_FACETS = ['app_nlgf', 'graft_sex', 'host_sex'];
   var FACETS = {
     sex: { label: 'Sex', contrast: 'male vs female', phrase: ['higher in males', 'higher in females'] },
     disease: { label: 'Disease (pathologic AD)', contrast: 'pathologic AD vs no AD pathology', phrase: ['higher with AD pathology', 'lower with AD pathology'], axis: true },
@@ -258,9 +258,10 @@ window.antViews = window.antViews || (function () {
     age_adjusted: { label: 'Age, adjusted for pathology', contrast: 'per decade, Braak stage in the model', phrase: ['higher with age (pathology held constant)', 'lower with age (pathology held constant)'], tag: 'Braak in the model' },
     apoe4_carrier: { label: 'APOE e4 carrier', contrast: 'carrier vs non-carrier', phrase: ['higher in APOE e4 carriers', 'lower in APOE e4 carriers'] },
     apoe4_dose: { label: 'APOE e4 dose', contrast: 'per e4 allele (0, 1, 2)', phrase: ['higher with more e4 alleles', 'lower with more e4 alleles'] },
+    graft_sex: { label: 'Sex of grafted cells (donor line)', contrast: 'male vs female donor line', phrase: ['higher in male donor lines', 'higher in female donor lines'] },
+    host_sex: { label: 'Sex of host mouse', contrast: 'male vs female host mouse', phrase: ['higher in male hosts', 'higher in female hosts'] },
     app_nlgf: { label: 'App NL-G-F host model', contrast: 'knock-in host vs control host', phrase: ['higher in App NL-G-F hosts', 'lower in App NL-G-F hosts'] }
   };
-  var XENO_SEX = { label: 'Sex of host', contrast: 'male vs female host', phrase: ['higher in male hosts', 'higher in female hosts'] };
   var GENE_FLAGS = {
     mitochondrial: ['MT', 'Mitochondrial gene: tracks nuclear RNA quality and cell damage, not regulation.'],
     ribosomal: ['ribosomal', 'Ribosomal protein gene: tracks library quality and cell state.'],
@@ -313,7 +314,6 @@ window.antViews = window.antViews || (function () {
   }
   function afterRender(root) { if (window.antDocRestore) window.antDocRestore(root); }
   function facetMeta(scope, facet) {
-    if (scope === 'xenograft_human_in_mouse' && facet === 'sex') return XENO_SEX;
     return FACETS[facet] || { label: facet, contrast: '', phrase: ['higher', 'lower'] };
   }
   function geneFlagPills(flags) {

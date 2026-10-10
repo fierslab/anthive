@@ -20,7 +20,10 @@ that the dataset's scope allows (``lib/facet_scopes.py``, ``facet_scopes`` of th
 registry) for differential gene expression. The unit of replication is the dataset's
 replicate (donor, animal, sample):
 
-  * sex           ant_sex            male vs female (reference female)
+  * sex           ant_sex            male vs female (reference female); human post-mortem only
+  * graft_sex     ant_sex            xenograft: sex of the grafted cells' donor line; refused when an animal
+                                     carries several lines (village: mixed per animal)
+  * host_sex      ant_host_sex       xenograft: sex of the host mouse
   * disease       ant_disease        AD vs control (reference control); every
                                      other value is dropped. PROVISIONAL:
                                      the disease vocabulary decisions
@@ -123,11 +126,14 @@ MAX_STRATUM_LEVELS = 40            # per-cell stratifier sanity cap
 POOLED_DIRNAME = '_pooled'         # <results>/_pooled/<pool_id>.* : donor-pooled units
 GROUP_POOL_SOURCE = 'group_pool'   # derived stratum: all labels of one cell type group pooled
 
-FACETS = ('sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age', 'age_adjusted', 'app_nlgf')
+FACETS = ('sex', 'graft_sex', 'host_sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age', 'age_adjusted', 'app_nlgf')
 #: Sensitivity facets run next to a main facet (same registry entry, own replication family).
 SENSITIVITY_FACETS = ('age_adjusted', 'braak_threshold', 'apoe4_dose')
+#: Sex facets. ``sex`` (post-mortem donor) runs in the human scope only; in a xenograft ``host_sex`` is the sex of the
+#: mouse and ``graft_sex`` the sex of the grafted human cells' donor line (both from the animal's own columns).
+SEX_FACETS = ('sex', 'graft_sex', 'host_sex')
 FACET_COLUMN = {
-    'sex': 'ant_sex', 'disease': 'ant_disease',
+    'sex': 'ant_sex', 'graft_sex': 'ant_sex', 'host_sex': 'ant_host_sex', 'disease': 'ant_disease',
     'apoe4_carrier': 'ant_apoe4_carrier', 'braak': 'ant_braak', 'age': 'ant_age',
     'app_nlgf': 'ant_app_nlgf', 'age_adjusted': 'ant_age', 'braak_threshold': 'ant_braak', 'apoe4_dose': 'ant_apoe',
 }
@@ -143,6 +149,8 @@ AGE_FACETS = ('age', 'age_adjusted')
 APOE4_CARRIER_COLUMNS = ('ant_apoe4_carrier', 'ant_apoe_carrier')
 CONTRAST = {
     'sex': ('f', 'm'),                 # (reference, tested)
+    'graft_sex': ('f', 'm'),
+    'host_sex': ('f', 'm'),
     'disease': ('control', 'AD'),
     'apoe4_carrier': ('noncarrier', 'e4_carrier'),
     'app_nlgf': ('control', 'nlgf'),
@@ -480,6 +488,7 @@ def build_donor_table(cells: pd.DataFrame, design_columns: Optional[Dict[str, An
     grouped = cells.groupby('ant_donor', sort=True)
     for donor, frame in grouped:
         record: Dict[str, Any] = {'donor': donor, 'n_cells_total': len(frame)}
+        record['graft_sex_mixed'] = False
         for facet_name, column, normaliser in (
                 ('sex', 'ant_sex', normalize_sex),
                 ('host_sex', 'ant_host_sex', normalize_sex),
@@ -491,8 +500,10 @@ def build_donor_table(cells: pd.DataFrame, design_columns: Optional[Dict[str, An
                 record[facet_name] = value
                 if conflict:
                     conflicts[facet_name] = conflicts.get(facet_name, 0) + 1
+                    record['graft_sex_mixed'] = record['graft_sex_mixed'] or facet_name == 'sex'
             else:
                 record[facet_name] = None
+        record['graft_sex'] = record['sex']        # the donor line of the grafted cells (``ant_sex``)
         # apoe carrier: carrier column first, derive from genotype otherwise
         carrier_series = None
         carrier_column = next((column for column in APOE4_CARRIER_COLUMNS
@@ -736,6 +747,32 @@ def _small_sample(facet: str, design: pd.DataFrame) -> bool:
     return bool(min(counts.get(0.0, 0), counts.get(1.0, 0)) < N_LT5_THRESHOLD)
 
 
+def sex_facet_refusal(facet: str, donor_table: pd.DataFrame) -> Optional[str]:
+    """Why a xenograft sex facet cannot be tested in this dataset, or None.
+
+    ``graft_sex`` (sex of the grafted cells' donor line) is a property of an animal only when one line was grafted
+    per mouse. A village (several lines per mouse) has animals whose cells carry both sexes: it is refused for the
+    whole dataset. A sex facet nobody recorded is reported as not recorded, not as an empty contrast.
+
+    Args:
+        facet: Facet name; only ``graft_sex`` and ``host_sex`` are checked.
+        donor_table: ``build_donor_table`` output (every replicate of the dataset).
+
+    Returns:
+        A status text, or None when the facet may be tested.
+    """
+    if facet not in ('graft_sex', 'host_sex') or facet not in donor_table:
+        return None
+    if facet == 'graft_sex' and 'graft_sex_mixed' in donor_table and donor_table['graft_sex_mixed'].any():
+        n_mixed = int(donor_table['graft_sex_mixed'].sum())
+        return (f'graft_sex: mixed per animal ({n_mixed} of {len(donor_table)} animals carry cells of both sexes, '
+                f'several graft lines per mouse); the sex of the grafted cells is not a property of the animal')
+    if not donor_table[facet].isin(['f', 'm']).any():
+        column = FACET_COLUMN[facet]
+        return f'{facet}: not recorded (no m or f value in {column} on any replicate)'
+    return None
+
+
 def pathology_covariate(donors: pd.DataFrame) -> Tuple[Optional[str], Optional[pd.Series]]:
     """The pathology term of the age-adjusted model: Braak where at least 90 percent of the donors have it,
     else the 2x2 disease (AD = 1, control = 0) where at least 90 percent have it, else none.
@@ -798,6 +835,10 @@ def plan_job(donor_table: pd.DataFrame, facet: str, stratum_donors: Iterable[str
         out['level_counts'] = _level_counts(facet, valid)
     else:
         reference, tested = CONTRAST[facet]
+        refusal = sex_facet_refusal(facet, donor_table)
+        if refusal:
+            out.update(status=refusal)
+            return out
         valid = donors[donors[facet].isin([reference, tested])].copy()
         counts = valid[facet].value_counts().to_dict()
         out['n_donors_facet'] = len(valid)
@@ -822,7 +863,7 @@ def plan_job(donor_table: pd.DataFrame, facet: str, stratum_donors: Iterable[str
 
     # sex covariate (the host's in a xenograft; not for the sex facet)
     sex_column = 'host_sex' if scope == facet_scopes.SCOPE_XENOGRAFT and 'host_sex' in design else 'sex'
-    if facet != 'sex':
+    if facet not in ('sex', 'host_sex'):
         sex_known = design[sex_column].isin(['f', 'm'])
         if sex_known.mean() >= MIN_COVARIATE_COVERAGE and design.loc[sex_known, sex_column].nunique() == 2:
             candidate = design[sex_known].copy()

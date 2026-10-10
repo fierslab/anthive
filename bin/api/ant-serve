@@ -13604,8 +13604,8 @@ def get_facet_tests_across_datasets(
     SEA-AD, MADRC, ...), so rows are not independent replications. A
     cross-dataset meta-analysis is not part of this endpoint. Exploratory.
 
-    ``facet_name`` is ``ant_sex`` or ``sex`` (also disease, apoe4_carrier,
-    braak, age, app_nlgf). Other names return 404. ``scope`` selects the facet scope
+    ``facet_name`` is ``ant_sex`` or ``sex`` (also graft_sex, host_sex, disease, apoe4_carrier,
+    braak, age, app_nlgf). ``graft_sex`` (alias ``ant_graft_sex``; the test of ``ant_sex`` in xenografts, sex of the grafted cells' donor line) and ``host_sex`` (``ant_host_sex``) are the xenograft sex facets; ``sex`` is human post-mortem only. Other names return 404. ``scope`` selects the facet scope
     (``scope`` and ``scopes`` in the response; ``all`` returns every scope).
     """
     facet_name = canonical_facet(facet_name)  # deprecated alias, one release
@@ -13613,7 +13613,7 @@ def get_facet_tests_across_datasets(
     overview = _facet_results().facet_overview(test_facet, _facet_test_datasets(), top_genes=top_genes,
                                                exclude_secondary=exclude_secondary,
                                                scope=_scope_param(scope, allow_all=True))
-    return _with_help({**overview, 'facet_column': 'ant_' + test_facet,
+    return _with_help({**overview, 'facet_column': facet_results_lib.FACET_COLUMN.get(test_facet, 'ant_' + test_facet),
                        'q_threshold': facet_results_lib.Q_THRESHOLD}, *_FACET_HELP_TOPICS)
 
 
@@ -13935,7 +13935,7 @@ def get_geneset_facet_effects(
         if not include_units:
             entry = {**entry, 'units': []}
         member_entry = reader.member_replication(facet_name, members, datasets, exclude_secondary=exclude_secondary,
-                                                 scope=facet_scope, exclude_sex_chromosome=facet_name == 'sex'
+                                                 scope=facet_scope, exclude_sex_chromosome=facet_name in facet_results_lib.HUMAN_CELL_SEX_FACETS
                                                  ) if members else None
         return {'facet': facet_name, 'scope': facet_scope, 'module': entry, 'members': member_entry}
 

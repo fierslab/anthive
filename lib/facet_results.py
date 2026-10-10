@@ -84,8 +84,12 @@ UNIT_TABLE_COLUMNS = [
     'analysis_level', 'tau_log2', 'exclusion_missing', 'is_secondary', 'celltype_group', 'facet_scope',
     'summary_unit', 'donor_digests', 'modality', 'modality_note']
 
-FACET_ORDER = ('sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age', 'age_adjusted',
+FACET_ORDER = ('sex', 'graft_sex', 'host_sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age', 'age_adjusted',
                'app_nlgf')
+#: Column of a tested facet when it is not ``ant_<name>``: the sex of the grafted cells' donor line is ``ant_sex``.
+FACET_COLUMN = {'graft_sex': 'ant_sex'}
+#: Sex facets whose cells are human: the XIST / Y-gene positive control applies.
+HUMAN_CELL_SEX_FACETS = ('sex', 'graft_sex')
 #: Replication-family cache size: every (facet, scope, exclude_secondary) fits, so no request evicts another's
 #: families (the 2.44 facets x scopes multiplied the keys past the old LRU of 16, so each call recomputed them).
 FAMILY_CACHE_ENTRIES = len(FACET_ORDER) * len(facet_scopes.SCOPES) * 2
@@ -319,6 +323,10 @@ SEX_CONTROL_RULE = ('passed when XIST is lower in males and RPS4Y1 higher in mal
 
 FACET_INFO = {
     'sex': {'contrast': 'm vs f', 'effect_unit': 'log2 fold change, male minus female', 'provisional': False},
+    'graft_sex': {'contrast': 'm vs f donor line of the grafted human cells (xenograft; one line per mouse)',
+                  'effect_unit': 'log2 fold change, male minus female donor line', 'provisional': False},
+    'host_sex': {'contrast': 'm vs f host mouse (xenograft)',
+                 'effect_unit': 'log2 fold change, male minus female host', 'provisional': False},
     'disease': {'contrast': 'AD vs control', 'effect_unit': 'log2 fold change, AD minus control',
                 'provisional': True},
     'apoe4_carrier': {'contrast': 'any e4 allele vs none (e2 carriers pooled with e3/e3)',
@@ -793,7 +801,7 @@ class FacetResults:
         result['cohort'] = cohort
         controls = self.sex_controls(group_folder, stem)
         for unit in result['units']:
-            if unit['facet'] == 'sex' and unit['tested']:
+            if unit['facet'] in HUMAN_CELL_SEX_FACETS and unit['tested']:
                 unit['sex_control'] = controls.get((unit['cell_type'], unit['celltype_source']))
         with self._lock:
             if len(self._summary_cache) > 512:
@@ -1267,7 +1275,7 @@ class FacetResults:
         try:
             frame = pd.read_parquet(path, columns=['facet', 'cell_type', 'celltype_source', 'gene',
                                                    'logFC', 'q_value'],
-                                    filters=[('facet', '==', 'sex'), ('gene', 'in', genes)])
+                                    filters=[('facet', 'in', list(HUMAN_CELL_SEX_FACETS)), ('gene', 'in', genes)])
         except Exception as exc:
             log.warning('facet results: cannot read %s: %s', path, exc)
             return {}
@@ -2227,7 +2235,7 @@ class FacetResults:
                       'exclude_secondary': exclude_secondary, 'scope': scope},
             'scope': scope,
             'scopes': self.scopes_with_results(facet, datasets),
-            'facet': {'name': facet, 'column': 'ant_' + facet, 'contrast': info['contrast'],
+            'facet': {'name': facet, 'column': FACET_COLUMN.get(facet, 'ant_' + facet), 'contrast': info['contrast'],
                       'effect_unit': info['effect_unit'], 'provisional': info['provisional'],
                       'status': 'exploratory'},
             'gene': unit_cards[0]['gene'] if unit_cards else gene,
@@ -3015,6 +3023,8 @@ _STRATUM_SOURCES = {
 
 _FACET_TERMS = {
     'sex': ('sex', 'm vs f: coefficient = m minus f (f is the reference)'),
+    'graft_sex': ('sex', 'm vs f donor line of the grafted cells: coefficient = m minus f (f is the reference); host sex is the covariate'),
+    'host_sex': ('host sex', 'm vs f host mouse: coefficient = m minus f (f is the reference)'),
     'disease': ('disease', 'AD vs control: coefficient = AD minus control (control is the reference)'),
     'apoe4_carrier': ('apoe4_carrier', 'e4 carrier vs non-carrier: coefficient = carrier minus non-carrier'),
     'braak': ('braak', 'Braak stage as a number: coefficient = change per Braak stage (linear trend)'),
@@ -3121,7 +3131,7 @@ def _covariate_rows(facet: str, record: Optional[Dict[str, Any]], manifest: Opti
     rows: List[Dict[str, str]] = []
     df_reason = 'dropped to keep the test and at least 2 residual degrees of freedom'
     host = (manifest or {}).get('facet_scope') == facet_scopes.SCOPE_XENOGRAFT
-    if facet != 'sex':
+    if facet not in ('sex', 'host_sex'):
         sex_label = 'host sex (m vs f)' if host else 'm vs f'
         if 'sex' in included:
             rows.append({'name': 'sex', 'status': 'included', 'term': 'sex', 'reason': sex_label})

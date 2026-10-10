@@ -422,7 +422,7 @@ def test_app_nlgf_plan_uses_host_sex_in_a_xenograft():
 
 def test_facets_for_scope_follow_the_registry():
     assert aft.facets_for_scope('mouse_in_vivo', aft.FACETS) == []            # retired scope: no facet is allowed
-    assert aft.facets_for_scope('xenograft_human_in_mouse', aft.FACETS) == ['sex', 'app_nlgf']
+    assert aft.facets_for_scope('xenograft_human_in_mouse', aft.FACETS) == ['graft_sex', 'host_sex', 'app_nlgf']
     assert aft.facets_for_scope('human_postmortem', aft.FACETS) == [
         'sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age', 'age_adjusted']
     assert aft.normalize_app_nlgf('NLGF') == 'nlgf' and aft.normalize_app_nlgf('wt') is None
@@ -782,3 +782,60 @@ def test_choose_strata_rules():
     nothing = pd.DataFrame({'x': [1, 2, 3]})
     membership, _ = aft.choose_strata(nothing, {})
     assert set(membership['source']) == {'none'} and set(membership['label']) == {'all'}
+
+
+# ── xenograft sex facets: graft_sex (donor line of the grafted cells) and host_sex (the mouse) ─────────────
+
+def _xeno_table(graft, host, mixed=None):
+    table = _donor_table(['x'] * len(graft), facet='graft_sex', sexes=graft)
+    table['graft_sex'] = graft
+    table['host_sex'] = host
+    table['graft_sex_mixed'] = mixed if mixed is not None else [False] * len(graft)
+    return table
+
+
+def test_graft_sex_and_host_sex_are_tested_separately_with_the_host_sex_covariate():
+    table = _xeno_table(['f'] * 4 + ['m'] * 4, ['f', 'm'] * 4)
+    graft = aft.plan_job(table, 'graft_sex', table['donor'], scope='xenograft_human_in_mouse')
+    assert graft['status'] == 'ok' and graft['level_counts'] == {'f': 4, 'm': 4} and graft['covariates'] == ['sex']
+    host = aft.plan_job(table, 'host_sex', table['donor'], scope='xenograft_human_in_mouse')
+    assert host['status'] == 'ok' and host['level_counts'] == {'f': 4, 'm': 4} and host['covariates'] == []
+    expected = (table.set_index('donor')['host_sex'] == 'm').astype(float)      # the covariate of graft_sex is the host's sex
+    assert (graft['design'].set_index('donor')['cov_sex'] == expected.reindex(graft['design']['donor']).to_numpy()).all()
+
+
+def test_graft_sex_is_refused_when_an_animal_carries_several_lines():
+    table = _xeno_table(['f'] * 4 + [None] * 4, ['f', 'm'] * 4, mixed=[False] * 4 + [True] * 4)
+    plan = aft.plan_job(table, 'graft_sex', table['donor'], scope='xenograft_human_in_mouse')
+    assert plan['status'].startswith('graft_sex: mixed per animal (4 of 8 animals') and 'village' not in plan['status']
+    assert aft.plan_job(table, 'host_sex', table['donor'], scope='xenograft_human_in_mouse')['status'] == 'ok'
+
+
+@pytest.mark.parametrize('facet', ['graft_sex', 'host_sex'])
+def test_a_sex_facet_nobody_recorded_is_reported_as_not_recorded(facet):
+    table = _xeno_table([None] * 8, [None] * 8)
+    plan = aft.plan_job(table, facet, table['donor'], scope='xenograft_human_in_mouse')
+    assert plan['status'].startswith(f'{facet}: not recorded')
+
+
+def test_sex_facet_refusal_ignores_other_facets_and_missing_columns():
+    table = _xeno_table(['f', 'm'] * 4, ['f', 'm'] * 4, mixed=[True] * 8)
+    assert aft.sex_facet_refusal('disease', table) is None
+    assert aft.sex_facet_refusal('graft_sex', table.drop(columns='graft_sex')) is None
+    assert 'mixed per animal' in aft.sex_facet_refusal('graft_sex', table)
+
+
+def test_build_donor_table_flags_an_animal_with_cells_of_both_sexes():
+    cells = pd.DataFrame({'ant_donor': ['A', 'A', 'B', 'B'], 'ant_sex': ['m', 'f', 'f', 'f'],
+                          'ant_host_sex': ['m', 'm', 'f', 'f']})
+    donors, conflicts = aft.build_donor_table(cells)
+    by_animal = donors.set_index('donor')
+    assert by_animal['graft_sex_mixed'].to_dict() == {'A': True, 'B': False}
+    assert by_animal['graft_sex'].tolist()[1] == 'f' and pd.isna(by_animal.loc['A', 'graft_sex'])
+    assert by_animal['host_sex'].to_dict() == {'A': 'm', 'B': 'f'} and conflicts == {'sex': 1}
+
+
+def test_sex_is_a_post_mortem_facet_only_and_the_graft_and_host_sex_xenograft_only():
+    assert aft.facets_for_scope('human_postmortem', ['sex', 'graft_sex', 'host_sex']) == ['sex']
+    assert aft.facets_for_scope('xenograft_human_in_mouse', ['sex', 'graft_sex', 'host_sex']) == ['graft_sex', 'host_sex']
+    assert aft.FACET_COLUMN['graft_sex'] == 'ant_sex' and aft.FACET_COLUMN['host_sex'] == 'ant_host_sex'

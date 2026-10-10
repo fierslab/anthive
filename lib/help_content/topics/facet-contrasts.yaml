@@ -11,6 +11,7 @@ aliases:
 body_html: |
   <ul>
     <li><strong>Contrasts.</strong> Sex is m vs f, disease is pathologic AD vs control, APOE e4 carrier vs non-carrier, App NL-G-F vs control. A positive log2 fold change means higher in the first-named group. Braak stage and age are numbers, so their effect is the change per Braak stage and per decade of age.</li>
+    <li><strong>Sex in xenografts.</strong> Two separate facets. <em>Sex of grafted cells (donor line)</em> is the sex of the donor line of the human cells, one value per mouse; it is not tested where a mouse carries several lines (villages), because it is then not a property of the animal. <em>Sex of host mouse</em> is the sex of the mouse. Both are male vs female. Post-mortem <em>sex</em> is the donor's sex and is only tested in human post-mortem tissue.</li>
     <li><strong>Composition.</strong> This flag means the fraction of each donor's cells in the cell type changes with the facet (p &lt; 0.05, uncorrected). It tests only the size of the cell type, not the mix of states inside it (see <a href="#glossary-composition">composition</a>).</li>
     <li><strong>Batch.</strong> "batch adjusted" means a batch column entered the model; "batch confounded" means the facet cannot be separated from batch and batch was left out.</li>
     <li><strong>Inflation.</strong> A unit whose <a href="#glossary-lambda">lambda</a> is above about 1.3 is flagged: many genes shift together, which usually points to a batch, chemistry or composition difference rather than to biology.</li>

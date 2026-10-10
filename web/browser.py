@@ -4573,8 +4573,13 @@ def _sort_paper_cards(cards: List[Dict]) -> List[Dict]:
 # /facets/{name} ("Effects across datasets", one row per dataset x stratum).
 # These helpers only turn API payloads into display fields.
 
+# Tested facets whose column is not 'ant_<name>': the sex of the grafted cells' donor line is ant_sex.
+_TEST_FACET_COLUMN = {'graft_sex': 'ant_sex'}
+
 _FACET_TEST_LABELS = {
     'sex': 'Sex',
+    'graft_sex': 'Sex of grafted cells (donor line)',
+    'host_sex': 'Sex of host mouse',
     'disease': 'Disease',
     'apoe4_carrier': 'APOE e4 carrier',
     'apoe4_dose': 'APOE e4 dose',
@@ -4588,12 +4593,16 @@ _FACET_TEST_LABELS = {
 # Tested variants of one facet column: the page of ``ant_<first>`` shows all of them
 # (the later ones are sensitivity or twin analyses with no column of their own).
 _FACET_VARIANTS = {
+    'sex': [('sex', 'donor, post-mortem tissue'), ('graft_sex', 'donor line of grafted cells, xenografts')],
     'age': [('age', 'not adjusted for pathology'), ('age_adjusted', 'adjusted for pathology')],
     'braak': [('braak', 'trend per stage'), ('braak_threshold', 'stage III or higher vs lower')],
     'apoe4_carrier': [('apoe4_carrier', 'carrier vs non-carrier'), ('apoe4_dose', 'per e4 allele')],
 }
 
 _FACET_VARIANT_NOTES = {
+    'sex': 'Sex of the donor in post-mortem tissue: male against female donors.',
+    'graft_sex': ('Xenografts: sex of the donor line of the grafted human cells (ant_sex), one value per mouse. Not the sex of the '
+                  'host mouse (ant_host_sex). Refused where a mouse carries several lines (villages).'),
     'age': ('Age, not adjusted for pathology: the straight-line trend per decade of age at death, in donors of 60 years and older. '
             'Age and AD pathology go together in every brain bank, so this result partly re-detects pathology; read it next to the adjusted twin.'),
     'age_adjusted': ('Age, adjusted for pathology: the same trend with Braak stage (else pathologic AD) in the model. '
@@ -5050,7 +5059,7 @@ def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Opt
     by_facet: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     index = 0
     for unit in summary.get('units') or []:
-        column = 'ant_' + str(unit.get('facet'))
+        column = _TEST_FACET_COLUMN.get(str(unit.get('facet')), 'ant_' + str(unit.get('facet')))
         slot = by_facet.setdefault(column, {'tested': [], 'untested': [], 'scope': unit.get('facet_scope')})
         if unit.get('tested'):
             slot['tested'].append(_fx_unit_view({**unit, 'dataset_changed': summary.get('dataset_changed')},

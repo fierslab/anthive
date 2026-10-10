@@ -816,7 +816,7 @@ def test_endpoint_across_datasets_and_effects(serve):
     top = serve.get('/facets/ant_braak/effects/top', params={'n': 5}).json()
     assert top['rows'][0]['gene'] == 'PTPRG'
     allf = serve.get('/genes/PTPRG/facet-effects').json()
-    assert set(allf['facets']) == {'sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age',
+    assert set(allf['facets']) == {'sex', 'graft_sex', 'host_sex', 'disease', 'apoe4_carrier', 'apoe4_dose', 'braak', 'braak_threshold', 'age',
                                    'age_adjusted', 'app_nlgf'}
     assert allf['scope'] is None and set(allf['by_scope']) == {'human_postmortem', 'xenograft_human_in_mouse'}
     assert serve.get('/facets/braak/effects', params={'gene': 'PTPRG', 'scope': 'nowhere'}).status_code == 400
@@ -1389,3 +1389,10 @@ def test_warmup_failure_is_logged_not_raised(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger='test-warmup'):
         namespace['_warm_facet_results']()
     assert calls == ['warm'] and 'warm-up failed' in caplog.text
+
+
+def test_xenograft_sex_facets_are_registered_with_their_columns_and_info():
+    from facet_results import FACET_COLUMN, FACET_INFO, FACET_ORDER, HUMAN_CELL_SEX_FACETS
+    assert FACET_ORDER[:3] == ('sex', 'graft_sex', 'host_sex')
+    assert FACET_COLUMN == {'graft_sex': 'ant_sex'} and HUMAN_CELL_SEX_FACETS == ('sex', 'graft_sex')
+    assert 'donor line' in FACET_INFO['graft_sex']['contrast'] and 'host mouse' in FACET_INFO['host_sex']['contrast']

@@ -1466,7 +1466,7 @@ def main() -> None:
 
         Args:
             db_id: Dataset id, e.g. 'G24/MMG'.
-            facet: Restrict to one facet: sex, disease, apoe4_carrier, braak, age or app_nlgf.
+            facet: Restrict to one facet: sex, graft_sex, host_sex, disease, apoe4_carrier, braak, age or app_nlgf.
             cell_type: Restrict to one cell type stratum (as listed in the summary).
             level: 'summary' (one line per facet x cell type: donors per level,
                 covariates, flags, genes and modules at q < 0.05), 'genes'
@@ -1665,13 +1665,13 @@ def main() -> None:
 
         Args:
             gene: Gene symbol, e.g. 'PTPRG'.
-            facet: sex, disease, apoe4_carrier, braak, age or app_nlgf; omit for all.
+            facet: sex (post-mortem), graft_sex or host_sex (xenograft: sex of the grafted cells' donor line, sex of the host mouse), disease, apoe4_carrier, braak, age or app_nlgf; omit for all.
             cell_type: Restrict to one cell type group (e.g. 'microglia') or raw label (e.g. 'Mic P2RY12').
             exclude_secondary: Do not count reanalyses (default true).
             scope: human_postmortem or xenograft_human_in_mouse. Default: human_postmortem
                 (for app_nlgf: xenograft_human_in_mouse); the reply names the other scopes that have results.
         """
-        facets = [facet] if facet else ['sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'app_nlgf']
+        facets = [facet] if facet else ['sex', 'graft_sex', 'host_sex', 'disease', 'apoe4_carrier', 'braak', 'age', 'app_nlgf']
         lines = [_FACET_TOOL_RULES]
         for name in facets:
             try:
@@ -1759,7 +1759,7 @@ def main() -> None:
         (relative to the API root: png or svg); open it for the small-multiples figure. Exploratory.
 
         Args:
-            facet: sex, disease, apoe4_carrier, braak, age or app_nlgf (also apoe4_dose, braak_threshold, age_adjusted).
+            facet: sex, graft_sex, host_sex, disease, apoe4_carrier, braak, age or app_nlgf (also apoe4_dose, braak_threshold, age_adjusted).
             cell_type: A cell type group such as 'microglia' (as in facet_effects).
             gene: Gene symbol, e.g. 'MEIS1'. Give exactly one of gene or geneset.
             geneset: Gene set id 'Study/Experiment/name' (as in module_facet_effects).
@@ -1995,7 +1995,7 @@ def main() -> None:
 
         Args:
             geneset: Gene set id 'study/experiment/name', e.g. 'Mancuso2024/Cell_states/DAM'.
-            facet: sex, disease, apoe4_carrier, braak, age or app_nlgf; omit for all.
+            facet: sex (post-mortem), graft_sex or host_sex (xenograft: sex of the grafted cells' donor line, sex of the host mouse), disease, apoe4_carrier, braak, age or app_nlgf; omit for all.
             cell_type: Restrict to one cell type group (e.g. 'microglia').
             scope: human_postmortem or xenograft_human_in_mouse. Default: each facet's default scope.
             exclude_secondary: Do not count reanalyses (default true).

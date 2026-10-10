@@ -7720,7 +7720,7 @@ def test_gene_panel_loads_each_scope_with_its_own_facet_tabs():
     module = browser.templates.env.get_template("_facet_effects.html").module
     panel = str(module.fx_gene_panel("PTPRG"))
     assert "human post-mortem" in panel and "human cells in mouse hosts (xenograft)" in panel
-    assert "xenograft_human_in_mouse: [['sex', 'sex'], ['app_nlgf', 'App NL-G-F host']]" in panel
+    assert "xenograft_human_in_mouse: [['graft_sex', 'sex of grafted cells (donor line)'], ['host_sex', 'sex of host mouse'], ['app_nlgf', 'App NL-G-F host']]" in panel
     assert "'/effects?gene=' + encodeURIComponent(gene) + '&scope='" in panel
     assert 'id="gene-fx-scope-about"' in panel and "never mixed" in panel
 

@@ -193,17 +193,26 @@ def check_scope(scope: Optional[str]) -> str:
 
 
 #: Test variants that share the registry entry of another facet (the age trend with the pathology term in the model).
-REGISTRY_TAG = {'age_adjusted': 'age', 'braak_threshold': 'braak', 'apoe4_dose': 'apoe4_carrier'}
+REGISTRY_TAG = {'age_adjusted': 'age', 'braak_threshold': 'braak', 'apoe4_dose': 'apoe4_carrier', 'graft_sex': 'sex'}
+
+#: Scopes a facet TEST runs in when they differ from the registry entry of its column. ``ant_sex`` may be published
+#: in every scope, but its test (``sex``) is the donor's sex in post-mortem tissue only. In a xenograft the sex of
+#: the animal is ``host_sex`` (column ``ant_host_sex``) and the sex of the grafted human cells' donor line is
+#: ``graft_sex`` (column ``ant_sex``; a test name only, no ``ant_graft_sex`` column exists).
+TEST_FACET_SCOPES = {'sex': [SCOPE_HUMAN], 'graft_sex': [SCOPE_XENOGRAFT]}
 
 
 def facet_allowed_scopes(facet: str) -> List[str]:
     """Scopes a facet may be published in (``facet_scopes`` of the registry; all when unset).
 
     Args:
-        facet: Facet tag (``braak``) or column (``ant_braak``).
+        facet: Facet tag (``braak``) or column (``ant_braak``); ``sex`` and ``graft_sex`` answer the scopes of
+        their tests (``TEST_FACET_SCOPES``).
     """
     from obscol_tags import facet_registry_entry  # noqa: PLC0415
     bare = facet[4:] if facet.startswith('ant_') else facet
+    if bare in TEST_FACET_SCOPES:
+        return list(TEST_FACET_SCOPES[bare])
     entry = facet_registry_entry(REGISTRY_TAG.get(bare, bare))
     scopes = list((entry or {}).get('facet_scopes') or [])
     return scopes or list(SCOPES)

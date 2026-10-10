@@ -83,7 +83,7 @@
   var PAYLOAD = {{ payload|tojson }};
   var DBS = {{ dbs|tojson }};
   var MODULE_FACETS_HUMAN = ['sex', 'disease', 'braak', 'age', 'age_adjusted', 'apoe4_carrier', 'apoe4_dose'];
-  var MODULE_FACETS_XENO = ['app_nlgf', 'sex'];
+  var MODULE_FACETS_XENO = ['app_nlgf', 'graft_sex', 'host_sex'];
   var state = { effects: null, preselected: false };
 
   function modalityTag(modality) {
@@ -271,7 +271,7 @@
       if (axisBoth) block.notes.push('Braak stage and pathologic AD are one pathology axis: where both replicate, count it as one finding' + help);
       if (block.scope === 'xenograft_human_in_mouse') block.notes.push('One lab pipeline: the cohorts are not independent confirmations' + help);
       if (block.rows.some(function (row) { return row.facet === 'age'; })) block.footer = 'Age: donors of 60 years and older; ROSMAP ages above 90 are recorded as 90.';
-      if (blocks.length > 1 && block.rows.some(function (row) { return row.facet === 'sex'; })) block.notes.push('Sex also appears in the other block: not comparable (donors vs mice), never combined');
+      if (blocks.length > 1 && block.rows.some(function (row) { return String(row.facet).indexOf('sex') !== -1; })) block.notes.push('Sex also appears in the other block: not comparable (donors vs mice), never combined');
     });
     return { blocks: blocks };
   }

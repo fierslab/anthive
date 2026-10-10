@@ -77,7 +77,8 @@ def test_check_scope_and_default():
 # ── the facet registry ───────────────────────────────────────────────────────
 
 @pytest.mark.parametrize('facet, scopes', [
-    ('sex', ['human_postmortem', 'xenograft_human_in_mouse', 'in_vitro']),
+    ('sex', ['human_postmortem']),
+    ('graft_sex', ['xenograft_human_in_mouse']),
     ('genotype', ['human_postmortem', 'xenograft_human_in_mouse', 'in_vitro']),
     ('host_genotype', ['xenograft_human_in_mouse']),
     ('disease', ['human_postmortem']), ('braak', ['human_postmortem']), ('apoe4_carrier', ['human_postmortem']),
@@ -202,17 +203,19 @@ def test_app_nlgf_in_a_xenograft_end_to_end_without_host_sex(tmp_path):
     out_root = tmp_path / 'out'
     manifest = aft.process_dataset(entry, store, out_root, list(aft.FACETS), RSCRIPT, threads=1, memory_limit_gb=1)
     assert manifest['status'] == 'done' and manifest['facet_scope'] == 'xenograft_human_in_mouse'
-    assert manifest['facets_tested_in_scope'] == ['sex', 'app_nlgf']
-    assert {u['facet'] for u in manifest['units']} == {'sex', 'app_nlgf'}           # no disease, braak, age in mouse
+    assert manifest['facets_tested_in_scope'] == ['graft_sex', 'host_sex', 'app_nlgf']
+    assert {u['facet'] for u in manifest['units']} == {'graft_sex', 'host_sex', 'app_nlgf'}   # no disease, braak, age in mouse
+    host = [u for u in manifest['units'] if u['facet'] == 'host_sex']
+    assert host and all(u['status'].startswith('host_sex: not recorded') for u in host)
     nlgf = [u for u in manifest['units'] if u['facet'] == 'app_nlgf' and u['status'] == 'ok']
     assert nlgf and nlgf[0]['facet_scope'] == 'xenograft_human_in_mouse' and nlgf[0]['covariates'] == []   # no host sex published
     assert nlgf[0]['level_counts'] == {'control': 6, 'nlgf': 6} and nlgf[0]['small_sample'] is False
     assert nlgf[0]['tau_log2'] == pytest.approx(math.log2(1.1))
     table = pd.read_parquet(out_root / 'Syn2026' / 'Syn_ds.facet_tests.parquet')
-    assert set(table['facet']) == {'sex', 'app_nlgf'} and (table['facet_scope'] == 'xenograft_human_in_mouse').all()
+    assert set(table['facet']) == {'graft_sex', 'app_nlgf'} and (table['facet_scope'] == 'xenograft_human_in_mouse').all()
     sub = table[table['facet'] == 'app_nlgf']
     assert set(sub['contrast']) == {'nlgf_vs_control'} and set(sub['level_ref']) == {'control'}
-    sex = table[(table['facet'] == 'sex') & (table['gene'] == 'GENE0') & (table['cell_type'] == 'T1')]
+    sex = table[(table['facet'] == 'graft_sex') & (table['gene'] == 'GENE0') & (table['cell_type'] == 'T1')]
     assert sex['logFC'].iloc[0] > 1.0 and sex['q_value'].iloc[0] < 0.05           # the planted effect is still found
 
 
@@ -288,7 +291,7 @@ def test_xenograft_scope_end_to_end_with_host_sex_covariate(tmp_path):
     manifest = aft.process_dataset(entry, store, tmp_path / 'out', list(aft.FACETS), RSCRIPT, threads=1,
                                    memory_limit_gb=1)
     assert manifest['status'] == 'done' and manifest['facet_scope'] == 'xenograft_human_in_mouse'
-    assert manifest['facets_tested_in_scope'] == ['sex', 'app_nlgf']
+    assert manifest['facets_tested_in_scope'] == ['graft_sex', 'host_sex', 'app_nlgf']
     nlgf = [u for u in manifest['units'] if u['facet'] == 'app_nlgf' and u['status'] == 'ok']
     assert nlgf and nlgf[0]['covariates'] == ['sex']                                 # the host's sex
 

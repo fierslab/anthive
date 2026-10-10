@@ -108,7 +108,8 @@ tags:
       definition: >
         Sex of the biological subject the cell comes from. Every cell
         inherits its donor's sex. For xenografts this is the graft donor,
-        not the host animal (see host_sex).
+        not the host animal (see host_sex). The test of this column in a xenograft is the
+        facet test `graft_sex` (one graft line per mouse only).
       kind: categorical
       values: "m (male), f (female)"
       missing: >

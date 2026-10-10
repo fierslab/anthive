@@ -207,7 +207,16 @@ Test eligibility is the statistical minimum (`lib/facet_rules.py`), and every te
 | Donor-count filter for counting | none besides descriptive-only | none |
 
 The sex covariate is the **host's** sex (`ant_host_sex`) for a xenograft, where the donor sex of the human cells
-varies within an animal. `ant-facet-test run` reports the units that became testable (see the results note).
+varies within an animal.
+
+Sex facets in a xenograft (2026-10-10). `ant_sex` of a xenograft is the sex of the donor line of the grafted human
+cells, not of the mouse; the old `sex` test therefore tested the graft donor sex under a "host" label. Two facets
+replace it in the `xenograft_human_in_mouse` scope (`sex` is now `human_postmortem` only, `TEST_FACET_SCOPES` in
+`lib/facet_scopes.py`): `graft_sex` (column `ant_sex`; API name `graft_sex` / `ant_graft_sex`, a test name with no column
+of its own, mapped to `ant_sex` by the dataset Facets tab) and `host_sex` (`ant_host_sex`). `graft_sex` is refused for the
+whole dataset when any animal carries cells of both sexes (a village: several lines per mouse, status "mixed per
+animal"). A sex facet no replicate has a value for is reported as "not recorded". The sex covariate of the other
+xenograft facets stays the host's sex; the XIST / Y-gene control applies to `graft_sex` (human cells), not to `host_sex`. `ant-facet-test run` reports the units that became testable (see the results note).
 
 ### C. Facet scopes
 
@@ -315,6 +324,8 @@ ignored for animals and samples.
 | apoe4_carrier | `ant_apoe4_carrier` | e4 carrier vs non-carrier | derived from `ant_apoe` (any e4 allele) when the carrier column is absent |
 | braak | `ant_braak` | linear trend, log2 fold change per Braak unit | donor value must be a single number |
 | age (v3) | `ant_age` | linear trend, log2 fold change per decade (`age / 10`) | human_postmortem; model `~ age + sex + pmi [+ batch]`; includes disease prevalence; top-coded ages (PsychAD 90) flatten the slope |
+| graft_sex (xenograft) | `ant_sex` | male vs female donor line of the grafted cells | one line per mouse; refused when mixed per animal |
+| host_sex (xenograft) | `ant_host_sex` | male vs female host mouse | covariate-free (the sex covariate is host sex in the other facets) |
 | app_nlgf (v3) | `ant_app_nlgf` | nlgf vs control (control is the reference) | mouse_in_vivo and xenograft_human_in_mouse; replicate = animal; covariate sex (host sex in a xenograft); NL-G-F plus a second engineered allele is NULL |
 
 A donor whose cells carry more than one distinct value for a facet gets NULL
