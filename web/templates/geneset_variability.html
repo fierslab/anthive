@@ -3,6 +3,7 @@
 {% block title %}geneset variability — anthive{% endblock %}
 
 {% block content %}
+{% from "_macros.html" import review_banner as _review_banner %}{{ _review_banner('genesets-variability') }}
 <style>
   .mv-intro { max-width: 900px; font-size: 13px; color: var(--text-muted); line-height: 1.55; margin: 2px 0 8px; }
   details.mv-stats-help { max-width: 900px; margin: 0 0 12px; font-size: 12px; }

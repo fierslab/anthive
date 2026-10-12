@@ -226,6 +226,14 @@
 <span class="info" title="{{ text }}"{% if glossary %} data-glossary="{{ glossary }}"{% endif %} tabindex="0" role="button">&#9432;</span>
 {%- endmacro %}
 
+{# Slim muted banner for a view that is not approved yet (see APPROVED_VIEWS in browser.py);
+   renders nothing for an approved view. key: a key of VIEW_REGISTRY. #}
+{% macro review_banner(key) -%}
+{%- if not view_approved(key) -%}
+<div class="review-banner" role="note" data-view="{{ key }}">Preview. {{ VIEW_PREVIEW_TIP }}</div>
+{%- endif -%}
+{%- endmacro %}
+
 {% macro experimental_notice(what) -%}
 {%- set _issue_url = issue_tracker_url() -%}
 <div class="exp-notice" role="note">

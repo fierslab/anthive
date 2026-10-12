@@ -40,6 +40,74 @@ templates = Jinja2Templates(directory=str(templates_dir))
 templates.env.filters['urlencode'] = url_quote
 
 
+# ── Reviewed ("OK-ed") views ─────────────────────────────────────────────────
+#
+# One place that says which data views are approved. Every other view stays fully
+# reachable but is greyed: a muted nav link or tab with a "preview" marker and a tooltip,
+# plus a slim banner on the page itself. To approve a view, add its key to
+# APPROVED_VIEWS. Utility pages (help, about, privacy, settings, account, api-guide,
+# admin, library, papers) are not data views and are not part of this mechanism.
+VIEW_REGISTRY: Dict[str, str] = {
+    'datasets': 'Datasets: catalogue, collection and dataset pages',
+    'genes': 'Genes: landing page',
+    'genesets': 'Gene sets: landing, study and experiment pages',
+    'gene-expression': 'Gene page, Expression tab',
+    'geneset-expression': 'Gene set page, Expression tab',
+    'facets': 'Facets: index and facet pages',
+    'donor-groups': 'Donor groups',
+    'genesets-variability': 'Gene set variability across datasets',
+    'gene-detection': 'Gene page, Detection tab (the earlier expression table)',
+    'gene-shifts': 'Gene page, What shifts it tab',
+    'gene-variability': 'Gene page, Donor variability tab',
+    'gene-author-de': 'Gene page, Author DE tab',
+    'gene-atlas': 'Gene page, Atlas tab (old)',
+    'geneset-score': 'Gene set page, Module score tab (the earlier expression table)',
+    'geneset-shifts': 'Gene set page, What shifts it tab',
+    'geneset-variability': 'Gene set page, Donor variability tab',
+    'geneset-genes': 'Gene set page, Genes tab',
+    'geneset-page': 'Gene set page, Gene set page (old) tab',
+}
+APPROVED_VIEWS = frozenset({
+    'datasets', 'genes', 'genesets', 'gene-expression', 'geneset-expression',
+})
+VIEW_PREVIEW_TIP = 'This view is still being reviewed; results may change.'
+
+
+def view_approved(key: str) -> bool:
+    """True when the view ``key`` is in ``APPROVED_VIEWS``.
+
+    Args:
+        key: a key of ``VIEW_REGISTRY``.
+
+    Returns:
+        Whether the view has been reviewed and approved.
+
+    Raises:
+        KeyError: for an unknown key, so a typo in a template fails loudly in the tests.
+    """
+    if key not in VIEW_REGISTRY:
+        raise KeyError(f'unknown view key: {key}')
+    return key in APPROVED_VIEWS
+
+
+def view_class(key: str) -> str:
+    """CSS class for a view's nav link or tab: ``vw-preview`` when it is not approved, else empty."""
+    return '' if view_approved(key) else 'vw-preview'
+
+
+def view_tip(key: str, text: str = '') -> str:
+    """Tooltip for a nav link or tab: the preview notice (after ``text``) when not approved, else ``text``."""
+    if view_approved(key):
+        return text
+    return (text + ' ' if text else '') + VIEW_PREVIEW_TIP
+
+
+templates.env.globals['view_approved'] = view_approved
+templates.env.globals['view_class'] = view_class
+templates.env.globals['view_tip'] = view_tip
+templates.env.globals['VIEW_PREVIEW_TIP'] = VIEW_PREVIEW_TIP
+
+
 _DEFAULT_ISSUE_TRACKER_URL = 'https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues'
 _issue_tracker_cfg: list = []      # [value] once read from anthive.yaml
 
@@ -3467,6 +3535,33 @@ def gene_author_de(request: Request, gene: str):
     return {'gene': gene, 'rows': rows}
 
 
+def _geneset_search_rows(api_url: str) -> List[Dict[str, Any]]:
+    """Compact rows of every gene set for the search box of ``/genesets`` (empty when the API fails).
+
+    Each row has the ids needed to link the set, the names the search matches on (display name,
+    module name, catalog = ``study/experiment``) and a few facts shown with a hit.
+    """
+    try:
+        flat = _api_get(api_url, '/genesets') or {}
+    except Exception as error:
+        print(f"API error (/genesets search list): {error}")
+        return []
+    rows: List[Dict[str, Any]] = []
+    for geneset in flat.get('genesets', []):
+        study, experiment, name = geneset.get('study'), geneset.get('experiment'), geneset.get('name')
+        if not (study and experiment and name):
+            continue
+        rows.append({
+            'study': study, 'experiment': experiment, 'name': name,
+            'display_name': geneset.get('display_name') or name,
+            'n_genes': geneset.get('n_genes'),
+            'celltypes': geneset.get('celltypes') or [],
+            'organism': geneset.get('organism') or '',
+            'n_scored': len([db for db in (geneset.get('scored_in') or []) if db]),
+        })
+    return rows
+
+
 @router.get("/genesets", response_class=HTMLResponse)
 async def genesets_index(request: Request):
     """Genesets landing page.
@@ -3556,6 +3651,7 @@ async def genesets_index(request: Request):
     # study rows and inside the drilldown.
     dataset_annotations = _build_dataset_annotations(api_url)
     return templates.TemplateResponse(request, "genesets.html", {
+        "search_genesets": _geneset_search_rows(api_url),
         "studies": studies,
         "total": len(studies),
         "total_genesets": total_genesets,
@@ -4317,7 +4413,8 @@ async def geneset_view(request: Request, study: str, experiment: str, name: str)
         # chips can render a `(2)` badge for secondary datasets.
         "dataset_annotations": dataset_annotations,
         "view_dbs": _view_db_map(api_url),
-        "view_payload": {k: payload.get(k) for k in ('scored_in', 'column_name', 'direction', 'n_genes', 'quality_sensitive', 'genes', 'ranks', 'format')},
+        "view_categories": VIEW_CATEGORIES,
+        "view_payload": {k: payload.get(k) for k in ('scored_in', 'column_name', 'direction', 'n_genes', 'quality_sensitive', 'genes', 'ranks', 'format', 'display_name')},
         "provenance": _geneset_provenance(api_url, payload, study, experiment),
         "mv_ctx": {
             "scope": "module",

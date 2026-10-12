@@ -192,7 +192,7 @@ def test_geneset_page_has_the_view_tab(client):
     for marker in ('data-vtab="score"', 'data-vtab="shifts"', 'data-vtab="variability"', 'data-vtab="page"', 'id="vt-score"', 'id="vt-shifts"',
                    'id="vt-variability"', 'id="vt-page"', 'id="vws-p1"', 'id="vws-p2"', 'id="vws-headline"', 'id="vws-p1-help" hidden', 'id="vws-p2-help" hidden'):
         assert marker in text, marker
-    for label in ("1. Module score", "2. What shifts it", "3. Donor variability", "Geneset page (old)"):
+    for label in ("1. Expression", "Module score", "2. What shifts it", "3. Donor variability", "Geneset page (old)"):
         assert label in text, label
     assert text.index('id="vws-headline"') < text.index('id="vw-tabs"')
     assert "doc-block" not in text.split('id="vt-page"')[0].split('id="vw-tabs"')[1]       # no doc_block clutter in the view tabs
@@ -457,3 +457,114 @@ def test_landing_keeps_the_multi_gene_comparison_separate_and_notes_it_on_the_pa
     assert "Compare several genes" in landing and 'href="/genes/APOE,TREM2,CX3CR1"' in landing
     page = client.get("/genes/APOE,TREM2").text
     assert 'id="gv-multi-note"' in page and 'href="/genes/TREM2"' in page and "Facet results are per gene" in page
+
+
+# ── approved views, Expression tab, gene set search ────────────────────────────
+
+def test_view_registry_and_initial_approval_list():
+    assert browser.APPROVED_VIEWS <= set(browser.VIEW_REGISTRY)
+    assert browser.APPROVED_VIEWS == {"datasets", "genes", "genesets", "gene-expression", "geneset-expression"}
+    assert browser.view_approved("datasets") and not browser.view_approved("facets")
+    assert browser.view_class("facets") == "vw-preview" and browser.view_class("genes") == ""
+    assert browser.VIEW_PREVIEW_TIP in browser.view_tip("facets", "Facets")
+    assert browser.view_tip("genes", "Genes") == "Genes"
+    with pytest.raises(KeyError):
+        browser.view_approved("no-such-view")
+
+
+def test_nav_greys_only_unapproved_views(client):
+    nav = client.get("/").text.split('<nav aria-label="Main">')[1].split("</nav>")[0]
+    facets = nav.split('href="/facets"')[1].split("</a>")[0]
+    assert 'class="vw-preview"' in facets and "preview" in facets and browser.VIEW_PREVIEW_TIP in facets
+    for href in ('href="/"', 'href="/genesets"', 'href="/genes"'):
+        entry = nav.split(href)[1].split("</a>")[0]
+        assert "vw-preview" not in entry and "preview" not in entry
+
+
+def test_approving_a_view_removes_its_marker(client, monkeypatch):
+    monkeypatch.setattr(browser, "APPROVED_VIEWS", browser.APPROVED_VIEWS | {"facets"})
+    text = client.get("/facets").text
+    assert 'class="review-banner"' not in text
+    assert 'class="vw-preview"' not in text.split('<nav aria-label="Main">')[1].split("</nav>")[0]
+
+
+@pytest.mark.parametrize("path", ["/facets", "/facets/ant_disease", "/donor-groups", "/genesets/variability"])
+def test_unapproved_pages_show_banner_but_stay_reachable(client, path):
+    response = client.get(path)
+    assert response.status_code == 200 or path == "/donor-groups"
+    if response.status_code == 200:
+        assert 'class="review-banner"' in response.text and browser.VIEW_PREVIEW_TIP in response.text
+
+
+@pytest.mark.parametrize("path", ["/about", "/help", "/privacy", "/settings", "/api-guide", "/"])
+def test_utility_and_approved_pages_have_no_banner(client, path):
+    assert 'class="review-banner"' not in client.get(path).text
+
+
+def _tab_button(text, vtab):
+    return re.search(r'<button[^>]*data-vtab="%s"[^>]*>' % vtab, text).group(0)
+
+
+def test_gene_page_expression_is_first_and_only_approved_tab(client):
+    text = client.get("/genes/PTPRG").text
+    assert text.index('data-vtab="expression"') < text.index('data-vtab="shifts"')
+    assert "vw-preview" not in _tab_button(text, "expression")
+    for vtab in ("shifts", "variability", "de", "detection", "atlas"):
+        assert "vw-preview" in _tab_button(text, vtab), vtab
+    assert "initTabs(document.getElementById('vw-tabs'), 'expression')" in text
+    panel = lambda name: text.split('id="vt-%s"' % name)[1].split('class="tab-panel', 1)[0]
+    assert "review-banner" not in panel("expression").split('id="vx-help"')[0]
+    for name in ("shifts", "detection"):
+        assert "review-banner" in panel(name)
+    for marker in ('id="vx-root" data-kind="gene"', "1. Expression rank by cell type", 'id="vx-help" hidden', "window.antExpression"):
+        assert marker in text, marker
+
+
+def test_geneset_page_expression_is_first_and_default(client):
+    text = client.get("/genesets/Study1/Exp1/DAM").text
+    assert text.index('data-vtab="expression"') < text.index('data-vtab="score"')
+    assert "vw-preview" not in _tab_button(text, "expression")
+    for vtab in ("score", "shifts", "variability", "genes", "page"):
+        assert "vw-preview" in _tab_button(text, vtab), vtab
+    assert "initTabs(document.getElementById('vw-tabs'), 'expression')" in text
+    assert 'id="vx-root" data-kind="geneset"' in text and "/rank?db_id=" in text
+    assert "review-banner" in text.split('id="vt-score"')[1].split('id="vt-shifts"')[0]
+
+
+def test_gene_and_geneset_expression_use_one_renderer(client):
+    gene = client.get("/genes/PTPRG").text
+    geneset = client.get("/genesets/Study1/Exp1/DAM").text
+    for text in (gene, geneset):
+        assert text.count("window.antExpression = window.antExpression") == 1
+        assert "Rank among" in text and "Datasets without per-cell cell types" in text
+    assert "mean (log-normalised) expression" in gene and "scanpy score" in geneset
+
+
+def test_geneset_landing_has_search_over_every_set(client, monkeypatch):
+    sets = [{"study": "S1", "experiment": "E1", "name": "Brown_Lysosome", "display_name": "Brown (Lysosome)", "n_genes": 34,
+             "celltypes": ["microglial cell"], "organism": "human", "scored_in": ["A/n1", None]},
+            {"study": "S1", "experiment": "E1", "display_name": "no name"}]
+    base = browser._api_get
+
+    def fake(api_url, path, **kwargs):
+        if path.split("?")[0] == "/genesets":
+            return {"genesets": sets}
+        return _fake(api_url, path, **kwargs)
+    monkeypatch.setattr(browser, "_api_get", fake)
+    text = client.get("/genesets").text
+    assert 'id="gs-search-q"' in text and 'aria-live="polite"' in text and "gene sets match" in text
+    data = json.loads(re.search(r'<script id="gs-search-data" type="application/json">(.*?)</script>', text, re.S).group(1))
+    assert data == [{"study": "S1", "experiment": "E1", "name": "Brown_Lysosome", "display_name": "Brown (Lysosome)", "n_genes": 34,
+                     "celltypes": ["microglial cell"], "organism": "human", "n_scored": 1}]
+    assert base is not fake
+
+
+def test_geneset_landing_without_the_list_has_no_search(client):
+    assert 'id="gs-search-q"' not in client.get("/genesets").text
+
+
+def test_help_describes_preview_marker_and_expression_rank():
+    import help_content
+    gene_view = help_content.get_topic("gene-view").body_html
+    assert "preview" in gene_view and "Expression rank" in gene_view
+    assert "Expression rank" in help_content.get_topic("geneset-view").body_html

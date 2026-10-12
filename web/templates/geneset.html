@@ -20,8 +20,12 @@
 
 {% from "_views.html" import views_styles, views_core %}
 {% from "_view_geneset.html" import view_geneset_headline, view_geneset_score, view_geneset_shifts, view_geneset_genes, view_geneset_variability, view_geneset_script %}
+{% from "_view_expression.html" import expression_styles, expression_panel, expression_core, expression_geneset_script %}
+{% from "_macros.html" import review_banner as _review_banner %}
 {{ views_styles() }}
+{{ expression_styles() }}
 {{ views_core() }}
+{{ expression_core() }}
 {% if provenance %}
 <div class="vw-prov" id="vws-provenance">
   {% for label, text, href in provenance['items'] %}{% if not loop.first %}<span class="sep">&middot;</span>{% endif %}<span class="muted">{{ label }}</span> {% if href %}<a href="{{ href }}">{{ text }}</a>{% else %}{{ text }}{% endif %}{% endfor %}
@@ -37,17 +41,20 @@
 {% endif %}
 {{ view_geneset_headline() }}
 <div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
-  <button type="button" class="tab-btn" data-vtab="score" data-hash="module-score" data-alias="geneset-view" role="tab">1. Module score</button>
-  <button type="button" class="tab-btn" data-vtab="shifts" data-hash="shifts" role="tab">2. What shifts it</button>
-  <button type="button" class="tab-btn" data-vtab="variability" data-hash="variability" role="tab" hidden>3. Donor variability</button>
-  <button type="button" class="tab-btn" data-vtab="genes" data-hash="genes" role="tab">Genes</button>
-  <button type="button" class="tab-btn vw-old" data-vtab="page" data-hash="page" role="tab" title="The earlier geneset page: members, where the score varies most">Geneset page (old)</button>
+  <button type="button" class="tab-btn {{ view_class('geneset-expression') }}" title="{{ view_tip('geneset-expression', 'Where the gene set ranks among all gene sets scored in a dataset, per cell type') }}" data-vtab="expression" data-hash="expression" role="tab">1. Expression</button>
+  <button type="button" class="tab-btn {{ view_class('geneset-score') }}" title="{{ view_tip('geneset-score', 'The earlier expression table: rank among gene sets and spread of the score') }}" data-vtab="score" data-hash="module-score" data-alias="geneset-view" role="tab">Module score</button>
+  <button type="button" class="tab-btn {{ view_class('geneset-shifts') }}" title="{{ view_tip('geneset-shifts', 'Facet effects on the mean score of the set') }}" data-vtab="shifts" data-hash="shifts" role="tab">2. What shifts it</button>
+  <button type="button" class="tab-btn {{ view_class('geneset-variability') }}" title="{{ view_tip('geneset-variability') }}" data-vtab="variability" data-hash="variability" role="tab" hidden>3. Donor variability</button>
+  <button type="button" class="tab-btn {{ view_class('geneset-genes') }}" title="{{ view_tip('geneset-genes', 'Member genes and their own facet calls') }}" data-vtab="genes" data-hash="genes" role="tab">Genes</button>
+  <button type="button" class="tab-btn vw-old {{ view_class('geneset-page') }}" title="{{ view_tip('geneset-page', 'The earlier geneset page: members, where the score varies most') }}" data-vtab="page" data-hash="page" role="tab">Geneset page (old)</button>
 </div>
-<div class="tab-panel vw-panel" id="vt-score">{{ view_geneset_score(name) }}</div>
-<div class="tab-panel vw-panel" id="vt-shifts">{{ view_geneset_shifts(name) }}</div>
-<div class="tab-panel vw-panel" id="vt-variability">{{ view_geneset_variability() }}</div>
-<div class="tab-panel vw-panel" id="vt-genes">{{ view_geneset_genes(name) }}</div>
+<div class="tab-panel vw-panel" id="vt-expression">{{ expression_panel('geneset', payload.display_name) }}</div>
+<div class="tab-panel vw-panel" id="vt-score">{{ _review_banner('geneset-score') }}{{ view_geneset_score(name) }}</div>
+<div class="tab-panel vw-panel" id="vt-shifts">{{ _review_banner('geneset-shifts') }}{{ view_geneset_shifts(name) }}</div>
+<div class="tab-panel vw-panel" id="vt-variability">{{ _review_banner('geneset-variability') }}{{ view_geneset_variability() }}</div>
+<div class="tab-panel vw-panel" id="vt-genes">{{ _review_banner('geneset-genes') }}{{ view_geneset_genes(name) }}</div>
 <div class="tab-panel" id="vt-page">
+{{ _review_banner('geneset-page') }}
 
 <div class="two-col" style="margin:8px 0 12px">
     <div>
@@ -147,5 +154,6 @@
 </details>
 </div>
 {{ view_geneset_script(study, experiment, name, view_payload or {}, view_dbs or {}) }}
-<script>window.antViews.initTabs(document.getElementById('vw-tabs'), 'score');</script>
+{{ expression_geneset_script(study, experiment, name, view_payload or {}, view_dbs or {}, view_categories or {}) }}
+<script>window.antViews.initTabs(document.getElementById('vw-tabs'), 'expression');</script>
 {% endblock %}

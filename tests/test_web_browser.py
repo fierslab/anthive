@@ -2512,8 +2512,8 @@ def test_topbar_menu_button(client):
 def test_exp_badge_is_small_inline(client):
     text = client.get("/").text
     nav_entry = text.split('<a href="/facets"')[1].split("</a>")[0]
-    assert 'class="nav-exp"' in nav_entry
-    assert '<span class="exp-badge">exp</span>' in nav_entry
+    assert 'class="vw-preview"' in nav_entry          # facets is not approved yet: muted nav link
+    assert '<span class="exp-badge">preview</span>' in nav_entry
     css = text.split(".exp-badge {")[1].split("}")[0]
     assert "font-size: .6em" in css
     assert "vertical-align: super" in css

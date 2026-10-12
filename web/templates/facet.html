@@ -3,6 +3,7 @@
 {% block title %}{{ facet_name }} · facets · anthive{% endblock %}
 
 {% block content %}
+{% from "_macros.html" import review_banner as _review_banner %}{{ _review_banner('facets') }}
 <style>
   .facet-header { margin: 4px 0 12px; }
   .facet-header .strip { color: var(--text-muted); font-family: var(--font-mono); font-size: 13px; margin-left: 8px; }

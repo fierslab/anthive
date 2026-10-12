@@ -483,11 +483,22 @@
   var p2 = document.getElementById('vws-p2');
   var genesHost = document.getElementById('vws-genes-body');
   renderGenes(genesHost, null);
-  loadScores().then(function (rows) {
-    var redraw = function () { renderP1(p1, rows); };
-    redraw();
-    loadRanks(rows, redraw);
-  });
+  // The earlier module score table is only built when its tab is opened: the Expression tab asks the API for
+  // the same ranks, and the first read of a dataset's score file is slow.
+  var scoresStarted = false;
+  function startScores() {
+    if (scoresStarted) return;
+    scoresStarted = true;
+    loadScores().then(function (rows) {
+      var redraw = function () { renderP1(p1, rows); };
+      redraw();
+      loadRanks(rows, redraw);
+    });
+  }
+  var scoreTab = document.querySelector('[data-vtab="score"]');
+  if (scoreTab) scoreTab.addEventListener('click', startScores);
+  window.addEventListener('hashchange', function () { setTimeout(function () { if (document.getElementById('vt-score').classList.contains('active')) startScores(); }, 0); });
+  setTimeout(function () { if (document.getElementById('vt-score').classList.contains('active')) startScores(); }, 0);
   V.cached(V.API + '/genesets/' + enc(STUDY) + '/' + enc(EXPERIMENT) + '/' + enc(NAME) + '/facet-effects').then(function (effects) {
     state.effects = effects;
     renderGenes(genesHost, effects);

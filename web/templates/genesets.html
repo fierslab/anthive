@@ -15,6 +15,19 @@
   .gs-count { font-size: 12px; color: var(--text-muted); margin: 0 0 6px; }
   .gs-desc { font-size: 12px; color: var(--text-muted); margin: 0 0 8px; max-width: 780px; }
   .gs-desc.err { color: #b91c1c; }
+  .gs-search { margin: 8px 0 14px; max-width: 760px; }
+  .gs-search-label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-bottom: 3px; }
+  .gs-search-row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .gs-search-row input[type=search] { flex: 1 1 320px; font-family: var(--font); font-size: 15px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 5px; }
+  .gs-search-count { font-size: 12px; color: var(--text-muted); }
+  .gs-search-results { list-style: none; margin: 6px 0 0; padding: 0; border: 1px solid var(--border); border-radius: 5px; background: #fff; max-height: 60vh; overflow-y: auto; }
+  .gs-search-results li { border-bottom: 1px solid var(--border-light); }
+  .gs-search-results li:last-child { border-bottom: none; }
+  .gs-search-results a { display: block; padding: 6px 10px; color: var(--text); text-decoration: none; }
+  .gs-search-results li.sel a, .gs-search-results a:hover, .gs-search-results a:focus { background: var(--hover); outline: none; }
+  .gs-hit-name { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
+  .gs-hit-meta { font-size: 11px; color: var(--text-muted); overflow-wrap: anywhere; }
+  .gs-hit-name mark { background: #fff3b0; padding: 0; }
 
   /* Study drilldown table reuses the landing-page column-header popover
      pattern (see index.html) with a smaller, geneset-specific set of
@@ -105,6 +118,99 @@
   {% if not studies %}
   <p class="muted">No gene sets in the store.</p>
   {% else %}
+  {% if search_genesets %}
+  <div class="gs-search" id="gs-search">
+    <label for="gs-search-q" class="gs-search-label">Find a gene set by name</label>
+    <div class="gs-search-row">
+      <input type="search" id="gs-search-q" placeholder="e.g. lysosome, DAM, microglia panel" autocomplete="off" spellcheck="false" aria-controls="gs-search-results" aria-describedby="gs-search-count" autofocus>
+      <span class="gs-search-count" id="gs-search-count" aria-live="polite"></span>
+    </div>
+    <ul class="gs-search-results" id="gs-search-results" role="listbox" hidden></ul>
+  </div>
+  <script id="gs-search-data" type="application/json">{{ search_genesets|tojson }}</script>
+  <script>
+  // Instant gene set search: all sets are on the page already, so filtering needs no request.
+  // Every word of the query must occur in the display name, module name or catalog (study/experiment);
+  // case, accents and the separators _ - / are ignored.
+  (function () {
+    var input = document.getElementById('gs-search-q');
+    var list = document.getElementById('gs-search-results');
+    var countEl = document.getElementById('gs-search-count');
+    var rows = JSON.parse(document.getElementById('gs-search-data').textContent);
+    var MAX_SHOWN = 100;
+    var selected = -1;
+    function fold(text) {
+      return String(text || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[_\-\/.,;:()]+/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+    function esc(text) { return String(text == null ? '' : text).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    rows.forEach(function (row) {
+      row.hay = fold(row.display_name + ' ' + row.name + ' ' + row.study + '/' + row.experiment);
+      row.lead = fold(row.display_name);
+      row.href = '/genesets/' + encodeURIComponent(row.study) + '/' + encodeURIComponent(row.experiment) + '/' + encodeURIComponent(row.name);
+    });
+    function search(query) {
+      var terms = fold(query).split(' ').filter(Boolean);
+      if (!terms.length) return [];
+      var hits = rows.filter(function (row) { return terms.every(function (term) { return row.hay.indexOf(term) >= 0; }); });
+      var rank = function (row) { return row.lead.indexOf(terms[0]) === 0 ? 0 : (row.lead.indexOf(' ' + terms[0]) >= 0 ? 1 : 2); };
+      return hits.sort(function (a, b) { return rank(a) - rank(b) || a.display_name.localeCompare(b.display_name); });
+    }
+    function mark(text, query) {
+      var folded = fold(text);
+      var safe = esc(text);
+      var terms = fold(query).split(' ').filter(Boolean);
+      if (!terms.length || folded.length !== String(text).length) return safe;
+      var first = terms.map(function (term) { return { at: folded.indexOf(term), len: term.length }; }).filter(function (hit) { return hit.at >= 0; }).sort(function (a, b) { return a.at - b.at; })[0];
+      if (!first) return safe;
+      return esc(text.slice(0, first.at)) + '<mark>' + esc(text.slice(first.at, first.at + first.len)) + '</mark>' + esc(text.slice(first.at + first.len));
+    }
+    function select(index) {
+      var items = list.querySelectorAll('li');
+      if (!items.length) { selected = -1; return; }
+      selected = (index + items.length) % items.length;
+      items.forEach(function (item, position) {
+        item.classList.toggle('sel', position === selected);
+        item.setAttribute('aria-selected', position === selected ? 'true' : 'false');
+      });
+      items[selected].scrollIntoView({ block: 'nearest' });
+    }
+    function render() {
+      var query = input.value;
+      var hits = search(query);
+      var searching = !!fold(query);
+      list.hidden = !searching || !hits.length;
+      var studies = document.getElementById('gs-studies');   // defined after this script, so looked up here
+      if (studies) studies.hidden = searching;
+      countEl.textContent = searching ? hits.length + ' of ' + rows.length + ' gene sets match' + (hits.length > MAX_SHOWN ? ' (first ' + MAX_SHOWN + ' shown)' : '') : rows.length + ' gene sets';
+      list.innerHTML = hits.slice(0, MAX_SHOWN).map(function (row) {
+        var meta = row.study + '/' + row.experiment + ' &middot; ' + (row.n_genes != null ? row.n_genes + ' genes' : '') + (row.celltypes.length ? ' &middot; ' + esc(row.celltypes.join(', ')) : '') + (row.n_scored ? ' &middot; scored in ' + row.n_scored + ' datasets' : '');
+        return '<li role="option"><a href="' + row.href + '"><span class="gs-hit-name">' + mark(row.display_name, query) + '</span><div class="gs-hit-meta">' + meta + '</div></a></li>';
+      }).join('');
+      selected = -1;
+      if (history.replaceState) {
+        var params = new URLSearchParams(location.search);
+        if (searching) params.set('q', query.trim()); else params.delete('q');
+        var text = params.toString();
+        history.replaceState(null, '', location.pathname + (text ? '?' + text : '') + location.hash);
+      }
+    }
+    input.addEventListener('input', render);
+    input.addEventListener('keydown', function (event) {
+      if (event.key === 'ArrowDown') { event.preventDefault(); select(selected + 1); }
+      else if (event.key === 'ArrowUp') { event.preventDefault(); select(selected < 0 ? -1 : selected - 1); }
+      else if (event.key === 'Enter') {
+        var items = list.querySelectorAll('li');
+        var target = items[selected >= 0 ? selected : 0];
+        if (target) { event.preventDefault(); location.href = target.querySelector('a').href; }
+      } else if (event.key === 'Escape' && input.value) { event.preventDefault(); input.value = ''; render(); }
+    });
+    var initial = new URLSearchParams(location.search).get('q');
+    if (initial) input.value = initial;
+    document.addEventListener('DOMContentLoaded', render);   // the study table below the script must exist first
+  })();
+  </script>
+  {% endif %}
+  <div id="gs-studies">
   <p class="gs-desc">One row per study. Click a row to browse that study's experiments and gene sets. Narrow the list with the filters below.</p>
 
   <div class="gs-filters" style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;margin:8px 0 12px">
@@ -184,6 +290,7 @@
   </div>
 
   <div style="margin-top:8px;font-size:11px;color:var(--text-muted)"><span id="gs-count-legacy" style="display:none"></span></div>
+  </div>
 
   <script>
   (function () {

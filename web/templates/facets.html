@@ -3,6 +3,7 @@
 {% block title %}facets · anthive{% endblock %}
 
 {% block content %}
+{% from "_macros.html" import review_banner as _review_banner %}{{ _review_banner('facets') }}
 <style>
   .facet-desc { font-size: 12px; color: var(--text-muted); max-width: 780px; margin: 4px 0 12px; }
   table.facet-table { width: 100%; border-collapse: collapse; font-size: 13px; }
