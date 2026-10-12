@@ -426,6 +426,13 @@ def test_gene_expression_panel_groups_by_cell_type_with_category_tags(client):
         assert gone not in text, gone
 
 
+def test_gene_expression_panel_lists_in_vitro_and_bulk_in_the_cell_type_row_without_pooling(client):
+    text = client.get("/genes/PTPRG").text
+    for needle in ("pooled: !!CATS[category].typed", "not pooled", "Bulk samples have no per-cell detection rate.",
+                   "category !== 'spatial' && category !== 'unclassified' && V.GROUPS.indexOf(db.group) >= 0"):
+        assert needle in text, needle
+
+
 def test_genes_landing_lists_examples_and_the_favourites_hook(client):
     anonymous = client.get("/genes").text
     for gene in browser.LANDING_EXAMPLE_GENES:
