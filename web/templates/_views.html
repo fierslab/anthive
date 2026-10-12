@@ -74,6 +74,16 @@
   tr.vw-sub td:first-child { padding-left: 28px; }
   tr.vw-scope-row td { background: #f7f9fa; font-weight: 500; font-size: 11.5px; color: #4b5563; }
 
+  /* ---- facet DE: units behind a cell, datasets outside the columns ---- */
+  col.u-ds { width: 38%; } col.u-co { width: 20%; } col.u-n { width: 12%; } col.u-e { width: 15%; } col.u-q { width: 15%; }
+  col.o-ds { width: 34%; } col.o-fc { width: 24%; }
+  table.vd-units td.num, table.vd-units th.num { white-space: nowrap; }
+  table.vw-grid table.vd-units td, table.vw-grid table.vd-units th { text-align: left; }
+  table.vw-grid table.vd-units td.num, table.vw-grid table.vd-units th.num { text-align: right; }
+  .vw-detail .dc-title { margin-bottom: 6px; }
+  #vwg-other, #vws-other { margin-top: 24px; }
+  @media (max-width: 640px) { col.u-ds { width: 34%; } col.u-co { width: 18%; } col.u-n { width: 14%; } col.u-e { width: 17%; } col.u-q { width: 17%; } col.o-ds { width: 32%; } col.o-fc { width: 22%; } }
+
   /* ---- panel 2: scope blocks ---- */
   .vw-scope-block { margin: 10px 0 18px; }
   .vw-scope-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 3px; }
@@ -567,16 +577,16 @@ window.antViews = window.antViews || (function () {
     return '<div class="fl">' + esc(row.label) + '</div><div class="fc">' + esc(row.contrast) + '</div>';
   }
   function gridA(block, model, ctx) {
-    var html = '<div class="vw-box"><table class="vw-grid"><colgroup><col style="width:200px">' + block.groups.map(function () { return '<col>'; }).join('') + '</colgroup><thead><tr><th class="fh">Facet ' + info('The donor-level property that was tested, and the comparison made. Click a cell to see the cohorts behind it.') + '</th>' +
-      block.groups.map(function (g) { return '<th>' + esc(SHORT[g] || g) + '</th>'; }).join('') + '</tr></thead><tbody>';
+    var html = '<div class="vw-box"><table class="vw-grid"><colgroup><col style="width:200px">' + GROUPS.map(function () { return '<col>'; }).join('') + '</colgroup><thead><tr><th class="fh">Facet ' + info('The donor-level property that was tested, and the comparison made. Click a cell to list the datasets behind it.') + '</th>' +
+      GROUPS.map(function (g) { return '<th>' + esc(SHORT[g] || g) + '</th>'; }).join('') + '</tr></thead><tbody>';
     block.rows.forEach(function (row) {
       var open = selection && selection.scope === block.scope && selection.facet === row.facet;
       html += '<tr><td class="fh">' + rowHeader(row) + '</td>';
-      block.groups.forEach(function (group) {
+      GROUPS.forEach(function (group) {
         html += '<td>' + cellHtml(row.cells[group] || null, { scope: block.scope, facet: row.facet, group: group, selected: open && selection.group === group }) + '</td>';
       });
       html += '</tr>';
-      if (open) html += '<tr class="vw-detail-row"><td colspan="' + (block.groups.length + 1) + '"><div class="vw-detail-wrap" data-detail="' + block.scope + '|' + row.facet + '|' + esc(selection.group) + '"><div class="vw-loading">Loading the cohorts...</div></div></td></tr>';
+      if (open) html += '<tr class="vw-detail-row"><td colspan="' + (GROUPS.length + 1) + '"><div class="vw-detail-wrap" data-detail="' + block.scope + '|' + row.facet + '|' + esc(selection.group) + '"><div class="vw-loading">Loading the datasets...</div></div></td></tr>';
     });
     return html + '</tbody></table></div>';
   }
@@ -585,7 +595,7 @@ window.antViews = window.antViews || (function () {
     block.rows.forEach(function (row) {
       var open = selection && selection.scope === block.scope && selection.facet === row.facet;
       var tested = [], untested = [];
-      block.groups.forEach(function (group) { (cellKind(row.cells[group]) === 'empty' ? untested : tested).push(group); });
+      GROUPS.forEach(function (group) { (cellKind(row.cells[group]) === 'empty' ? untested : tested).push(group); });
       html += '<div class="vw-crow"><div class="chead"><span class="fl">' + esc(row.label) + '</span><span class="fc">' + esc(row.contrast) + '</span></div><div class="cchips">';
       tested.forEach(function (group) {
         var cell = row.cells[group];
@@ -598,7 +608,7 @@ window.antViews = window.antViews || (function () {
       if (!tested.length) html += '<span class="rest">Not tested in any cell type.</span>';
       html += '</div>';
       if (untested.length && tested.length) html += '<div class="rest">not tested: ' + untested.map(plain).join(', ') + '</div>';
-      if (open) html += '<div data-detail="' + block.scope + '|' + row.facet + '|' + esc(selection.group) + '"><div class="vw-loading">Loading the cohorts...</div></div>';
+      if (open) html += '<div data-detail="' + block.scope + '|' + row.facet + '|' + esc(selection.group) + '"><div class="vw-loading">Loading the datasets...</div></div>';
       html += '</div>';
     });
     return html + '</div>';
@@ -652,6 +662,77 @@ window.antViews = window.antViews || (function () {
   }
   function preselect(scope, facet, group) { selection = { scope: scope, facet: facet, group: group }; }
 
+
+  /* ---------- facet DE: the datasets behind a cell, and the datasets outside the cell type columns ---------- */
+  // rows: {db_id, title, name (cohort), stats (pointStats), est, q, counted, reason, descriptive}.
+  // effect: {label, tip} of the effect column (LFC for genes, Effect in SD for gene sets).
+  function unitsTable(rows, effect) {
+    if (!rows.length) return '<div class="vw-placeholder">No dataset result is available for this cell.</div>';
+    var head = '<th>Dataset ' + info('Dataset behind the cell, with its id. Click for the dataset page.') + '</th><th>Cohort ' + info('The cohort the dataset belongs to; replication counts one dataset per cohort.') + '</th>' +
+      '<th class="num">Donors ' + info('Donors in the test group vs the reference group for two-group facets, otherwise the number of donors (host mice in the xenograft block).') + '</th>' +
+      '<th class="num">' + effect.label + ' ' + info(effect.tip) + '</th><th class="num">Adj. p ' + info(effect.pTip) + '</th>';
+    var body = rows.map(function (row) {
+      return '<tr' + (row.counted ? '' : ' class="vw-grey"') + '><td title="' + esc(row.title) + '">' + dsLink(row.db_id, row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + ' <span class="muted">' + esc(row.db_id) + '</span>' +
+        (row.counted ? '' : '<div class="muted">not counted' + (row.reason ? ': ' + esc(row.reason) : '') + '</div>') + '</td><td>' + esc(row.name) + '</td><td class="num">' + esc(row.stats && row.stats.donors || '') + '</td>' +
+        '<td class="num">' + (row.est == null ? 'n/a' : signed(row.est, 2)) + '</td><td class="num">' + (row.q == null ? '<span class="muted" title="Descriptive only: no test">n/a</span>' : pfmt(row.q)) + '</td></tr>';
+    }).join('');
+    return '<div class="vw-box"><table class="vw-table fixed vd-units"><colgroup><col class="u-ds"><col class="u-co"><col class="u-n"><col class="u-e"><col class="u-q"></colgroup><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table></div>';
+  }
+  // donor-pooled units (pool:<id>) have no dataset page
+  function dsLink(dbId, text) { return String(dbId).indexOf('pool:') === 0 ? esc(text) : '<a href="' + dbLink(dbId) + '">' + esc(text) + '</a>'; }
+  var SHOWN_OTHER = 25;
+  function excludedGroups(dbs) {
+    var groups = {};
+    Object.keys(dbs).forEach(function (id) {
+      var db = dbs[id];
+      if (!db || db.secondary) return;
+      var reason = db.facet_exclude_reason || '';
+      var label = null;
+      if (/^spatial/.test(reason)) label = 'spatial';
+      else if (/^proteomics/.test(reason)) label = 'proteomics';
+      else if (/^metacell/.test(reason)) label = 'metacell sets';
+      else if (/^Francken/.test(reason)) label = 'set aside by decision';
+      else if (reason) label = reason;
+      else if (db.scope === 'in_vitro') { label = 'in vitro, not tested'; reason = 'cultured cells are listed but not tested'; }
+      else if (!db.scope && db.human === false) { label = 'mouse, no facet layer'; reason = 'pure mouse datasets are outside the facet layer'; }
+      if (label) (groups[label] = groups[label] || []).push({ id: id, title: db.title || id, reason: reason });
+    });
+    return groups;
+  }
+  // items: [{scope, facetLabel, group, rows}] from the replication entries of cell type groups without a column.
+  function otherDatasetsHtml(items, dbs, effect) {
+    var flat = [];
+    items.forEach(function (item) {
+      item.rows.forEach(function (row) { flat.push({ item: item, row: row }); });
+    });
+    var html = '';
+    if (flat.length) {
+      var line = function (entry) {
+        var row = entry.row;
+        return '<tr' + (row.counted ? '' : ' class="vw-grey"') + '><td title="' + esc(row.title) + '">' + dsLink(row.db_id, row.title.length > 40 ? row.title.slice(0, 38) + '...' : row.title) + ' <span class="muted">' + esc(row.db_id) + '</span></td>' +
+          '<td>' + esc(entry.item.facetLabel) + '<div class="muted">' + esc(plain(entry.item.group)) + (entry.item.scope === 'xenograft_human_in_mouse' ? ', xenograft' : '') + '</div></td><td class="num">' + esc(row.stats && row.stats.donors || '') + '</td>' +
+          '<td class="num">' + (row.est == null ? 'n/a' : signed(row.est, 2)) + '</td><td class="num">' + (row.q == null ? '<span class="muted">n/a</span>' : pfmt(row.q)) + '</td></tr>';
+      };
+      var head = '<th>Dataset ' + info('Dataset without a single cell type column in the matrix: mixed, unmapped or other cell types. Click for the dataset page.') + '</th><th>Facet and cell type ' + info('The facet tested and the cell type group of the result (the label of the group the dataset holds).') + '</th>' +
+        '<th class="num">Donors ' + info('Donors in the test group vs the reference group for two-group facets, otherwise the number of donors.') + '</th><th class="num">' + effect.label + ' ' + info(effect.tip) + '</th><th class="num">Adj. p ' + info(effect.pTip) + '</th>';
+      var table = function (entries) { return '<div class="vw-box"><table class="vw-table fixed vd-units vd-other"><colgroup><col class="o-ds"><col class="o-fc"><col class="u-n"><col class="u-e"><col class="u-q"></colgroup><thead><tr>' + head + '</tr></thead><tbody>' + entries.map(line).join('') + '</tbody></table></div>'; };
+      html += table(flat.slice(0, SHOWN_OTHER));
+      if (flat.length > SHOWN_OTHER) html += '<details class="vw-more"><summary>Show the other ' + (flat.length - SHOWN_OTHER) + ' rows</summary>' + table(flat.slice(SHOWN_OTHER)) + '</details>';
+    } else {
+      html += '<div class="vw-placeholder">No dataset outside the cell type columns has a result for this subject.</div>';
+    }
+    var excluded = excludedGroups(dbs || {});
+    var labels = Object.keys(excluded).sort(function (a, b) { return excluded[b].length - excluded[a].length; });
+    if (labels.length) {
+      var total = labels.reduce(function (sum, label) { return sum + excluded[label].length; }, 0);
+      html += '<details class="vw-more"><summary>' + total + ' datasets are not tested: ' + labels.map(function (label) { return excluded[label].length + ' ' + esc(label); }).join(', ') + '</summary>' +
+        '<div class="vw-box"><table class="vw-table"><tbody>' + labels.map(function (label) {
+          return excluded[label].map(function (entry) { return '<tr><td><a href="' + dbLink(entry.id) + '">' + esc(entry.title) + '</a> <span class="muted">' + esc(entry.id) + '</span></td><td class="muted">' + esc(entry.reason) + '</td></tr>'; }).join('');
+        }).join('') + '</tbody></table></div></details>';
+    }
+    return html;
+  }
+
   /* ---------- tabs ---------- */
   // bar: element holding buttons[data-vtab][data-hash]; panels are #vt-<name>. The first load reads the hash
   // (a "&gv=..." tail, used by the atlas filters, is kept untouched).
@@ -702,7 +783,7 @@ window.antViews = window.antViews || (function () {
     gl: gl, pill: pill, GENE_FLAGS: GENE_FLAGS, getJson: getJson, cached: cached, docBlock: docBlock, afterRender: afterRender, facetMeta: facetMeta, geneFlagPills: geneFlagPills,
     info: info, helpBtn: helpBtn, compact: compact, CELLS: CELLS, cellFromRep: cellFromRep, cellKind: cellKind, cellHtml: cellHtml, forestHtml: forestHtml, bindForest: bindForest,
     replicationLine: replicationLine, sameDirection: sameDirection, isTwoGroup: isTwoGroup, pointStats: pointStats, smallPill: smallPill, informativeCount: informativeCount, MIN_GROUP: MIN_GROUP, MIN_TREND: MIN_TREND,
-    linksHtml: linksHtml, bindDonorPlot: bindDonorPlot, dbLink: dbLink, apiUrl: apiUrl, renderPanel2: renderPanel2, legendHtml: legendHtml, preselect: preselect, initTabs: initTabs
+    linksHtml: linksHtml, bindDonorPlot: bindDonorPlot, dbLink: dbLink, apiUrl: apiUrl, renderPanel2: renderPanel2, legendHtml: legendHtml, preselect: preselect, initTabs: initTabs, unitsTable: unitsTable, otherDatasetsHtml: otherDatasetsHtml
   };
 })();
 </script>

@@ -57,12 +57,12 @@ VIEW_REGISTRY: Dict[str, str] = {
     'donor-groups': 'Donor groups',
     'genesets-variability': 'Gene set variability across datasets',
     'gene-detection': 'Gene page, Detection tab (the earlier expression table)',
-    'gene-shifts': 'Gene page, What shifts it tab',
+    'gene-shifts': 'Gene page, Facet DE tab',
     'gene-variability': 'Gene page, Donor variability tab',
     'gene-author-de': 'Gene page, Author DE tab',
     'gene-atlas': 'Gene page, Atlas tab (old)',
     'geneset-score': 'Gene set page, Module score tab (the earlier expression table)',
-    'geneset-shifts': 'Gene set page, What shifts it tab',
+    'geneset-shifts': 'Gene set page, Facet DE tab',
     'geneset-variability': 'Gene set page, Donor variability tab',
     'geneset-genes': 'Gene set page, Genes tab',
     'geneset-page': 'Gene set page, Gene set page (old) tab',
@@ -3969,7 +3969,7 @@ def _view_db_map(api_url: str) -> Dict[str, Dict[str, Any]]:
     ``celltype_col`` the per-cell cell type column (may be empty), ``scope`` is the facet scope, ``group`` the cell type group of the dataset-level
     cell type (empty when the dataset is mixed or has several cell types), ``human``
     whether the organism is human, ``secondary`` the reanalysis flag and ``modality``
-    nuclei versus cells (``_view_modality``), ``category`` the dataset category (``_view_category``). Empty when the API is unreachable.
+    nuclei versus cells (``_view_modality``), ``category`` the dataset category (``_view_category``), ``facet_exclude_reason`` why the dataset is outside the facet layer ('' when it is inside). Empty when the API is unreachable.
     """
     result: Dict[str, Dict[str, Any]] = {}
     try:
@@ -3995,6 +3995,7 @@ def _view_db_map(api_url: str) -> Dict[str, Dict[str, Any]]:
             'secondary': bool(db.get('is_secondary')),
             'modality': _view_modality(db),
             'category': _view_category(db),
+            'facet_exclude_reason': str(db.get('facet_exclude_reason') or ''),
         }
     return result
 

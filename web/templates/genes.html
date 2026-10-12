@@ -205,7 +205,7 @@
 {{ expression_core() }}
 <div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
   <button type="button" class="tab-btn {{ view_class('gene-expression') }}" title="{{ view_tip('gene-expression', 'Where the gene ranks among all genes, per cell type') }}" data-vtab="expression" data-hash="expression" role="tab">Expression</button>
-  <button type="button" class="tab-btn {{ view_class('gene-shifts') }}" title="{{ view_tip('gene-shifts', 'Facet effects on the gene') }}" data-vtab="shifts" data-hash="shifts" role="tab">What shifts it</button>
+  <button type="button" class="tab-btn {{ view_class('gene-shifts') }}" title="{{ view_tip('gene-shifts', 'Facet DE: donor-level facet effects on the gene') }}" data-vtab="shifts" data-hash="facet-de" data-alias="shifts" role="tab">Facet DE</button>
   <button type="button" class="tab-btn {{ view_class('gene-variability') }}" title="{{ view_tip('gene-variability') }}" data-vtab="variability" data-hash="variability" role="tab" hidden>Donor variability</button>
   <button type="button" class="tab-btn {{ view_class('gene-author-de') }}" title="{{ view_tip('gene-author-de') }}" data-vtab="de" data-hash="author-de" role="tab" hidden>Author DE (as published)<span class="tab-count"></span></button>
   <button type="button" class="tab-btn {{ view_class('gene-detection') }}" title="{{ view_tip('gene-detection', 'The earlier expression table: percent of cells expressing and rank in dataset') }}" data-vtab="detection" data-hash="detection" data-alias="gene-view" role="tab">Detection</button>

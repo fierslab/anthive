@@ -106,7 +106,7 @@ def test_view_db_map_groups_scope_and_flags(monkeypatch):
     monkeypatch.setattr(browser, "_api_get", _fake)
     result = browser._view_db_map("http://x")
     assert result["A/n1"] == {"title": "Nuclei microglia", "celltype_col": "ant_cell_type", "scope": "human_postmortem", "group": "microglia",
-                              "human": True, "secondary": False, "modality": "nuclei", "category": "post_mortem"}
+                              "human": True, "secondary": False, "modality": "nuclei", "category": "post_mortem", "facet_exclude_reason": ""}
     assert result["A/c1"]["modality"] == "cells"
     assert result["B/x1"]["secondary"] is True and result["B/x1"]["modality"] == "sorted live cells"
     assert result["B/mix"]["group"] == ""          # several cell types: not summarised
@@ -138,11 +138,11 @@ def test_gene_page_has_the_three_tabs_and_the_dataset_map(client):
     for marker in ('data-vtab="expression"', 'data-vtab="shifts"', 'data-vtab="variability"', 'data-vtab="atlas"', 'data-vtab="de"',
                    'id="vt-expression"', 'id="vt-shifts"', 'id="vt-variability"', 'id="vt-atlas"', 'id="vwg-p1"', 'id="vwg-p2"', 'id="vwg-headline"'):
         assert marker in text, marker
-    for label in ("Expression", "What shifts it", "Donor variability", "Author DE (as published)", "Atlas (old)"):
+    for label in ("Expression", "Facet DE", "Donor variability", "Author DE (as published)", "Atlas (old)"):
         assert label in text, label
-    for hash_name in ("expression", "shifts", "variability", "author-de", "atlas"):
+    for hash_name in ("expression", "facet-de", "variability", "author-de", "atlas"):
         assert f'data-hash="{hash_name}"' in text, hash_name
-    assert text.index('id="vwg-headline"') > text.index('id="vt-shifts"')      # facet summary sentence lives in the What shifts it tab
+    assert text.index('id="vwg-headline"') > text.index('id="vt-shifts"')      # facet summary sentence lives in the Facet DE tab
     assert not re.search(r'data-vtab="\w+"[^>]*>\d\. ', text)               # no numbers on tab labels
     assert text.index('data-vtab="de"') < text.index('data-vtab="atlas"')      # the old atlas tab is last
     assert "expression across the catalogue" in text
@@ -193,7 +193,7 @@ def test_geneset_page_has_the_view_tab(client):
     for marker in ('data-vtab="score"', 'data-vtab="shifts"', 'data-vtab="variability"', 'data-vtab="page"', 'id="vt-score"', 'id="vt-shifts"',
                    'id="vt-variability"', 'id="vt-page"', 'id="vws-p1"', 'id="vws-p2"', 'id="vws-headline"', 'id="vws-p1-help" hidden', 'id="vws-p2-help" hidden'):
         assert marker in text, marker
-    for label in ("Expression", "Module score", "What shifts it", "Donor variability", "Geneset page (old)"):
+    for label in ("Expression", "Module score", "Facet DE", "Donor variability", "Geneset page (old)"):
         assert label in text, label
     assert text.index('id="vws-headline"') > text.index('id="vt-shifts"')
     assert "doc-block" not in text.split('id="vt-page"')[0].split('id="vw-tabs"')[1]       # no doc_block clutter in the view tabs
@@ -276,7 +276,7 @@ def test_section_help_and_col_info_macros_render_the_shared_pattern():
 
 def test_gene_page_uses_numbered_help_headers_and_drops_old_labels(client):
     text = client.get("/genes/PTPRG").text
-    for header in ("1. Where is it expressed", "2. What shifts it", "3. Donor variability"):
+    for header in ("1. Where is it expressed", "Facet DE by cell type", "3. Donor variability"):
         assert header in text, header
     for panel in ("vwg-p1-help", "vwg-p2-help", "vwg-p3-help"):
         assert f'id="{panel}" hidden' in text
@@ -288,8 +288,8 @@ def test_gene_page_uses_numbered_help_headers_and_drops_old_labels(client):
 
 @pytest.mark.parametrize("name, needles", [
     ("_views.html", ("vw-dplot", "X-Plot-Caption", "adjusted for covariates", "per-cell view in", "donor values (JSON)", "table-layout: fixed", 'class="eb-cell"', "numberHtml")),
-    ("_view_gene.html", ("plot by cell type", "dataset page", "linksHtml")),
-    ("_view_geneset.html", ("plot by cell type", "linksHtml", "vws-p2-help")),
+    ("_view_gene.html", ("plot by cell type", "dataset page", "unitsTable")),
+    ("_view_geneset.html", ("plot by cell type", "unitsTable", "vws-p2-help")),
 ])
 def test_view_scripts_carry_the_donor_plot_links_and_q_column(name, needles):
     text = (_WEB_DIR / "templates" / name).read_text(encoding="utf-8")
@@ -298,8 +298,8 @@ def test_view_scripts_carry_the_donor_plot_links_and_q_column(name, needles):
 
 
 @pytest.mark.parametrize("path, hashes", [
-    ("/genes/PTPRG", ("expression", "shifts", "variability", "author-de", "atlas")),
-    ("/genesets/Study1/Exp1/DAM", ("module-score", "shifts", "variability", "page")),
+    ("/genes/PTPRG", ("expression", "facet-de", "variability", "author-de", "atlas")),
+    ("/genesets/Study1/Exp1/DAM", ("module-score", "facet-de", "variability", "page")),
     ("/facets/ant_disease", ("overview", "detail")),
 ])
 def test_every_tab_has_a_deep_link_hash_and_a_panel(client, path, hashes):
@@ -570,3 +570,40 @@ def test_help_describes_preview_marker_and_expression_rank():
     gene_view = help_content.get_topic("gene-view").body_html
     assert "preview" in gene_view and "Expression rank" in gene_view and "76%" in gene_view
     assert "Expression rank" in help_content.get_topic("geneset-view").body_html
+
+
+def test_facet_de_tab_rename_alias_and_two_sections(client):
+    for path in ("/genes/PTPRG", "/genesets/Study1/Exp1/DAM"):
+        text = client.get(path).text
+        button = _tab_button(text, "shifts")
+        assert ">Facet DE<" in text and 'data-hash="facet-de"' in button and 'data-alias="shifts"' in button
+        assert "What shifts it" not in text
+        for header in ("Facet DE by cell type", "Facet DE in other datasets"):
+            assert header in text
+        assert text.count('class="section-head">Facet DE') == 2
+    assert 'id="vwg-p2o-help" hidden' in client.get("/genes/PTPRG").text
+    assert 'id="vws-p2o-help" hidden' in client.get("/genesets/Study1/Exp1/DAM").text
+
+
+def test_facet_matrix_uses_the_fixed_site_wide_column_order(client):
+    text = client.get("/genes/PTPRG").text
+    assert "groups: Object.keys(seen).length ? V.GROUPS : []" in text
+    assert "GROUPS.map(function (g) { return '<th>'" in text
+    gene_set = client.get("/genesets/Study1/Exp1/DAM").text
+    assert "groups: Object.keys(seen).length ? V.GROUPS : []" in gene_set
+    assert "var GROUPS = ['microglia', 'astrocyte'" in text      # microglia first, one list for every grid
+
+
+def test_opened_cell_is_a_plain_table_without_plots(client):
+    for path in ("/genes/PTPRG", "/genesets/Study1/Exp1/DAM"):
+        text = client.get(path).text
+        detail_source = text.split("function detail")[1].split("/* ----------")[0]
+        assert "V.unitsTable(" in detail_source and "forestHtml(" not in detail_source and "linksHtml(" not in detail_source
+    assert "Adj. p" in client.get("/genes/PTPRG").text and "label: 'LFC'" in client.get("/genes/PTPRG").text
+    assert "label: 'Effect (SD)'" in client.get("/genesets/Study1/Exp1/DAM").text
+
+
+def test_view_db_map_carries_the_facet_exclusion_reason(monkeypatch):
+    databases = [dict(_DATABASES[0], id="X/sp", facet_exclude_reason="spatial technology (10x_visium): no replicate-level cell-type pseudobulk")]
+    monkeypatch.setattr(browser, "_api_get", lambda api_url, path, **kwargs: {"databases": databases})
+    assert browser._view_db_map("http://x")["X/sp"]["facet_exclude_reason"].startswith("spatial technology")
