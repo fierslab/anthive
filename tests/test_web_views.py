@@ -138,11 +138,12 @@ def test_gene_page_has_the_three_tabs_and_the_dataset_map(client):
     for marker in ('data-vtab="expression"', 'data-vtab="shifts"', 'data-vtab="variability"', 'data-vtab="atlas"', 'data-vtab="de"',
                    'id="vt-expression"', 'id="vt-shifts"', 'id="vt-variability"', 'id="vt-atlas"', 'id="vwg-p1"', 'id="vwg-p2"', 'id="vwg-headline"'):
         assert marker in text, marker
-    for label in ("1. Expression", "2. What shifts it", "3. Donor variability", "Author DE (as published)", "Atlas (old)"):
+    for label in ("Expression", "What shifts it", "Donor variability", "Author DE (as published)", "Atlas (old)"):
         assert label in text, label
     for hash_name in ("expression", "shifts", "variability", "author-de", "atlas"):
         assert f'data-hash="{hash_name}"' in text, hash_name
-    assert text.index('id="vwg-headline"') < text.index('id="vw-tabs"')       # the summary sentence sits above the tabs
+    assert text.index('id="vwg-headline"') > text.index('id="vt-shifts"')      # facet summary sentence lives in the What shifts it tab
+    assert not re.search(r'data-vtab="\w+"[^>]*>\d\. ', text)               # no numbers on tab labels
     assert text.index('data-vtab="de"') < text.index('data-vtab="atlas"')      # the old atlas tab is last
     assert "expression across the catalogue" in text
     assert 'data-vtab="de" data-hash="author-de" role="tab" hidden' in text      # shown only when DE exists
@@ -192,9 +193,9 @@ def test_geneset_page_has_the_view_tab(client):
     for marker in ('data-vtab="score"', 'data-vtab="shifts"', 'data-vtab="variability"', 'data-vtab="page"', 'id="vt-score"', 'id="vt-shifts"',
                    'id="vt-variability"', 'id="vt-page"', 'id="vws-p1"', 'id="vws-p2"', 'id="vws-headline"', 'id="vws-p1-help" hidden', 'id="vws-p2-help" hidden'):
         assert marker in text, marker
-    for label in ("1. Expression", "Module score", "2. What shifts it", "3. Donor variability", "Geneset page (old)"):
+    for label in ("Expression", "Module score", "What shifts it", "Donor variability", "Geneset page (old)"):
         assert label in text, label
-    assert text.index('id="vws-headline"') < text.index('id="vw-tabs"')
+    assert text.index('id="vws-headline"') > text.index('id="vt-shifts"')
     assert "doc-block" not in text.split('id="vt-page"')[0].split('id="vw-tabs"')[1]       # no doc_block clutter in the view tabs
     payload = json.loads(re.search(r"var PAYLOAD = (\{.*?\});\n", text, re.S).group(1))
     assert payload["scored_in"] == ["A/n1", "A/c1"] and payload["column_name"] == "Study1::Exp1::DAM"
@@ -516,7 +517,7 @@ def test_gene_page_expression_is_first_and_only_approved_tab(client):
     assert "review-banner" not in panel("expression").split('id="vx-help"')[0]
     for name in ("shifts", "detection"):
         assert "review-banner" in panel(name)
-    for marker in ('id="vx-root" data-kind="gene"', "1. Expression rank by cell type", 'id="vx-help" hidden', "window.antExpression"):
+    for marker in ('id="vx-root" data-kind="gene"', "Expression rank by cell type", "Expression rank in other datasets", 'id="vx-help" hidden', 'id="vx-help-other" hidden', "window.antExpression"):
         assert marker in text, marker
 
 
@@ -536,7 +537,8 @@ def test_gene_and_geneset_expression_use_one_renderer(client):
     geneset = client.get("/genesets/Study1/Exp1/DAM").text
     for text in (gene, geneset):
         assert text.count("window.antExpression = window.antExpression") == 1
-        assert "Rank among" in text and "Datasets without per-cell cell types" in text
+        assert "Rank among" in text and 'id="vx-other"' in text
+        assert "top x%" not in text.split('id="vt-expression"')[1].split('class="tab-panel', 1)[0] and "median of" not in text.split("window.antExpression = ")[1].split("</script>")[0]
     assert "mean (log-normalised) expression" in gene and "scanpy score" in geneset
 
 
@@ -566,5 +568,5 @@ def test_geneset_landing_without_the_list_has_no_search(client):
 def test_help_describes_preview_marker_and_expression_rank():
     import help_content
     gene_view = help_content.get_topic("gene-view").body_html
-    assert "preview" in gene_view and "Expression rank" in gene_view
+    assert "preview" in gene_view and "Expression rank" in gene_view and "76%" in gene_view
     assert "Expression rank" in help_content.get_topic("geneset-view").body_html
