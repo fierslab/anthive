@@ -32,6 +32,19 @@
     table.vx-gene col.x-name { width: 25%; } table.vx-gene col.x-cells { width: 12%; } table.vx-gene col.x-pct { width: 17%; } table.vx-gene col.x-rank { width: 17%; } table.vx-gene col.x-std { width: 12%; } table.vx-gene col.x-plots { width: 17%; }
     table.vx-table .obs-plot-icon { padding: 0 2px; }
   }
+  /* phones: the table sizes to its content, names wrap, the Std. dev. column is dropped (the value stays in the bar
+     tooltips of wider screens); nothing overlaps at 390 px */
+  @media (max-width: 560px) {
+    table.vx-table { table-layout: auto; }
+    table.vx-table col { width: auto !important; }
+    table.vx-table col.x-std, table.vx-gene tr > :nth-child(5):not([colspan]), table.vx-set tr > :nth-child(4):not([colspan]) { display: none; }
+    table.vx-table .vx-dscell, table.vx-table tr.vw-toggle td:first-child { white-space: normal; overflow-wrap: break-word; }
+    table.vx-table .vx-ds-name, table.vx-table .vx-ds-name a { display: inline; white-space: normal; }
+    table.vx-table .vx-ds-text { display: block; overflow: visible; }
+    table.vx-table .vx-n { white-space: nowrap; }
+    table.vx-table .vw-bar { width: 42px; }
+    table.vx-table td, table.vx-table th { padding-left: 3px; padding-right: 3px; }
+  }
 </style>
 {%- endmacro %}
 

@@ -712,3 +712,9 @@ def test_gene_page_facet_de_tab_has_the_other_de_section(client):
     assert section.split(">")[0].strip().endswith("hidden")
     assert "Other DE (author and custom)" in section and 'data-view="gene-other-de"' in section
     assert "renderOtherDe(rows)" in text and "#ode-gene-head" in text
+
+
+def test_expression_table_has_a_phone_layout():
+    template = (_WEB_DIR / "templates" / "_view_expression.html").read_text(encoding="utf-8")
+    phone = template.split("@media (max-width: 560px)")[1].split("</style>")[0]
+    assert "table-layout: auto" in phone and "col.x-std" in phone and "white-space: normal" in phone
