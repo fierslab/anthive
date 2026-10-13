@@ -12,7 +12,7 @@ aliases:
 - genotype
 body_html: |
   <ul>
-    <li><strong>Tissue</strong> is a coarse umbrella term (prefrontal cortex, temporal cortex, hippocampus, white matter and so on) so that datasets with different dissections can be compared. The most specific term of a dataset stays in the plain column <code>tissue_uberon</code>, which is shown as detail on the dataset's Facets tab and is not a facet (<a href="#glossary-tissue-umbrella">glossary</a>).</li>
+    <li><strong>Tissue</strong> is a coarse umbrella term (prefrontal cortex, temporal cortex, hippocampus, white matter and so on) so that datasets with different dissections can be compared. The most specific term of a dataset stays in the plain column <code>tissue_uberon</code>, which is shown as detail on the dataset's Facet tab and is not a facet (<a href="#glossary-tissue-umbrella">glossary</a>).</li>
     <li><strong>Genotype and host genotype.</strong> <code>ant_genotype</code> is the genotype of the sequenced cells (the grafted line, or the donor); <code>ant_host_genotype</code> is the genotype of the mouse host. The tested App NL-G-F facet is derived from the host genotype.</li>
     <li><strong>Author clusters</strong> are published per cell type (<code>ant_mg_author_cluster</code> for microglia, and the same for astrocytes, oligodendrocytes, OPCs, excitatory and inhibitory neurons and endothelial cells). They are dataset-scoped: a label such as <code>L26/FMG/cluster_Homeo</code> only has meaning inside one cell type of one dataset, so these facets are shown as a mapping table only, with no gene tests and no comparison across datasets (<a href="#glossary-author-cluster">glossary</a>).</li>
   </ul>

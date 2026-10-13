@@ -111,7 +111,7 @@ template (`t.values` resolves to the dict method).
 definition on top (`#facet-definition`) and a Datasets card
 (`#facet-datasets`): carriers with author column, mapping kind and value
 translation, and the non-carriers folded in `#non-carriers` with name hints.
-The dataset **Facets tab** (`#facets`, after Genesets and before Facet GS, count badge; shown
+The dataset **Facet tab** (label of the Facet tab group, `#facets`, after Genesets, count badge; the effects are in its Gene sub-tab `#facet-gene`; shown
 whenever the dataset has any `ant_*` facet) holds `#ds-facets` from
 `GET /databases/{id}/facets`: unit line (`#fx-unit-line`: designation, donor
 group, cohort; the spot where a "Replicate unit" entry goes), mapping tables
@@ -569,8 +569,8 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
 - **Tab bar order (2026-10-13):** `Overview` (only when markdown) · `Data` ·
   `Numerical` · `Categorical` · `Genes` (only when n_genes > 0) ·
   `Genesets` (only when module scores) ·
-  `Facets` (only when the dataset has any facet) ·
-  `Facet GS` (same condition as Genesets; preview) ·
+  the **Facet group** (when the dataset has facets or module scores; see
+  "Facet tab group" below) ·
   `Differential expression` (only when DE data) · `Papers` (only when linked
   library papers) · `Downloads` (always; `loadFiles` adds `.tab-empty` and the
   panel says "Nothing to download for this dataset" when `/files` lists nothing
@@ -853,7 +853,13 @@ starCAT modules/scores (`.description` on `/catalogs`). Wire each up when shippe
 
 ## Dataset Facet GS tab (2026-10-13)
 
-- The dataset page's Genesets tab (`data-tab="modules"`, `#modules`) holds only the rank table (`#obs-tbl-modrank`, `/module_ranks`). The per-cell association explorer (`_module_view.html`, `mv_ctx.id` `mv-modules-tab`) moved to its own tab: **Facet GS** (after Genesets and Facets) (`data-tab="facet-gs"`, panel `#tab-facet-gs`, hash `#facet-gs`, filter state `#facet-gs&mv=...`), shown under the same `n_module_scores` condition. Heading "Gene set scores by annotation column" with the (i), no count.
+- (Superseded in layout by the Facet tab group below: Facet GS is now the GS pill of that group.) The dataset page's Genesets tab (`data-tab="modules"`, `#modules`) holds only the rank table (`#obs-tbl-modrank`, `/module_ranks`). The per-cell association explorer (`_module_view.html`, `mv_ctx.id` `mv-modules-tab`) moved to its own tab: **Facet GS** (after Genesets and Facets) (`data-tab="facet-gs"`, panel `#tab-facet-gs`, hash `#facet-gs`, filter state `#facet-gs&mv=...`), shown under the same `n_module_scores` condition. Heading "Gene set scores by annotation column" with the (i), no count.
 - Not approved: registry key `dataset-facet-gs` (tab `vw-preview`, panel starts with `review_banner`).
 - Lazy: `mv_ctx.lazy_tab = 'facet-gs'` makes `_module_view.html` wait for `anthive:tab-activated` with that name (or an already active panel) before fetching `/module-variability`; the spinner is `data-tab-loading="facet-gs"` and is dismissed with the same name. Pages without `lazy_tab` load at once.
 - Aliases in `handleHash`: `#modules&mv=...` and the legacy `#tab-modules-mv=...` open Facet GS and are rewritten to `#facet-gs&mv=...`; `#tab-facet-gs` opens Facet GS, `#tab-modules` opens Genesets; bare `#modules` stays on Genesets. `datasetUrl()` in the explorer (gene set pages) links `#facet-gs&mv=...`.
+
+## Facet tab group (2026-10-13)
+
+- Facets and Facet GS are one grouped tab, `<span class="tab-group" id="tab-group-facet">` in the bar (a span so the bar stays one flat `<div>`), holding three plain `.tab-btn` buttons the existing tab wiring treats as ordinary tabs: the label **Facet** (`data-tab="facets"`, `.tab-group-label`, panel `#tab-facets`, hash `#facets`), the pill **Gene** (`data-tab="facet-gene"`, `.tab-sub`, panel `#tab-facet-gene`, hash `#facet-gene`) and the pill **GS** (`data-tab="facet-gs"`, `.tab-sub` plus `vw-preview`, panel `#tab-facet-gs`). CSS in dataset.html: `.tab-group` draws the tab outline, `.tab-group:has(.tab-btn.active)` makes it the open tab, the active pill is filled. On phones the bar scrolls inside itself as before (`flex: none`).
+- `#tab-facets` keeps the description: `#ds-facets` (heading, `ds-facets-about`, `#fx-unit-line`, `#fx-changed`, Analysed facets, Not analysed yet). `#tab-facet-gene` holds `#ds-facet-effects`: everything from `#facets-effects-head` on (fx_intro, effects blocks, `#fx-untested-extra`, `#fx-excluded`, `#fx-not-tested`) plus `fx_script()`, content unchanged. Both need `show_facets_tab`. With module scores but no facets the label is `.tab-empty` and opens `#ds-no-facets`; the Gene pill is not rendered. GS keeps its lazy load (`mv_ctx.lazy_tab`) and aliases.
+- Hash routing: `#facets`, `#facet-gene`, `#facet-gs` (plus the Facet GS aliases above), `#ds-facets` and `#ds-facet-effects`; any other hash that is the id of an element inside a tab panel (for example `#facets-effects-head`, `#fx-...`) opens that panel and scrolls to it. Clicking a pill writes its hash.

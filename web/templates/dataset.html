@@ -201,6 +201,18 @@
   .obs-stats-tbl td, .obs-stats-tbl th { border-bottom: 1px solid #e2e8f0; }
   /* Data tab: auto-wrapping two-column card layout. */
   .data-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; margin-top: 8px; }
+  /* Facet tab group (2026-10-13): one bordered tab holding the label and the Gene / GS sub-tab pills.
+     The buttons are plain .tab-btn for the tab wiring; the group draws the tab outline. */
+  .tab-group { display: inline-flex; align-items: center; flex: none; gap: 3px; padding: 0 6px 0 0;
+               border: 1px solid var(--border-light, #e5e7eb); border-bottom: none; border-radius: 6px 6px 0 0; }
+  .tab-group:has(.tab-btn.active) { background: #fff; border-color: var(--border); margin-bottom: -1px; padding-bottom: 1px; }
+  .tab-group .tab-btn, .tab-group .tab-btn.active { border-color: transparent; margin-bottom: 0; background: transparent; }
+  .tab-group .tab-btn.tab-group-label.active { color: var(--text); font-weight: 600; }
+  .tab-group .tab-btn.tab-sub { padding: 1px 9px; font-size: 11px; line-height: 1.6; border: 1px solid var(--border); border-radius: 10px; }
+  .tab-group .tab-btn.tab-sub:hover { background: var(--hover); }
+  .tab-group .tab-btn.tab-sub.active { background: #2f4f5f; border-color: #2f4f5f; color: #fff; }
+  .tab-group .tab-btn.tab-sub.vw-preview::after { margin-left: 4px; }
+  .tab-group .tab-btn.tab-sub.vw-preview.active::after { background: rgba(255,255,255,.2); color: #fff; }
   /* Empty-state tab (nothing to download, no caveats): muted and never highlighted, still clickable.
      Distinct from .vw-preview (a view that is not approved yet), which carries a "preview" marker. */
   .tab-btn.tab-empty, .tab-btn.tab-empty:hover, .tab-btn.tab-empty.active { color: #a3aab2; font-weight: 400; }
@@ -482,7 +494,7 @@
 {% set _cat_cols = obs_columns | selectattr('type', 'equalto', 'cat') | list %}
 
 <div class="tab-bar" id="ds-tab-bar" role="tablist">
-  {# Button order (2026-10-13): Overview, Data, Numerical, Categorical, Genes, Genesets, Facets, Facet GS,
+  {# Button order (2026-10-13): Overview, Data, Numerical, Categorical, Genes, Genesets, the Facet group (label, Gene, GS),
      Differential expression, Papers, Downloads, Caveats. Panel DOM order is independent of this. #}
   {% if markdown_content %}<button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>{% endif %}
   <button type="button" class="tab-btn{% if not markdown_content %} active{% endif %}" data-tab="data" role="tab">Data</button>
@@ -494,11 +506,16 @@
   {% if n_module_scores %}
   <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Genesets<span class="tab-count">{{ n_module_scores }}</span></button>
   {% endif %}
-  {% if show_facets_tab %}
-  <button type="button" class="tab-btn"        data-tab="facets"   role="tab" id="tab-btn-facets">Facets<span class="tab-count">{{ n_facets_total }}</span></button>
-  {% endif %}
-  {% if n_module_scores %}
-  <button type="button" class="tab-btn {{ view_class('dataset-facet-gs') }}" data-tab="facet-gs" role="tab" id="tab-btn-facet-gs" title="{{ view_tip('dataset-facet-gs', 'Gene set scores compared with the cell annotation columns, per cell and descriptive.') }}">Facet GS</button>
+  {% if show_facets_tab or n_module_scores %}
+  {# Facet group: one bordered tab holding the label (facet description, #facets) and the sub-tab pills
+     Gene (effects by facet, #facet-gene) and GS (gene set scores by annotation column, #facet-gs).
+     All three are plain .tab-btn buttons, so the tab wiring treats them as ordinary tabs. A span, not a
+     div, so the bar markup stays one flat <div>. #}
+  <span class="tab-group" id="tab-group-facet">
+    <button type="button" class="tab-btn tab-group-label{% if not show_facets_tab %} tab-empty{% endif %}" data-tab="facets" role="tab" id="tab-btn-facets" title="{{ 'The facets of this dataset and how its columns map onto them' if show_facets_tab else 'This dataset has no facet columns' }}">Facet{% if show_facets_tab %}<span class="tab-count">{{ n_facets_total }}</span>{% endif %}</button>
+    {% if show_facets_tab %}<button type="button" class="tab-btn tab-sub" data-tab="facet-gene" role="tab" id="tab-btn-facet-gene" title="Effects by facet: donor-level differences per facet and cell type">Gene</button>{% endif %}
+    {% if n_module_scores %}<button type="button" class="tab-btn tab-sub {{ view_class('dataset-facet-gs') }}" data-tab="facet-gs" role="tab" id="tab-btn-facet-gs" title="{{ view_tip('dataset-facet-gs', 'Gene set scores compared with the cell annotation columns, per cell and descriptive.') }}">GS</button>{% endif %}
+  </span>
   {% endif %}
   {% if de_studies %}
   <button type="button" class="tab-btn"        data-tab="de"       role="tab">Differential expression<span class="tab-count">{{ de_studies|length }}</span></button>
@@ -756,7 +773,7 @@
 
   {% if show_facets_tab %}
   <div class="data-card wide" id="ds-facets-pointer">
-    <p class="muted" style="margin:0">Facets and their effects: see the <a href="#facets">Facets tab</a>.</p>
+    <p class="muted" style="margin:0">Facets: see the <a href="#facets">Facet tab</a>; their effects are in its <a href="#facet-gene">Gene</a> sub-tab.</p>
   </div>
   {% endif %}
 
@@ -888,7 +905,7 @@
       <span class="info" data-glossary="facet" title="Standardised donor-level variables of this dataset and how its own columns map onto them.">ⓘ</span></h2>
     {% call doc_block('About the facet mappings', id='ds-facets-about') %}
       <p>Facets are the standardised <code>ant_</code> columns of this dataset. For each one the table shows the author column it comes from, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts.</p>
-      <p>For facets that were tested, the effects section below shows the differences between donors per cell type. Click a facet for its definition and the other datasets that carry it. Terms are explained in the <a href="/help#glossary">glossary</a>.</p>
+      <p>For facets that were tested, the Gene sub-tab shows the differences between donors per cell type. Click a facet for its definition and the other datasets that carry it. Terms are explained in the <a href="/help#glossary">glossary</a>.</p>
     {% endcall %}
     {% if not (facet_tests and facet_tests.excluded) %}
     <p class="fx-intro" id="fx-unit-line">
@@ -924,6 +941,12 @@
     {{ _facet_mapping_table(dataset_facets_other) }}
     {% endif %}
 
+  </div>
+</section>
+
+{# ── Facet group, Gene sub-tab: the effects by facet, moved out of the Facets panel unchanged (2026-10-13). #}
+<section class="tab-panel" id="tab-facet-gene" role="tabpanel">
+  <div id="ds-facet-effects">
     {% if facet_tests and facet_tests.n_units_tested %}
     <h2 class="section-head" id="facets-effects-head">Effects by facet</h2>
     {{ fx_intro('dataset', facet_tests.n_permutations) }}
@@ -951,6 +974,12 @@
     {% endif %}
   </div>
   {{ fx_script() }}
+</section>
+{% elif n_module_scores %}
+{# Facet group without facets (only the GS sub-tab has content): the label opens an empty-state panel. #}
+<section class="tab-panel" id="tab-facets" role="tabpanel">
+  <h2 class="section-head">Facets</h2>
+  <p class="muted tab-empty-note" id="ds-no-facets">This dataset has no facet columns. Gene set scores by annotation column are in the GS sub-tab.</p>
 </section>
 {% endif %}
 
@@ -1301,6 +1330,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 name = panels.overview ? 'overview' : (panels.data ? 'data' : name);
             }
             btns.forEach(function(b) { b.classList.toggle('active', b.dataset.tab === name); });
+            // Phones: the bar scrolls sideways; keep the open tab (or its whole Facet group) in view.
+            var openBtn = btns.filter(function (b) { return b.dataset.tab === name; })[0];
+            if (openBtn && bar.scrollWidth > bar.clientWidth) {
+                var target = openBtn.closest('.tab-group') || openBtn;
+                var barBox = bar.getBoundingClientRect(), box = target.getBoundingClientRect();
+                if (box.right > barBox.right) bar.scrollLeft += box.right - barBox.right + 8;
+                else if (box.left < barBox.left) bar.scrollLeft -= barBox.left - box.left + 8;
+            }
             Object.keys(panels).forEach(function(k) {
                 var isActive = (k === name);
                 panels[k].classList.toggle('active', isActive);
@@ -1382,6 +1419,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
             if (tabPart === 'ds-facets') tabPart = 'facets';   // old anchor of the card
+            if (tabPart === 'ds-facet-effects') tabPart = 'facet-gene';
             // The gene set score explorer moved from the Genesets tab to Facet GS:
             // old links with explorer filter state (#modules&mv=..., #tab-modules-mv=...)
             // open the new tab; the hash is rewritten to the canonical #facet-gs&mv=...
@@ -1394,6 +1432,18 @@ document.addEventListener('DOMContentLoaded', function() {
                 tabPart = 'modules';
             } else if (tabPart === 'tab-facet-gs') {
                 tabPart = 'facet-gs';
+            }
+            // A hash that is not a tab but the id of an element inside a tab panel (for example the effects
+            // anchors #facets-effects-head or #fx-... now in the Facet group's Gene sub-tab): open that
+            // panel, then scroll to the element.
+            if (!panels[tabPart]) {
+                var anchorEl = document.getElementById(tabPart);
+                var hostPanel = anchorEl && anchorEl.closest('.tab-panel');
+                if (hostPanel && hostPanel.id.indexOf('tab-') === 0 && panels[hostPanel.id.slice(4)]) {
+                    activateTab(hostPanel.id.slice(4), false);
+                    setTimeout(function () { anchorEl.scrollIntoView({ block: 'start' }); }, 30);
+                    return;
+                }
             }
             activateTab(tabPart, false);
         }

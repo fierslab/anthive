@@ -29,7 +29,7 @@ URL hash scheme (feature: back-button / shareable filter state):
   Semicolons separate pairs; values are encodeURIComponent-encoded.
   Multi-value filters: comma-separated within the value (e.g. celltype=microglial+cell,astrocyte).
   When co-existing with a tab anchor, the mv= part is appended after '&':
-  #facet-gs&mv=...  (dataset page Facet GS tab). The legacy form
+  #facet-gs&mv=...  (dataset page, Facet tab, GS sub-tab). The legacy form
   #tab-modules-mv=... is still parsed, and dataset.html redirects it and
   #modules&mv=... to #facet-gs&mv=...
 
@@ -116,7 +116,7 @@ Optional mv_ctx keys:
   <p class="mv-short" id="{{ _id }}-short" style="font-size:12px;margin:2px 0 4px"><strong>Exploratory.</strong> These are per-cell associations (descriptive), not tests.</p>
   {% call doc_block('About per-cell associations', id=_id ~ '-about') %}
     <p>Each value describes how a gene set score differs with a cell annotation column, computed over individual cells rather than donors. Cells of one donor are not independent, and every cell carries its donor's facet value, so these numbers mostly show how different donors are from each other. They help to spot candidates; they are not significance tests.</p>
-    <p>Donor and cluster columns are off by default because they explain a lot by construction. For effects tested per donor use the Facets tab of a dataset (<a href="/help#glossary-per-cell-association">glossary</a>).</p>
+    <p>Donor and cluster columns are off by default because they explain a lot by construction. For effects tested per donor use the Gene sub-tab of a dataset's Facet tab (<a href="/help#glossary-per-cell-association">glossary</a>).</p>
   {% endcall %}
   {# Row 1: dataset · module · facet #}
   <div class="mv-filter-row mv-filter-row-1">

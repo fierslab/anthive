@@ -1816,7 +1816,7 @@ def test_dataset_page_facets_card(client):
     assert '<div class="table-wrap">\n<table class="ds-facets">' in facets_tab
     data_tab = text.split('id="tab-data"')[1].split("</section>")[0]
     assert 'id="ds-facets"' not in data_tab
-    assert 'Facets and their effects: see the <a href="#facets">Facets tab</a>' in data_tab
+    assert 'Facets: see the <a href="#facets">Facet tab</a>; their effects are in its <a href="#facet-gene">Gene</a> sub-tab.' in data_tab
     bar = text.split('id="ds-tab-bar"')[1].split("</div>")[0]
     assert 'data-tab="facets"' in bar and '<span class="tab-count">' in bar.split('data-tab="facets"')[1]
     assert bar.index('data-tab="data"') < bar.index('data-tab="num"') < bar.index('data-tab="cat"') < bar.index('data-tab="facets"')
@@ -6988,13 +6988,14 @@ def test_dataset_facets_tab_when_every_facet_is_hidden(client, monkeypatch):
     tab = text.split('id="tab-facets"')[1].split("</section>")[0]
     assert 'id="facets-analysed"' not in tab and 'id="facets-not-analysed"' in tab
     assert 'href="/facets/ant_sex"' in tab
-    assert "this dataset is a xenograft" in tab and "host animal" in tab
+    gene_tab = text.split('id="tab-facet-gene"')[1].split("</section>")[0]
+    assert "this dataset is a xenograft" in gene_tab and "host animal" in gene_tab
 
 
 def test_dataset_facets_tab_hidden_without_facets(client):
     text = client.get("/browse/GroupA/ds2").text
     assert 'data-tab="facets"' not in text and 'id="tab-facets"' not in text
-    assert "see the Facets tab" not in text
+    assert "see the Facets tab" not in text and "see the <a href=\"#facets\">Facet tab" not in text
 
 
 @pytest.mark.parametrize("status,reason,expected", [
@@ -7816,11 +7817,11 @@ def test_dataset_facet_gs_tab_follows_genesets_and_facets_and_is_greyed(client, 
     html = client.get("/browse/GroupA/ds1").text
     bar = html.split('id="ds-tab-bar"')[1].split("</div>")[0]
     tabs = re.findall(r'data-tab="([^"]+)"', bar)
-    # Facets (when present) sits between Genesets and Facet GS
-    following = ["facets", "facet-gs"] if "facets" in tabs else ["facet-gs"]
+    # The Facet group (label, Gene pill when facets exist, GS pill) follows Genesets
+    following = ["facets", "facet-gene", "facet-gs"] if "facet-gene" in tabs else ["facets", "facet-gs"]
     assert tabs[tabs.index("modules") + 1:tabs.index("modules") + 1 + len(following)] == following
     button = re.search(r'<button[^>]*data-tab="facet-gs"[^>]*>[^<]*', bar).group(0)
-    assert "vw-preview" in button and button.endswith(">Facet GS")
+    assert "vw-preview" in button and button.endswith(">GS")
     assert browser.VIEW_PREVIEW_TIP in button
     assert "vw-preview" not in re.search(r'<button[^>]*data-tab="modules"[^>]*>', bar).group(0)
     assert "dataset-facet-gs" in browser.VIEW_REGISTRY and "dataset-facet-gs" not in browser.APPROVED_VIEWS
@@ -7887,7 +7888,7 @@ def test_dataset_tab_order_follows_the_agreed_sequence(client, monkeypatch):
         return result
     monkeypatch.setattr(browser, "_api_get", everything)
     tabs, bar = _tab_order(client.get("/browse/GroupA/ds1").text)
-    expected = ["overview", "data", "num", "cat", "genes", "modules", "facets", "facet-gs", "de", "papers", "downloads", "caveats"]
+    expected = ["overview", "data", "num", "cat", "genes", "modules", "facets", "facet-gene", "facet-gs", "de", "papers", "downloads", "caveats"]
     present = [name for name in expected if name in tabs]
     assert tabs == present, tabs
     for name in ("data", "num", "cat", "modules", "facet-gs", "downloads", "caveats"):
@@ -7907,3 +7908,52 @@ def test_dataset_without_caveats_has_a_greyed_caveats_tab(client):
     assert "No caveats recorded for this dataset." in panel and "caveats-card" not in panel
     # the empty-state style is its own class, not the approval marker
     assert ".tab-btn.tab-empty" in html
+
+
+# ── Facet tab group: label (description), Gene (effects), GS (explorer) ──────
+
+def test_dataset_facet_group_holds_label_gene_and_gs(client, monkeypatch):
+    _dataset_with_module_scores(monkeypatch)
+    text = client.get("/browse/GroupA/ds1").text
+    bar = text.split('id="ds-tab-bar"')[1].split("</div>")[0]
+    group = bar.split('id="tab-group-facet"')[1].split("</span>\n")[0]
+    assert re.findall(r'data-tab="([^"]+)"', group) == ["facets", "facet-gene", "facet-gs"]
+    label = re.search(r'<button[^>]*data-tab="facets"[^>]*>Facet', group).group(0)
+    assert "tab-group-label" in label and "vw-preview" not in label and "tab-empty" not in label
+    gene = re.search(r'<button[^>]*data-tab="facet-gene"[^>]*>Gene', group).group(0)
+    assert "tab-sub" in gene and "vw-preview" not in gene
+    gs = re.search(r'<button[^>]*data-tab="facet-gs"[^>]*>GS', group).group(0)
+    assert "tab-sub" in gs and "vw-preview" in gs
+    assert 'data-tab="facet-gs" role="tab" id="tab-btn-facet-gs"' in group
+    # the label panel keeps the description; the effects live in the Gene panel
+    facets_panel = text.split('id="tab-facets"')[1].split("</section>")[0]
+    gene_panel = text.split('id="tab-facet-gene"')[1].split("</section>")[0]
+    assert 'id="fx-unit-line"' in facets_panel and 'id="ds-facets-about"' in facets_panel
+    assert 'id="facets-effects-head"' not in facets_panel
+    assert 'id="facets-effects-head"' in gene_panel and 'id="ds-facet-effects"' in gene_panel
+    assert ".tab-group:has(.tab-btn.active)" in text
+
+
+def test_dataset_facet_group_without_facets_keeps_gs_and_greys_the_label(client, monkeypatch):
+    def scores_no_facets(api_url, path):
+        result = _fake_api_get(api_url, path)
+        if path.endswith("/info") and isinstance(result, dict):
+            result = dict(result)
+            obs = dict(result.get("obs", {}))
+            obs["numerical"] = list(obs.get("numerical", [])) + ["Sierksma2025::WGCNA::Brown_Lysosome"]
+            result["obs"] = obs
+        return result
+    monkeypatch.setattr(browser, "_api_get", scores_no_facets)
+    text = client.get("/browse/GroupA/ds2").text
+    bar = text.split('id="ds-tab-bar"')[1].split("</div>")[0]
+    group = bar.split('id="tab-group-facet"')[1].split("</span>\n")[0]
+    assert re.findall(r'data-tab="([^"]+)"', group) == ["facets", "facet-gs"]
+    assert "tab-empty" in re.search(r'<button[^>]*data-tab="facets"[^>]*>', group).group(0)
+    assert 'id="ds-no-facets"' in text and 'id="tab-facet-gene"' not in text
+
+
+def test_dataset_hash_routing_opens_panels_holding_an_anchor(client):
+    text = client.get("/browse/GroupA/ds1").text
+    handle = text.split("function handleHash(hash)")[1].split("window.addEventListener('hashchange'")[0]
+    assert "anchorEl.closest('.tab-panel')" in handle and "scrollIntoView" in handle
+    assert "tabPart === 'ds-facet-effects'" in handle
