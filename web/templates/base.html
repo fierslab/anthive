@@ -775,9 +775,9 @@
             {%- endmacro %}
             {{ navlink('datasets', '/', 'datasets', 'The dataset catalogue') }}
             {% if request.app.state.genesets_available %}
-            {{ navlink('genesets', '/genesets', 'genesets', 'Gene sets: search by name, then see where a set is expressed') }}
+            {{ navlink('genesets', '/genesets', 'gene sets', 'Gene sets: search by name, then see where a set is expressed') }}
             {% endif %}
-            {{ navlink('genes', '/genes', 'genes', 'Gene atlas: look up a gene across the whole catalogue', 'nav-genes') }}
+            {{ navlink('genes', '/genes', 'genes', 'Genes: look up a gene across the whole catalogue', 'nav-genes') }}
             {{ navlink('facets', '/facets', 'facets', 'Facets: donor-level properties tested across datasets') }}
             {% if library_available(request) %}
             <a href="/library" id="nav-library" title="The papers behind the datasets">library</a>

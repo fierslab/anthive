@@ -133,7 +133,7 @@
 {% if not gene %}
 {{ breadcrumb([("gene atlas", None)]) }}
 <div class="gv-landing">
-<h1 class="page-title">Gene atlas</h1>
+<h1 class="page-title">Genes</h1>
 <p>Look up a gene to see where it is expressed across every dataset in the catalogue. Several genes separated by commas give an expression-only gene &times; dataset heatmap.</p>
 <form class="gv-lookup" id="gv-lookup" action="/genes" method="get" role="search">
   <input type="search" name="q" id="gv-lookup-q" placeholder="e.g. TREM2 or APOE,TREM2" aria-label="Gene symbol" autocomplete="off" spellcheck="false" autocapitalize="characters"{% if not gene %} autofocus{% endif %}>

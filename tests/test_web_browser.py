@@ -3590,7 +3590,7 @@ def test_dataset_view_module_scores_tab_groups_three_methods(client, monkeypatch
     assert 'GroupA/ds1' in resp.text
     # Module count is reported in the tab label (server-side n_module_scores)
     # Dataset has 4 scored cols (scanpy + starcat + 2 aucell) → 4 modules tracked
-    assert 'Genesets<span class="tab-count">' in resp.text
+    assert 'Gene sets<span class="tab-count">' in resp.text
     # Plain-numerical columns (n_genes, pseudotime) are on Numerical tab, not Modules
     assert 'x=n_genes' in resp.text  # still linked from the Numerical tab
 
@@ -5646,8 +5646,8 @@ def test_dataset_tab_label_says_genesets_not_modules(client, monkeypatch):
     resp = client.get("/browse/GroupA/ds1")
     assert resp.status_code == 200
     # Tab button must say Genesets not Modules.
-    assert 'Genesets<span class="tab-count">' in resp.text, (
-        "dataset Modules tab must be relabelled 'Genesets'"
+    assert 'Gene sets<span class="tab-count">' in resp.text, (
+        "dataset Modules tab must be labelled 'Gene sets'"
     )
     assert 'Modules<span class="tab-count">' not in resp.text, (
         "'Modules' tab label must be gone — it was renamed to 'Genesets'"
