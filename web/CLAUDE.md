@@ -566,16 +566,19 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   headline biology lives ONLY in the context pills; the **Biology** section shows
   only condition/sex/age/strain; provenance + external links live ONLY in the top
   `.ds-prov` row. Each datum appears once; sections hide when empty.
-- **Actual tab bar (2026-08):** `Overview` (only when markdown) · `Data` ·
-  `Genes` (only when n_genes > 0) · `Genesets` (only when module scores) ·
-  `Facet GS` (same condition as Genesets; preview) ·
+- **Tab bar order (2026-10-13):** `Overview` (only when markdown) · `Data` ·
+  `Numerical` · `Categorical` · `Genes` (only when n_genes > 0) ·
+  `Genesets` (only when module scores) · `Facet GS` (same condition; preview) ·
   `Facets` (only when the dataset has any facet) ·
-  `Numerical` · `Categorical` · `Differential expression` (only when DE data) ·
-  `Papers` (only when linked library papers) ·
-  `Downloads` (JS-revealed when h5ad exists) · `⚠ Caveats` (only when caveats
-  — pinned far right and **never default-active**; it's an opt-in warning
-  surface, not a landing tab; `activateTab` fallback skips it and prefers
-  Overview → Data).
+  `Differential expression` (only when DE data) · `Papers` (only when linked
+  library papers) · `Downloads` (always; `loadFiles` adds `.tab-empty` and the
+  panel says "Nothing to download for this dataset" when `/files` lists nothing
+  and there are no paper PDFs) · `Caveats` (always, pinned far right, **never
+  default-active**; level colour with caveats, `.tab-empty` plus "No caveats
+  recorded for this dataset" without). `.tab-empty` (dataset.html) is the
+  empty-state style: muted, no highlight, still clickable; it is not the
+  `vw-preview` approval marker. Only the button order matters; panel DOM order
+  is independent, and `activateTab` falls back to Overview, then Data.
   **Embeddings** live inside the Data tab as a card (`#obsm_keys`), not a
   separate tab. **Resources** and a standalone **Differential expression** tab
   exist when data is present (DE tab is conditional). Deep-links `#tab-embeddings`

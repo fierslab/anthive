@@ -201,6 +201,10 @@
   .obs-stats-tbl td, .obs-stats-tbl th { border-bottom: 1px solid #e2e8f0; }
   /* Data tab: auto-wrapping two-column card layout. */
   .data-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; margin-top: 8px; }
+  /* Empty-state tab (nothing to download, no caveats): muted and never highlighted, still clickable.
+     Distinct from .vw-preview (a view that is not approved yet), which carries a "preview" marker. */
+  .tab-btn.tab-empty, .tab-btn.tab-empty:hover, .tab-btn.tab-empty.active { color: #a3aab2; font-weight: 400; }
+  .tab-btn.tab-empty.active { background: #fafbfc; }
   /* Caveats tab-button — filled palette-red pill so it reads instantly
      as a warning. Not shy. */
   .tab-btn.caveat-tab {
@@ -478,8 +482,12 @@
 {% set _cat_cols = obs_columns | selectattr('type', 'equalto', 'cat') | list %}
 
 <div class="tab-bar" id="ds-tab-bar" role="tablist">
+  {# Button order (2026-10-13): Overview, Data, Numerical, Categorical, Genes, Genesets, Facet GS, Facets,
+     Differential expression, Papers, Downloads, Caveats. Panel DOM order is independent of this. #}
   {% if markdown_content %}<button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>{% endif %}
   <button type="button" class="tab-btn{% if not markdown_content %} active{% endif %}" data-tab="data" role="tab">Data</button>
+  <button type="button" class="tab-btn"        data-tab="num"      role="tab">Numerical<span class="tab-count">{{ _num_cols|length }}</span></button>
+  <button type="button" class="tab-btn"        data-tab="cat"      role="tab">Categorical<span class="tab-count">{{ _cat_cols|length }}</span></button>
   {% if info and info.n_genes %}
   <button type="button" class="tab-btn"        data-tab="genes"    role="tab">Genes</button>
   {% endif %}
@@ -490,18 +498,17 @@
   {% if show_facets_tab %}
   <button type="button" class="tab-btn"        data-tab="facets"   role="tab" id="tab-btn-facets">Facets<span class="tab-count">{{ n_facets_total }}</span></button>
   {% endif %}
-  <button type="button" class="tab-btn"        data-tab="num"      role="tab">Numerical<span class="tab-count">{{ _num_cols|length }}</span></button>
-  <button type="button" class="tab-btn"        data-tab="cat"      role="tab">Categorical<span class="tab-count">{{ _cat_cols|length }}</span></button>
   {% if de_studies %}
   <button type="button" class="tab-btn"        data-tab="de"       role="tab">Differential expression<span class="tab-count">{{ de_studies|length }}</span></button>
   {% endif %}
   {% if papers %}<button type="button" class="tab-btn" data-tab="papers" role="tab" id="tab-btn-papers">Papers<span class="tab-count">{{ papers|length }}</span></button>{% endif %}
-  {# Downloads tab hidden until JS confirms a filtered h5ad is available. #}
-  <button type="button" class="tab-btn"        data-tab="downloads" role="tab" id="tab-btn-downloads" style="display:none">Downloads</button>
-  {# Caveats tab is intentionally last and NEVER default-active — it is a
-     warning affordance, not a landing surface. Users click into it when
-     they want to see caveats; the page opens on Overview (or Data). #}
-  {% if caveats %}<button type="button" class="tab-btn caveat-tab lvl-{{ caveats_summary.max_level or 'low' }}" data-tab="caveats" role="tab">⚠ Caveats<span class="tab-count">{{ caveats_summary.n }}</span></button>{% endif %}
+  {# Downloads is always shown. The JS (loadFiles) adds .tab-empty when /files lists nothing and there are
+     no paper PDFs: greyed, still clickable, the panel says there is nothing to download. #}
+  <button type="button" class="tab-btn"        data-tab="downloads" role="tab" id="tab-btn-downloads">Downloads</button>
+  {# Caveats is always shown, last, and NEVER default-active: it is a warning affordance, not a landing
+     surface. Without caveats it is greyed (.tab-empty) and the panel says none are recorded. #}
+  {% if caveats %}<button type="button" class="tab-btn caveat-tab lvl-{{ caveats_summary.max_level or 'low' }}" data-tab="caveats" role="tab" id="tab-btn-caveats">⚠ Caveats<span class="tab-count">{{ caveats_summary.n }}</span></button>
+  {% else %}<button type="button" class="tab-btn tab-empty" data-tab="caveats" role="tab" id="tab-btn-caveats" title="No caveats recorded for this dataset">Caveats</button>{% endif %}
 </div>
 
 {# ── Overview tab ──────────────────────────────────────────────────────
@@ -518,7 +525,12 @@
 {# ── Papers tab (only when the library links papers to this dataset) ──── #}
 
 {# ── Caveats tab (only rendered when caveats present) ────────────────── #}
-{% if caveats %}
+{% if not caveats %}
+<section class="tab-panel" id="tab-caveats" role="tabpanel">
+  <h2 class="section-head">Caveats</h2>
+  <p class="muted tab-empty-note" id="ds-no-caveats">No caveats recorded for this dataset.</p>
+</section>
+{% else %}
 <section class="tab-panel" id="tab-caveats" role="tabpanel">
   <div class="caveats-card caveat-{{ caveats_summary.max_level or 'low' }}"
        role="note" aria-label="Known caveats for this dataset">
@@ -2279,7 +2291,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // ── Downloads: raw AnnData + per-collection static files.
         //    The server-side /files endpoint only returns those two kinds
         //    (duckdb / scores / mus are locked down on the API side, not
-        //    filtered here). Tab reveals only when at least one entry exists.
+        //    filtered here). The tab is always shown; it is greyed (.tab-empty) when nothing is listed and there are no paper PDFs.
         (function loadFiles() {
             var box = document.getElementById('ds-files');
             var tabBtn = document.getElementById('tab-btn-downloads');
@@ -2287,10 +2299,12 @@ document.addEventListener('DOMContentLoaded', function() {
             // Paper PDFs are rendered server-side (#ds-paper-files); they keep
             // the tab visible even when /files lists nothing.
             var hasPaperPdfs = !!document.getElementById('ds-paper-files');
-            if (hasPaperPdfs && tabBtn) tabBtn.style.display = '';
             function noFiles() {
-                box.textContent = '';
-                if (tabBtn) tabBtn.style.display = hasPaperPdfs ? '' : 'none';
+                box.textContent = hasPaperPdfs ? '' : 'Nothing to download for this dataset.';
+                if (tabBtn && !hasPaperPdfs) {
+                    tabBtn.classList.add('tab-empty');
+                    tabBtn.title = 'Nothing to download for this dataset';
+                }
             }
             function fmtSize(n) {
                 if (n == null) return '';
@@ -2316,7 +2330,6 @@ document.addEventListener('DOMContentLoaded', function() {
                         noFiles();
                         return;
                     }
-                    if (tabBtn) tabBtn.style.display = '';
                     var h5ads = files.filter(function (f) { return f.kind === 'h5ad'; });
                     var statics = files.filter(function (f) { return f.kind === 'static'; })
                         .sort(function (a, b) { return String(a.filename || '').localeCompare(String(b.filename || '')); });

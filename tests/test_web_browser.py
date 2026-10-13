@@ -1819,7 +1819,7 @@ def test_dataset_page_facets_card(client):
     assert 'Facets and their effects: see the <a href="#facets">Facets tab</a>' in data_tab
     bar = text.split('id="ds-tab-bar"')[1].split("</div>")[0]
     assert 'data-tab="facets"' in bar and '<span class="tab-count">' in bar.split('data-tab="facets"')[1]
-    assert bar.index('data-tab="data"') < bar.index('data-tab="facets"') < bar.index('data-tab="num"')
+    assert bar.index('data-tab="data"') < bar.index('data-tab="num"') < bar.index('data-tab="cat"') < bar.index('data-tab="facets"')
     assert 'id="fx-unit-line"' in facets_tab and 'id="fx-cohort"' in facets_tab
 
 
@@ -3739,16 +3739,16 @@ def test_dataset_view_de_tab_only_when_de_present(client, monkeypatch):
     assert 'data-tab="de"' not in resp_no.text
 
 
-def test_dataset_view_downloads_tab_hidden_by_default(client):
-    # The Downloads tab is display:none until the /files fetch confirms an
-    # h5ad exists (JS reveals it). Server-render should carry the hidden state.
-    resp = client.get("/browse/GroupA/ds1")
-    assert resp.status_code == 200
-    assert 'id="tab-btn-downloads"' in resp.text
-    # rendered with style="display:none" until JS proves otherwise
-    idx = resp.text.index('id="tab-btn-downloads"')
-    button_snippet = resp.text[idx:idx + 200]
-    assert 'display:none' in button_snippet
+def test_dataset_view_downloads_tab_always_shown(client):
+    # The Downloads tab is always in the bar (2026-10-13). The JS greys it
+    # (.tab-empty) when /files lists nothing and there are no paper PDFs.
+    html = client.get("/browse/GroupA/ds1").text
+    idx = html.index('id="tab-btn-downloads"')
+    button_snippet = html[html.rindex("<button", 0, idx):html.index(">", idx)]
+    assert "display:none" not in button_snippet
+    assert "tabBtn.classList.add('tab-empty')" in html
+    assert "Nothing to download for this dataset" in html
+    assert "tabBtn.style.display" not in html
 
 
 def test_dataset_view_embeddings_on_data_tab(client):
@@ -7864,3 +7864,44 @@ def test_module_view_peer_bar_shows_percentage_and_has_no_em_dash(client):
     assert "it is a position on that range, not a percentile" in html
     template = (Path(browser.__file__).parent / "templates" / "_module_view.html").read_text(encoding="utf-8")
     assert "\u2014" not in template
+
+
+# ── Dataset page tab order and empty-state tabs (2026-10-13) ─────────────────
+
+def _tab_order(html):
+    bar = html.split('id="ds-tab-bar"')[1].split("</div>")[0]
+    return re.findall(r'data-tab="([^"]+)"', bar), bar
+
+
+def test_dataset_tab_order_follows_the_agreed_sequence(client, monkeypatch):
+    def everything(api_url, path):
+        result = _fake_api_get(api_url, path)
+        if path.endswith("/info") and isinstance(result, dict):
+            result = dict(result)
+            obs = dict(result.get("obs", {}))
+            obs["numerical"] = list(obs.get("numerical", [])) + ["Sierksma2025::WGCNA::Brown_Lysosome"]
+            result["obs"] = obs
+            result["caveats"] = [{"level": "medium", "message": "batch effect"}]
+        return result
+    monkeypatch.setattr(browser, "_api_get", everything)
+    tabs, bar = _tab_order(client.get("/browse/GroupA/ds1").text)
+    expected = ["overview", "data", "num", "cat", "genes", "modules", "facet-gs", "facets", "de", "papers", "downloads", "caveats"]
+    present = [name for name in expected if name in tabs]
+    assert tabs == present, tabs
+    for name in ("data", "num", "cat", "modules", "facet-gs", "downloads", "caveats"):
+        assert name in tabs, name
+    caveat_button = re.search(r'<button[^>]*data-tab="caveats"[^>]*>', bar).group(0)
+    assert "caveat-tab lvl-medium" in caveat_button and "tab-empty" not in caveat_button
+
+
+def test_dataset_without_caveats_has_a_greyed_caveats_tab(client):
+    html = client.get("/browse/GroupA/ds2").text
+    tabs, bar = _tab_order(html)
+    assert tabs[-2:] == ["downloads", "caveats"]
+    caveat_button = re.search(r'<button[^>]*data-tab="caveats"[^>]*>[^<]*', bar).group(0)
+    assert "tab-empty" in caveat_button and "caveat-tab" not in caveat_button and "vw-preview" not in caveat_button
+    assert 'title="No caveats recorded for this dataset"' in caveat_button
+    panel = html.split('id="tab-caveats"')[1].split("</section>")[0]
+    assert "No caveats recorded for this dataset." in panel and "caveats-card" not in panel
+    # the empty-state style is its own class, not the approval marker
+    assert ".tab-btn.tab-empty" in html
