@@ -26,7 +26,8 @@
   <tbody>
     {% for f in facets %}
     <tr class="ds-facet-row{% if not f.live %} not-live{% endif %}" data-facet="{{ f.facet }}">
-      <td data-label="Facet"><a class="fct-name" href="/facets/{{ f.facet|urlencode }}" title="{{ f.summary or f.facet }}">{{ f.facet[4:] }}</a>
+      <td data-label="Facet"><a class="fct-name" href="/facets/{{ f.facet|urlencode }}" title="{{ f.facet }}{% if f.summary %}: {{ f.summary }}{% endif %}">{{ f.facet[4:]|replace('_', ' ') }}</a>
+        {% if f.not_tested_reason %}<div class="fm-note fm-reason">{{ f.not_tested_reason }}</div>{% endif %}
         {% if not f.live %}<div class="fm-warn" title="Declared in the dataset description but not in the served data (views not rebuilt, or the source column is missing).">declared, not served</div>{% endif %}
         {% if f.facet.endswith('_author_cluster') %}<div class="fm-note ds-scoped-note" title="The labels are the authors' own clusters inside one cell type of this dataset. They are never compared across datasets and no gene tests run on them.">dataset-scoped, no tests <a href="/help#glossary-author-cluster">?</a></div>{% endif %}
         {% if f.facet in ('ant_genotype', 'ant_host_genotype') %}<div class="fm-note ds-genotype-note">{{ 'host mouse' if f.facet == 'ant_host_genotype' else 'sequenced cells' }} <a href="/help#glossary-host-genotype">?</a></div>{% endif %}
@@ -530,7 +531,7 @@
      All three are plain .tab-btn buttons, so the tab wiring treats them as ordinary tabs. A span, not a
      div, so the bar markup stays one flat <div>. #}
   <span class="tab-group" id="tab-group-facet">
-    <button type="button" class="tab-btn tab-group-label{% if not show_facets_tab %} tab-empty{% endif %}" data-tab="facets" role="tab" id="tab-btn-facets" title="{{ 'The facets of this dataset and how its columns map onto them' if show_facets_tab else 'This dataset has no facet columns' }}">Facet{% if show_facets_tab %}<span class="tab-count">{{ n_facets_total }}</span>{% endif %}</button>
+    <button type="button" class="tab-btn tab-group-label{% if not show_facets_tab %} tab-empty{% endif %}" data-tab="facets" role="tab" id="tab-btn-facets" title="{{ 'The facets of this dataset and how its columns map onto them' if show_facets_tab else 'This dataset has no facet columns' }}">Facet{% if show_facets_tab %}<span class="tab-count">{{ facet_groups.n_listed }}</span>{% endif %}</button>
     {% if show_facets_tab %}<button type="button" class="tab-btn tab-sub {{ view_class('dataset-facet-gene') }}" data-tab="facet-gene" role="tab" id="tab-btn-facet-gene" title="{{ view_tip('dataset-facet-gene', 'Effects by facet: genes that differ between donors, per facet and cell type.') }}">Gene</button>{% endif %}
     {% if n_module_scores %}<button type="button" class="tab-btn tab-sub {{ view_class('dataset-facet-gs') }}" data-tab="facet-gs" role="tab" id="tab-btn-facet-gs" title="{{ view_tip('dataset-facet-gs', 'Gene set scores compared with the cell annotation columns, per cell and descriptive.') }}">GS</button>{% endif %}
   </span>
@@ -950,7 +951,7 @@
   {% set _fx_shown = (dataset_facets + dataset_facets_other)|map(attribute='facet')|list %}
   {% set _fx_extra = [] %}{% set _fx_untested_extra = [] %}{% for col in _fx %}{% if col not in _fx_shown %}{% if _fx[col].tested %}{% set _ = _fx_extra.append(col) %}{% elif _fx[col].untested %}{% set _ = _fx_untested_extra.append(col) %}{% endif %}{% endif %}{% endfor %}
   <div id="ds-facets">
-    <h2 class="section-head">Facets <span class="muted">({{ n_facets_total }})</span>{{ doc_toggle('ds-facets-about', 'About the facet mappings') }}</h2>
+    <h2 class="section-head">Facets <span class="muted">({{ facet_groups.n_listed }})</span>{{ doc_toggle('ds-facets-about', 'About the facet mappings') }}</h2>
     {% call doc_block('About the facet mappings', id='ds-facets-about') %}
       <p>Facets are the standardised <code>ant_</code> columns of this dataset. For each one the table shows the author column it comes from, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts.</p>
       <p>For facets that were tested, the Gene sub-tab shows the differences between donors per cell type. Click a facet for its definition and the other datasets that carry it. Terms are explained in the <a href="/help#glossary">glossary</a>.</p>
@@ -986,21 +987,30 @@
     {% endif %}
     {% if facet_tests and facet_tests.dataset_changed %}<p class="fx-intro" id="fx-changed" style="color:#7a4b0c">The dataset has changed since the facet tests were run; the effects describe the earlier version.</p>{% endif %}
 
-    {% if dataset_facets or _fx_extra %}
-    <h3 class="subsection-head" id="facets-analysed">Analysed facets <span class="muted">({{ dataset_facets|length + _fx_extra|length }})</span></h3>
-    {% call _facet_mapping_table(dataset_facets) %}
-        {% for col in _fx_extra %}
+    {% set _groups = facet_groups %}
+    {% if _groups.tested or _groups.extra %}
+    <h3 class="subsection-head" id="facets-analysed">Tested <span class="muted">({{ _groups.tested|length + _groups.extra|length }})</span>{{ doc_toggle('facets-tested-about', 'About the tested facets') }}</h3>
+    {% call doc_block('About the tested facets', id='facets-tested-about') %}<p>Facets with at least one donor-level test in this dataset; the results are in the Gene and GS sub-tabs.</p>{% endcall %}
+    {% call _facet_mapping_table(_groups.tested) %}
+        {% for col in _groups.extra %}
         <tr class="ds-facet-row" data-facet="{{ col }}">
-          <td data-label="Facet"><a class="fct-name" href="/facets/{{ (('ant_' ~ {'ant_age_adjusted': 'age', 'ant_braak_threshold': 'braak', 'ant_apoe4_dose': 'apoe4_carrier'}.get(col, col[4:]))|urlencode) }}">{{ col[4:] }}</a></td>
+          <td data-label="Facet"><a class="fct-name" href="/facets/{{ (('ant_' ~ {'ant_age_adjusted': 'age', 'ant_braak_threshold': 'braak', 'ant_apoe4_dose': 'apoe4_carrier'}.get(col, col[4:]))|urlencode) }}" title="{{ col }}">{{ facet_test_label(col) }}</a></td>
           <td colspan="4" class="fm-note">Not published as a column of this dataset; the facet test derived it ({{ facet_derived_note(col) }}).</td>
         </tr>
         {% endfor %}
     {% endcall %}
     {% endif %}
-    {% if dataset_facets_other %}
-    <h3 class="subsection-head" id="facets-not-analysed">Not analysed yet <span class="muted">({{ dataset_facets_other|length }})</span>
-      <span class="info" title="These facets are in the data, the plots, SQL and the API. Their donor-level effects are not analysed while the facet audit decisions are pending.">ⓘ</span></h3>
-    {{ _facet_mapping_table(dataset_facets_other) }}
+    {% if _groups.untested %}
+    <h3 class="subsection-head" id="facets-not-analysed">Present, not tested <span class="muted">({{ _groups.untested|length }})</span>{{ doc_toggle('facets-untested-about', 'About facets that are present but not tested') }}</h3>
+    {% call doc_block('About facets that are present but not tested', id='facets-untested-about') %}<p>These facets are in the data, the plots, SQL and the API, but there is no donor-level test of them in this dataset. The reason is under each name: one value only (every donor has the same value), too few donors per group, a covariate that is adjusted for but not tested itself, or a facet whose definition is still under review.</p>{% endcall %}
+    {{ _facet_mapping_table(_groups.untested) }}
+    {% endif %}
+    {% if _groups.structural %}
+    <button type="button" class="doc-toggle fxg-full-toggle" id="facets-structural-toggle" data-help-for="facets-structural" aria-controls="facets-structural" aria-expanded="false" title="The columns that define the unit of the analysis: show or hide">structural columns ({{ _groups.structural|length }})</button>
+    {% call doc_block('Structural columns', id='facets-structural') %}
+      <p>These columns define the unit of the analysis rather than being compared: the cell type the cells are grouped by, the donor a profile belongs to, the tissue and the authors' own clusters. They are never tested as a facet.</p>
+      {{ _facet_mapping_table(_groups.structural) }}
+    {% endcall %}
     {% endif %}
 
   </div>

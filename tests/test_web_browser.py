@@ -6953,11 +6953,13 @@ def test_dataset_facets_card_hides_facets_outside_the_config(client, monkeypatch
     monkeypatch.setattr(browser, "_api_get", fake)
     card = client.get("/browse/GroupA/ds1").text.split('id="ds-facets"')[1].split("<script>")[0]
     assert 'href="/facets/ant_sex"' in card
-    # not analysed facets are listed, under their own subheading, not dropped
-    assert 'id="facets-not-analysed"' in card and "Not analysed yet" in card
+    # facets that are present but not tested are listed with their reason, not dropped; tissue is structural
+    assert 'id="facets-not-analysed"' in card and "Present, not tested" in card
     analysed, not_analysed = card.split('id="facets-not-analysed"')
     assert 'data-facet="ant_sex"' in analysed and 'data-facet="ant_tissue"' not in analysed
-    assert 'href="/facets/ant_tissue"' in not_analysed and 'href="/facets/ant_braak_group"' in not_analysed
+    assert 'href="/facets/ant_braak_group"' in not_analysed and "not analysed yet" in not_analysed
+    structural = not_analysed.split('id="facets-structural"')[1]
+    assert 'href="/facets/ant_tissue"' in structural
 
 
 def test_dataset_facets_card_not_tested_state(client, monkeypatch):
@@ -8255,3 +8257,18 @@ def test_dataset_small_fixes_wrap_badge_count_caveats_bulk(client, monkeypatch):
     monkeypatch.setattr(browser, "_api_get", bulk)
     text = client.get("/browse/GroupA/ds1").text
     assert 'class="tab-panel ds-bulk" id="tab-genes"' in text and '<td class="colname">samples</td>' in text   # M12
+
+
+def test_facet_groups_split_tested_untested_structural_and_count_what_is_listed():
+    facets = [{"facet": "ant_sex"}, {"facet": "ant_disease"}, {"facet": "ant_pmi"}, {"facet": "ant_cell_type"},
+              {"facet": "ant_donor"}, {"facet": "ant_mg_author_cluster"}, {"facet": "ant_braak_group", "hidden_by_config": True}]
+    tests = {"by_facet": {"ant_sex": {"tested": [{}], "untested": []},
+                          "ant_disease": {"tested": [], "untested": [{"reason": "level with < 3 donors (control=0, AD=12)"}]},
+                          "ant_age_adjusted": {"tested": [{}], "untested": []}}}
+    groups = browser._facet_groups(facets, tests)
+    assert [f["facet"] for f in groups["tested"]] == ["ant_sex"] and groups["extra"] == ["ant_age_adjusted"]
+    reasons = {f["facet"]: f["not_tested_reason"] for f in groups["untested"]}
+    assert reasons["ant_disease"] == "one value only" and "covariate" in reasons["ant_pmi"]
+    assert reasons["ant_braak_group"].startswith("not analysed yet")
+    assert [f["facet"] for f in groups["structural"]] == ["ant_cell_type", "ant_donor", "ant_mg_author_cluster"]
+    assert groups["n_listed"] == 1 + 1 + 3

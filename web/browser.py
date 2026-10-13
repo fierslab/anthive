@@ -3068,6 +3068,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "dataset_facets": dataset_facets,
         "dataset_facets_other": dataset_facets_other,
         "n_facets_total": sum(1 for f in dataset_facets + dataset_facets_other if f.get('live', True)),
+        # the Facet label panel lists tested / present but not tested / structural; the badge counts what is listed
+        "facet_groups": _facet_groups(dataset_facets + dataset_facets_other, facet_tests),
         # an excluded dataset (spatial, proteomics, metacells, mouse) keeps the tab to say why it has no facet analysis
         "show_facets_tab": bool(dataset_facets or dataset_facets_other or (facet_tests or {}).get('excluded')),
         "folder_name": friendly_group,
@@ -5517,6 +5519,47 @@ def _facet_module_matrices(summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             variants.append({'method': method, 'source': source, 'label': label, 'key': f'{method}-{source}',
                              'matrix': matrix})
     return {'variants': variants, 'default': variants[0]['key']} if variants else None
+
+
+# Facet label panel groups (2026-10-13): structural columns define the unit of the analysis (cell type, donor,
+# tissue, author clusters); covariates are adjusted for but never tested themselves.
+_STRUCTURAL_FACETS = frozenset({'ant_cell_type', 'ant_donor', 'ant_donor_uid', 'ant_tissue'})
+_COVARIATE_FACETS = {'ant_pmi': 'used as a covariate (post-mortem interval), not tested itself'}
+
+
+def _facet_groups(facets: List[Dict[str, Any]], facet_tests: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Split a dataset's facets into the three groups of the Facet label panel.
+
+    ``tested``: facets with at least one tested unit. ``untested``: present but not tested, each with a short
+    ``not_tested_reason`` (one value only, too few donors, a covariate, not analysed yet). ``structural``: the
+    columns that define the unit (cell type, donor, donor uid, tissue, author clusters). ``extra``: tested facets
+    without a column of their own (derived by the test). ``n_listed`` (the badge) counts tested, extra and untested.
+    """
+    by_facet = (facet_tests or {}).get('by_facet') or {}
+    tested, untested, structural = [], [], []
+    names = set()
+    for facet in facets:
+        name = str(facet.get('facet') or '')
+        names.add(name)
+        if name in _STRUCTURAL_FACETS or name.endswith('_author_cluster'):
+            structural.append(facet)
+            continue
+        slot = by_facet.get(name) or {}
+        if slot.get('tested'):
+            tested.append(facet)
+            continue
+        if name in _COVARIATE_FACETS:
+            reason = _COVARIATE_FACETS[name]
+        elif slot.get('untested'):
+            reason = ', '.join(sorted({_fxg_short_reason(item) for item in slot['untested']}))
+        elif facet.get('hidden_by_config'):
+            reason = 'not analysed yet (the facet definition is under review)'
+        else:
+            reason = 'no facet test for this column'
+        untested.append({**facet, 'not_tested_reason': reason})
+    extra = [col for col, slot in by_facet.items() if slot.get('tested') and col not in names]
+    return {'tested': tested, 'untested': untested, 'structural': structural, 'extra': extra,
+            'n_listed': len(tested) + len(extra) + len(untested)}
 
 
 def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Optional[Dict[str, Any]]:
