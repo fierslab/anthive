@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{# Per donor plot page (2026-10-13): one gene or gene set, one facet, one cell type of one dataset; the values the
+   donor-level facet test used. Image from /api/facets/{facet}/donor-plot.{png,svg,pdf}?...&db_id=; numbers from the
+   matching /donor-values. Reached from the plot icons of the dataset Facet > Gene and GS lists. #}
+{% block title %}Per donor: {{ subject }} by {{ facet_label }}, {{ dataset_name }}{% endblock %}
+{% block content %}
+{% from "_macros.html" import breadcrumb, secondary_badge, doc_block, doc_toggle %}
+{% from "_plot_caveats.html" import plot_caveats_button, plot_caveats_panel %}
+<style>
+  .plot-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .plot-title-row .page-title { margin-right: auto; }
+  .dp-sub { font-size: 12.5px; color: var(--text-muted); margin: 2px 0 8px; }
+  .dp-bar { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 12px; margin: 6px 0 10px; }
+  .dp-bar a, .dp-bar label { white-space: nowrap; }
+  .dp-img { border: 1px solid var(--border); border-radius: 6px; background: #fff; padding: 8px; min-height: 120px; max-width: 100%; overflow-x: auto; }
+  .dp-img img { max-width: 100%; height: auto; display: block; }
+  .dp-caption { font-size: 11.5px; color: #475569; margin: 6px 0; max-width: 900px; line-height: 1.5; border-left: 3px solid #335C67; padding-left: 10px; }
+  .dp-status { font-size: 12px; color: var(--text-muted); padding: 8px; }
+</style>
+{{ breadcrumb([
+    (folder_name, "/browse/" ~ folder_browse_id),
+    (dataset_name, "/browse/" ~ folder_browse_id ~ "/" ~ file_id),
+    ("per donor", None)
+], ids=[("collection", group_id), ("dataset", file_id)]) }}
+
+<div class="plot-title-row">
+<h1 class="page-title{% if is_secondary %} secondary-dataset{% endif %}" id="dp-title">Per donor: {{ subject }} by {{ facet_label }}, {{ cell_type }}, {{ db_id }}{{ doc_toggle('dp-about', 'About this plot') }}{{ secondary_badge(is_secondary) }}</h1>
+{{ plot_caveats_button(caveats, caveats_summary) }}
+</div>
+{{ plot_caveats_panel(caveats, caveats_summary) }}
+{% call doc_block('About this plot', id='dp-about') %}
+  <p>One point per donor (per host animal in xenografts): {% if gene %}the pseudobulk expression of {{ gene }}, log2 CPM of the counts summed over the donor's {{ cell_type }} cells (TMM normalised, the scale the test fits){% else %}the donor's score of the gene set{% if method == 'pseudobulk' %} on the pseudobulk counts{% else %}, the mean of the per-cell score over the donor's {{ cell_type }} cells{% endif %}{% endif %}. These are the values the donor-level facet test used, so this is the evidence behind the result, unlike the per cell plots, which are descriptive.</p>
+  <p>Values are unadjusted unless you tick "adjusted for covariates", which removes the covariate part of an ordinary least squares fit on the same scale. The test also weights donors, so the drawn trend can differ a little from the reported estimate. The number of donors and the estimate are under the plot; the caption has the model.</p>
+{% endcall %}
+{% if not valid %}
+<p class="dp-status" id="dp-invalid">This page needs a facet, a cell type and a gene (or a gene set with its method and source).</p>
+{% else %}
+<p class="dp-sub" id="dp-summary">Loading the donor values&hellip;</p>
+<div class="dp-bar">
+  <label><input type="checkbox" id="dp-adjusted"> adjusted for covariates</label>
+  <span>download: <a href="#" data-fmt="png" class="dp-dl">PNG</a> <a href="#" data-fmt="svg" class="dp-dl">SVG</a> <a href="#" data-fmt="pdf" class="dp-dl">PDF</a></span>
+  <a href="/browse/{{ folder_browse_id }}/{{ file_id }}#{{ back_hash }}" id="dp-back">back to the facet results</a>
+</div>
+<div class="dp-img" id="dp-img"><p class="dp-status">Loading the plot&hellip; (the first plot after a restart can take a minute)</p></div>
+<p class="dp-caption" id="dp-caption" hidden></p>
+<script>
+(function () {
+  var FACET = {{ facet|tojson }}, QUERY = {{ api_query|tojson }};
+  var base = '/api/facets/' + encodeURIComponent(FACET);
+  var box = document.getElementById('dp-img'), caption = document.getElementById('dp-caption'), summary = document.getElementById('dp-summary');
+  var adjusted = document.getElementById('dp-adjusted');
+  var current = null;
+  function esc(text) { return String(text == null ? '' : text).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function query() { return QUERY + (adjusted.checked ? '&adjusted=true' : ''); }
+  function load() {
+    box.innerHTML = '<p class="dp-status">Loading the plot&hellip; (the first plot after a restart can take a minute)</p>';
+    fetch(base + '/donor-plot.png?' + query() + '&width=4&height=3.6', { credentials: 'same-origin' })
+      .then(function (response) {
+        if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || ('HTTP ' + response.status)); }, function () { throw new Error('HTTP ' + response.status); });
+        var text = response.headers.get('X-Plot-Caption');
+        if (text) { caption.textContent = text; caption.hidden = false; }
+        return response.blob();
+      })
+      .then(function (blob) {
+        if (current) URL.revokeObjectURL(current);
+        current = URL.createObjectURL(blob);
+        box.innerHTML = '<img alt="Per donor plot" src="' + current + '">';
+      })
+      .catch(function (error) { box.innerHTML = '<p class="dp-status">The per donor plot is not available: ' + esc(error.message) + '.</p>'; });
+    fetch(base + '/donor-values?' + query(), { credentials: 'same-origin' })
+      .then(function (response) { return response.ok ? response.json() : null; })
+      .then(function (body) {
+        var unit = body && (body.units || [])[0];
+        if (!unit) { summary.textContent = ''; return; }
+        var model = unit.model || {};
+        var q = model.q_value == null ? 'n/a' : model.q_value === 0 ? '< 1e-300' : (model.q_value < 0.001 ? Number(model.q_value).toExponential(1) : Number(model.q_value).toFixed(3));
+        summary.innerHTML = esc(unit.n_donors) + ' ' + (unit.replicate_unit === 'animal' ? 'animals' : 'donors') + (unit.cohort_display ? ', cohort ' + esc(unit.cohort_display) : '') +
+          '; estimate ' + (model.estimate == null ? 'n/a' : Number(model.estimate).toFixed(3)) + ' (' + esc(model.unit || '') + '), q ' + q +
+          (unit.counted ? '; counted towards replication' : '; not counted towards replication') + '.';
+      }).catch(function () { summary.textContent = ''; });
+  }
+  adjusted.addEventListener('change', load);
+  document.querySelectorAll('.dp-dl').forEach(function (link) {
+    link.addEventListener('click', function (event) {
+      event.preventDefault();
+      window.open(base + '/donor-plot.' + link.dataset.fmt + '?' + query(), '_blank', 'noopener');
+    });
+  });
+  load();
+})();
+</script>
+{% endif %}
+{% endblock %}

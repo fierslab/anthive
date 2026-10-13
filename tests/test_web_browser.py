@@ -8050,7 +8050,7 @@ def test_dataset_gene_subtab_shows_the_matrix_and_keeps_the_full_table(client):
     full = panel.split('<div class="doc-box" id="fxg-full"')[1]
     assert 'id="fx-table-ant_sex"' in full and 'hidden' in panel.split('id="fxg-full"')[1][:120]
     # gene list script: genes endpoint, csv, volcano, plot icons, effect bar
-    for needle in ("/facet-tests", "/genes", "&format=csv", "/volcano.png?", "/donor-plot.png?", "&db_id=", "/plot/violin?x=",
+    for needle in ("/facet-tests", "/genes", "&format=csv", "/volcano.png?", "/plot/donor?facet=", "/plot/violin?x=",
                    "/plot/rolling?x=", "&subset=", "per donor", "per cell, descriptive", "antEffectBar", "listScale", "show all "):
         assert needle in panel, needle
     assert "dataset-facet-gene" in browser.VIEW_REGISTRY and "dataset-facet-gene" not in browser.APPROVED_VIEWS
@@ -8116,3 +8116,93 @@ def test_facet_tab_group_has_a_tint_token_with_a_dark_value(client):
     text = client.get("/browse/GroupA/ds1").text
     assert "--tab-group-tint: #eef4f5" in text and ':root:not([data-theme="light"]) { --tab-group-tint:' in text
     assert "background: var(--tab-group-tint)" in text
+
+
+# ── Other DE (author and custom) under the facet matrices (2026-10-13) ──────
+
+@pytest.mark.parametrize("term,contrast,reference,expected", [
+    ("cluster", "3", "vsgrandmean", "3 vs all (cluster)"),
+    ("genotype", "K_vs_W", "vsreference", "K vs W (genotype)"),
+    ("Strain", "AppNLGF - AppHuHu", "vsgrandmean", "AppNLGF vs AppHuHu (Strain)"),
+])
+def test_de_row_label(term, contrast, reference, expected):
+    assert browser._de_row_label(term, contrast, reference) == expected
+
+
+def test_de_subset_expressible_only_for_one_categorical_column():
+    assert browser._de_subset(None, ["ant_cell_type"])["label"] == "all cells"
+    one = browser._de_subset({"ant_cell_type": ["microglial cell"]}, ["ant_cell_type"])
+    assert one["query"] == "ant_cell_type:microglial cell" and one["label"] == "microglial cell"
+    two = browser._de_subset({"a": "x", "b": "y"}, ["a", "b"])
+    assert two["query"] == "" and two["label"] == "study subset" and two["note"]
+
+
+_OTHER_DE_STUDIES = [{"study_id": "s_gene", "name": "Sex in microglia", "method": "deseq2_pseudobulk", "target": "gene"},
+                     {"study_id": "s_mod", "name": "Modules", "method": "lmem", "target": "module"}]
+
+
+def _other_de_fake(api_url, path, **kwargs):
+    if path.endswith("/de/s_gene/summary"):
+        return {"study_id": "s_gene", "name": "Sex in microglia", "method": "deseq2_pseudobulk", "target": "gene",
+                "reference_type": "vsreference", "covariates": ["batch"], "n_cells_total": 1200, "subset_filter": None,
+                "cluster_obs_column": None, "description": "Pseudobulk per mouse.", "source": "x", "notes": None,
+                "contrasts": [{"term": "intercept", "contrast": "x", "n_genes": 10, "n_sig": 10, "n_up": 5, "n_down": 5, "efftype": "log2fc"},
+                              {"term": "Sex", "contrast": "M_vs_F", "n_genes": 100, "n_sig": 12, "n_up": 5, "n_down": 7, "efftype": "log2fc"}]}
+    if path.endswith("/de/s_mod/summary"):
+        return {"study_id": "s_mod", "name": "Modules", "method": "lmem", "target": "module", "reference_type": "vsgrandmean",
+                "subset_filter": None, "contrasts": [{"term": "cluster", "contrast": "3", "n_genes": 13, "n_sig": 2, "n_up": 2,
+                                                      "n_down": 0, "efftype": "zeff"}]}
+    if path.endswith("/de"):
+        return {"studies": _OTHER_DE_STUDIES}
+    return _fake_api_get(api_url, path)
+
+
+def test_other_de_view_splits_gene_and_module_studies(monkeypatch):
+    monkeypatch.setattr(browser, "_api_get", _other_de_fake)
+    view = browser._other_de_view("http://x", "GroupA/ds1", _OTHER_DE_STUDIES, {"categorical": ["sex", "leiden"]})
+    gene = view["gene"][0]
+    assert [r["label"] for r in gene["rows"]] == ["M vs F (Sex)"]            # intercept dropped
+    row = gene["rows"][0]
+    assert (row["n"], row["n_up"], row["n_down"], row["obs_column"]) == (12, 5, 7, "sex")
+    assert gene["level"].startswith("donor") and gene["subset"]["label"] == "all cells" and gene["covariates"] == "batch"
+    assert view["module"][0]["rows"][0]["label"] == "3 vs all (cluster)"
+
+
+def test_dataset_page_shows_other_de_under_the_gene_matrix_and_points_from_the_de_tab(client, monkeypatch):
+    monkeypatch.setattr(browser, "_api_get", _other_de_fake)
+    text = client.get("/browse/GroupA/ds1").text
+    gene_panel = text.split('id="tab-facet-gene"')[1].split('<section class="tab-panel"')[0]
+    assert 'id="ode-gene-head"' in gene_panel and "Other DE (author and custom)" in gene_panel
+    assert 'data-view="dataset-other-de"' in gene_panel
+    assert "not donor-level facet tests, not counted towards replication" in gene_panel
+    assert 'data-study="s_gene" data-term="Sex" data-contrast="M_vs_F"' in gene_panel and 'data-obs-column="' in gene_panel
+    assert "/plot/volcano?" in gene_panel and "/plot/ma?" in gene_panel and "padj_max=0.05" in gene_panel
+    assert "donor-plot" not in gene_panel.split('id="ode-gene"')[1].split("{%- endmacro")[0].split("fxg_list")[0].split("var root = document.getElementById({{")[0].split("</script>")[0]
+    de_tab = text.split('id="tab-de"')[1].split("</section>")[0]
+    assert 'id="de-other-pointer"' in de_tab and 'href="#ode-gene-head"' in de_tab
+    assert "dataset-other-de" in browser.VIEW_REGISTRY and "dataset-other-de" not in browser.APPROVED_VIEWS
+    assert "gene-other-de" in browser.VIEW_REGISTRY and "gene-other-de" not in browser.APPROVED_VIEWS
+
+
+# ── Per donor plot page (2026-10-13) ────────────────────────────────────────
+
+def test_donor_plot_page_draws_the_api_image_with_db_id(client):
+    text = client.get("/browse/GroupA/ds1/plot/donor?facet=braak&cell_type=microglial%20cell&gene=PTPRG").text
+    assert "Per donor: PTPRG by Braak stage, microglial cell, GroupA/ds1" in text
+    assert "/donor-plot.png?" in text and "/donor-values?" in text
+    assert "cell_type=microglial+cell&amp;db_id=GroupA%2Fds1&amp;gene=PTPRG" in text or "db_id=GroupA%2Fds1" in text
+    assert 'data-fmt="svg"' in text and 'data-fmt="pdf"' in text and 'id="dp-adjusted"' in text
+    assert 'href="/browse/GroupA/ds1#facet-gene"' in text
+    assert '<div class="doc-box" id="dp-about"' in text and "the values the donor-level facet test used" in text
+    assert 'class="breadcrumb' in text
+
+
+def test_donor_plot_page_for_a_gene_set_and_without_parameters(client):
+    text = client.get("/browse/GroupA/ds1/plot/donor?facet=sex&cell_type=astrocyte&module=S/E/Mod1&method=pseudobulk&source=gene_list").text
+    assert "Per donor: Mod1 by Sex" in text and "module=S%2FE%2FMod1" in text and "#facet-gs" in text
+    assert 'id="dp-invalid"' in client.get("/browse/GroupA/ds1/plot/donor").text
+
+
+def test_plot_pages_share_the_caveat_partial(client):
+    text = client.get("/browse/GroupA/ds1/plot/violin").text
+    assert 'id="cv-toggle"' in text and 'id="cv-panel"' in text

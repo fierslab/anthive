@@ -1,0 +1,135 @@
+{# The collapsed caveat button and its panel of the plot pages (plot.html, donor_plot.html).
+   plot_caveats_button(caveats, caveats_summary) goes in the title row; plot_caveats_panel(...) right under it. #}
+{% macro plot_caveats_button(caveats, caveats_summary) -%}
+{% if caveats %}<div class="cv-btnwrap caveat-{{ caveats_summary.max_level or 'low' }}">
+<button type="button" class="cv-toggle" id="cv-toggle" aria-expanded="false" aria-controls="cv-panel"
+        title="Known caveats for this dataset: {{ caveats_summary.n }}{% if caveats_summary.n > 1 %}, highest {{ caveats_summary.max_level }}{% endif %}. Click to show or hide.">
+  <svg class="cv-tri" viewBox="0 0 24 22" width="16" height="15" aria-hidden="true" focusable="false">
+    <path d="M12 2 L22.5 20 H1.5 Z" fill="currentColor" fill-opacity=".15" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M12 8.5 V14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+    <circle cx="12" cy="17.3" r="1.3" fill="currentColor"/>
+  </svg>
+  <span class="cv-n">{{ caveats_summary.n }}</span>
+  <span class="cv-lbl">caveat{{ 's' if caveats_summary.n != 1 }}{% if caveats_summary.max_level == 'high' %}, high{% endif %}</span>
+</button>
+</div>{% endif %}
+{%- endmacro %}
+
+{% macro plot_caveats_panel(caveats, caveats_summary) -%}
+{% if caveats %}
+<style>
+  .cv-wrap { margin: 0 0 8px; }
+  .plot-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .plot-title-row .page-title { margin-right: auto; }
+  .cv-btnwrap { margin-left: auto; }
+  .cv-toggle {
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    font: inherit; font-size: 12px; font-weight: 600; line-height: 1.4;
+    padding: 2px 10px 2px 8px; border-radius: 999px;
+    border: 1px solid currentColor; background: #fff;
+  }
+  .cv-toggle:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+  .cv-toggle[aria-expanded="true"] { background: #f8fafc; }
+  .cv-toggle .cv-lbl { font-weight: 500; }
+  .cv-btnwrap.caveat-low    .cv-toggle { color: #64748b; }
+  .cv-btnwrap.caveat-medium .cv-toggle { color: #b45309; }
+  .cv-btnwrap.caveat-high   .cv-toggle { color: #b91c1c; }
+  @media (max-width: 480px) { .cv-toggle .cv-lbl { display: none; } }
+  .caveats-card[hidden] { display: none; }
+  .caveats-card {
+    margin-top: 6px !important;
+    border: 1px solid var(--border); border-left-width: 4px; border-radius: 6px;
+    background: #fafafa; margin: 8px 0 10px; padding: 8px 12px; font-size: 12px;
+  }
+  .caveats-card .cv-header {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 6px;
+  }
+  .caveats-card .cv-sigil { font-size: 13px; filter: grayscale(1); opacity: .85; }
+  .caveats-card .cv-count { color: var(--text-muted); font-weight: 500; }
+  .caveats-card .cv-list { display: flex; flex-direction: column; gap: 6px; }
+  .caveats-card .cv-item { padding-top: 6px; border-top: 1px dotted var(--border); }
+  .caveats-card .cv-item:first-child { border-top: 0; padding-top: 0; }
+  .caveats-card .cv-row1 {
+    display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; margin-bottom: 2px;
+  }
+  .caveats-card .cv-chip {
+    display: inline-block; padding: 0 6px; font-size: 10px;
+    line-height: 1.5; border-radius: 3px; font-family: var(--font-mono);
+    background: #f1f5f9; color: #334155; border: 1px solid var(--border);
+    text-transform: lowercase; letter-spacing: .2px;
+  }
+  .caveats-card .cv-chip.lvl { text-transform: uppercase; letter-spacing: .3px; font-size: 9px; }
+  .caveats-card .cv-scope   { font-family: var(--font-mono); font-size: 11px; color: #475569; }
+  .caveats-card .cv-obsflag { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
+  .caveats-card .cv-msg    { color: var(--text); font-size: 12px; line-height: 1.4; }
+  /* "Filter these out" chip, one-click plot restart with the obs_flag
+     baked into subset. Small, monospace, subtly clickable. */
+  .caveats-card .cv-filter-chip {
+    display: inline-block; margin-left: 6px; padding: 0 6px; font-size: 10px;
+    line-height: 1.6; border-radius: 3px; font-family: var(--font-mono);
+    background: #eef2ff; color: #3730a3; border: 1px solid #c7d2fe;
+    text-decoration: none; cursor: pointer;
+  }
+  .caveats-card .cv-filter-chip:hover { background: #e0e7ff; text-decoration: none; }
+  .caveats-card.caveat-low    { border-left-color: #94a3b8; background: #f8fafc; }
+  .caveats-card.caveat-low    .cv-chip.lvl { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+  .caveats-card.caveat-medium { border-left-color: #d97706; background: #fffbeb; }
+  .caveats-card.caveat-medium .cv-chip.lvl { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+  .caveats-card.caveat-high   { border-left-color: #b91c1c; background: #fef2f2; }
+  .caveats-card.caveat-high   .cv-chip.lvl { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
+</style>
+<div class="cv-wrap caveat-{{ caveats_summary.max_level or 'low' }}">
+<div class="caveats-card caveat-{{ caveats_summary.max_level or 'low' }}" id="cv-panel" hidden
+     role="note" aria-label="Known caveats for this dataset">
+  <div class="cv-list">
+    {% for cv in caveats %}
+    <div class="cv-item">
+      <div class="cv-row1">
+        <span class="cv-chip lvl" title="severity">{{ cv.level or 'low' }}</span>
+        {% if cv.kind %}<span class="cv-chip" title="caveat type">{{ cv.kind }}</span>{% endif %}
+        {% if cv.scope %}<span class="cv-scope" title="scope">{{ cv.scope }}</span>{% endif %}
+        {% if cv.obs_flag %}<span class="cv-obsflag" title="boolean obs column ('yes'/'no') that flags affected cells">obs:{{ cv.obs_flag }}</span>{% endif %}
+      </div>
+      {% if cv.message %}
+      <div class="cv-msg">{{ cv.message }}{% if cv.obs_flag %}<a class="cv-filter-chip" href="#" data-obs-flag="{{ cv.obs_flag }}" role="button" title="Prepend subset={{ cv.obs_flag }}:no to the current URL and reload the plot">Filter these out</a>{% endif %}</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+</div>
+<script>
+  (function() {
+    var toggle = document.getElementById('cv-toggle');
+    var panel = document.getElementById('cv-panel');
+    if (!toggle || !panel) return;
+    toggle.addEventListener('click', function() {
+      var open = toggle.getAttribute('aria-expanded') === 'true';
+      toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+      panel.hidden = open;
+    });
+  })();
+  // Filter-chip handler, prepends subset=<obs_flag>:no to the current URL
+  // and reloads. Preserves any existing subset/params. Task #254.
+  (function() {
+    document.querySelectorAll('.cv-filter-chip').forEach(function(chip) {
+      chip.addEventListener('click', function(ev) {
+        ev.preventDefault();
+        var flag = chip.dataset.obsFlag;
+        if (!flag) return;
+        var url = new URL(window.location.href);
+        var existing = url.searchParams.getAll('subset');
+        var addition = flag + ':no';
+        // De-dup: if the exact predicate is already there (either
+        // form), do nothing.
+        if (existing.indexOf(addition) !== -1) { return; }
+        if (existing.some(function(s) { return s.trim() === flag + "=='no'"; })) { return; }
+        url.searchParams.append('subset', addition);
+        window.location.href = url.toString();
+      });
+    });
+  })();
+</script>
+{% endif %}
+{%- endmacro %}

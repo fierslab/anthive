@@ -918,6 +918,11 @@
   {% else %}
   <p class="fx-none" id="fxs-none">No donor-level gene set results for this dataset{% if facet_tests and facet_tests.reason_text %}: {{ facet_tests.reason_text }}{% endif %}.</p>
   {% endif %}
+  {% if other_de and other_de.module %}
+  {% from "_other_de.html" import other_de_section %}
+  {{ fxg_styles() }}
+  {{ other_de_section(other_de.module, 'module', db_id, '/browse/' ~ folder_browse_id ~ '/' ~ file_id, default_embedding) }}
+  {% endif %}
   {% call doc_block('Per-cell associations (descriptive)', id='fxs-percell') %}
   <h3 class="subsection-head">Gene set scores by annotation column{{ doc_toggle('mv-modules-tab-about', 'About per-cell associations') }}</h3>
   <div class="tab-loading plot-loading" data-tab-loading="facet-gs" style="min-height:60px">
@@ -1043,6 +1048,11 @@
     {% endif %}
     {% endif %}
   </div>
+  {% if other_de and other_de.gene %}
+  {% from "_other_de.html" import other_de_section %}
+  {{ fxg_styles() }}
+  {{ other_de_section(other_de.gene, 'gene', db_id, '/browse/' ~ folder_browse_id ~ '/' ~ file_id, default_embedding) }}
+  {% endif %}
   {% if facet_tests and facet_tests.matrix %}{{ fxg_list_script('genes', 'fxg', 'fxg-genes', db_id, '/browse/' ~ folder_browse_id ~ '/' ~ file_id, default_embedding, obs_columns) }}{% endif %}
   {{ fx_script() }}
 </section>
@@ -1136,6 +1146,7 @@
 {% if de_studies %}
 <section class="tab-panel" id="tab-de" role="tabpanel">
   <h2 class="section-head">Differential expression <span class="muted">({{ de_studies|length }} {{ 'study' if de_studies|length == 1 else 'studies' }})</span></h2>
+  {% if other_de %}<p class="muted" id="de-other-pointer" style="font-size:12px;margin:0 0 6px">These studies are also shown as matrices next to the facet results: {% if other_de.gene and show_facets_tab %}<a href="#ode-gene-head">Facet &gt; Gene, Other DE</a>{% endif %}{% if other_de.gene and show_facets_tab and other_de.module and n_module_scores %} and {% endif %}{% if other_de.module and n_module_scores %}<a href="#ode-module-head">Facet &gt; GS, Other DE</a>{% endif %}.</p>{% endif %}
   <div class="table-wrap">
   <table class="auto" style="font-size:12px">
       <thead><tr>

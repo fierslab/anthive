@@ -67,6 +67,8 @@ VIEW_REGISTRY: Dict[str, str] = {
     'geneset-genes': 'Gene set page, Genes tab',
     'geneset-page': 'Gene set page, Gene set page (old) tab',
     'dataset-facet-gene': 'Dataset page, Facet > Gene sub-tab (facet x cell type matrix of gene results)',
+    'dataset-other-de': 'Dataset page, Other DE (author and custom) under the Facet > Gene and GS matrices',
+    'gene-other-de': 'Gene page, Other DE (author and custom) on the Facet DE tab',
     'dataset-facet-gs': 'Dataset page, Facet GS tab (gene set scores by annotation column, per cell)',
 }
 APPROVED_VIEWS = frozenset({
@@ -2610,6 +2612,50 @@ _PLOT_GEOM_GROUPS = (
 )
 
 
+@router.get("/browse/{folder_browse_id}/{dataset_browse_id}/plot/donor", response_class=HTMLResponse)
+async def donor_plot_view(request: Request, folder_browse_id: str, dataset_browse_id: str):
+    """Per donor plot page of one gene or gene set for one facet and cell type of this dataset (the values the facet test
+    used), built on the plot page shell. The image comes from ``/api/facets/{facet}/donor-plot.{fmt}`` with ``db_id``.
+
+    Query: ``facet``, ``cell_type`` and ``gene``, or ``module`` (``Study/Experiment/name``) with ``method`` and ``source``.
+    Registered before ``plot_view`` so 'donor' is not read as a geom.
+    """
+    group_id = unquote(folder_browse_id)
+    file_id = unquote(dataset_browse_id)
+    db_id = f"{group_id}/{file_id}"
+    api_url = _api_url(request)
+    params = request.query_params
+    facet = params.get('facet') or ''
+    cell_type = params.get('cell_type') or ''
+    gene = params.get('gene') or ''
+    module = params.get('module') or ''
+    try:
+        db = _api_get(api_url, f'/databases/{db_id}/info')
+    except Exception as error:
+        print(f"API error: {error}")
+        return templates.TemplateResponse(request, "index.html", {"folders": [], "error": f"Dataset '{db_id}' not found"},
+                                          status_code=404)
+    collection = db.get('collection') or {}
+    caveats = db.get('caveats') or []
+    subject = gene or module.rpartition('/')[2] or ''
+    query = {'cell_type': cell_type, 'db_id': db_id}
+    if gene:
+        query['gene'] = gene
+    elif module:
+        query.update({'module': module, 'method': params.get('method') or '', 'source': params.get('source') or ''})
+    return templates.TemplateResponse(request, "donor_plot.html", {
+        "folder_name": (collection.get('title') or '').strip() or collection.get('group') or group_id,
+        "folder_browse_id": group_id, "group_id": group_id, "file_id": file_id, "db_id": db_id,
+        "dataset_name": db.get('title') or file_id, "is_secondary": bool(db.get('is_secondary')),
+        "caveats": caveats, "caveats_summary": _summarize_caveats(caveats),
+        "facet": facet, "facet_label": _FACET_TEST_LABELS.get(facet, facet.replace('_', ' ')), "cell_type": cell_type,
+        "gene": gene, "module": module, "subject": subject, "method": params.get('method') or '',
+        "source": params.get('source') or '', "valid": bool(facet and cell_type and (gene or module)),
+        "api_query": urlencode({k: v for k, v in query.items() if v}),
+        "back_hash": 'facet-gs' if module else 'facet-gene',
+    })
+
+
 @router.get("/browse/{folder_browse_id}/{dataset_browse_id}/plot/{geom}",
             response_class=HTMLResponse)
 async def plot_view(request: Request, folder_browse_id: str,
@@ -3062,6 +3108,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "has_duckdb": True,
         "update_pending": False,
         "de_studies": de_studies,
+        "other_de": _other_de_view(api_url, db_id, de_studies, obs),
         "de_total_contrasts": de_total_contrasts,
         "papers": _dataset_papers(api_url, db_id),
         "facet_tests": facet_tests,
@@ -4103,6 +4150,91 @@ def _author_de_studies(api_url: str) -> Dict[str, List[Dict[str, Any]]]:
         return found
 
 
+_DE_PSEUDOBULK_METHODS = ('pseudobulk', 'deseq2', 'edger', 'limma', 'dream')
+
+
+def _de_method_level(method: Any) -> str:
+    """'donor' for a pseudobulk-style method name, 'cell' for a cell-level model, '' when it cannot be told."""
+    text = str(method or '').lower()
+    if 'pseudobulk' in text or text.startswith(('deseq2', 'edger', 'limma', 'dream')):
+        return 'donor or sample (pseudobulk)'
+    if text in ('glmm', 'lmem', 'wilcoxon', 'mast', 't-test', 'ttest', 'logreg', 'seurat', 'scanpy'):
+        return 'cell'
+    return ''
+
+
+def _de_row_label(term: str, contrast: str, reference: Any) -> str:
+    """A plain row label for one (term, contrast) of a stored DE study ('3 vs all (cluster)', 'K vs W (genotype)')."""
+    term_text = str(term or '').replace('_', ' ').strip()
+    contrast = str(contrast or '').strip()
+    if ' - ' in contrast:
+        left, right = contrast.split(' - ', 1)
+        return f"{left.strip()} vs {right.strip()} ({term_text})"
+    if reference == 'vsgrandmean':
+        return f"{contrast} vs all ({term_text})"
+    if '_vs_' in contrast:
+        return f"{contrast.replace('_vs_', ' vs ')} ({term_text})"
+    return f"{term_text}: {contrast}" if contrast else term_text
+
+
+def _de_subset(subset_filter: Any, categorical: List[str]) -> Dict[str, str]:
+    """The plot page ``subset=`` value and a label for a study's subset filter; empty query when not expressible."""
+    if not subset_filter:
+        return {'query': '', 'label': 'all cells', 'note': ''}
+    if isinstance(subset_filter, dict) and len(subset_filter) == 1:
+        column, value = next(iter(subset_filter.items()))
+        values = value if isinstance(value, list) else [value]
+        if column in categorical and all(isinstance(v, (str, int, float)) for v in values):
+            text = ', '.join(str(v) for v in values)
+            return {'query': f'{column}:{",".join(str(v) for v in values)}', 'label': text, 'note': ''}
+    return {'query': '', 'label': 'study subset', 'note': 'the study subset cannot be expressed as a plot filter, so the plots use all cells'}
+
+
+def _other_de_view(api_url: str, db_id: str, studies: List[Dict[str, Any]], obs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The stored DE studies of a dataset as matrices for the Facet > Gene ("gene" target) and GS ("module")
+    sub-tabs: one row per (term, contrast) with the significant genes at padj < 0.05 split up / down
+    (``/de/{study}/summary``, API 2.45), one column for the cells the study covers. None without studies."""
+    if not studies:
+        return None
+    categorical = list(obs.get('categorical', []) or [])
+    lower = {name.lower(): name for name in categorical}
+    out: Dict[str, List[Dict[str, Any]]] = {'gene': [], 'module': []}
+    for study in studies:
+        study_id = study.get('study_id')
+        try:
+            summary = _api_get(api_url, f'/databases/{db_id}/de/{url_quote(str(study_id), safe="")}/summary')
+        except Exception:
+            continue
+        if not isinstance(summary, dict) or 'contrasts' not in summary:
+            continue
+        subset = _de_subset(summary.get('subset_filter'), categorical)
+        rows = []
+        for item in summary['contrasts']:
+            if str(item.get('term')) == 'intercept':
+                continue
+            count = int(item.get('n_sig') or 0)
+            column = lower.get(str(item.get('term') or '').lower())
+            if column is None and summary.get('cluster_obs_column') and 'cluster' in str(item.get('term') or '').lower():
+                column = summary['cluster_obs_column']
+            rows.append({'term': item.get('term'), 'contrast': item.get('contrast'),
+                         'label': _de_row_label(item.get('term'), item.get('contrast'), summary.get('reference_type')),
+                         'n': count, 'n_up': item.get('n_up'), 'n_down': item.get('n_down'), 'n_tested': item.get('n_genes'),
+                         'level': _fxg_level(count), 'efftype': item.get('efftype'), 'obs_column': column})
+        target = 'module' if str(summary.get('target') or '').lower() == 'module' else 'gene'
+        covariates = summary.get('covariates')
+        out[target].append({
+            'study_id': study_id, 'name': summary.get('name') or study_id, 'method': summary.get('method') or '',
+            'level': _de_method_level(summary.get('method')), 'n_cells': summary.get('n_cells_total'),
+            'description': summary.get('description'), 'reference_type': summary.get('reference_type'),
+            'covariates': ', '.join(covariates) if isinstance(covariates, list) else covariates,
+            'subset_filter': summary.get('subset_filter'), 'source': summary.get('source'), 'notes': summary.get('notes'),
+            'subset': subset, 'rows': rows, 'key': re.sub(r'[^A-Za-z0-9_-]', '-', str(study_id)),
+        })
+    if not out['gene'] and not out['module']:
+        return None
+    return out
+
+
 def _plain_de_label(row: Dict[str, Any], study: Dict[str, Any]) -> str:
     """A reader's label for one author DE row: what was compared, in plain words."""
     term = str(row.get('term') or '').replace('_', ' ').strip()
@@ -4147,6 +4279,8 @@ def _gene_author_de_rows(api_url: str, gene: str) -> List[Dict[str, Any]]:
                 'study': row.get('study_name') or row.get('study_id'), 'method': row.get('method') or study.get('method') or '',
                 'term': row.get('term') or '', 'contrast': row.get('contrast') or '', 'label': _plain_de_label(row, study),
                 'log2fc': row.get('log2fc'), 'padj': row.get('padj'), 'pvalue': row.get('pvalue'),
+                'effsize': row.get('effsize'), 'efftype': row.get('efftype'), 'study_id': row.get('study_id'),
+                'target': study.get('target') or 'gene',
             })
         return out
     with ThreadPoolExecutor(max_workers=6) as pool:

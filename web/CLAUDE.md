@@ -68,6 +68,7 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | `/browse/{group}` | one collection | `folder.html` |
 | `/browse/{group}/{file}` | one dataset (info + viz launcher) | `dataset.html` |
 | `/browse/{group}/{file}/plot/{geom}` | interactive plot UI for one geom on one dataset | `plot.html` |
+| `/browse/{group}/{file}/plot/donor` `?facet&cell_type&gene` or `&module&method&source` | per donor plot of one gene or gene set for one facet and cell type (the values the facet test used); image from `/api/facets/{f}/donor-plot.{png,svg,pdf}` with `db_id`, numbers from `/donor-values`; registered before `plot_view` | `donor_plot.html` |
 | `/browse/{group}/{file}/de/{study}` | differential-expression explorer for one study | `de_browser.html` |
 | `/genesets` `?group=genesets\|starcat\|bygene` | group-selector browser | `genesets.html` |
 | `/genesets/variability` `?tag=&statistic=&source=` | module × dataset variance-explained heatmap | `geneset_variability.html` |
@@ -922,3 +923,34 @@ starCAT modules/scores (`.description` on `/catalogs`). Wire each up when shippe
 - The Facet tab group has a faint tint, token `--tab-group-tint` on `:root` in base.html (`#eef4f5`, dark value `#1d2a2e` under
   `prefers-color-scheme: dark` guarded by `:root:not([data-theme="light"])` and under `:root[data-theme="dark"]`); pills are white on it,
   the open group gains the full border and a 2px teal top line, the open pill stays filled.
+
+## Other DE (author and custom) (2026-10-13)
+
+- Stored DE studies (`__de_study` / `__de`) are shown under the facet matrices: gene-target studies at the end of the Facet > Gene panel,
+  module-target studies in Facet > GS (before the per-cell box). Partial `_other_de.html`, macro
+  `other_de_section(studies, kind, db_id, browse_base, default_embedding)` (reuses `fxg_styles`); registry key `dataset-other-de` (preview).
+  Data: `browser._other_de_view(api_url, db_id, de_studies, obs)` (`other_de` in the dataset context), one
+  `GET /databases/{id}/de/{study}/summary` per study (API 2.45: per (term, contrast) `n_sig` / `n_up` / `n_down` at padj < 0.05,
+  `subset_filter`, `cluster_obs_column`). Rows are (term, contrast) labelled by `_de_row_label` ("3 vs all (cluster)", "K vs W
+  (genotype)"), intercept rows dropped, rows after 20 behind "show all N contrasts"; one column for the cells the study covers
+  (`_de_subset`: a single-key `subset_filter` on a categorical column becomes `subset=col:v1,v2`, else "study subset" with a note, or
+  "all cells"). The term maps to a categorical obs column case-insensitively (else `cluster_obs_column` for cluster terms) for the per
+  cell plots. Level from the method name (`_de_method_level`). The (i) per study: description, method, reference, covariates, subset,
+  source, notes, why there is no per donor plot.
+- A click opens the list under that study (`/de/{study}/terms/{term}/contrasts/{contrast}?padj_max=0.05&sort=padj&limit=2000`):
+  gene (link; module studies plain) | effect (`effsize`, label log2 fold change or z by `efftype`, CI only when `estimate` equals
+  `log2fc`) | adj. p | per cell plots (violin, ECDF, histogram by the term column, embedding; no per donor link). Header links: the full
+  volcano and MA plot pages (`/plot/volcano|ma?study&term&contrast`). Bars use the same `listScale`.
+- The Differential expression tab stays; it has a pointer line `#de-other-pointer` to `#ode-gene-head` / `#ode-module-head`.
+- Gene page: `#vwg-ode` under the Facet DE tab ("Other DE (author and custom)", (?) panel, `review_banner('gene-other-de')`), filled
+  from the same `/genes/{gene}/author-de` call as the Author DE tab (rows now carry `effsize`, `efftype`, `study_id`, `target`); hidden when
+  the gene has no gene-target row. Gene set pages: not built, because no module-target study names its modules like a gene set (the
+  stored module names are WGCNA eigengenes such as `MEred`).
+
+## Per donor plot page (2026-10-13)
+
+- `donor_plot_view` / `donor_plot.html`: breadcrumb and title row like the plot pages ("Per donor: PTPRG by Braak stage, microglial cell,
+  L26/PSY"), the shared caveat button and panel (`_plot_caveats.html`, `plot_caveats_button` / `plot_caveats_panel`, also used by
+  plot.html), an (i) box `dp-about`, a summary line from `/donor-values` (donors, cohort, estimate, q, counted), an "adjusted for
+  covariates" checkbox (`adjusted=true`), PNG / SVG / PDF downloads and a link back to `#facet-gene` (`#facet-gs` for gene sets). The image
+  is fetched as a blob so an API error shows as a sentence. The first plot icon of the Facet > Gene and GS lists points here.

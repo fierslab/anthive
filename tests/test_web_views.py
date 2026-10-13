@@ -704,3 +704,11 @@ def test_geneset_expression_has_std_dev_in_the_shared_table(client):
     assert "Standard deviation of the module score over all cells in the dataset (samples for bulk)" in core
     order = [core.index(label) for label in ("headerCell('Cells'", "headerCell('Rank among '", "headerCell('Std. dev.'", "headerCell('Plots'")]
     assert order == sorted(order) and "(gene ? headerCell('Cells expressing" in core
+
+
+def test_gene_page_facet_de_tab_has_the_other_de_section(client):
+    text = client.get("/genes/PTPRG").text
+    section = text.split('id="vwg-ode"')[1]
+    assert section.split(">")[0].strip().endswith("hidden")
+    assert "Other DE (author and custom)" in section and 'data-view="gene-other-de"' in section
+    assert "renderOtherDe(rows)" in text and "#ode-gene-head" in text

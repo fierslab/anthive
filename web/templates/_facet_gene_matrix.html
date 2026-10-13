@@ -190,7 +190,8 @@
   function plotIcons(row, cell) {
     var facet = cell.dataset.facet, label = cell.dataset.label, where = cellFilter(cell);
     var name, display, note = '';
-    var donorUrl = '/api/facets/' + enc(facet) + '/donor-plot.png?cell_type=' + enc(cell.dataset.cellType) + '&db_id=' + enc(DB);
+    // the per donor plot page (donor_plot.html), which draws /api/facets/{facet}/donor-plot.png with db_id
+    var donorUrl = BASE + '/plot/donor?facet=' + enc(facet) + '&cell_type=' + enc(cell.dataset.cellType);
     if (KIND === 'modules') {
       display = row.module;
       donorUrl += '&module=' + enc(row.catalog + '/' + row.module) + '&method=' + enc(row.method) + '&source=' + enc(row.source);

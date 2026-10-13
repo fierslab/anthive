@@ -1,0 +1,168 @@
+{# Dataset page, "Other DE (author and custom)" (2026-10-13): the stored DE studies of a dataset (__de_study / __de,
+   ingested with ant-de-ingest) as matrices under the facet matrices, gene-target studies in the Facet > Gene sub-tab and
+   module-target studies in Facet > GS. Not approved yet (VIEW_REGISTRY key dataset-other-de).
+
+   other_de_section(studies, kind, db_id, browse_base, default_embedding)
+     studies: browser._other_de_view(...)[kind] (one entry per study with rows per (term, contrast))
+     kind:    'gene' or 'module'
+
+   One matrix per study: rows are (term, contrast), one column for the cells the study covers (its subset filter or all
+   cells). A cell is the number of genes (or modules) at padj < 0.05, split up / down by the sign of effsize. Clicking a cell
+   opens its list (/de/{study}/terms/{term}/contrasts/{contrast}). No per donor plot: these are not the donor-level facet
+   tests. Styles come from _facet_gene_matrix.html (fxg_styles). #}
+{% from "_macros.html" import doc_block, doc_toggle, review_banner %}
+
+{% macro other_de_section(studies, kind, db_id, browse_base, default_embedding) -%}
+{% set noun = 'gene sets' if kind == 'module' else 'genes' %}
+<div class="ode-wrap" id="ode-{{ kind }}">
+  <h2 class="section-head" id="ode-{{ kind }}-head">Other DE (author and custom){{ doc_toggle('ode-' ~ kind ~ '-about', 'About the other DE studies') }}</h2>
+  {{ review_banner('dataset-other-de') }}
+  <p class="fxg-legend ode-note">As published or added by the lab; not donor-level facet tests, not counted towards replication; methods differ, so do not compare with the facet results above.</p>
+  {% call doc_block('About the other DE studies', id='ode-' ~ kind ~ '-about') %}
+    <p>These are differential expression results that were stored with the dataset: the authors' own analysis as published, or an analysis added by the lab. Each study has its own method (cell-level models, pseudobulk tests), its own covariates and its own definition of the groups, so its numbers are not on the same footing as the donor-level facet tests above and are never counted towards replication.</p>
+    <p>Each row is one term and contrast of a study. A cell counts the {{ noun }} with an adjusted p below 0.05, split into higher and lower by the sign of the effect. Cell-level models give very small p values with many cells, so large counts are expected there. Intercept rows are left out. Click a cell for its {{ noun }}; the list header links the full volcano and MA plots of that contrast.</p>
+  {% endcall %}
+  {% for study in studies %}
+  <div class="ode-study" id="ode-study-{{ study.key }}">
+    <h3 class="subsection-head">{{ study.name }} <span class="muted" style="font-weight:normal">{{ study.method }}{% if study.level %}, {{ study.level }} level{% endif %}{% if study.n_cells %}, {{ "{:,}".format(study.n_cells|int) }} cells{% endif %}</span>{{ doc_toggle('ode-help-' ~ study.key, 'About this study') }}</h3>
+    {% call doc_block('About ' ~ study.name, id='ode-help-' ~ study.key) %}
+      {% if study.description %}<p>{{ study.description }}</p>{% endif %}
+      <p>Method: {{ study.method or 'not recorded' }}{% if study.level %} ({{ study.level }} level){% endif %}. Reference: {{ {'vsgrandmean': 'each level against the average of all levels', 'vsreference': 'each level against a reference level'}.get(study.reference_type, study.reference_type or 'not recorded') }}.</p>
+      <p>Covariates: {{ study.covariates or 'not recorded' }}. Subset: {{ study.subset_filter or 'none (all cells)' }}{% if study.subset.note %}; {{ study.subset.note }}{% endif %}.</p>
+      {% if study.source %}<p>Source: <code>{{ study.source }}</code></p>{% endif %}
+      {% if study.notes %}<p>Notes: {{ study.notes }}</p>{% endif %}
+      <p>There is no per donor plot here: these results are not the donor-level facet tests{% if 'pseudobulk' in (study.level or '') %}, and even for this pseudobulk study the per donor values were not stored{% endif %}. The per cell plots in the list are descriptive.</p>
+    {% endcall %}
+    <div class="table-wrap"><table class="fxg-matrix ode-matrix">
+      <thead><tr><th></th><th scope="col" title="The cells this study covers">{{ study.subset.label }}</th></tr></thead>
+      <tbody>
+      {% for row in study.rows %}
+        <tr{% if loop.index > 20 %} class="ode-more-row" hidden{% endif %}><th scope="row" class="fxg-rowhead">{{ row.label }}</th><td>
+          <button type="button" class="fxg-cell l{{ row.level }}" data-study="{{ study.study_id }}" data-term="{{ row.term }}" data-contrast="{{ row.contrast }}"
+            data-efftype="{{ row.efftype or '' }}" data-obs-column="{{ row.obs_column or '' }}" data-subset="{{ study.subset.query }}" data-label="{{ row.label }}" data-study-name="{{ study.name }}"
+            title="{{ row.label }}: {{ row.n }} of {{ row.n_tested or '?' }} {{ noun }} at padj &lt; 0.05{% if row.n_up is not none %} ({{ row.n_up }} up, {{ row.n_down }} down){% endif %}. Click for the list.">
+            <span class="n">{{ "{:,}".format(row.n) }}</span>{% if row.n and row.n_up is not none %}<span class="ud"><span class="up">&uarr;{{ "{:,}".format(row.n_up) }}</span> <span class="down">&darr;{{ "{:,}".format(row.n_down) }}</span></span>{% endif %}</button></td></tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    {% if study.rows|length > 20 %}<button type="button" class="fxg-more ode-show-all">show all {{ study.rows|length }} contrasts</button>{% endif %}
+  </div>
+  {% endfor %}
+  <div class="fxg-genes" id="ode-{{ kind }}-list" hidden aria-live="polite"></div>
+</div>
+<script>
+(function () {
+  var root = document.getElementById('ode-{{ kind }}');
+  var box = document.getElementById('ode-{{ kind }}-list');
+  if (!root || !box) return;
+  var KIND = {{ kind|tojson }};
+  var DB = {{ db_id|tojson }}, BASE = {{ browse_base|tojson }}, EMBEDDING = {{ (default_embedding or '')|tojson }};
+  var API = '/api/databases/' + DB.split('/').map(encodeURIComponent).join('/') + '/de/';
+  var current = null, rows = [], shown = 25, query = '';
+  function esc(text) { return String(text == null ? '' : text).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function enc(text) { return encodeURIComponent(text); }
+  function pText(p) { return p == null ? 'n/a' : p === 0 ? '&lt; 1e-300' : (p < 0.001 ? Number(p).toExponential(1) : Number(p).toFixed(3)); }
+  function link(href, title, svg) { return '<a class="obs-plot-icon" href="' + esc(href) + '" title="' + esc(title) + '" target="_blank" rel="noopener">' + svg + '</a>'; }
+  var SVG_VIOLIN = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1.5c1.6 2.5 1.6 4 .4 6.5 1.4 2.5 1.4 4-.4 6.5-1.8-2.5-1.8-4-.4-6.5C2.4 5.5 2.4 4 4 1.5zM12 1.5c1.2 3 1.2 5 .3 7 1 2 1 4-.3 5.5-1.3-1.5-1.3-3.5-.3-5.5-.9-2-.9-4 .3-7z"/></svg>';
+  // effect: effsize; the CI is shown when it is on the same scale (estimate equal to the log2 fold change)
+  function effectOf(row) {
+    var sameScale = row.efftype === 'log2fc' && row.estimate != null && row.log2fc != null && Math.abs(row.estimate - row.log2fc) < 1e-6;
+    return { est: row.effsize, lo: sameScale ? row.ci_low : null, hi: sameScale ? row.ci_high : null };
+  }
+  function listScale(list) {
+    var values = [];
+    list.forEach(function (row) { var e = effectOf(row); [e.est, e.lo, e.hi].forEach(function (v) { if (v != null && !isNaN(v)) values.push(Math.abs(v)); }); });
+    if (!values.length) return { max: 1, unit: '' };
+    values.sort(function (a, b) { return a - b; });
+    var top = values[Math.min(values.length - 1, Math.floor(values.length * 0.95))] || values[values.length - 1];
+    var step = Math.pow(10, Math.floor(Math.log10(top || 1)));
+    return { max: Math.ceil((top || 1) / step * 2) / 2 * step || 1, unit: '' };
+  }
+  function effectHtml(row, scale) {
+    var EB = window.antEffectBar, e = effectOf(row);
+    var number = e.est == null ? 'n/a' : (e.est > 0 ? '+' : '') + Number(e.est).toFixed(2);
+    if (!EB) return number;
+    return '<span class="eb-row">' + EB.barHtml({ scale: scale, est: e.est, lo: e.lo, hi: e.hi, sig: row.padj != null && row.padj < 0.05, counted: true, whisker: 'ci',
+      title: (row.efftype === 'zeff' ? 'z ' : 'log2 fold change ') + number }) + ' ' + number + '</span>';
+  }
+  function plots(row, cell) {
+    var name = row.gene_name, n = enc(name), column = cell.dataset.obsColumn, subset = cell.dataset.subset;
+    var where = subset ? '&subset=' + enc(subset) : '';
+    var whereText = subset ? 'cells of the study subset' : 'all cells';
+    var per = ' (per cell, descriptive; ' + whereText + ')';
+    var I = window.antPlotIcons ? window.antPlotIcons.SVG : {};
+    var html = '';
+    if (column) {
+      html += link(BASE + '/plot/violin?x=' + enc(column) + '&y=' + n + where, 'violin of ' + name + ' by ' + column + per, SVG_VIOLIN);
+      html += link(BASE + '/plot/ecdf?x=' + n + '&color=' + enc(column) + where, 'ECDF of ' + name + ' by ' + column + per, I.line || '');
+      html += link(BASE + '/plot/histogram?x=' + n + '&color=' + enc(column) + where, 'histogram of ' + name + ' by ' + column + per, I.bar || '');
+    } else {
+      html += link(BASE + '/plot/ecdf?x=' + n + where, 'ECDF of ' + name + ', not split: the term ' + cell.dataset.term + ' is not a cell annotation column' + per, I.line || '');
+    }
+    if (EMBEDDING) html += link(BASE + '/plot/scatter?embedding=' + enc(EMBEDDING) + '&color=' + n + where, EMBEDDING + ' coloured by ' + name + per, I.umap || '');
+    return html;
+  }
+  function draw() {
+    var q = query.trim().toUpperCase();
+    var list = q ? rows.filter(function (row) { return String(row.gene_name || '').toUpperCase().indexOf(q) >= 0; }) : rows;
+    var visible = list.slice(0, shown), scale = listScale(visible);
+    var head = box.querySelector('.fxg-scale');
+    if (head) head.textContent = '(bar scale ±' + scale.max + ')';
+    box.querySelector('tbody').innerHTML = visible.map(function (row) {
+      var gene = String(row.gene_name || '');
+      var nameCell = KIND === 'module' ? esc(gene) : '<a href="/genes/' + enc(gene) + '">' + esc(gene) + '</a>';
+      return '<tr><td>' + nameCell + '</td><td class="num">' + effectHtml(row, scale) + '</td><td class="num">' + pText(row.padj) + '</td><td class="plots obs-plots">' + plots(row, current) + '</td></tr>';
+    }).join('') || '<tr><td colspan="4" class="muted">Nothing matches.</td></tr>';
+    var more = box.querySelector('.fxg-more');
+    more.hidden = list.length <= shown;
+    more.textContent = 'show all ' + list.length.toLocaleString();
+  }
+  function close() { box.hidden = true; if (current) current.classList.remove('sel'); current = null; }
+  function open(cell) {
+    if (current === cell && !box.hidden) { close(); return; }
+    if (current) current.classList.remove('sel');
+    current = cell; cell.classList.add('sel'); shown = 25; query = ''; rows = [];
+    var d = cell.dataset;
+    var path = API + enc(d.study) + '/terms/' + enc(d.term) + '/contrasts/' + enc(d.contrast);
+    var plotQuery = 'study=' + enc(d.study) + '&term=' + enc(d.term) + '&contrast=' + enc(d.contrast);
+    var effectLabel = d.efftype === 'zeff' ? 'Effect (z)' : 'log2 fold change';
+    box.innerHTML = '<div class="fxg-genes-head"><span class="t">' + esc(d.label) + '</span><span class="m">' + esc(d.studyName) + '</span>' +
+      '<input type="search" class="fxg-search" placeholder="search" aria-label="search this list">' +
+      '<a href="' + BASE + '/plot/volcano?' + plotQuery + '" target="_blank" rel="noopener" title="Full volcano plot of this contrast">volcano</a>' +
+      '<a href="' + BASE + '/plot/ma?' + plotQuery + '" target="_blank" rel="noopener" title="MA plot of this contrast (needs a mean expression; some methods do not store one)">MA plot</a>' +
+      '<button type="button" class="fxg-close">close</button></div>' +
+      '<div class="table-wrap"><table class="fxg-gene-table"><thead><tr><th>' + (KIND === 'module' ? 'Module' : 'Gene') + '</th><th>' + effectLabel + '<span class="fxg-scale"></span></th><th>adj. p</th><th class="plots">Plots</th></tr></thead>' +
+      '<tbody><tr><td colspan="4" class="muted">loading&hellip;</td></tr></tbody></table></div><button type="button" class="fxg-more" hidden></button>';
+    box.hidden = false;
+    // keep the list under the study it belongs to
+    var study = cell.closest('.ode-study');
+    if (study && study.nextSibling !== box) study.parentNode.insertBefore(box, study.nextSibling);
+    box.querySelector('.fxg-close').addEventListener('click', close);
+    box.querySelector('.fxg-search').addEventListener('input', function (event) { query = event.target.value; shown = 25; draw(); });
+    box.querySelector('.fxg-more').addEventListener('click', function () { shown = Infinity; draw(); });
+    var requested = cell;
+    fetch(path + '?padj_max=0.05&sort=padj&limit=2000', { credentials: 'same-origin' })
+      .then(function (response) { if (!response.ok) throw new Error('HTTP ' + response.status); return response.json(); })
+      .then(function (data) {
+        if (current !== requested) return;
+        rows = (data.rows || []).filter(function (row) { return row.padj != null && row.padj < 0.05; });
+        if (!rows.length) { box.querySelector('tbody').innerHTML = '<tr><td colspan="4" class="muted">Nothing is below adjusted p 0.05 here.</td></tr>'; return; }
+        draw();
+      })
+      .catch(function (error) {
+        if (current !== requested) return;
+        box.querySelector('tbody').innerHTML = '<tr><td colspan="4" class="muted">The list could not be loaded (' + esc(error.message) + ').</td></tr>';
+      });
+  }
+  root.addEventListener('click', function (event) {
+    var cell = event.target.closest ? event.target.closest('button.fxg-cell') : null;
+    if (cell) { open(cell); return; }
+    var all = event.target.closest ? event.target.closest('.ode-show-all') : null;
+    if (all) {
+      all.parentNode.querySelectorAll('.ode-more-row').forEach(function (row) { row.hidden = false; });
+      all.hidden = true;
+    }
+  });
+})();
+</script>
+{%- endmacro %}

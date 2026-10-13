@@ -6,7 +6,7 @@
    Data: GET /api/gene_stats_all, /api/genes/{g}/facet-effects (include_units=false), then
    /api/facets/{f}/effects?gene=&scope=&cell_type= when a cell is opened, and the web route
    /genes/{g}/author-de.  `view_dbs` is the compact dataset map built by browser.py. #}
-{% from "_macros.html" import section_help %}
+{% from "_macros.html" import section_help, review_banner %}
 
 {% macro view_gene_headline() -%}
 <div id="vwg-headline"></div>
@@ -63,6 +63,15 @@
       <p>Datasets that were not tested at all are summarised in one line below the table with the reason: spatial and proteomics datasets have no replicate-level cell type pseudobulk, metacell sets are aggregates of cells, cultured cells are listed but not tested, pure mouse datasets are outside the facet layer, and some sets are set aside by decision. Open the line to see which datasets and why.</p>
     {% endcall %}
     <div id="vwg-other-body"><p class="vw-loading">Loading the facet effects...</p></div>
+  </div>
+  <div id="vwg-ode" hidden>
+    {% call section_help('Other DE (author and custom)', 'vwg-ode-help') %}
+      <p>Differential expression stored with a dataset: the authors' own analysis as published, or an analysis added by the lab. Each study has its own method (cell-level models or pseudobulk tests), covariates and group definitions, so these rows are not donor-level facet tests, are never counted towards replication and should not be compared with the matrix above. Cell-level models give very small p values with many cells.</p>
+      <p>One row per study and contrast where the gene was tested; the effect is the log2 fold change or a z value, as the study stored it. The dataset link opens that dataset's Other DE matrices (Facet &gt; Gene).</p>
+    {% endcall %}
+    {{ review_banner('gene-other-de') }}
+    <p class="vw-fnote">As published or added by the lab; not donor-level facet tests, not counted towards replication; methods differ, so do not compare with the facet results above.</p>
+    <div id="vwg-ode-body"></div>
   </div>
 </div>
 {%- endmacro %}
@@ -415,12 +424,34 @@
   /* ---------- author DE tab ---------- */
   var deBody = document.getElementById('vwa-body');
   var deButton = document.querySelector('[data-vtab="de"]');
-  if (deBody && deButton) {
+  var odeBox = document.getElementById('vwg-ode');
+  if ((deBody && deButton) || odeBox) {
     getAuthorDe();
+  }
+  // "Other DE (author and custom)" under the Facet DE matrix: one row per study x contrast of a gene-target study
+  function renderOtherDe(rows) {
+    if (!odeBox) return;
+    var geneRows = rows.filter(function (row) { return (row.target || 'gene') !== 'module'; });
+    if (!geneRows.length) return;
+    odeBox.hidden = false;
+    var html = '<div class="vw-box"><table class="vw-table"><thead><tr><th>Dataset</th><th>Study</th><th>Contrast</th><th class="num">Effect</th><th class="num">adj. p</th></tr></thead><tbody>';
+    geneRows.forEach(function (row, index) {
+      var effect = row.effsize != null ? row.effsize : row.log2fc;
+      var kind = row.efftype === 'zeff' ? 'z' : 'log2FC';
+      html += '<tr' + (index >= 20 ? ' class="ode-more" hidden' : '') + '><td><a href="/browse/' + V.esc(row.db_id) + '#ode-gene-head">' + V.esc(row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span></td>' +
+        '<td>' + V.esc(row.study) + '<br><span class="muted" style="font-size:10.5px">' + V.esc(row.method) + '</span></td>' +
+        '<td>' + V.esc(row.label) + '</td><td class="num">' + V.signed(effect, 2) + ' <span class="muted" style="font-size:10.5px">' + kind + '</span></td><td class="num">' + (row.padj == null ? 'n/a' : V.pfmt(row.padj)) + '</td></tr>';
+    });
+    var body = document.getElementById('vwg-ode-body');
+    body.innerHTML = html + '</tbody></table></div>' + (geneRows.length > 20 ? '<button type="button" class="vw-more-units" id="vwg-ode-more">show all ' + geneRows.length + ' rows (best adjusted p first)</button>' : '');
+    var more = document.getElementById('vwg-ode-more');
+    if (more) more.addEventListener('click', function () { body.querySelectorAll('tr.ode-more').forEach(function (tr) { tr.hidden = false; }); more.remove(); });
   }
   function getAuthorDe() {
     V.getJson('/genes/' + enc(GENE) + '/author-de').then(function (data) {
       var rows = data.rows || [];
+      renderOtherDe(rows);
+      if (!deBody || !deButton) return;
       if (!rows.length) { deBody.innerHTML = '<div class="vw-placeholder">No author-provided differential expression for ' + V.esc(GENE) + '.</div>'; return; }
       deButton.hidden = false;
       var count = deButton.querySelector('.tab-count');
@@ -431,7 +462,7 @@
           '</td><td>' + V.esc(row.label) + '<br><span class="muted" style="font-size:10.5px">' + V.esc(row.term) + ': ' + V.esc(row.contrast) + '</span></td><td class="num">' + V.signed(row.log2fc, 2) + '</td><td class="num">' + (row.padj == null ? 'n/a' : V.pfmt(row.padj)) + '</td></tr>';
       });
       deBody.innerHTML = html + '</tbody></table></div><p class="vw-fnote">Cell-level models: p values of 1e-25 are possible with thousands of cells and are not comparable with the donor-level r-values and q values of the Gene view.</p>';
-    }).catch(function () { deBody.innerHTML = '<div class="vw-error">The author differential expression could not be loaded.</div>'; });
+    }).catch(function () { if (deBody) deBody.innerHTML = '<div class="vw-error">The author differential expression could not be loaded.</div>'; });
   }
 })();
 </script>
