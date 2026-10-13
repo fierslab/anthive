@@ -58,6 +58,14 @@ and `lib/config.py` (anthive.yaml loader).
   BYPASS`); it is not part of the key.
 - `analytics_query` runs sandboxed SELECT-only SQL via `lib/analytics.py` —
   see `tests/test_analytics_security.py` before touching the sandbox.
+- **Module scores live in two places**: legacy obsnum columns of the duckdb,
+  and (most datasets) the `<stem>.scores.parquet` sidecar, which `obsnum`
+  does not contain. Anything that lists or reads scores must cover both:
+  `/module_scores` (`storage`), the score index, `/info`; SQL reaches the
+  sidecar through the TEMP view `score_sidecar` (`lib/scores_parquet.py`,
+  installed by the analytics sandbox and `/query/sql`). A wide one-column-
+  per-score view was tried and dropped (aggregates the whole sidecar per
+  query). Tests: `tests/test_score_sidecar_surfaces.py`.
 
 ## Help endpoints and `explain`
 

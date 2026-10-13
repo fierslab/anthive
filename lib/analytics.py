@@ -36,6 +36,7 @@ import duckdb
 import pandas as pd
 
 from anthive_db import portable_layer_views
+from scores_parquet import install_score_views
 
 log = logging.getLogger('anthive.analytics')
 
@@ -463,6 +464,11 @@ def _open_analytics_connection(
                 conn.execute(create_sql)
             except duckdb.Error as exc:
                 log.warning('analytics: portable view %s not installed: %s', view_name, exc)
+
+        # Module scores kept in <stem>.scores.parquet are not in obsnum: expose
+        # them as the lazy TEMP view score_sidecar (reading the sidecar is
+        # allowed: it matches <stem>.*.parquet above).
+        install_score_views(conn, db_url)
 
         for view_name, pq_path in session_views + extra_views:
             conn.execute(

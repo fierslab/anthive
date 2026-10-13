@@ -295,17 +295,34 @@ def test_get_geneset_adds_the_rank_in_one_dataset():
     assert 'scores sidecar' in text
 
 
-def test_list_module_scores_with_ranks_also_lists_sidecar_only_scores():
+def test_list_module_scores_lists_sidecar_scores_with_their_query():
     ranks = {'available': True, 'modules': [
         {'geneset_id': 'S/E/low', 'column_name': 'S::E::low', 'available': True, 'rank': 0.1, 'n_modules_compared': 2, 'std': 0.1},
         {'geneset_id': 'S/E/high', 'column_name': 'S::E::high', 'available': True, 'rank': 0.9, 'n_modules_compared': 2, 'std': 0.2}]}
-    empty = {'count': 0, 'scored_genesets': []}
-    namespace, calls = _load({'/databases/X/Y/module_scores': empty, '/databases/X/Y/module-ranks': ranks})
+    stats = {'n': 3, 'min': 0.0, 'max': 1.0, 'mean': 0.5, 'std': 0.1, 'median': 0.5}
+    listing = {'count': 3, 'count_by_storage': {'scores_sidecar': 2, 'duckdb': 1}, 'scored_genesets': [
+        {'geneset_id': 'L/E/old', 'column_name': 'L::E::old', 'storage': 'duckdb', 'geneset_known': True, 'stats': stats,
+         'query_sql': 'SELECT cell_name, "L::E::old" FROM obsnum'},
+        {'geneset_id': 'S/E/high', 'column_name': 'S::E::high', 'storage': 'scores_sidecar', 'geneset_known': True,
+         'stats': stats, 'ucell_column_name': 'ucell__S/E__high',
+         'query_sql': "SELECT cell_name, score AS \"S::E::high\" FROM score_sidecar WHERE source = 'geneset' "
+                      "AND catalog = 'S/E' AND module = 'high'"},
+        {'geneset_id': 'S/E/low', 'column_name': 'S::E::low', 'storage': 'scores_sidecar', 'geneset_known': False,
+         'stats': stats, 'query_sql': 'x'}]}
+    namespace, calls = _load({'/databases/X/Y/module_scores': listing, '/databases/X/Y/module-ranks': ranks})
     text = _run(namespace['list_module_scores']('X/Y'))
-    assert 'with_ranks=true lists them' in text and len(calls) == 1
+    assert len(calls) == 1
+    assert '3 pre-computed module score(s) (1 as obsnum columns, 2 in the scores sidecar)' in text
+    assert "FROM score_sidecar WHERE source = 'geneset' AND catalog = 'S/E' AND module = 'high'" in text
+    assert 'FROM obsnum' in text and "UCell score also stored: 'ucell__S/E__high'" in text
+    assert 'SELECT ... FROM obsnum does not see them' in text
     text = _run(namespace['list_module_scores']('X/Y', with_ranks=True))
-    assert '2 pre-computed module score(s) (from the scores sidecar' in text
-    assert text.index('S/E/high') < text.index('S/E/low') and 'analytics_query on obsnum does not see them' in text
+    assert text.index('S/E/high') < text.index('S/E/low')
+
+
+def test_list_module_scores_empty_dataset():
+    namespace, _ = _load({'/databases/X/Y/module_scores': {'count': 0, 'scored_genesets': []}})
+    assert 'no pre-computed module scores' in _run(namespace['list_module_scores']('X/Y'))
 
 
 # ── stored DE (author or custom) ──────────────────────────────────────────────

@@ -362,6 +362,27 @@ Module statistics fixes (2026-10-09, additive fields; module replication values 
 - Directionless sets (GWAS, MAGMA, bidirectional) are left out of the module families, replicated and top lists; their
   cards carry `directionless: true` and variants with `call: not_tested`, `nt_label: no expected direction`.
 - Web: `/facets/{bare name}` (for example `/facets/braak`) redirects to `/facets/ant_braak`.
+
+Fixes (2026-10-13):
+
+- **Module scores kept only in the scores sidecar are listed and queryable.** `GET /databases/{id}/module_scores`
+  read only the obsnum columns of the duckdb, so it answered `count: 0` for datasets whose gene set scores live in
+  `<dataset>.scores.parquet` (G24/MMG: 0, while `/module-ranks`, `scored_in` and `/info` listed 160). It now lists
+  those scores too, in the same row shape, with stats over the scored cells. New on every row: `storage` (`duckdb` |
+  `scores_sidecar`), `query_table` (`obsnum` | `score_sidecar`), `query_sql` (a SELECT returning `cell_name` and the
+  score); `ucell_column_name` and `ucell_stats` when the sidecar also holds the UCell score of the set. New on the
+  response: `count_by_storage`, `query_tables`, `sidecar_error` (only when the sidecar cannot be read). A duckdb
+  column wins over a sidecar row of the same set. S3-backed datasets list duckdb columns only (as the score index).
+- **Analytics SQL reads sidecar scores** through the new view `score_sidecar` (`cell_id, cell_name, source, catalog,
+  module, column_name, score`; one row per cell and score) in `POST /databases/{id}/analytics/query` and
+  `POST /databases/{id}/query/sql`. Filter on `source`, `catalog` and `module` (only matching row groups are read);
+  `column_name` is the obs name the plot routes use. The duckdb file is not changed. A wide view with one column per
+  score is not offered: it aggregates the whole sidecar on every query (on G24/MMG it ran out of the sandbox memory).
+  `GET /databases/{id}/analytics/schema` adds `score_sidecar` (`available`, `view`, `columns`, `n_scores`,
+  `n_scores_by_source`, `note`, `example_sql`), or `available: false` with a `reason`; it describes the view without
+  scanning it.
+- ant-mcp: `list_module_scores` shows storage and the query per score, `analytics_schema` shows the view,
+  `get_geneset` gives the sidecar query.
 - Clients: pyvark, vark and the skills reach none of the new routes yet; pass-through clients keep working with
   the new optional fields. pyvark's `get_facet_recurring_genes` documents `n` up to 500 and has no `offset`,
   `effect_gate`, `strict` or `forest`. The breaking changes above (internal datasets for anonymous callers, admin-only

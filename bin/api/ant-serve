@@ -127,6 +127,7 @@ from metadata import parse_md_file, get_caveats
 import mus
 import plotting
 import analytics
+import scores_parquet as scores_parquet_lib
 from chat_config import load_chat_config, warn_if_misconfigured, status_payload
 from chat_history import ChatHistory
 from chat_agent import run_turn as _chat_run_turn
@@ -5469,6 +5470,10 @@ def execute_sql_query(db_id: str, request: QueryRequest):
             # Only when named; installing costs a few ms per request.
             if 'layer__' in request.query.lower():
                 install_portable_layer_views(db._conn, db.db_url)
+            # Same for the module-score sidecar view (score_sidecar), only
+            # when the query names it.
+            if scores_parquet_lib.SCORE_SIDECAR_LONG_VIEW in request.query.lower():
+                scores_parquet_lib.install_score_views(db._conn, registry.get_database_path(db_id))
             df = db.execute_sql(request.query, limit=effective_limit)
 
         # Convert to JSON-safe format
@@ -11410,6 +11415,12 @@ async def analytics_schema(db_id: str):
     Lists every table with its column names, types, row count, and a 3-row
     sample.  Use this to understand what fields are available before writing
     an analytics_query SQL statement.
+
+    ``score_sidecar`` describes the module scores kept in the dataset's
+    ``.scores.parquet`` sidecar, which are not in ``obsnum``: analytics_query
+    reads them through the view ``score_sidecar`` (long format: one row per
+    cell and score). Described without being run, so the schema call stays
+    cheap; ``available: false`` with a reason otherwise.
     """
     try:
         db_url = registry.get_database_path(db_id)
@@ -11426,9 +11437,16 @@ async def analytics_schema(db_id: str):
             connection_pool.return_connection(db_url, conn)
     try:
         schema = await asyncio.to_thread(_sync_schema)
+        obscat_columns = next((
+            [column['name'] for column in table.get('columns', [])]
+            for table in schema if table.get('table') == 'obscat'), [])
+        group_column = next((name for name in ('ant_cell_type', 'cell_type', 'ant_celltype_group')
+                             if name in obscat_columns),
+                            next((name for name in obscat_columns if name != 'cell_name'), None))
+        score_views = await asyncio.to_thread(scores_parquet_lib.score_views_schema, db_url, group_column)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return _json_safe({"db_id": db_id, "tables": schema})
+    return _json_safe({"db_id": db_id, "tables": schema, "score_sidecar": score_views})
 
 
 @app.post("/databases/{db_id:path}/analytics/query", tags=["analytics"])
@@ -11438,6 +11456,13 @@ async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
     The full result set is saved server-side; only column metadata and a small
     preview (first 10 rows) are returned.  Use the returned session_id in a
     subsequent POST /analytics/viz call to visualise the data.
+
+    Pre-computed module scores kept in the dataset's ``.scores.parquet``
+    sidecar are not in ``obsnum``; query them through the view
+    ``score_sidecar`` (cell_id, cell_name, source, catalog, module,
+    column_name, score), filtering on source, catalog and module. Each
+    /module_scores row carries its ``query_sql``; /analytics/schema
+    describes the view under ``score_sidecar``.
 
     To use results from a prior module_score call, pass its session_id in
     `attach_sessions`. The scores become available as a table called `scores`
@@ -16136,18 +16161,34 @@ def get_database_module_ranks(db_id: str):
 
 @app.get("/databases/{db_id:path}/module_scores", tags=["databases"])
 def get_database_module_scores(db_id: str):
-    """List all pre-computed module-score columns for one dataset.
+    """List all pre-computed gene set module scores of one dataset.
 
-    For each scored geneset, returns:
+    Scores live in one of two places, reported per row as ``storage``:
+      - ``duckdb``          a column of the served duckdb (legacy); query it in
+                            ``obsnum``.
+      - ``scores_sidecar``  a row set in ``<dataset>.scores.parquet`` (what
+                            ant-score-ext / ant-ucell write today); query it in
+                            the analytics view ``score_sidecar`` (long format,
+                            one row per cell and score).
+
+    For each scored geneset (scanpy-style ``geneset`` scores; a duckdb column
+    wins over a sidecar row of the same set), returns:
       - geneset_id        canonical geneset id (study/experiment/name)
-      - column_name       obs/duckdb column where the score is stored
+      - column_name       obs column name, plottable on every plot endpoint
+      - storage           'duckdb' | 'scores_sidecar'
+      - query_table       'obsnum' | 'score_sidecar' (where analytics SQL finds it)
+      - query_sql         a SELECT returning (cell_name, <column_name>)
       - geneset_known     True if the geneset is in the registered genesetstore
       - method            (if known)
       - description       (if known)
       - n_genes           (if known)
-      - stats             {min, max, mean, std, median}  computed from the column
+      - stats             {n, min, max, mean, std, median}; for duckdb columns
+                          n counts all cells, for sidecar scores the cells
+                          with a score
+      - ucell_column_name, ucell_stats  when the sidecar also holds the UCell
+                          score of the same set (else absent)
 
-    Use the resulting column names directly in analytics_query, e.g.:
+    Example (storage duckdb; sidecar rows carry their own query_sql):
         SELECT cell_name, "Sierksma2025::WGCNA::Brown_Lysosome"
         FROM   obsnum
     """
@@ -16155,6 +16196,31 @@ def get_database_module_scores(db_id: str):
         raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
 
     db_url = registry.get_database_path(db_id)
+    gset_reg = geneset_registry  # may be None if store not configured
+
+    def _base_row(geneset_id: Optional[str], column: str, storage: str) -> Dict[str, Any]:
+        row = {
+            "geneset_id":   geneset_id,
+            "column_name":  column,
+            "storage":      storage,
+            "query_table":  'obsnum' if storage == 'duckdb' else scores_parquet_lib.SCORE_SIDECAR_LONG_VIEW,
+            "query_sql":    ('SELECT cell_name, "' + column.replace('"', '""') + '" FROM obsnum') if storage == 'duckdb' else None,
+            "geneset_known": False,
+            "method":       None,
+            "description":  None,
+            "n_genes":      None,
+            "stats":        None,
+        }
+        if gset_reg is not None and geneset_id:
+            gs = gset_reg.get(geneset_id)
+            if gs is not None:
+                row["geneset_known"] = True
+                row["method"]       = gs.experiment.method
+                row["description"]  = gs.metadata.get('description') or ''
+                row["n_genes"]      = gs.n_genes
+        return row
+
+    out = []
     conn = connection_pool.get_connection(db_url)
     try:
         cols = conn.execute("""
@@ -16163,26 +16229,8 @@ def get_database_module_scores(db_id: str):
         """).fetchall()
         score_cols = [c[0] for c in cols if is_score_column(c[0])]
 
-        out = []
-        gset_reg = geneset_registry  # may be None if store not configured
         for col in sorted(score_cols):
-            geneset_id = parse_score_column(col)
-            row = {
-                "geneset_id":   geneset_id,
-                "column_name":  col,
-                "geneset_known": False,
-                "method":       None,
-                "description":  None,
-                "n_genes":      None,
-                "stats":        None,
-            }
-            if gset_reg is not None:
-                gs = gset_reg.get(geneset_id)
-                if gs is not None:
-                    row["geneset_known"] = True
-                    row["method"]       = gs.experiment.method
-                    row["description"]  = gs.metadata.get('description') or ''
-                    row["n_genes"]      = gs.n_genes
+            row = _base_row(parse_score_column(col), col, 'duckdb')
             try:
                 # safe_ident() validates against [A-Za-z0-9_:.\- ] and quotes
                 # — defends against a crafted column name (`"); DROP …`) even
@@ -16214,15 +16262,53 @@ def get_database_module_scores(db_id: str):
     finally:
         connection_pool.return_connection(db_url, conn)
 
-    return {
+    # Scores held only in the <stem>.scores.parquet sidecar (the score index,
+    # scored_in and /info list them too). Local datasets only, like the index.
+    sidecar = scores_parquet_lib.sidecar_for_db_url(db_url)
+    sidecar_error = None
+    if sidecar is not None:
+        in_duckdb = {row["column_name"] for row in out}
+        try:
+            sidecar_stats = scores_parquet_lib.sidecar_score_stats(sidecar)
+        except Exception as exc:  # unreadable sidecar: list nothing from it, say why
+            log.warning("module_scores: cannot read score sidecar of %s: %s", db_id, exc)
+            sidecar_stats, sidecar_error = {}, str(exc)
+        for (source, catalog, module), stats in sorted(sidecar_stats.items()):
+            if source != 'geneset':
+                continue
+            column = scores_parquet_lib.virtual_column_name(source, catalog, module)
+            if column in in_duckdb:
+                continue
+            row = _base_row(parse_score_column(column), column, 'scores_sidecar')
+            row["stats"] = stats
+            row["query_sql"] = scores_parquet_lib.score_query_sql(source, catalog, module)
+            ucell_stats = sidecar_stats.get(('ucell', catalog, module))
+            if ucell_stats is not None:
+                row["ucell_column_name"] = scores_parquet_lib.virtual_column_name('ucell', catalog, module)
+                row["ucell_stats"] = ucell_stats
+            out.append(row)
+        out.sort(key=lambda row: row["column_name"])
+
+    storage_counts: Dict[str, int] = {}
+    for row in out:
+        storage_counts[row["storage"]] = storage_counts.get(row["storage"], 0) + 1
+    payload = {
         "db_id": db_id,
         "count": len(out),
+        "count_by_storage": storage_counts,
         "column_naming": {
             "separator": SCORE_COLUMN_SEPARATOR,
             "template":  SCORE_COLUMN_TEMPLATE,
         },
+        "query_tables": {
+            "duckdb": "obsnum",
+            "scores_sidecar": scores_parquet_lib.SCORE_SIDECAR_LONG_VIEW,
+        },
         "scored_genesets": out,
     }
+    if sidecar_error:
+        payload["sidecar_error"] = sidecar_error
+    return payload
 
 
 @app.get("/databases/{db_id:path}/files", tags=["databases"])

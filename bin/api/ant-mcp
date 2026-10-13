@@ -1212,6 +1212,19 @@ def main() -> None:
             if sample:
                 lines.append(f"  Sample: {sample[0]}")
             lines.append('')
+        sidecar = data.get('score_sidecar') or {}
+        if sidecar.get('available'):
+            by_source = ', '.join(f"{source}: {count}" for source, count in
+                                  sorted((sidecar.get('n_scores_by_source') or {}).items()))
+            lines.append(f"View: {sidecar.get('view', 'score_sidecar')}  ({sidecar.get('n_scores', 0)} scores"
+                         + (f"; {by_source}" if by_source else '') + ")")
+            for col in sidecar.get('columns', []):
+                lines.append(f"  {col['name']}  [{col['type']}]")
+            if sidecar.get('note'):
+                lines.append(f"  {sidecar['note']}")
+            for example in sidecar.get('example_sql') or []:
+                lines.append(f"  Example: {example}")
+            lines.append("  list_module_scores(db_id) lists every score with its own query.")
         return '\n'.join(lines)
 
     @mcp.tool()
@@ -1242,6 +1255,14 @@ def main() -> None:
         table called `scores` (columns: cell_name, module_score). Example:
             sql: "SELECT o.cell_type, AVG(s.module_score) FROM scores s JOIN obscat o USING (cell_name) GROUP BY 1"
             attach_sessions: ["<session_id from module_score>"]
+
+        PRE-COMPUTED SCORES IN THE SCORES SIDECAR: most datasets keep their gene
+        set scores in a sidecar file, not in obsnum. Read them from the view
+        `score_sidecar` (cell_id, cell_name, source, catalog, module,
+        column_name, score); always filter on source, catalog and module.
+        list_module_scores gives the exact query per score, e.g.
+            SELECT cell_name, score FROM score_sidecar
+            WHERE source = 'geneset' AND catalog = 'Sierksma2025/WGCNA' AND module = 'Brown_Lysosome'
 
         Args:
             db_id:   Dataset identifier (e.g. 'S25/SGM').
@@ -1493,12 +1514,17 @@ def main() -> None:
             lines.append(f"  Pre-scored in: {', '.join(scored_in)}")
             lines.append(
                 f"  → Use the pre-computed scores instead of recomputing with module_score: plot them by "
-                f"column name, or where the column is in the obsnum table (list_module_scores(db_id) says so), "
-                f"analytics_query, e.g.:")
+                f"column name, or read them with analytics_query. Where the score is kept depends on the "
+                f"dataset; list_module_scores(db_id) gives the exact query. Usually the scores sidecar:")
+            set_study, _, set_rest = (data.get('geneset_id') or geneset_id).partition('/')
+            set_experiment, _, set_name = set_rest.partition('/')
+            catalog_literal = "'" + f"{set_study}/{set_experiment}".replace("'", "''") + "'"
+            module_literal = "'" + set_name.replace("'", "''") + "'"
             lines.append(
-                f"      SELECT cell_name, \"{column}\" FROM obsnum")
+                f"      SELECT cell_name, score FROM score_sidecar WHERE source = 'geneset' "
+                f"AND catalog = {catalog_literal} AND module = {module_literal}")
             lines.append(
-                f"    In datasets that keep the score only in their scores sidecar, obsnum has no such column.")
+                f"    or, in datasets that hold it as a column: SELECT cell_name, \"{column}\" FROM obsnum")
         else:
             lines.append(f"  Pre-scored in: (none — use module_score to compute on-the-fly)")
 
@@ -1520,14 +1546,20 @@ def main() -> None:
         """List geneset module scores already computed and stored on a dataset.
 
         Use this BEFORE module_score to check whether a geneset is already
-        pre-computed as an obs column; if it is, prefer reading it via
-        analytics_query rather than recomputing.
+        pre-computed; if it is, prefer reading it via analytics_query rather
+        than recomputing.
 
-        Returns the column names, geneset references, and per-column stats.
-        Each column can be queried directly:
+        Returns the column names, geneset references, per-score stats and,
+        per score, the SQL that reads it. Scores live either in the scores
+        sidecar (most datasets; read through the view score_sidecar) or as
+        an obsnum column (older datasets):
 
-            SELECT cell_name, "Sierksma2025::WGCNA::Brown_Lysosome"
-            FROM   obsnum
+            SELECT cell_name, score FROM score_sidecar
+            WHERE source = 'geneset' AND catalog = 'Sierksma2025/WGCNA' AND module = 'Brown_Lysosome'
+
+            SELECT cell_name, "Sierksma2025::WGCNA::Brown_Lysosome" FROM obsnum
+
+        Every listed column name can also be plotted directly.
 
         with_ranks=true adds each set's RANK AMONG GENE SETS in this dataset
         (fraction of the other scored sets with a lower mean scanpy score, 0 to
@@ -1559,24 +1591,20 @@ def main() -> None:
                 rank_note = f"Ranks: error {exc.response.status_code}: {exc.response.text[:200]}"
 
         items = data.get('scored_genesets', [])
-        sidecar_only = False
-        if not items and ranks:
-            # Scores kept only in the dataset's .scores.parquet sidecar are not obs columns, so
-            # /module_scores misses them; /module-ranks reads the sidecar.
-            sidecar_only = True
-            items = [{'geneset_id': row['geneset_id'], 'column_name': row['column_name'], 'geneset_known': True}
-                     for row in ranks.values()]
         if not items:
             return (
-                f"{db_id}: no pre-computed module scores as obs columns. "
+                f"{db_id}: no pre-computed module scores. "
                 + (rank_note + ' ' if rank_note else '')
-                + ("Scores kept only in the dataset's scores sidecar are not listed here; with_ranks=true lists "
-                   "them. " if not with_ranks else '')
+                + (f"(scores sidecar unreadable: {data['sidecar_error']}) " if data.get('sidecar_error') else '')
                 + "Use module_score to compute one on-the-fly."
             )
 
+        by_storage = data.get('count_by_storage') or {}
+        storage_text = ', '.join(
+            f"{count} {'in the scores sidecar' if storage == 'scores_sidecar' else 'as obsnum columns'}"
+            for storage, count in sorted(by_storage.items()))
         lines = [f"{db_id}: {len(items)} pre-computed module score(s)"
-                 + (' (from the scores sidecar; none is an obs column):' if sidecar_only else ':')]
+                 + (f" ({storage_text})" if storage_text else '') + ':']
         if rank_note:
             lines.append(rank_note)
         if ranks:
@@ -1601,24 +1629,23 @@ def main() -> None:
             if 'mean' in stats and stats.get('mean') is not None:
                 line += (
                     f"\n      stats: mean={stats['mean']:.3f}, "
-                    f"std={stats.get('std',0):.3f}, "
-                    f"range=[{stats.get('min',0):.3f}, {stats.get('max',0):.3f}]"
+                    f"std={(stats.get('std') or 0):.3f}, "
+                    f"range=[{(stats.get('min') or 0):.3f}, {(stats.get('max') or 0):.3f}]"
                 )
+            if item.get('query_sql'):
+                line += f"\n      sql: {item['query_sql']}"
+            if item.get('ucell_column_name'):
+                line += f"\n      UCell score also stored: {item['ucell_column_name']!r}"
             if not item.get('geneset_known'):
-                line += "\n      (geneset is in obs but not registered in genesetstore)"
+                line += "\n      (geneset is scored here but not registered in genesetstore)"
             lines.append(line)
 
         lines.append("")
-        if sidecar_only:
-            lines.append("These scores are in the dataset's scores sidecar, not in the obsnum table: plot them by "
-                         "column name (e.g. plot(geom='violin', x=<cell type column>, y=<column>)); analytics_query "
-                         "on obsnum does not see them.")
-            return '\n'.join(lines)
-        lines.append("To read pre-computed scores, use analytics_query, e.g.:")
-        if items:
-            lines.append(
-                f"  SELECT cell_name, \"{items[0]['column_name']}\" FROM obsnum LIMIT 5"
-            )
+        lines.append("Read a score with analytics_query using its sql line (join other tables on cell_name), "
+                     "or plot it by column name, e.g. plot(geom='violin', x=<cell type column>, y=<column>).")
+        if by_storage.get('scores_sidecar'):
+            lines.append("Sidecar scores are not obsnum columns: SELECT ... FROM obsnum does not see them; "
+                         "use the view score_sidecar and filter on source, catalog and module.")
         return '\n'.join(lines)
 
     def _fmt_number(value, digits: int = 3) -> str:
