@@ -2319,6 +2319,18 @@ def test_plot_view_shows_caveats_banner(client):
     assert 'data-obs-flag="astro_contaminated"' in resp.text
 
 
+def test_plot_view_caveats_collapsed_behind_toggle(client):
+    """Caveats sit in a closed panel behind a button with count and level colour."""
+    for geom in ("violin", "histogram"):
+        text = client.get(f"/browse/GroupA/ds1/plot/{geom}").text
+        assert 'id="cv-toggle"' in text
+        assert 'aria-expanded="false"' in text
+        assert 'aria-controls="cv-panel"' in text
+        assert re.search(r'<div class="caveats-card [^"]*" id="cv-panel" hidden', text)
+        assert 'class="cv-n">' in text
+        assert 'Known caveats \u2014 apply to the plot below' not in text
+
+
 def test_plot_view_caveats_banner_absent_without_data(client):
     """No caveats in /info → no card at all (avoid empty header noise)."""
     # GroupA/ds2 has no caveats key in _INFO.

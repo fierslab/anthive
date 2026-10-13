@@ -580,6 +580,7 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   exist when data is present (DE tab is conditional). Deep-links `#tab-embeddings`
   / `#tab-resources` are NOT implemented — those were a spec artifact; the
   actual anchors are `#tab-data` (for embeddings) and `#tab-de` (for DE).
+- **Plot-page caveats (plot.html, all geoms incl. the DE ones)** are collapsed behind `#cv-toggle` (triangle icon + count, coloured by the highest level, `aria-expanded`, panel `#cv-panel`, closed by default; label hidden below 480px). The dataset page's own card is unchanged. Nothing requires high caveats to stay open.
 - **Known caveats card** (dataset.html): rendered above the tab bar when
   `/info` returns a non-empty `caveats: [...]`. The Python side (`dataset_view`
   in `browser.py`) reduces the list to a `caveats_summary = {n, max_level}`
