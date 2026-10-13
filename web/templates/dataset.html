@@ -193,6 +193,8 @@
   .obs-stats-tbl th { font-size: 10px; }
   .obs-stats-tbl td { font-family: var(--font-mono); color: #555; white-space: nowrap; }
   .obs-stats-tbl td.colname { font-family: var(--font); }
+  /* multi-valued fields (disease, tissue, cell type) wrap instead of widening the page */
+  .data-card .obs-stats-tbl td:last-child { white-space: normal; overflow-wrap: anywhere; }
   .obs-plots-th { text-align: center; border-left: 1px solid #94a3b8; border-right: 1px solid #94a3b8; }
   .obs-stats-tbl td.obs-plots {
     text-align: center; padding: 0 6px; white-space: nowrap;
@@ -239,7 +241,7 @@
   }
   .tab-btn.caveat-tab:hover        { background: #7c1e1f; color: #fff; }
   .tab-btn.caveat-tab.active       { background: #540B0E; color: #fff; }
-  .tab-btn.caveat-tab .tab-count           { color: #fff; background: rgba(0,0,0,.32); font-weight: 700; }
+  .tab-btn.caveat-tab .tab-count           { color: #fff; background: rgba(0,0,0,.32); }
   .tab-btn.caveat-tab.lvl-medium           { background: #E09F3E; border-color: #c8892d; color: #3f2b0e; }
   .tab-btn.caveat-tab.lvl-medium:hover     { background: #c8892d; color: #fff; }
   .tab-btn.caveat-tab.lvl-medium.active    { background: #a97525; color: #fff; }
@@ -286,6 +288,8 @@
   table.gx-table th.obs-plots-th, table.gx-table td.obs-plots { border-left: none; border-right: none; text-align: left; white-space: nowrap; }
   table.gx-table tbody tr:hover td { background: var(--hover); }
   td.g-pct-cell, td.g-rank-cell, td.g-var-cell, td.g-num-cell { white-space: nowrap; }
+  /* bulk datasets: one profile per sample, so 'cells expressing' has no meaning */
+  .ds-bulk th[data-sortcol="pct"], .ds-bulk td.g-pct-cell { display: none; }
   @media (max-width: 640px) { table.gx-table .vw-bar { width: 36px; } table.gx-table th, table.gx-table td { padding: 4px 5px; } }
   /* Module-scores table — three method columns each carry their own icon
      triplet + stats, so let each row be as wide as it needs to be. */
@@ -577,8 +581,8 @@
       <div class="cv-item">
         <div class="cv-row1">
           <span class="cv-chip lvl" title="severity">{{ cv.level or 'low' }}</span>
-          {% if cv.kind %}<span class="cv-chip" title="caveat type">{{ cv.kind }}</span>{% endif %}
-          {% if cv.scope %}<span class="cv-scope" title="scope">{{ cv.scope }}</span>{% endif %}
+          {% if cv.kind and cv.kind != 'note' %}<span class="cv-chip" title="caveat type">{{ cv.kind }}</span>{% endif %}
+          {% if cv.scope and cv.scope not in ('object', 'dataset') %}<span class="cv-scope" title="what the caveat applies to">{{ 'column ' ~ cv.scope }}</span>{% endif %}
           {% if cv.obs_flag %}<span class="cv-obsflag" title="boolean obs column ('yes'/'no') that flags affected cells">obs:{{ cv.obs_flag }}</span>{% endif %}
         </div>
         {% if cv.message %}<div class="cv-msg">{{ cv.message }}</div>{% endif %}
@@ -602,7 +606,7 @@
    Always rendered when the dataset has genes (n_genes > 0); curated rows only
    when gene_panel.genes is non-empty; top-variable rows fetched by JS always. #}
 {% if info and info.n_genes %}
-<section class="tab-panel" id="tab-genes" role="tabpanel">
+<section class="tab-panel{% if is_bulk %} ds-bulk{% endif %}" id="tab-genes" role="tabpanel">
   <style>
     /* Sortable gene-table column headers */
     #obs-tbl-genes thead th[data-sortcol] { cursor: pointer; user-select: none; white-space: nowrap; }
@@ -710,7 +714,7 @@
     <h2 class="section-head">Stats</h2>
     <table class="obs-stats-tbl auto" style="font-size:12px">
       <tbody>
-        {% if info.n_cells %}<tr><td class="colname">cells</td><td>{{ "{:,}".format(info.n_cells) }}</td></tr>{% endif %}
+        {% if info.n_cells %}<tr><td class="colname">{{ 'samples' if is_bulk else 'cells' }}</td><td>{{ "{:,}".format(info.n_cells) }}</td></tr>{% endif %}
         {% if info.n_genes %}<tr><td class="colname">genes</td><td>{{ "{:,}".format(info.n_genes) }}</td></tr>{% endif %}
         <tr><td class="colname">obs cols</td><td>{{ info.n_obs_columns }}</td></tr>
         {% if info.modified %}<tr><td class="colname">modified</td><td>{{ info.modified[:10] }}</td></tr>{% endif %}
@@ -805,7 +809,7 @@
    A method chip links to a histogram plot on that column. Datasets with
    no rows for a given method get a blank cell. #}
 {% if n_module_scores %}
-<section class="tab-panel" id="tab-modules" role="tabpanel">
+<section class="tab-panel{% if is_bulk %} ds-bulk{% endif %}" id="tab-modules" role="tabpanel">
   {# One row per gene set scored in this dataset, in the same table and bar style as the Genes tab: rank among gene sets, std. dev., plot icons. #}
   <h2 class="section-head">Gene sets <span class="muted" id="modrank-count" style="font-size:12px;font-weight:normal"></span></h2>
   <div class="gene-search-row">
@@ -815,7 +819,7 @@
   <div class="table-wrap gx-wrap"><table class="obs-stats-tbl auto gx-table" id="obs-tbl-modrank">
     <thead><tr>
       <th data-sort="name" style="cursor:pointer">Gene set</th>
-      <th data-sort="n_cells" style="cursor:pointer" class="num">Cells <span class="info" title="Cells of the dataset the gene set was scored on (a set is scored on the cells of its cell type). Click to sort.">&#9432;</span></th>
+      <th data-sort="n_cells" style="cursor:pointer" class="num">{{ 'Samples' if is_bulk else 'Cells' }} <span class="info" title="{{ 'Samples' if is_bulk else 'Cells' }} of the dataset the gene set was scored on (a set is scored on the cells of its cell type). Click to sort.">&#9432;</span></th>
       <th data-sort="rank" style="cursor:pointer" class="g-sort-desc"><span class="vw-swatch m-rank"></span>Rank among gene sets (%) <span class="info" title="Percent of the other gene sets scored on the same cells of this dataset (sets that apply to its cell type) with a lower mean scanpy score than this gene set. Higher means a stronger score relative to the other sets; it compares gene sets within this dataset only. Click to sort.">&#9432;</span></th>
       <th data-sort="std" style="cursor:pointer"><span class="vw-swatch m-std"></span>Std. dev. <span class="info" title="Standard deviation of the module score over all cells in the dataset (samples for bulk). Scores from different scoring methods are on different scales, so compare within one dataset, not across datasets. The bar is scaled to the highest value in the table. Click to sort.">&#9432;</span></th>
       <th class="obs-plots-th">Plots</th>
@@ -1976,7 +1980,7 @@ document.addEventListener('DOMContentLoaded', function() {
             var genes = rows.map(function (r) { return r.dataset.gene; }).filter(Boolean);
             var curatedByGene = {};   // populated after gene_stats fetch
 
-            if (searchCount) searchCount.textContent = rows.length + ' genes';
+            if (searchCount) searchCount.textContent = '';   // the count shows only while a search is active
 
             // Personal-favourite set for cross-checking top-var / search hits.
             // Lower-cased for case-insensitive match. Reflects the localStorage
@@ -2294,7 +2298,7 @@ document.addEventListener('DOMContentLoaded', function() {
             function _updateSearchCount(q, res) {
                 if (!searchCount) return;
                 if (!q) {
-                    searchCount.textContent = res.total + ' genes';
+                    searchCount.textContent = '';
                 } else {
                     searchCount.textContent = res.shown + ' / ' + res.total + ' match'
                         + (res.shown === 1 ? '' : 'es');

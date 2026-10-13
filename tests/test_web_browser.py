@@ -8238,3 +8238,20 @@ def test_de_tab_offers_the_ma_plot_only_for_pseudobulk_methods():
     template = (Path(browser.__file__).parent / "templates" / "dataset.html").read_text(encoding="utf-8")
     de_tab = template.split('id="tab-de"')[1].split("</section>")[0]
     assert "{% if de_has_mean(s.method) %}" in de_tab and "🌋" not in de_tab and "🔥" not in de_tab
+
+
+def test_dataset_small_fixes_wrap_badge_count_caveats_bulk(client, monkeypatch):
+    template = (Path(browser.__file__).parent / "templates" / "dataset.html").read_text(encoding="utf-8")
+    assert ".data-card .obs-stats-tbl td:last-child { white-space: normal" in template            # M4
+    base = (Path(browser.__file__).parent / "templates" / "base.html").read_text(encoding="utf-8", errors="replace")
+    assert ".tab-btn .tab-count, .tab-count {" in base and "border-radius: 9px" in base             # M5
+    assert "searchCount.textContent = '';   // the count shows only while a search is active" in template   # M10
+    assert "cv.kind != 'note'" in template and "cv.scope not in ('object', 'dataset')" in template       # M11
+    def bulk(api_url, path, **kwargs):
+        result = _fake_api_get(api_url, path)
+        if path.endswith("/info") and isinstance(result, dict):
+            result = dict(result, technology="bulk_rna", experimental_system="bulk_tissue")
+        return result
+    monkeypatch.setattr(browser, "_api_get", bulk)
+    text = client.get("/browse/GroupA/ds1").text
+    assert 'class="tab-panel ds-bulk" id="tab-genes"' in text and '<td class="colname">samples</td>' in text   # M12

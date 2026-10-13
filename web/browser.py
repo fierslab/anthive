@@ -3111,6 +3111,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "update_pending": False,
         "de_studies": de_studies,
         "other_de": _other_de_view(api_url, db_id, de_studies, obs),
+        # bulk datasets: samples, not cells (Genes / Genesets tabs, Stats card)
+        "is_bulk": _view_category(db) == 'bulk',
         "de_total_contrasts": de_total_contrasts,
         "papers": _dataset_papers(api_url, db_id),
         "facet_tests": facet_tests,
