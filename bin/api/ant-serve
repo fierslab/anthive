@@ -2011,8 +2011,13 @@ async def lifespan(app: FastAPI):
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
 API_VERSION = "2.45.0"
-API_VERSION_RELEASED = "2026-10-07"
-API_COMPATIBLE_ANTCLIENT = ">=1.6.0"
+# Release date (YYYY-MM-DD) of API_VERSION; None while it is unreleased. Set it
+# in the release commit together with the changelog heading
+# (tests/test_version_sync.py keeps the two in step).
+API_VERSION_RELEASED: Optional[str] = None
+# Oldest pyvark (codeberg.org/mfiers/pyvark, `from vark import AnthiveClient`)
+# that works with this API.
+API_COMPATIBLE_PYVARK = ">=0.9.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
 app = FastAPI(
@@ -2020,8 +2025,8 @@ app = FastAPI(
     description=f"""
 REST API for querying single-cell expression databases.
 
-* **Current version**: {API_VERSION} (released {API_VERSION_RELEASED}).
-* **Recommended antclient**: {API_COMPATIBLE_ANTCLIENT}.
+* **Current version**: {API_VERSION} ({'released ' + API_VERSION_RELEASED if API_VERSION_RELEASED else 'unreleased'}).
+* **Python client**: pyvark {API_COMPATIBLE_PYVARK} (`from vark import AnthiveClient`).
 * **Machine-readable contract**: [/openapi.json](/openapi.json) — auto-generated, always current.
 * **Version + change summary**: [/version](/version) — single JSON; check on every session start to detect drift.
 * **Changelog**: [/changelog](/changelog) — full history of contract changes since 2.0.
@@ -3527,7 +3532,9 @@ def get_version():
     bindings, or ``changelog_url`` to see what changed.
 
     Response is intentionally small + stable: just the version stamp,
-    the recommended antclient pin, pointers to the canonical contract
+    the release date (``released``, null while unreleased), the oldest
+    compatible pyvark (``compatible_pyvark``; ``compatible_antclient`` is the
+    same pin under its old name, deprecated), pointers to the canonical contract
     surfaces, the list of supported plot geoms, and the list of
     endpoints flagged ``deprecated`` in OpenAPI (so callers prefer
     the non-deprecated alternatives).
@@ -3546,7 +3553,8 @@ def get_version():
     return {
         "version":              API_VERSION,
         "released":             API_VERSION_RELEASED,
-        "compatible_antclient": API_COMPATIBLE_ANTCLIENT,
+        "compatible_pyvark":    API_COMPATIBLE_PYVARK,
+        "compatible_antclient": API_COMPATIBLE_PYVARK,     # deprecated name (antclient became pyvark), removed in 2.46
         "openapi_url":          f"{root}/openapi.json",
         "swagger_ui_url":       f"{root}/docs",
         "redoc_url":            f"{root}/redoc",
