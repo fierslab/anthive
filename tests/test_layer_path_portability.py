@@ -336,7 +336,9 @@ def serve_client(moved_store, tmp_path, monkeypatch):
     monkeypatch.setattr(serve, 'registry', serve.DatabaseRegistry(moved_store['store'], pool))
     assert len(serve.registry.databases) == 1
     db_id = next(iter(serve.registry.databases))   # generated id, e.g. GXX/DSX
-    client = TestClient(serve.app)   # no context manager: lifespan tasks not started
+    # no context manager: lifespan tasks not started. A signed-in caller: the synthetic dataset has no
+    # `access: public`, so an anonymous one would get 404 (lib/dataset_access.py, tested in test_api_access.py).
+    client = TestClient(serve.app, headers={'Remote-User': 'tester'})
     yield client, db_id
     pool.close_all()
 
