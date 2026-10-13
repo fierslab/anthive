@@ -740,11 +740,15 @@ def main() -> None:
         ),
     )
 
-    print(f'Anthive MCP server')
-    print(f'  MCP URL:    {mcp_public_url}')
-    print(f'  API URL:    {api_base_url}')
-    print(f'  Plots dir:  {plots_dir or "(none — using data: URIs)"}')
-    print(f'  Public URL: {public_url}')
+    # With transport stdio, stdout carries the JSON-RPC stream: anything else
+    # written there corrupts the protocol, so the banner goes to stderr.
+    banner_stream = sys.stderr if args.transport == 'stdio' else sys.stdout
+    print('Anthive MCP server', file=banner_stream)
+    print(f'  MCP URL:    {mcp_public_url}', file=banner_stream)
+    print(f'  API URL:    {api_base_url}', file=banner_stream)
+    print(f'  Plots dir:  {plots_dir or "(none — using data: URIs)"}', file=banner_stream)
+    print(f'  Public URL: {public_url}', file=banner_stream)
+    banner_stream.flush()
 
     # ── API helpers ────────────────────────────────────────────────────────────
 

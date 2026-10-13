@@ -383,6 +383,8 @@ Fixes (2026-10-13):
   scanning it.
 - ant-mcp: `list_module_scores` shows storage and the query per score, `analytics_schema` shows the view,
   `get_geneset` gives the sidecar query.
+- ant-mcp with `transport: stdio` writes its startup banner to stderr. It went to stdout, the protocol stream: with
+  unbuffered output (`PYTHONUNBUFFERED=1`) a client read five non-JSON lines before the `initialize` answer.
 - Clients: pyvark, vark and the skills reach none of the new routes yet; pass-through clients keep working with
   the new optional fields. pyvark's `get_facet_recurring_genes` documents `n` up to 500 and has no `offset`,
   `effect_gate`, `strict` or `forest`. The breaking changes above (internal datasets for anonymous callers, admin-only
