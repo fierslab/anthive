@@ -108,6 +108,8 @@ def create_app(api_url: str) -> FastAPI:
 
     # Include browser router
     app.include_router(browser_router)
+    # One HTML error page for page routes (JSON for API clients)
+    browser_module.install_error_pages(app)
 
     return app
 

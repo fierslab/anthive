@@ -106,6 +106,30 @@ def view_tip(key: str, text: str = '') -> str:
     return (text + ' ' if text else '') + VIEW_PREVIEW_TIP
 
 
+def _error_page(request: Request, message: str, status_code: int = 404, hint: Optional[str] = None,
+                back: Optional[Tuple[str, str]] = None) -> HTMLResponse:
+    """The one error page of the web UI (error.html): a breadcrumb, one sentence, an optional hint and a link back."""
+    message = str(message).replace(' \u2014 ', ': ')
+    return templates.TemplateResponse(request, "error.html", {
+        "message": message, "status_code": status_code, "hint": hint,
+        "back_href": back[0] if back else '/', "back_label": back[1] if back else 'back to the datasets',
+    }, status_code=status_code)
+
+
+def install_error_pages(app: Any) -> None:
+    """Render HTTP errors of page routes with error.html (JSON stays JSON for /api paths and JSON clients)."""
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+    from fastapi.responses import JSONResponse
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _page_error(request: Request, exc: StarletteHTTPException):  # noqa: ANN202
+        wants_html = 'text/html' in (request.headers.get('accept') or '') and not request.url.path.startswith('/api')
+        if not wants_html:
+            return JSONResponse({'detail': exc.detail}, status_code=exc.status_code)
+        message = 'This page does not exist.' if exc.status_code == 404 else str(exc.detail)
+        return _error_page(request, message, exc.status_code)
+
+
 templates.env.globals['view_approved'] = view_approved
 # MA plots need a mean expression, which only the pseudobulk-style DE methods store
 templates.env.globals['de_has_mean'] = lambda method: _de_method_level(method).startswith('donor')
@@ -2441,11 +2465,7 @@ async def folder_view(request: Request, browse_id: str):
         datasets, description_html, collection_meta = [], None, {'pills': [], 'var_fields': []}
 
     if not datasets:
-        return templates.TemplateResponse(
-            request, "index.html",
-            {"folders": [], "error": f"Collection '{group_id}' not found"},
-            status_code=404
-        )
+        return _error_page(request, f"Collection '{group_id}' not found", 404)
 
     # Friendly group name. Falls through index.md `title` (curator override)
     # → `group` (folder name) → the short group_id when neither is set.
@@ -2520,11 +2540,7 @@ async def edit_collection_view(request: Request, browse_id: str):
     which writes to disk. The /admin/* path is also gated at the proxy."""
     group_id = unquote(browse_id)
     if not _is_admin(request):
-        return templates.TemplateResponse(
-            request, "index.html",
-            {"folders": [], "error": "Not authorized — admin only."},
-            status_code=403,
-        )
+        return _error_page(request, "Not authorized — admin only.", 403)
     # Datasets in this collection → options for the default_dataset dropdown
     # (value = file_id, the collection-relative id, e.g. "AQB").
     dataset_opts = []
@@ -2614,6 +2630,12 @@ _PLOT_GEOM_GROUPS = (
 )
 
 
+@router.get("/datasets")
+def datasets_redirect():
+    """The nav label is "datasets": the catalogue lives at /."""
+    return RedirectResponse("/", status_code=307)
+
+
 @router.get("/browse/{folder_browse_id}/{dataset_browse_id}/plot/donor", response_class=HTMLResponse)
 async def donor_plot_view(request: Request, folder_browse_id: str, dataset_browse_id: str):
     """Per donor plot page of one gene or gene set for one facet and cell type of this dataset (the values the facet test
@@ -2635,8 +2657,7 @@ async def donor_plot_view(request: Request, folder_browse_id: str, dataset_brows
         db = _api_get(api_url, f'/databases/{db_id}/info')
     except Exception as error:
         print(f"API error: {error}")
-        return templates.TemplateResponse(request, "index.html", {"folders": [], "error": f"Dataset '{db_id}' not found"},
-                                          status_code=404)
+        return _error_page(request, f"Dataset '{db_id}' not found", 404)
     collection = db.get('collection') or {}
     caveats = db.get('caveats') or []
     subject = gene or module.rpartition('/')[2] or ''
@@ -2664,11 +2685,9 @@ async def plot_view(request: Request, folder_browse_id: str,
                     dataset_browse_id: str, geom: str):
     """Render the interactive plot form for one geom on one dataset."""
     if geom not in _PLOT_GEOMS_UI:
-        from fastapi import HTTPException
-        raise HTTPException(
-            status_code=404,
-            detail=f"Unknown plot geom '{geom}'. Valid: {sorted(_PLOT_GEOMS_UI)}",
-        )
+        return _error_page(request, f"There is no plot type '{geom}'.", 404,
+                           hint='Open the dataset and pick a plot from its visualize menu.',
+                           back=(f"/browse/{unquote(folder_browse_id)}/{unquote(dataset_browse_id)}", 'back to the dataset'))
 
     group_id = unquote(folder_browse_id)
     file_id = unquote(dataset_browse_id)
@@ -2679,11 +2698,7 @@ async def plot_view(request: Request, folder_browse_id: str,
         db = _api_get(api_url, f'/databases/{db_id}/info')
     except Exception as error:
         print(f"API error: {error}")
-        return templates.TemplateResponse(
-            request, "index.html",
-            {"folders": [], "error": f"Dataset '{db_id}' not found"},
-            status_code=404,
-        )
+        return _error_page(request, f"Dataset '{db_id}' not found", 404)
 
     collection = db.get('collection') or {}
     # Collection display name. index.md `title` (curator override) beats the
@@ -2780,11 +2795,7 @@ async def de_study_view(request: Request, folder_browse_id: str,
         study_meta = _api_get(api_url, f'/databases/{db_id}/de/{study_id}')
     except Exception as error:
         print(f"API error: {error}")
-        return templates.TemplateResponse(
-            request, "index.html",
-            {"folders": [], "error": f"DE study '{study_id}' not found on {db_id}"},
-            status_code=404,
-        )
+        return _error_page(request, f"DE study '{study_id}' not found on {db_id}", 404)
 
     # Breadcrumb names (best-effort).
     friendly_group, dataset_title = group_id, file_id
@@ -2827,11 +2838,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         db = _api_get(api_url, f'/databases/{db_id}/info')
     except Exception as error:
         print(f"API error: {error}")
-        return templates.TemplateResponse(
-            request, "index.html",
-            {"folders": [], "error": f"Dataset '{db_id}' not found"},
-            status_code=404
-        )
+        return _error_page(request, f"Dataset '{db_id}' not found", 404)
 
     # Differential-expression studies (best-effort — empty if none ingested or
     # the geneset/DE store isn't configured). Drives the DE panel + badge.
@@ -3163,11 +3170,7 @@ async def edit_dataset_view(request: Request, folder_browse_id: str, dataset_bro
     group_id = unquote(folder_browse_id)
     file_id = unquote(dataset_browse_id)
     if not _is_admin(request):
-        return templates.TemplateResponse(
-            request, "index.html",
-            {"folders": [], "error": "Not authorized — admin only."},
-            status_code=403,
-        )
+        return _error_page(request, "Not authorized — admin only.", 403)
     return templates.TemplateResponse(request, "edit_dataset.html", {
         "group_id": group_id,
         "file_id": file_id,
@@ -3360,11 +3363,7 @@ async def admin_feedback_view(request: Request):
     flagged assistant message content); this route only renders the shell and
     gates SHOWING it on the Authelia admins group."""
     if not _is_admin(request):
-        return templates.TemplateResponse(
-            request, "index.html",
-            {"folders": [], "error": "Not authorized — admin only."},
-            status_code=403,
-        )
+        return _error_page(request, "Not authorized — admin only.", 403)
     return templates.TemplateResponse(request, "admin_feedback.html", {})
 
 
@@ -5827,9 +5826,7 @@ async def paper_view(request: Request, citekey: str):
     except Exception:
         record = None
     if not isinstance(record, dict) or not record.get('citekey'):
-        return templates.TemplateResponse(
-            request, "index.html", {"folders": [], "error": f"Paper '{citekey}' not found"},
-            status_code=404)
+        return _error_page(request, f"Paper '{citekey}' not found", 404)
     card = _paper_card(record)
     drafts = set(_as_list(record.get('draft_fields')))
     topics = [{'label': label, 'vals': _as_list(record.get(key)), 'draft': field in drafts}

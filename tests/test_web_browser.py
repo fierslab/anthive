@@ -8282,3 +8282,27 @@ def test_page_titles_use_one_format_without_em_dashes():
         if match and path.name != "base.html":
             assert "\u2014" not in match.group(1) and "anthive" in match.group(1), path.name
             assert " · anthive" in match.group(1), path.name
+
+
+def test_error_pages_use_one_template(client):
+    unknown_geom = client.get("/browse/GroupA/ds1/plot/nosuchgeom")
+    assert unknown_geom.status_code == 404 and 'id="error-card"' in unknown_geom.text and "nosuchgeom" in unknown_geom.text
+    missing = client.get("/browse/ZZ9/ZZZ")
+    assert missing.status_code == 404 and 'id="error-card"' in missing.text
+    assert client.get("/datasets", follow_redirects=False).headers["location"] == "/"
+
+
+def test_install_error_pages_renders_html_for_pages_and_json_for_api():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    app = FastAPI()
+    app.state.api_url = "http://testapi"
+    app.state.reports = []
+    app.state.genesets_available = False
+    app.include_router(browser.router)
+    browser.install_error_pages(app)
+    test_client = TestClient(app)
+    page = test_client.get("/no/such/page", headers={"accept": "text/html"})
+    assert page.status_code == 404 and 'id="error-card"' in page.text and "This page does not exist." in page.text
+    api = test_client.get("/no/such/page", headers={"accept": "application/json"})
+    assert api.status_code == 404 and api.json() == {"detail": "Not Found"}
