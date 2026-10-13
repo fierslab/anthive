@@ -485,6 +485,7 @@
   {% endif %}
   {% if n_module_scores %}
   <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Genesets<span class="tab-count">{{ n_module_scores }}</span></button>
+  <button type="button" class="tab-btn {{ view_class('dataset-facet-gs') }}" data-tab="facet-gs" role="tab" id="tab-btn-facet-gs" title="{{ view_tip('dataset-facet-gs', 'Gene set scores compared with the cell annotation columns, per cell and descriptive.') }}">Facet GS</button>
   {% endif %}
   {% if show_facets_tab %}
   <button type="button" class="tab-btn"        data-tab="facets"   role="tab" id="tab-btn-facets">Facets<span class="tab-count">{{ n_facets_total }}</span></button>
@@ -840,13 +841,18 @@
     } else { load(); }
   })();
   </script>
-  <h2 class="section-head">Geneset scores
-    <span class="muted" style="font-size:12px;font-weight:normal">({{ n_module_scores }} genesets)</span>
+</section>
+
+{# ── Facet GS tab: the per-cell association explorer (_module_view.html), moved out of the Genesets tab. Not approved yet (VIEW_REGISTRY key dataset-facet-gs). Loads on first open of the tab (mv_ctx.lazy_tab). Old #modules&mv=... and #tab-modules-mv=... links open this tab. #}
+{% from "_macros.html" import review_banner as _review_banner %}
+<section class="tab-panel" id="tab-facet-gs" role="tabpanel">
+  {{ _review_banner('dataset-facet-gs') }}
+  <h2 class="section-head">Gene set scores by annotation column
     <span class="info" data-glossary="per-cell-association" title="Gene set scores compared with the cell annotation columns, sorted by how far each stands out from its peers.">ⓘ</span>
   </h2>
-  <div class="tab-loading plot-loading" data-tab-loading="modules" style="min-height:60px;display:none">
+  <div class="tab-loading plot-loading" data-tab-loading="facet-gs" style="min-height:60px;display:none">
     <span class="spinner-lg"></span>
-    <span>loading geneset variability…</span>
+    <span>loading gene set scores…</span>
   </div>
   {% include "_module_view.html" with context %}
 </section>
@@ -1158,7 +1164,7 @@ document.addEventListener('DOMContentLoaded', function() {
     })();
 
     // ── Tab-loading spinner controller (P1.9) ─────────────────────────────
-    // Each JS-hydrated tab (Genes, Numerical, Categorical, Genesets, Downloads)
+    // Each JS-hydrated tab (Genes, Numerical, Categorical, Facet GS, Downloads)
     // carries a `.tab-loading[data-tab-loading]` block. Hydration code calls
     // window.antTabLoading.done(name) when its fetch completes; if a tab is
     // activated before that, the spinner is shown. If activated after, it
@@ -1362,6 +1368,19 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
             if (tabPart === 'ds-facets') tabPart = 'facets';   // old anchor of the card
+            // The gene set score explorer moved from the Genesets tab to Facet GS:
+            // old links with explorer filter state (#modules&mv=..., #tab-modules-mv=...)
+            // open the new tab; the hash is rewritten to the canonical #facet-gs&mv=...
+            var legacyMv = tabPart.match(/^tab-modules-mv=(.*)$/);
+            if (legacyMv || (tabPart === 'modules' && h.indexOf('&mv=') >= 0)) {
+                var mvState = legacyMv ? legacyMv[1] + (ampIdx >= 0 ? h.slice(ampIdx) : '') : h.slice(h.indexOf('&mv=') + 4);
+                try { history.replaceState(null, '', '#facet-gs&mv=' + mvState); } catch (_) {}
+                tabPart = 'facet-gs';
+            } else if (tabPart === 'tab-modules') {
+                tabPart = 'modules';
+            } else if (tabPart === 'tab-facet-gs') {
+                tabPart = 'facet-gs';
+            }
             activateTab(tabPart, false);
         }
         window.addEventListener('hashchange', function() { handleHash(location.hash); });

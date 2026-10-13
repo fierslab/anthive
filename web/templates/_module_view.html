@@ -28,8 +28,14 @@ URL hash scheme (feature: back-button / shareable filter state):
   Keys match filter names: group, module, dataset, tag, method, celltype, tissue, technology, biosample, sort.
   Semicolons separate pairs; values are encodeURIComponent-encoded.
   Multi-value filters: comma-separated within the value (e.g. celltype=microglial+cell,astrocyte).
-  When co-existing with a tab anchor (e.g. #tab-modules), the mv= part is
-  appended: #tab-modules-mv=...  The JS strips the -mv= suffix before parsing.
+  When co-existing with a tab anchor, the mv= part is appended after '&':
+  #facet-gs&mv=...  (dataset page Facet GS tab). The legacy form
+  #tab-modules-mv=... is still parsed, and dataset.html redirects it and
+  #modules&mv=... to #facet-gs&mv=...
+
+Optional mv_ctx keys:
+    "lazy_tab": "facet-gs"   # dataset page: fetch only when this tab opens; also
+                             # the name of the tab-loading spinner to dismiss.
 #}
 {% from "_macros.html" import mff_styles, mff_scripts, doc_block %}
 {% set _mv = mv_ctx %}
@@ -541,15 +547,15 @@ URL hash scheme (feature: back-button / shareable filter state):
     return b + '/plot/scatter?embedding=X_umap&color=' + encodeURIComponent(col);
   }
 
-  // Build the dataset browse URL landing on the Modules tab with the group/module pre-selected.
-  // Hash format: #modules&mv=group=<catalog>;module=<module>
+  // Build the dataset browse URL landing on the Facet GS tab with the group/module pre-selected.
+  // Hash format: #facet-gs&mv=group=<catalog>;module=<module>
   // The dataset page's activateTab reads the prefix up to '&' as the tab name.
   function datasetUrl(row) {
     var b = baseUrl(row); if (!b) return null;
     var mvPairs = [];
     if (row.catalog) mvPairs.push('group=' + encodeURIComponent(row.catalog));
     if (row.module)  mvPairs.push('module=' + encodeURIComponent(row.module));
-    return b + '#modules' + (mvPairs.length ? '&mv=' + mvPairs.join(';') : '');
+    return b + '#facet-gs' + (mvPairs.length ? '&mv=' + mvPairs.join(';') : '');
   }
 
   // Build an ECDF plot URL using the module score as x-axis, categorical tag as hue.
@@ -1273,7 +1279,7 @@ URL hash scheme (feature: back-button / shareable filter state):
         // controller may not exist yet. Retry once on DOMContentLoaded when
         // that happens.
         function dismiss() {
-          if (window.antTabLoading) { window.antTabLoading.done('modules'); return true; }
+          if (window.antTabLoading) { window.antTabLoading.done(CTX.lazy_tab || 'modules'); return true; }
           return false;
         }
         if (!dismiss()) {
@@ -1290,6 +1296,19 @@ URL hash scheme (feature: back-button / shareable filter state):
   if (flt.n_cells) { flt.n_cells.addEventListener('change', function () { updateHash(!!this.value); render(); }); }
 
   // Sort is handled by column-header click listeners bound above.
-  load();
+  // With mv_ctx.lazy_tab (the dataset page's Facet GS tab) the fetch waits until
+  // that tab is opened: on the anthive:tab-activated event, or at once when the
+  // panel is already active (deep link). Other pages load straight away.
+  if (CTX.lazy_tab) {
+    var _lazyStarted = false;
+    var startLazy = function () { if (_lazyStarted) return; _lazyStarted = true; load(); };
+    document.addEventListener('anthive:tab-activated', function (ev) {
+      if (ev && ev.detail && ev.detail.name === CTX.lazy_tab) startLazy();
+    });
+    var _lazyPanel = document.getElementById('tab-' + CTX.lazy_tab);
+    if (_lazyPanel && _lazyPanel.classList.contains('active')) startLazy();
+  } else {
+    load();
+  }
 })();
 </script>

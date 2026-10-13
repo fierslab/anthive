@@ -4822,15 +4822,16 @@ def test_genesets_bygene_url_has_gene_param(client):
 
 # ── Ask 7: broken dataset link fix ───────────────────────────────────────────
 
-def test_module_view_dataset_link_uses_modules_tab_hash(client):
-    """Dataset links must use #modules&mv=... so the Modules tab activates on landing."""
+def test_module_view_dataset_link_uses_facet_gs_tab_hash(client):
+    """Dataset links must use #facet-gs&mv=... so the Facet GS tab (the explorer's home) activates on landing."""
     resp = client.get("/genesets/StudyX/Exp1/gs_up")
     assert resp.status_code == 200
     html = resp.text
-    # The JS template string that builds the href must include '#modules'.
-    assert "'#modules'" in html or '"#modules"' in html or "'#modules&'" in html, (
-        "datasetUrl must embed '#modules' so the Modules tab is activated"
+    # The JS template string that builds the href must include '#facet-gs'.
+    assert "b + '#facet-gs'" in html, (
+        "datasetUrl must embed '#facet-gs' so the Facet GS tab is activated"
     )
+    assert "b + '#modules'" not in html
     # Must use &mv= separator (not bare #mv=).
     assert "'&mv='" in html or '"&mv="' in html, (
         "datasetUrl must use the '&mv=' separator after the tab anchor"
@@ -7794,3 +7795,63 @@ def test_dataset_geneset_tab_has_rank_table_in_the_genes_tab_style(client, monke
         assert header in section
     assert "antBar.html(" in section and "antPlotIcons.row(" in section and "antDot" not in section
     assert "Standard deviation of the module score over all cells in the dataset (samples for bulk)" in section
+
+
+# ── Dataset page: Facet GS tab holds the per-cell association explorer ───────
+
+def _dataset_with_module_scores(monkeypatch):
+    def with_scores(api_url, path):
+        result = _fake_api_get(api_url, path)
+        if path.endswith("/info") and isinstance(result, dict):
+            result = dict(result)
+            obs = dict(result.get("obs", {}))
+            obs["numerical"] = list(obs.get("numerical", [])) + ["Sierksma2025::WGCNA::Brown_Lysosome"]
+            result["obs"] = obs
+        return result
+    monkeypatch.setattr(browser, "_api_get", with_scores)
+
+
+def test_dataset_facet_gs_tab_follows_genesets_and_is_greyed(client, monkeypatch):
+    _dataset_with_module_scores(monkeypatch)
+    html = client.get("/browse/GroupA/ds1").text
+    bar = html.split('id="ds-tab-bar"')[1].split("</div>")[0]
+    tabs = re.findall(r'data-tab="([^"]+)"', bar)
+    assert tabs[tabs.index("modules") + 1] == "facet-gs"
+    button = re.search(r'<button[^>]*data-tab="facet-gs"[^>]*>[^<]*', bar).group(0)
+    assert "vw-preview" in button and button.endswith(">Facet GS")
+    assert browser.VIEW_PREVIEW_TIP in button
+    assert "vw-preview" not in re.search(r'<button[^>]*data-tab="modules"[^>]*>', bar).group(0)
+    assert "dataset-facet-gs" in browser.VIEW_REGISTRY and "dataset-facet-gs" not in browser.APPROVED_VIEWS
+
+
+def test_dataset_explorer_moved_from_genesets_to_facet_gs(client, monkeypatch):
+    _dataset_with_module_scores(monkeypatch)
+    html = client.get("/browse/GroupA/ds1").text
+    modules_panel = html.split('id="tab-modules"')[1].split('id="tab-facet-gs"')[0]
+    facet_gs_panel = html.split('id="tab-facet-gs"')[1].split('<section class="tab-panel"')[0]
+    # Genesets keeps the rank table only.
+    assert 'id="obs-tbl-modrank"' in modules_panel
+    assert 'id="mv-modules-tab"' not in modules_panel and "Geneset scores" not in modules_panel
+    # Facet GS carries the banner, the plain heading, its own spinner and the explorer.
+    assert 'class="review-banner"' in facet_gs_panel and 'data-view="dataset-facet-gs"' in facet_gs_panel
+    assert "Gene set scores by annotation column" in facet_gs_panel and "genesets)" not in facet_gs_panel
+    assert 'data-glossary="per-cell-association"' in facet_gs_panel
+    assert 'data-tab-loading="facet-gs"' in facet_gs_panel and 'data-tab-loading="modules"' not in html
+    assert 'id="mv-modules-tab"' in facet_gs_panel
+    # The explorer waits for its tab.
+    assert '"lazy_tab": "facet-gs"' in html
+    assert "CTX.lazy_tab" in html and "anthive:tab-activated" in html
+
+
+def test_dataset_without_module_scores_has_no_facet_gs_tab(client):
+    html = client.get("/browse/GroupA/ds1").text
+    assert 'data-tab="facet-gs"' not in html and 'id="tab-facet-gs"' not in html
+
+
+def test_dataset_old_explorer_hashes_alias_to_facet_gs(client, monkeypatch):
+    _dataset_with_module_scores(monkeypatch)
+    html = client.get("/browse/GroupA/ds1").text
+    handle = html.split("function handleHash(hash)")[1].split("window.addEventListener('hashchange'")[0]
+    assert "/^tab-modules-mv=(.*)$/" in handle                         # legacy #tab-modules-mv=...
+    assert "tabPart === 'modules' && h.indexOf('&mv=') >= 0" in handle  # #modules&mv=... from old gene set links
+    assert "'#facet-gs&mv=' + mvState" in handle and "tabPart = 'facet-gs'" in handle

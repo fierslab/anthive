@@ -66,6 +66,7 @@ VIEW_REGISTRY: Dict[str, str] = {
     'geneset-variability': 'Gene set page, Donor variability tab',
     'geneset-genes': 'Gene set page, Genes tab',
     'geneset-page': 'Gene set page, Gene set page (old) tab',
+    'dataset-facet-gs': 'Dataset page, Facet GS tab (gene set scores by annotation column, per cell)',
 }
 APPROVED_VIEWS = frozenset({
     'datasets', 'genes', 'genesets', 'gene-expression', 'geneset-expression',
@@ -3070,6 +3071,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
             "scope": "dataset",
             "dataset": db_id,
             "id": "mv-modules-tab",
+            # Lives in the Facet GS tab; fetch /module-variability only when that tab opens.
+            "lazy_tab": "facet-gs",
             # For the empty-state branching in _module_view.html: does this
             # dataset carry any facet (`ant_*`) obs columns at all?
             # No facets means variability cannot be computed, so the message

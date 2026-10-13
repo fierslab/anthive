@@ -1,6 +1,6 @@
 id: dataset-page
 title: Dataset page
-summary: The dataset page has the id strip with the database id you need in the API, provenance, and tabs (Overview, Data, Genes, Genesets, Numerical, Categorical, Differential expression, Papers, Downloads, Caveats) that appear only when the dataset has that data.
+summary: The dataset page has the id strip with the database id you need in the API, provenance, and tabs (Overview, Data, Genes, Genesets, Facet GS, Numerical, Categorical, Differential expression, Papers, Downloads, Caveats) that appear only when the dataset has that data.
 aliases:
 - dataset tabs
 body_html: |
@@ -11,7 +11,8 @@ body_html: |
     <tr><td>Overview</td><td>The written description of the dataset, when there is one.</td></tr>
     <tr><td>Data</td><td>Layers, embeddings (UMAP, PCA) and an overview of the cell annotation columns.</td></tr>
     <tr><td>Genes</td><td>Expression statistics per gene (mean, standard deviation, coefficient of variation, fraction of cells expressing it); search, sort and star favourites.</td></tr>
-    <tr><td>Genesets</td><td>Module scores already computed for curated gene sets, with how strongly they vary across the dataset's annotations.</td></tr>
+    <tr><td>Genesets</td><td>Module scores already computed for curated gene sets: one row per gene set with its rank among the other gene sets of the dataset, the spread of the score over the cells and plot icons.</td></tr>
+    <tr><td>Facet GS</td><td>The same gene set scores compared with the cell annotation columns (how strongly each score varies across them), as a filterable list. These are per-cell associations, descriptive only. Marked <em>preview</em>: still being reviewed.</td></tr>
     <tr><td>Numerical</td><td>Numeric cell annotations (age, Braak stage, QC metrics, scores) with summaries and quick plots.</td></tr>
     <tr><td>Categorical</td><td>Categorical annotations (cell type, donor, disease, sex) with value counts and quick plots.</td></tr>
     <tr><td>Differential expression</td><td>Precomputed differential expression results, when the dataset has them: studies, terms, contrasts and genes, with volcano and MA plots.</td></tr>
