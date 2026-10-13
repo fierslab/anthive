@@ -13,11 +13,6 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-try:
-    from facet_aliases import DEPRECATED_FACET_COLUMNS
-except ImportError:  # imported as lib.config
-    from lib.facet_aliases import DEPRECATED_FACET_COLUMNS  # type: ignore[no-redef]
-
 
 class ConfigError(Exception):
     """Configuration-related errors"""
@@ -571,11 +566,11 @@ def get_facets_visible(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
 
 
 def _current_facet_names(names: List[Any]) -> List[str]:
-    """Strip names, drop empties, and map deprecated facet names (the
-    one-release aliases) to their current name without duplicates."""
+    """Strip names, drop empties and duplicates. The retired name
+    ``ant_apoe_carrier`` is no longer mapped (API 2.45.0); it matches no facet."""
     current: List[str] = []
     for name in names:
-        text = DEPRECATED_FACET_COLUMNS.get(str(name).strip(), str(name).strip())
+        text = str(name).strip()
         if text and text not in current:
             current.append(text)
     return current
@@ -627,6 +622,18 @@ def get_auth_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         )
     admins = {str(name).strip() for name in (block.get('admins') or []) if str(name).strip()}
     return {'mode': mode, 'admins': admins}
+
+
+def get_internal_requires_auth(cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether access=internal datasets need an authenticated caller.
+
+    env ANTHIVE_INTERNAL_REQUIRES_AUTH > ``internal_requires_auth`` > True.
+    Anything but an explicit false value keeps the protection on.
+    """
+    value = _setting(cfg, 'internal_requires_auth', 'ANTHIVE_INTERNAL_REQUIRES_AUTH', True)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ('false', '0', 'no', 'off')
 
 
 def get_catalog_scan_mode(cfg: Optional[Dict[str, Any]] = None) -> str:

@@ -47,4 +47,6 @@ docker run --rm -p 8501:8501 \
 Optional variables: `ANTHIVEPORT` (default 8501), `STARCATSTORE`,
 `ANTHIVE_CHAT_API_KEY` / `ANTHIVE_CHAT_MODEL`, and `ANTHIVE_S3_ENDPOINT`,
 `_BUCKET`, `_REGION`, `_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`. Without basic
-auth the container runs in auth mode `none` (public, no admin features).
+auth the container runs in auth mode `none` (public, no admin features, and only
+datasets annotated `access: public` are served; `ANTHIVE_INTERNAL_REQUIRES_AUTH=false`
+serves the internal ones too, only for a store that may be public as a whole).

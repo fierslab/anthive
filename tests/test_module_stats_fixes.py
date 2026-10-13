@@ -58,7 +58,7 @@ def test_gate_reads_the_lower_confidence_bound_not_the_point_estimate(views):
     assert row['replicated'] is True and row['gate'] is False and row['n_cohorts_ge_gate'] == 1
     assert row['effect_gate_tau'] == pytest.approx(0.2 / 3)
     assert row['effect_gate_unit'] == facet_rules.module_gate_words('braak')
-    assert top['effect_gate']['std_effect'] == pytest.approx(0.2 / 3)
+    assert top['effect_gate_rule']['std_effect'] == pytest.approx(0.2 / 3)
 
 
 def test_gate_per_facet_changes_the_threshold(views):

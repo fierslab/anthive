@@ -83,11 +83,31 @@ and `lib/config.py` (anthive.yaml loader).
   `POST /internal/mcp/verify` (internal secret only; Caddy 403s
   `/api/internal/*`). The web UI's `/account/mcp` page consumes `/me/mcp`.
 - `_InternalSecretGuard`: a wrong `X-Anthive-Internal` is a 401 everywhere.
-- `/admin/rescan|release|restore|refresh-views` use
-  `_require_admin_or_local`: loopback tool calls without proxy headers or
-  Remote-User (ant-sync, AnnotationWriter, ant-refresh-views, ant-score),
-  internal-secret calls without a user (tools in another container), or
-  admins. Through the proxy a normal user gets 403.
+- `/admin/rescan|release|restore|refresh-views`, every `/admin/*-cache/*` and
+  `/admin/*-index/*` route, `/admin/api-config/*` and `POST /genesets/rescan`,
+  `/module-variability/rescan`, `/catalogs/rescan` use
+  `_require_admin_or_local`: loopback tool calls without proxy headers,
+  Remote-User or `X-Anthive-Anonymous` (ant-sync, AnnotationWriter,
+  ant-refresh-views, ant-score), internal-secret calls without a user (tools
+  in another container), or admins. Through the proxy a normal user gets 403.
+  `tests/test_api_access.py` lists the guarded routes; add new server-control
+  routes there.
+- **Identity is `Remote-User` / `Remote-Groups` only** (2.45). `X-Remote-*`
+  is never read (it let a client claim `admins`); the Caddy snippets drop it.
+- **access=internal datasets need an identity** (2.45, `lib/dataset_access.py`,
+  setting `internal_requires_auth`). `_DatasetAccessGuard` (pure ASGI) answers
+  404 for `/databases/{hidden}/...` and dataset query parameters, and sets the
+  context variable behind `registry.databases` / `registry.metadata_cache` /
+  `list_databases()` (properties that drop hidden ids during an anonymous
+  request; the full maps are `_databases_all` / `_metadata_all`). Anything that
+  lists datasets from another source (score index, parquet indexes, cohort
+  table, library links, pools) must filter with `_visible_db_ids` /
+  `_hidden_db_ids()`, and a cache built inside a request must be keyed by the
+  hidden set. Worker threads (`ThreadPoolExecutor`) do not inherit the context:
+  decide the dataset list in the request thread. ant-browse forwards
+  `Remote-User` (or `X-Anthive-Anonymous`) on every server-side call; ant-mcp
+  sends `X-Anthive-Anonymous` without a link owner. Unknown and hidden datasets
+  share one 404 (`UnknownDatabaseError`, `unknown_database_detail`).
 - Secrets: `internal_secret` / `mcp.token_secret` in config, else env
   `ANTHIVE_INTERNAL_SECRET` / `ANTHIVE_MCP_TOKEN_SECRET`, else auto-created
   0600 files in `<state_dir>/secrets/` (`config.get_or_create_secret`).

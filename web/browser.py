@@ -16,9 +16,11 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote as url_quote, unquote, urlencode
 
+import contextvars
+
 import markdown
 import requests
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from markupsafe import Markup
@@ -34,7 +36,36 @@ import celltype_groups  # noqa: E402
 
 from canonical_columns import is_canonical_column, strip_ant_prefix  # noqa: E402
 
-router = APIRouter()
+# Who the current page request is for, forwarded on every server-side API
+# call (_api_get): Remote-User of a signed-in visitor, else
+# X-Anthive-Anonymous, so ant-serve never mistakes a proxied anonymous visit
+# for a local tool and hides access=internal datasets from it
+# (lib/dataset_access.py). Empty outside a request (background probes).
+_REQUEST_IDENTITY: contextvars.ContextVar = contextvars.ContextVar('anthive_web_identity', default=None)
+
+
+async def _bind_request_identity(request: Request) -> None:
+    """Router dependency (async, so the value reaches the threadpool handlers)."""
+    user = (request.headers.get('Remote-User') or '').strip()
+    _REQUEST_IDENTITY.set({'Remote-User': user} if user else {'X-Anthive-Anonymous': '1'})
+
+
+def _forwarded_identity() -> Dict[str, str]:
+    return dict(_REQUEST_IDENTITY.get() or {})
+
+
+def _with_request_identity(func):
+    """``func`` for a worker thread: runs with the identity of the request that
+    created it (a ThreadPoolExecutor thread does not inherit context vars)."""
+    identity = _REQUEST_IDENTITY.get()
+
+    def run(*args, **kwargs):
+        _REQUEST_IDENTITY.set(identity)
+        return func(*args, **kwargs)
+    return run
+
+
+router = APIRouter(dependencies=[Depends(_bind_request_identity)])
 templates_dir = Path(__file__).parent / 'templates'
 templates = Jinja2Templates(directory=str(templates_dir))
 templates.env.filters['urlencode'] = url_quote
@@ -362,9 +393,11 @@ for _fav_name, _fav_media in _FAVICON_FILES.items():
 
 def _api_get(api_url: str, path: str, headers: Optional[Dict[str, str]] = None,
              timeout: float = 15) -> Any:
-    """GET request to the ant-serve API"""
+    """GET request to the ant-serve API, on behalf of the current visitor."""
     url = f"{api_url.rstrip('/')}{path}"
-    response = requests.get(url, timeout=timeout, headers=headers)
+    forwarded = _forwarded_identity()
+    forwarded.update(headers or {})
+    response = requests.get(url, timeout=timeout, headers=forwarded or None)
     response.raise_for_status()
     return response.json()
 
@@ -2525,6 +2558,21 @@ async def folder_view(request: Request, browse_id: str):
     })
 
 
+def _collection_visible(request: Request, group_key: str) -> bool:
+    """True when the API lists at least one dataset of the collection for this
+    visitor (an anonymous visitor does not see access=internal datasets, so a
+    collection of internal datasets keeps its static files too)."""
+    try:
+        for db in _all_databases(_api_url(request)):
+            collection = db.get('collection') or {}
+            if group_key in (db.get('group_id'), db['id'].split('/')[0], collection.get('group'),
+                             collection.get('group_id')):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 @router.get("/browse/{browse_id}/static/{filename}")
 async def group_static_download(request: Request, browse_id: str, filename: str):
     """Serve a file from ``data/h5adstore/{group}/static/`` as a download.
@@ -2538,7 +2586,7 @@ async def group_static_download(request: Request, browse_id: str, filename: str)
     if '/' in name or '\\' in name or name in ('.', '..') or _is_download_hidden(name):
         raise HTTPException(status_code=404, detail="not found")
     resolved = _resolve_static_dir(group_id)
-    if resolved is None:
+    if resolved is None or not _collection_visible(request, group_id):
         raise HTTPException(status_code=404, detail="not found")
     static_dir = resolved.resolve()
     try:
@@ -3822,7 +3870,7 @@ async def facet_detail_view(request: Request, facet_name: str):
 
     Header stats, value distribution across all carriers, and the top
     variable genesets from ``module_variability.parquet`` filtered on
-    ``tag_column == facet``. A deprecated facet name redirects to the current one.
+    ``tag_column == facet``. The bare name of a tested facet redirects to its column.
     """
     current_name = canonical_facet(facet_name)
     if not current_name.startswith('ant_') and current_name in _FACET_TEST_LABELS:
@@ -4159,8 +4207,12 @@ def _author_de_studies(api_url: str) -> Dict[str, List[Dict[str, Any]]]:
     pool; later requests reuse the answer, so a gene page never repeats the scan.
     """
     from concurrent.futures import ThreadPoolExecutor
+    # The answer depends on what the visitor may see (internal datasets need a
+    # signed-in user), so a cached answer is reused only for the same kind.
+    visibility = 'user' if _forwarded_identity().get('Remote-User') else 'anonymous'
     with _author_de_lock:
-        if _author_de_state['studies'] and time.time() - _author_de_state['at'] < _AUTHOR_DE_TTL:
+        if (_author_de_state['studies'] and _author_de_state.get('visibility', visibility) == visibility
+                and time.time() - _author_de_state['at'] < _AUTHOR_DE_TTL):
             return _author_de_state['studies']
         try:
             db_ids = [db['id'] for db in _all_databases(api_url) if db.get('id')]
@@ -4175,9 +4227,11 @@ def _author_de_studies(api_url: str) -> Dict[str, List[Dict[str, Any]]]:
             except Exception:
                 return db_id, []
         with ThreadPoolExecutor(max_workers=8) as pool:
-            found = {db_id: studies for db_id, studies in pool.map(studies_of, db_ids) if studies}
+            found = {db_id: studies for db_id, studies in pool.map(_with_request_identity(studies_of), db_ids)
+                     if studies}
         _author_de_state['studies'] = found
         _author_de_state['at'] = time.time()
+        _author_de_state['visibility'] = visibility
         return found
 
 
@@ -4343,7 +4397,7 @@ def _gene_author_de_rows(api_url: str, gene: str) -> List[Dict[str, Any]]:
             })
         return out
     with ThreadPoolExecutor(max_workers=6) as pool:
-        collected = [row for rows in pool.map(rows_of, list(studies_by_db)) for row in rows]
+        collected = [row for rows in pool.map(_with_request_identity(rows_of), list(studies_by_db)) for row in rows]
     collected.sort(key=lambda row: (row['padj'] if row['padj'] is not None else 2.0))
     return collected[:200]
 

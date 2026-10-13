@@ -176,6 +176,15 @@ auth:
   # Users treated as admins when the proxy sends no Remote-Groups (basic mode).
   admins: []
 
+# Datasets whose annotation is not `access: public` (internal, or no access
+# value at all) are served only to callers with an authenticated identity
+# (Remote-User from the proxy; ignored on auth.mode none), local maintenance
+# tools and tools holding the internal secret. Anonymous callers do not see
+# them in any listing and get 404 on their routes. false serves every dataset
+# to everyone who can reach the API (only for a site whose whole store may be
+# public). Env: ANTHIVE_INTERNAL_REQUIRES_AUTH (true/false).
+internal_requires_auth: true
+
 # DuckDB resource limits for ant-convert (ingest).
 duckdb_memory_limit: auto
 duckdb_threads: 2

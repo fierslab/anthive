@@ -435,7 +435,7 @@ def test_donor_plot_png_svg_headers_and_clean_image(results):
     assert pixels.shape[0] > 100 and pixels.shape[1] > 200
     svg = serve.get('/facets/braak/donor-plot.svg', params=params)
     assert svg.status_code == 200 and svg.headers['content-type'].startswith('image/svg+xml')
-    assert serve.get('/facets/braak/donor-plot.gif', params=params).status_code == 404
+    assert serve.get('/facets/braak/donor-plot.gif', params=params).status_code == 400
     cached = serve.get('/facets/braak/donor-plot.png', params=params)
     assert cached.content == png.content
 

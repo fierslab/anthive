@@ -69,7 +69,9 @@ auth:
   # trusted-proxy  an upstream proxy (nginx + SSO) already authenticated the
   #                user and sets Remote-User/Remote-Groups; Caddy must then
   #                only be reachable from that proxy (ports.bind: 127.0.0.1)
-  # none           no login; public read-only mirror. Admin features are off.
+  # none           no login; public read-only mirror. Admin features are off
+  #                and only access: public datasets are served (see
+  #                internal_requires_auth below).
   mode: authelia
   # Admins by user name (basic mode; in authelia mode admins are the users
   # in the `admins` group, seeded from `users` below).
@@ -82,6 +84,13 @@ auth:
       displayname: Administrator
       email: admin@example.org
       groups: [admins]
+  # Datasets whose annotation is not `access: public` (internal, or no
+  # access value) are served only to signed-in users and to local or
+  # internal tools; anonymous callers do not see them (404, absent from every
+  # listing). On auth.mode none that means they are hidden from everyone.
+  # false serves them to everyone who reaches the API: only for a site whose
+  # whole store may be public. `ant-stack check` counts them.
+  internal_requires_auth: true
   # Authelia only: SMTP for password resets. null = write notifications to
   # <state_dir>/authelia/notification.txt instead of sending mail.
   smtp: null

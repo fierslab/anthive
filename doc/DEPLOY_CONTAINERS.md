@@ -431,6 +431,11 @@ s3:
 
 Rules and limits:
 
+- With `auth.mode: none` only `access: public` datasets are served (see
+  "Internal datasets"); `ant-stack check` lists how many of the linked
+  datasets are hidden. Link only public datasets into a public mirror anyway:
+  the files are readable on the host.
+
 - `extra_mounts` are absolute host paths, mounted **read-only at the same
   path** into api, web, mcp and ingest. `ant-stack check` fails when one does
   not exist or is inside (or contains) `state_dir`, and warns when it
@@ -522,6 +527,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.42.1** | A running server picks up records and a literature index that a sync changed on disk (within about 30 s). Needed on the site that publishes the index and on sites that download it. | none: set `images: tag: 2.42.1`, `ant-stack pull`, `ant-stack up` |
 | **2.43.0** | Facet test engine v2: partial-conjunction replication, `apoe_carrier` renamed `apoe4_carrier` (the old name stays as an alias), dataset versions. | `git pull` the h5adstore, then `ant sync pull`; set `images: tag: 2.43.0`, `ant-stack pull`, `ant-stack up` |
 | **2.44.0** | (1) **Facets**: `ant sync pull` now also brings `_facet_tests/` (the facet test results the API serves; logs and scripts stay out), and the h5adstore repo has many changed `.md` files (facet layer metadata, lineage fields). (2) **Mirror sites with symlinks**: new `data.extra_mounts` bind-mounts folders read-only at the same path into api, web, mcp and ingest, so symlinks from your stores into another site's stores resolve in the containers; `ant-stack check` validates them and warns about symlinks that would dangle. (3) **Hidden paper links**: on every site a `papers:` link to a citekey that is not in the site's own library is hidden everywhere (web, REST, MCP, BibTeX); `GET /library/status` shows `unresolved_references`, issue texts and paths to admins only (on `auth.mode: none` to nobody), non-admins get counts (`n_errors`, `n_warnings`). (4) **Library**: a plain, non-git library of symlinked records works read-only (no git is run in it); `file not found` warnings are computed from the disk on each call and no longer outlive the PDF's arrival; a symlinked record whose target is gone is an error entry, not a crash. (5) **Own literature index**: new `library.index_pull` (default true); `ant sync` never downloads the shared index when `s3.enabled` is false or `library.index_pull: false`. (6) **Facet engine v3 and help API**: facet scopes, new facets and exclusions, per-cell-type clusters, faster facet endpoints; `GET /api/help` and the MCP `explain` tool serve plain-language explanations; facet results are published by `ant sync push` and pulled by `ant sync pull`. (7) **Cron and systemd**: new `config/examples/anthive-sync.{cron,service}.example` set PATH for uv; `ant-stack check` says where uv is and warns when it is missing. | none required. `git pull` the h5adstore, then `ant-stack ingest -- ant sync pull` for `_facet_tests/`. Set `images: tag: 2.44.0`, `ant-stack pull`, `ant-stack up`. Optional: `data.extra_mounts`, `library.index_pull`; cron jobs: add `PATH=$HOME/.local/bin:...` (see "Run syncs from cron or a timer") |
+| **2.45.0** | (1) **Internal datasets need a login**: datasets that are not `access: public` (also those without an `access` value) are hidden from callers without an identity: absent from every listing, 404 on their routes (new `auth.internal_requires_auth`, default true; see "Internal datasets"). Sites with a login see no change; on `auth.mode: none` internal datasets disappear, and a `trusted-proxy` site behind a vhost without a login must drop the `Remote-*` headers there. (2) `X-Remote-User` / `X-Remote-Groups` are ignored everywhere and dropped by the Caddy snippets. (3) Cache, index and rescan routes (`/admin/*-cache/*`, `/admin/*-index/*`, `/admin/api-config/*`, `POST /genesets/rescan`, `/module-variability/rescan`, `/catalogs/rescan`) need an admin, a host-local tool or the internal secret; other signed-in users get 403. (4) The web, mcp and api containers must run the same release (the web now forwards the visitor's identity to the api). | `ant-stack check` (it counts internal datasets and warns), set `images: tag: 2.45.0`, `ant-stack pull`, `ant-stack up`. If your upstream proxy sends identity as `X-Remote-*` only, switch it to `Remote-User` / `Remote-Groups`. If you copied an nginx vhost from `config/examples/`, add the new `proxy_set_header ... ""` lines (the public vhost must drop `Remote-*`). Scripts that call the rescan routes need an admin account. |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.
@@ -629,10 +635,39 @@ catalogue from git.
 | `authelia` (default) | a normal site | a login page; scripts and vark/pyvark use the same name and password over HTTP basic on `/api` |
 | `basic` | a small group or automation only | the browser's own password popup; logging out means closing the browser |
 | `trusted-proxy` | your institute's web server already does the login (e.g. university SSO in front) | the upstream proxy; the site must only listen on 127.0.0.1 (`check` enforces it) and use `tls.mode: off` |
-| `none` | a public read-only mirror | nobody logs in; admin features are switched off |
+| `none` | a public read-only mirror | nobody logs in; admin features are switched off and only `access: public` datasets are served |
 
 Only the Authelia container is extra; it only starts in `authelia` mode.
 Personal MCP links work the same in every mode.
+
+### Internal datasets (`auth.internal_requires_auth`)
+
+A dataset whose annotation (`.h5ad.mus` or the `.env` cascade) does not say
+`access: public` counts as internal; that includes datasets with no `access`
+value at all. With `auth.internal_requires_auth: true` (the default) the API
+serves internal datasets only to callers with an identity:
+
+- signed-in users (the `Remote-User` that Authelia, basic auth or the
+  trusted upstream proxy sets; the web app and personal MCP links pass it on);
+- maintenance tools on the api host or with the internal secret
+  (`ant sync`, `ant-refresh-views`, the scoring tools).
+
+Everyone else does not see them: they are missing from every listing
+(`/databases`, gene sets `scored_in`, facet results, donor variability,
+module variability, paper dataset links, ...) and their routes answer
+`404 Database '<id>' not found`, the same as for a dataset the site does not
+have. On `auth.mode: none` nobody has an identity, so internal datasets are
+hidden from everyone even when they sit in `data.h5adstore`. On
+`trusted-proxy` the upstream proxy decides: a vhost without a login must drop
+`Remote-User`, `Remote-Groups`, `Remote-Email` and `Remote-Name` (see
+`config/examples/nginx-vhost.public.conf.example`), or a visitor could send
+them. `X-Remote-User` and `X-Remote-Groups` are never an identity.
+
+`ant-stack check` counts the internal datasets in `data.h5adstore` and
+warns when they could reach people without a login. Set
+`internal_requires_auth: false` only for a site whose whole store may be
+public; the files themselves stay readable to anyone with shell access to the
+host, so keep internal data off a public host.
 
 ### Certificates (`tls.mode`)
 
@@ -698,6 +733,7 @@ absolute path.
 | `data.extra_mounts` | absolute host folders bind-mounted read-only at the same path into api, web, mcp and ingest: the targets of symlinks in your stores or library (see "A mirror with a hand-picked subset") |
 | `state_dir` | secrets, users, caches and the rendered config |
 | `scratch_dir` | disk for temporary DuckDB files and conversions (default: a docker volume) |
+| `auth.internal_requires_auth` | whether datasets that are not `access: public` need a signed-in caller (default `true`; see "Internal datasets") |
 | `auth.*`, `tls.*`, `ports.*` | see above |
 | `run_as` | the user id the containers run as (default: whoever runs ant-stack) |
 | `images.*` | registry, image names, tag |

@@ -15,7 +15,7 @@
 #     are already what nginx handled — re-running forward_auth here is
 #     redundant.
 #
-# Intentionally empty: the @bypass_auth matcher in Caddyfile still
+# No gate here: the @bypass_auth matcher in Caddyfile still
 # ensures /.well-known/*, /register, /streamlit* are never blocked, but
 # the actual gate is upstream in nginx.  This file MUST exist (Caddy
 # errors out on a missing import target).
@@ -23,3 +23,13 @@
 # IMPORTANT: 127.0.0.1:8500 MUST NOT be exposed to the outside world.
 # Caddy is bound localhost-only by ANTHIVE_CADDY_BIND=127.0.0.1 in prod
 # precisely because there's no auth at this layer.
+#
+# The upstream proxy MUST overwrite or drop client-sent Remote-User /
+# Remote-Groups / Remote-Email / Remote-Name on every path (the nginx
+# examples in config/examples/ do). A public vhost without a login must
+# drop them, or a visitor can claim `Remote-Groups: admins`.
+#
+# The legacy X-Remote-* names are no identity anywhere (ant-serve ignores
+# them); drop whatever the upstream lets through.
+request_header -X-Remote-User
+request_header -X-Remote-Groups

@@ -19,7 +19,8 @@ fails if they drift. A running server reports it in `/api/health`
 From a clean checkout of `main` on a machine with Docker:
 
 ```sh
-# 1. bump both version strings and write the changelog entry
+# 1. bump both version strings, set API_VERSION_RELEASED (today, YYYY-MM-DD) and
+#    API_COMPATIBLE_PYVARK in bin/api/ant-serve, and date the changelog heading
 $EDITOR bin/api/ant-serve lib/__init__.py doc/API_CHANGELOG.md
 make test                                   # no new failures
 git commit -am "X.Y.Z: <summary>"

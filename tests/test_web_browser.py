@@ -7374,10 +7374,10 @@ def test_facet_intro_uses_manifest_permutations(client):
     assert "10,000 by default" in str(macro("facet"))
 
 
-def test_deprecated_facet_page_redirects_to_the_current_name(client):
+def test_retired_facet_name_no_longer_redirects(client):
+    # API 2.45.0 removed the apoe_carrier alias; the old page name is just an unknown facet now.
     response = client.get("/facets/ant_apoe_carrier", follow_redirects=False)
-    assert response.status_code == 307
-    assert response.headers["location"] == "/facets/ant_apoe4_carrier"
+    assert response.status_code != 307 and "location" not in response.headers
 
 
 def test_help_mentions_the_facet_rename(client):
@@ -7795,7 +7795,7 @@ def test_dataset_geneset_tab_has_rank_table_in_the_genes_tab_style(client, monke
     monkeypatch.setattr(browser, '_api_get', _with_scores)
     html = client.get("/browse/GroupA/ds1").text
     section = html.split('id="tab-modules"')[1].split("Geneset scores")[0]
-    assert 'id="obs-tbl-modrank"' in section and "/module_ranks" in section and "gx-table" in section
+    assert 'id="obs-tbl-modrank"' in section and "/module-ranks" in section and "gx-table" in section
     for header in ("Rank among gene sets (%)", "Std. dev.", "Plots", "Cells"):
         assert header in section
     assert "antBar.html(" in section and "antPlotIcons.row(" in section and "antDot" not in section

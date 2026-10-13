@@ -369,6 +369,7 @@ def serve(tmp_path):
         'modality_of_metadata': modality_of_metadata,
         '_module_variability_path': lambda: tmp_path / 'module_variability.parquet',
         '_cell_level_skips': lambda path: {'G9/BULK': 'bulk data (technology bulk_RNA-seq)', 'G1/PRI': 'about one observation per donor'},
+        '_hidden_db_ids': lambda: frozenset(), '_visible_db_ids': list,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     return TestClient(app), namespace

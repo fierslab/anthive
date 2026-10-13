@@ -34,7 +34,89 @@ the spec drifting away from the running code.
 Release summary. The data behind the new gene, gene set and facet views: forest rows with limma intervals and the
 calls a view draws, module (gene set) replication across cohorts with the member-gene counts next to it, an
 uncapped and paged top list, a one-call facet overview, the low-detection pill and the modality (nuclei or cells) of
-every dataset. Minor bump, additive; the facet statistics are unchanged.
+every dataset. The facet statistics are unchanged.
+
+**Breaking changes in this release** (marked BREAKING below; see "Security and access" and "Renames and
+error codes"). By the versioning rules above several of them would call for a major version; they ship in 2.45.0 because
+they close security gaps or remove unreleased or announced names. Clients that only read public data as a signed-in
+user need no change.
+
+Security and access (2026-10-13):
+
+- BREAKING: **`access: internal` datasets need an authenticated caller.** A dataset whose resolved annotation is not
+  `access: public` (internal, or no `access` value) is hidden from callers without an identity: it is missing from
+  every listing (`/databases`, `/groups/{group_id}`, `scored_in` of the gene set routes, `/genesets/.../rank`,
+  facet results and cohorts, donor variability, `/module-variability`, the facet inventory's signal strength, gene
+  detection, donor-pooled units with an internal member, the dataset links and `n_datasets` of papers) and every
+  route that names it (`/databases/{id}/...`, a `db_id` / `db_ids` / `dataset` / `datasets` / `db_x` / `db_y`
+  query parameter, the dataset inside a `/notebook/{b64}` link) answers `404 {"detail": "Database '<id>' not
+  found"}`, the answer for a dataset the site does not have. An identity is a non-empty `Remote-User` set by the
+  proxy (ignored on `auth.mode: none`), a local maintenance tool (loopback, no `X-Forwarded-For`, no user) or the
+  internal secret without a user. A request with `X-Anthive-Anonymous` is anonymous whatever else it carries;
+  ant-browse and ant-mcp send it when they act for a visitor who is not signed in, and ant-browse now forwards the
+  visitor's `Remote-User` on every server-side call. Site setting `internal_requires_auth` (default true, env
+  `ANTHIVE_INTERNAL_REQUIRES_AUTH`, `site.yaml` `auth.internal_requires_auth`); `lib/dataset_access.py`.
+  Sites with a login see no change.
+- BREAKING: **`X-Remote-User` and `X-Remote-Groups` are no identity.** ant-serve used them as a fallback when
+  `Remote-User` / `Remote-Groups` were empty, which let a client claim `X-Remote-Groups: admins` behind a proxy that
+  did not strip them. Only `Remote-User` / `Remote-Groups` count; every Caddy auth snippet and the nginx examples drop
+  the `X-Remote-*` headers. A forged `X-Remote-Groups: admins` gets 403, a chat or `/me/mcp` call with only
+  `X-Remote-User` gets 401.
+- BREAKING: **Server-control routes need an admin, a host-local tool or the internal secret** (the
+  `_require_admin_or_local` rule of `/admin/rescan`): `POST /admin/api-config/{id}`, `GET /admin/plot-cache/stats`,
+  `POST /admin/plot-cache/clear`, `GET /admin/gene-stats-cache/stats`, `POST /admin/gene-stats-cache/clear`,
+  `POST /admin/gene-stats-cache/gc`, `GET /admin/gene-stats-index/stats`, `POST /admin/gene-stats-index/reload`,
+  `POST /admin/gene-stats-index/rebuild`, `GET /admin/gene-variance-index/stats`,
+  `POST /admin/gene-variance-index/reload`, `POST /admin/gene-variance-index/rebuild`,
+  `GET /admin/gene-variance-cache/stats`, `POST /genesets/rescan`, `POST /module-variability/rescan`,
+  `POST /catalogs/rescan`. They relied on the proxy alone (the last three not even that); other signed-in users now
+  get 403. pyvark `rescan_genesets`, `rescan_module_variability`, `rescan_catalogs`, `plot_cache_stats` and
+  `plot_cache_clear` need an admin account; `ant sync` sends the internal secret and is unaffected.
+
+Renames and error codes (2026-10-13):
+
+- **One 404 for an unknown dataset.** Every route answers `404 {"detail": "Database '<id>' not found"}` (was:
+  `Database not found: <id>`, `Dataset '<id>' not found`, `db_id '<id>' not found` or the message with embedded
+  quotes). The DE routes (`/databases/{id}/de`, `/de/{study}`, `/de/{study}/summary`, `/de/by-gene/{gene}`,
+  `/de/{study}/terms/...`) answered 500 for an unknown dataset; they answer this 404 now.
+- `GET /databases/{id}/module_ranks` (new in this release) is `GET /databases/{id}/module-ranks` (kebab case like
+  the other new paths); no alias, it was never released.
+- `GET /donor-variability/top` answers `celltype_group` (was `cell_type_group`, the only route with that spelling).
+- The effect gate rule in a response is `effect_gate_rule` (was `effect_gate`, the same name as the boolean
+  `effect_gate` query parameter of the same routes): `{std_effect, wording}` on `/facets/{facet}/modules/top` and on
+  the module card of `/genesets/{study}/{experiment}/{name}/facet-effects` (was a bare number there),
+  `{std_effect, per_facet}` on the gene set card. The query parameter keeps its name.
+- `GET /facets/{facet}/donor-plot.{fmt}` with a format other than png, svg or pdf: 400 (was 404).
+- `GET /databases/{id}/donor-variability` checks `rung`, `sort` and `feature_type` up front: a bad value is a 400 also
+  without `feature_type` (it was ignored with a 200). `cell_type` takes the cell type group too (`microglia`), like
+  the other donor and facet routes: the exact stratum label wins, else the unit of that group with the most replicates.
+- BREAKING: **The `apoe_carrier` alias is gone**, as announced in 2.43.0: `/facets/ant_apoe_carrier`,
+  `/facets/apoe_carrier/...` and `facet=apoe_carrier` are unknown facets (404 or 400 like any other), the
+  `facets_visible` entry `ant_apoe_carrier` matches nothing, and views built from now on have no
+  `ant_apoe_carrier` column (views built earlier keep it until they are rebuilt; the facet listings hide it). Facet
+  test results written under the old name are still read under the new one.
+- `/version`: `released` is null until the release is cut (it said 2026-10-07, the 2.44.0 date); new
+  `compatible_pyvark` (`>=0.9.0`), the oldest pyvark that works with this API. `compatible_antclient` carries the same
+  pin and is deprecated (antclient became pyvark); it is removed in 2.46.
+
+Changed behaviour (2026-10-08 to 2026-10-10):
+
+- **Xenograft sex facets.** New tested facets `graft_sex` (sex of the donor line of the grafted cells, the test of
+  `ant_sex` in xenografts; `facet_column` is `ant_sex`) and `host_sex` (`ant_host_sex`, the mouse) on every facet route.
+  `sex` is human post-mortem only now: a `facet=sex` call with `scope=xenograft_human_in_mouse` no longer finds
+  results (use `graft_sex`). Villages (several donor lines per animal) are refused as mixed.
+- **Gene sets.** Every experiment in the gene set store must declare `celltypes` (labels or `all`); experiments
+  without a valid value are dropped from the registry (and from `/genesets`, the cards and the module views). The gene
+  set detail and card add `role` (`markers` for QC panels); a set's own `.md` may override `celltypes` and `role`. Module
+  scores and the module facet tests cover only the cells of a set's cell type scope.
+- **Score index from the sidecars.** Gene sets scored only in a `.scores.parquet` sidecar (not as an obs column) are
+  in the score index now, so `scored_in`, `/databases/{id}/module_scores` and the gene set listings can name more
+  datasets than in 2.44.
+- Module variants (gene set card) add `family_rank` and `family_size`: the rank by `p_pc` among the modules of the
+  same family ("ranks 2nd of 122"). For the `sex` facet the member-gene counts leave out genes on chrX and chrY
+  (`members.n_sex_chromosome_excluded`). Gene top rows (`/facets/{facet}/effects/top`) add `min_logFC` / `max_logFC`,
+  module top rows `min_effect` / `max_effect` (smallest and largest per-cohort effect). The gene and module top lists add
+  `n_cohorts_tested` and `not_tested` (why a cell type group has no family, null when it has one).
 
 New endpoints:
 
@@ -44,13 +126,15 @@ New endpoints:
   celltypes, role, direction, quality: {mt_fraction, ribosomal_fraction, mt_dominated, ribosomal_dominated,
   quality_sensitive}, directionless, directionless_reason, directionless_note, member_match, scored_in: [{db_id, title,
   facet_scope, cohort_label, cell_types, groups, variants, facets, has_counts, counted, modality, n_donors}], scope,
-  facets: {facet: {facet, scope, module, members}}, by_scope (only without `scope`), effect_gate: {std_effect: 0.2},
-  help_topics}`. `module` is `{catalog, module, module_key, facet, scope, cell_type, replication: [{celltype_group,
+  facets: {facet: {facet, scope, module, members}}, by_scope (only without `scope`), effect_gate_rule: {std_effect: 0.2,
+  per_facet: {facet: tau}}, help_topics}`. `module` is `{catalog, module, module_key, facet, scope, cell_type, directionless,
+  effect_gate_rule: {std_effect, wording}, replication: [{celltype_group,
   cl_id, labels, primary: {method, source, label}, variants: [variant], ab: {disagree, reason} | null}], n_units, units}`;
   a `variant` is `{method, source, label, basis, forest, r_value, p_pc, k, m, r_direction, replicated, call, nt_label,
   gate, effect_gate_passed, effect_gate_cohorts, n_cohorts_ge_gate, median_std_effect, median_estimate, agreement,
-  r_cohorts, n_small, small_cohorts, k_over_m, cohorts_label, strict: null}`. `members` is `{facet, scope, scopes,
-  n_members, groups: {celltype_group: {n_members, n_in_data, n_tested, n_replicated, n_up, n_down, n_effect_gate,
+  r_cohorts, n_small, small_cohorts, k_over_m, cohorts_label, family_rank, family_size, strict: null}` (plus the
+  fields of the module statistics fixes below). `members` is `{facet, scope, scopes,
+  n_members, n_sex_chromosome_excluded, groups: {celltype_group: {n_members, n_in_data, n_tested, n_replicated, n_up, n_down, n_effect_gate,
   n_strict, genes_up, genes_down, genes_gate, genes: [{gene, r_value, direction, median_logFC, k, m,
   effect_gate_passed, strict}]}}}`, never truncated; null when the geneset store has no such set. Module
   replication uses the same partial conjunction as genes (Simes, u = 2) on the permutation p values of the donor-level
@@ -63,16 +147,25 @@ New endpoints:
   log fold change fields; `forest` (`full` | `anchors` | `none`, default `anchors` here) sets the detail as for genes.
 - `GET /facets/{facet}/modules/top` (`cell_type`, `n`, `offset`, `effect_gate`, `include_not_replicated`, `catalog`,
   `exclude_secondary`, `scope`): modules ranked by r-value, then k, agreement and the standardised effect. Shape
-  `{facet, scope, scopes, cell_type, celltype_group, labels, cohorts_in_cell_type, n_modules_in_family, n_replicated,
-  n_effect_gate, offset, n_matching, n_returned, has_more, cell_types: [{celltype_group, n_cohorts, n_modules_in_family,
-  n_replicated, n_effect_gate, ...}], rows, effect_gate, help_topics}`; a row is the variant fields above plus
-  `geneset_id, catalog, module, variant_label, other_variants, ab, quality_sensitive, directionless, n_genes`.
+  `{facet, scope, scopes, cell_type, celltype_group, labels, cohorts_in_cell_type, n_cohorts_tested, not_tested,
+  n_modules_in_family, n_replicated, n_effect_gate, offset, n_matching, n_returned, has_more, cell_types: [{cell_type,
+  celltype_group, cl_id, labels, n_cohorts, n_units, n_modules_in_family, n_replicated, n_effect_gate}], rows,
+  effect_gate_rule: {std_effect, wording}, exclude_secondary, help_topics}`. A row is `{geneset_id, catalog, module,
+  method, source, variant_label, r_value, p_pc, k, m, r_direction, replicated, r_significant (same as replicated), call,
+  nt_label, gate, effect_gate_passed, effect_gate_tau, effect_gate_unit, effect_gate_cohorts, n_cohorts_ge_gate,
+  median_std_effect, median_estimate, min_effect, max_effect, agreement, r_cohorts, n_small, small_cohorts, k_over_m,
+  cohorts_label, n_cohorts_tested, p_check_cohorts, p_check_flag, per_region_only_cohorts, module_scope_note,
+  other_variants: [{method, source, label, call, r_value, median_std_effect, r_direction, cohorts_label}], ab,
+  quality_sensitive, directionless, n_genes}`; the gene tiers `strict`, `r_strong`, `replicated_strong`, `r_treat` and
+  `replicated_effect` are always null for modules. A row has no `label`, `basis` or `forest` (those are on the card
+  variants).
 - `GET /facets/{facet}/effects/overview` (`n`, `scope`, `exclude_secondary`): the simplified facet view in one call.
   `{facet, scope, scopes, headline: {celltype_group, cohorts, n_genes_in_family, n_replicated, n_effect_gate, n_strict,
   strict_genes, effect_gate_unit}, cell_types: [{celltype_group, cl_id, n_cohorts, n_genes_in_family, n_replicated,
   n_effect_gate, n_strict, n_assigned, genes: [{gene, r_value, direction, median_logFC, k, m, effect_gate_passed,
-  strict, also_in, detection, low_detection}]}], quiet_groups: [{celltype_group, n_cohorts, counts, low_power}],
-  n_genes_unique}`. A gene replicated in several groups is listed once, in the group where it is strongest.
+  strict, also_in, detection, low_detection}]}], quiet_groups: [{celltype_group, n_cohorts, n_genes_in_family,
+  n_replicated, n_effect_gate, n_strict, low_power}], n_genes_unique}` (the counts of a quiet group are flat fields, as
+  on `cell_types`). A gene replicated in several groups is listed once, in the group where it is strongest.
 - `GET /genes/{gene}/detection`: `{gene, low_detection_pct: 5, min_cells: 50, n_candidates, n_missing, partial,
   summary: [{scope, celltype_group, n_datasets, pct_median, pct_min, pct_max, n_cells, low_detection}], datasets:
   [{db_id, title, scope, celltype_group, cell_type, n_cells, pct, modality, modality_note, technology, mean, median_nonzero, q10_nonzero, q90_nonzero, rank_mean}]}` from the
@@ -123,8 +216,10 @@ New endpoints:
   (`pseudobulk` primary, `cell_mean` secondary), `source` (`gene_list`, `geneset`, `ucell`), `n_genes_found`; modules have no
   `excess_z`. Rungs: D0 technical block (cells, UMI per cell, genes per cell, mitochondrial fraction, ambient score, long gene
   index, composition PCs), D1 + sex, age, PMI, batch, D2 + disease (host genotype for xenografts), D3 + APOE e4, D4 + Braak, F +
-  3 to 5 latent factors; a rung a cohort cannot support (n - p < 20, no new term) is `null`. Errors: 400 (bad `rung`, `sort`,
-  `feature_type`, `feature_type` without `cell_type`), 404 (unknown dataset or unit).
+  3 to 5 latent factors; a rung a cohort cannot support (n - p < 20, no new term) is `null`. `cell_type` is the stratum
+  label or its cell type group (`microglia`; the exact label wins, else the unit of that group with the most
+  replicates). Errors: 400 (bad `rung`, `sort` or `feature_type`, also without `feature_type`; `feature_type` without
+  `cell_type`), 404 (unknown dataset or unit).
 - `GET /genes/{gene}/donor-variability` (`scope`, `cell_type`, `rung` default D1, `exclude_secondary`): one gene in every analysed
   unit. `{feature, feature_type, scope, rung, rung_label, units: [{db_id, title, cohort, cohort_label, cell_type, celltype_source,
   celltype_group, n_replicates, replicate_unit, rung_deepest, counted, not_counted_reason, values: <gene row above>}], by_group:
@@ -152,15 +247,16 @@ New endpoints:
   means between datasets. Computed from the `.scores.parquet` sidecar joined with `ant_cell_type`, cached per dataset under
   `<tmp_dir>/module_rank/` until the sidecar or the duckdb changes (first request of a dataset reads its whole sidecar: seconds to
   about a minute; `scores_index.parquet` has no cell type column and can lag the sidecars, so it is not used).
-- `GET /databases/{db_id}/module_ranks`: the dataset view of the rank route: one row per gene set scored in the dataset (`geneset` source)
-  with `rank`, `n_modules_compared`, `n_cells`, `mean`, `std` (standard deviation of the score over the scored cells, not donors), `column_name` and
-  `display_name`; `available: false` with a `reason` for a dataset without per-cell scores. Same cached table and rules as `/rank`; within one
-  dataset only.
+- `GET /databases/{db_id}/module-ranks`: the dataset view of the rank route. `{db_id, available, reason, min_cells,
+  min_peers, modules, help_topics}`; one row per gene set scored in the dataset (`geneset` source): `{geneset_id, study,
+  experiment, name, display_name, column_name, available, reason, rank, n_modules_compared, n_cells, mean, std}` (`std`:
+  standard deviation of the score over the scored cells, not donors); `available: false` with a `reason` for a dataset
+  without per-cell scores. Same cached table and rules as `/rank`; within one dataset only.
 - `GET /genesets/{study}/{experiment}/{name}/donor-variability` (`scope`, `cell_type`, `rung`, `method`, `source`,
   `exclude_secondary`): the same card for a gene set (the `pseudobulk` variant unless `method` is given); `k`, `p_rank_product` and `r_value` are
   null (no ranking test for modules).
 - `GET /donor-variability/top` (`cell_type` default microglia, `scope`, `feature_type` gene | module, `rung`, `limit`, `min_cohorts`
-  default 2, `exclude_secondary`): features that vary between replicates in several cohorts at one rung. `{scope, cell_type_group,
+  default 2, `exclude_secondary`): features that vary between replicates in several cohorts at one rung. `{scope, celltype_group,
   feature_type, rung, rung_label, cohorts: [{db_id, cohort, title, cell_type, celltype_source, n_replicates, replicate_unit,
   rung_deepest}], m_cohorts, concordance: {mean_spearman, n_pairs, pairs: [{cohorts, n_genes, spearman}]} | null (mean
   Spearman correlation of `excess_z` between the anchors over the genes both rank), min_replicates_per_cohort: 30, high_tail: 0.05,
@@ -242,7 +338,8 @@ Module statistics fixes (2026-10-09, additive fields; module replication values 
 - `/facets/{facet}/modules/top` and the module cards of `/genesets/{study}/{experiment}/{name}/facet-effects`: the
   effect gate is per facet (0.2 SD per contrast, 0.2/3 per Braak stage, 0.2 per decade, 0.1 per e4 allele) and is
   read on the lower 95 percent confidence bound of the standardised effect; `effect_gate_tau` and `effect_gate_unit`
-  follow the facet, `effect_gate: {std_effect, wording}` on the top list, `effect_gate.per_facet` on the card.
+  follow the facet, `effect_gate_rule: {std_effect, wording}` on the top list and the module card,
+  `effect_gate_rule.per_facet` on the gene set card (named `effect_gate` before 2026-10-13, see "Renames").
 - Cohort p values for module replication are the parametric p when the unit has at least 30 residual df, else the
   permutation p. New on every forest point: `df_resid`, `p_used`, `p_basis` (`parametric` | `permutation`),
   `p_disagree`, `p_check_flag`, `p_check_fraction`, `n_ref`, `n_test`, `per_region_only`; `small_sample` is true when
@@ -253,7 +350,10 @@ Module statistics fixes (2026-10-09, additive fields; module replication values 
 - Directionless sets (GWAS, MAGMA, bidirectional) are left out of the module families, replicated and top lists; their
   cards carry `directionless: true` and variants with `call: not_tested`, `nt_label: no expected direction`.
 - Web: `/facets/{bare name}` (for example `/facets/braak`) redirects to `/facets/ant_braak`.
-- Clients: no change needed (new fields are optional); `vark` and `pyvark` pass module fields through.
+- Clients: pyvark, vark and the skills reach none of the new routes yet; pass-through clients keep working with
+  the new optional fields. pyvark's `get_facet_recurring_genes` documents `n` up to 500 and has no `offset`,
+  `effect_gate`, `strict` or `forest`. The breaking changes above (internal datasets for anonymous callers, admin-only
+  rescans, the `apoe_carrier` alias) are the ones a client may notice.
 
 ## 2.44.0 (2026-10-07)
 

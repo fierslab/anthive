@@ -45,7 +45,9 @@ forward_auth @api {$ANTHIVE_AUTHELIA_HOST:localhost}:{$ANTHIVE_AUTHELIA_PORT:909
 # headers before setting the ones Authelia returned (Caddy >= 2.7), so a
 # forged Remote-Groups never reaches ant-serve on a gated route. Do NOT
 # add a site-level `request_header -Remote-*`: it runs after forward_auth
-# and would strip the authenticated identity.
+# and would strip the authenticated identity. The legacy X-Remote-* names
+# are never set by Authelia, so they are dropped below (ant-serve ignores
+# them too; this is the second lock).
 @browser {
 	not path /api/* /artifacts/* /authelia/* /.well-known/* /register /streamlit* /mcp/u/*
 	not {
@@ -57,3 +59,7 @@ forward_auth @browser {$ANTHIVE_AUTHELIA_HOST:localhost}:{$ANTHIVE_AUTHELIA_PORT
 	uri /authelia/api/authz/forward-auth-cookie
 	copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
 }
+
+# Client-sent legacy identity headers: never an identity, always dropped.
+request_header -X-Remote-User
+request_header -X-Remote-Groups

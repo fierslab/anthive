@@ -24,10 +24,8 @@ import numpy as np
 import pandas as pd
 
 try:
-    from facet_aliases import DEPRECATED_FACET_COLUMNS
     from obs_derive_forms import FORM_JOIN, FORM_TEMPLATE, derive_form, derive_sql as derive_form_sql
 except ImportError:  # imported as lib.anthive_db
-    from lib.facet_aliases import DEPRECATED_FACET_COLUMNS  # type: ignore[no-redef]
     from lib.obs_derive_forms import (FORM_JOIN, FORM_TEMPLATE, derive_form,  # type: ignore[no-redef]
                                       derive_sql as derive_form_sql)
 
@@ -138,9 +136,9 @@ def build_obs_view_sql(
     ``_computed_facet_sql``) when the ``.md`` declares neither the facet
     itself nor a stored column of that name. They land in the obscat view.
 
-    A view that exposes a renamed facet also gets the deprecated name as an
-    alias column (``facet_aliases.DEPRECATED_FACET_COLUMNS``, e.g.
-    ``ant_apoe_carrier`` = ``ant_apoe4_carrier``), kept for one release.
+    The one-release alias column ``ant_apoe_carrier`` (= ``ant_apoe4_carrier``)
+    is no longer created (API 2.45.0); views built earlier keep it until they
+    are rebuilt, and the facet listings hide it.
 
     Shared by ant-convert (initial view build) and AnnotationWriter
     (view rebuild after ALTER TABLE ADD COLUMN).
@@ -353,10 +351,6 @@ def build_obs_view_sql(
             f"ON o.cell_id = s.cell_id"
         )
     select_sql = f"SELECT {', '.join(projections)} FROM {_q(underscore_table)} o {join_sql}"
-    aliases = [f"{_q(current)} AS {_q(old)}" for old, current in DEPRECATED_FACET_COLUMNS.items()
-               if current in projected_names and old not in projected_names]
-    if aliases:
-        select_sql = f"SELECT *, {', '.join(aliases)} FROM ({select_sql})"
     return f"CREATE VIEW {safe_ident(view_name)} AS {select_sql}"
 
 
