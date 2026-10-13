@@ -2,7 +2,7 @@
 
 Renders one long list of (module group · module · dataset · tag · method ·
 score · peer-position). Each row is a (module × dataset × tag × method)
-combination. Sort default: peer-position descending — most variable
+combination. Sort default: peer-position descending, most variable
 modules-vs-their-peers on that dataset+tag+method float to the top.
 
 Filter controls at top: group · tag · method · dataset · cell type · tissue · technology · biosample.
@@ -11,7 +11,7 @@ Multi-select facets: dataset, geneset, facet, group, cell type, tissue,
 technology, biosample. Selecting multiple values OR-filters rows.
 Single-select: n cells (range bucket), method (single-choice semantics).
 
-Consumer passes a `mv_ctx` Jinja var — a dict:
+Consumer passes a `mv_ctx` Jinja var, a dict:
   {
     "scope": "dataset" | "module" | "global",
     "dataset": "MY4/MTH",             # required if scope=="dataset"
@@ -43,7 +43,7 @@ Optional mv_ctx keys:
 {# Column count for the empty-state row's colspan. Base = 8 columns
    (group · geneset · dataset · tag · method · score · vs-peer · plots).
    Scope 'dataset' drops the dataset column; scope 'module' drops the
-   group column — each = 7. #}
+   group column, each = 7. #}
 {% set _empty_colspan = 8 if _mv.scope == 'global' else 7 %}
 {{ mff_styles() }}
 {{ mff_scripts() }}
@@ -85,8 +85,8 @@ Optional mv_ctx keys:
     .mv-panel .mv-ds-tip .tip-row { color: #475569; }
     .mv-panel .mv-ds-tip .tip-id { font-family: var(--font-mono); color: var(--text-muted); font-size: 10px; margin-top: 4px; }
     .mv-panel .mv-val    { font-family: var(--font-mono); text-align: right; }
-    .mv-panel .mv-pos    { min-width: 160px; }
-    /* Peer position is a bar (.vw-bar, base.html): its length is the value between the min and max of the peer modules. */
+    .mv-panel .mv-pos    { min-width: 160px; white-space: nowrap; }
+    /* Peer position is a bar (.vw-bar, base.html) plus the percentage: the value between the min and max of the peer modules. */
     .mv-panel .mv-pos .vw-bar { width: 96px; }
     .mv-panel .mv-icons a { display: inline-flex; text-decoration: none; color: var(--text-muted); font-size: 14px; padding: 0 3px; position: relative; }
     .mv-panel .mv-icons a:hover { color: var(--link); }
@@ -103,7 +103,7 @@ Optional mv_ctx keys:
     }
     .mv-panel .mv-empty  { color: var(--text-muted); font-style: italic; padding: 12px 4px; font-size: 12px; }
     .mv-panel .mv-summary { color: var(--text-muted); font-size: 11px; margin: 6px 0; }
-    /* Row-cap badge — visible above the table only when the render cap fires
+    /* Row-cap badge, visible above the table only when the render cap fires
        (500-row hard limit). Amber accent so it reads as a warning without
        being loud. Hidden by default; shown only via .mv-cap-visible. */
     .mv-panel .mv-cap-badge {
@@ -183,7 +183,7 @@ Optional mv_ctx keys:
       </div>
     </div>
     {% endif %}
-    {# Cell type, tissue, technology, and biosample facets — populated from dataset_annotations when provided #}
+    {# Cell type, tissue, technology, and biosample facets, populated from dataset_annotations when provided #}
     {% if _mv.get('dataset_annotations') %}
     <div>
       <label>cell type</label>
@@ -279,7 +279,7 @@ Optional mv_ctx keys:
         <th class="mv-th-tag" data-sortcol="tag">obs column</th>
         <th data-sortcol="method">method</th>
         <th data-sortcol="value" style="text-align:right">per-cell association (descriptive) <span class="info" data-glossary="per-cell-association" onclick="event.stopPropagation()" title="Computed over cells, not donors; it shows where a score differs, not a tested effect.">ⓘ</span></th>
-        <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" onclick="event.stopPropagation()" title="Peers = other modules scored with the SAME method on the SAME (dataset, tag). The dot is this row's value on the min–max range across peer modules; red, amber and green mark the low, middle and high third. Click to sort by this column.">ⓘ</span></th>
+        <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" onclick="event.stopPropagation()" title="Peers are the other gene sets scored with the same method on the same dataset and annotation column. The bar and the percentage place this row's value between the lowest (0%) and the highest (100%) value among its peers; it is a position on that range, not a percentile. Rows with fewer than 4 peers have no bar and sort last. Click to sort by this column.">ⓘ</span></th>
         <th style="text-align:center;cursor:default">plots</th>
       </tr></thead>
       <tbody class="mv-rows"></tbody>
@@ -423,13 +423,13 @@ Optional mv_ctx keys:
 
   // dataset_annotations: {db_id: {celltype, tissue, technology, biosample, title, n_cells, contributor}}
   var DS_ANNOT = CTX.dataset_annotations || {};
-  // preselect_cell_types: [] or [ct, ...] — OR-filter applied on first render.
+  // preselect_cell_types: [] or [ct, ...], OR-filter applied on first render.
   var PRESELECT_CTS = CTX.preselect_cell_types || [];
   // tissue_ancestors: {term: [parent, grandparent, ...]} for hierarchical filtering.
   // Keys and values use original casing from the ontology; matching is case-insensitive.
   var TISSUE_ANCESTORS = CTX.tissue_ancestors || {};
 
-  // SVG icons — mirrors dataset.html's chart_icon macro
+  // SVG icons, mirrors dataset.html's chart_icon macro
   var SVG_BAR = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>';
   var SVG_LINE = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>';
   var SVG_UMAP = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>';
@@ -541,7 +541,7 @@ Optional mv_ctx keys:
     return b + '/plot/scatter?embedding=X_umap&color=' + encodeURIComponent(tagCol);
   }
   // UMAP coloured by the module score column (continuous). Different colour
-  // channel than the tag UMAP — this shows where the module lights up.
+  // channel than the tag UMAP, this shows where the module lights up.
   function umapModuleUrl(row) {
     var col = scoreColFor(row); var b = baseUrl(row); if (!col || !b) return null;
     return b + '/plot/scatter?embedding=X_umap&color=' + encodeURIComponent(col);
@@ -575,12 +575,12 @@ Optional mv_ctx keys:
     return b + '/plot/hexbin?embedding=X_umap&color=' + encodeURIComponent(col);
   }
 
-  // Peer group key — matched to how "peers" is defined: same (dataset, tag,
+  // Peer group key, matched to how "peers" is defined: same (dataset, tag,
   // source, statistic). Different statistics keep different peer groups so
   // ω² isn't compared to spearman's [-1,+1] range.
   function peerKey(r) { return r.dataset + '|' + r.tag + '|' + r.source + '|' + r.statistic; }
   // Which statistic each (tag, source) row's variability is best captured
-  // by — we keep only ONE stat per row to avoid duplicate rows.
+  // by, we keep only ONE stat per row to avoid duplicate rows.
   var CAT_STATS = { omega2: 1 };            // categorical: ω² only
   var NUM_STATS = { spearman: 1, R2: 1 };   // numerical: spearman + R²
 
@@ -689,7 +689,7 @@ Optional mv_ctx keys:
 
     // Intercept a click on any tissue checkbox: if it's a parent (has
     // descendants), cascade the new state to the entire subtree so the
-    // user's mental model — "click 'brain' selects brain" — matches.
+    // user's mental model, "click 'brain' selects brain", matches.
     // Leaves cascade nothing. The final onMffChange still fires once.
     var suppressCascade = false;
     boxes.forEach(function (cb) {
@@ -707,7 +707,7 @@ Optional mv_ctx keys:
         refreshIndeterminates();
       });
       // Regular 'change' events (from the shared widget) need indeterminate
-      // updates too — bind once per box, non-cascading.
+      // updates too, bind once per box, non-cascading.
       cb.addEventListener('change', function () {
         if (suppressCascade) return;
         refreshIndeterminates();
@@ -746,19 +746,19 @@ Optional mv_ctx keys:
 
   // ── URL hash filter state ────────────────────────────────────────────────────
   // Hash scheme: #prefix&mv=key=val;key=val  OR  #mv=key=val;key=val (no prefix)
-  // Separator between page anchor and mv-state is '&' — unambiguous even when
+  // Separator between page anchor and mv-state is '&', unambiguous even when
   // the prefix contains '-' (e.g. '#modules-Sierksma2025/WGCNA::Blue').
   // Values are encodeURIComponent-encoded; keys are the flt.* names.
-  // The browser treats everything after '#' as a fragment — '&' within it does
+  // The browser treats everything after '#' as a fragment, '&' within it does
   // NOT become a query-string separator, so this is safe.
 
   var MV_SEP = '&mv=';  // prefix anchor &mv= filter-state
 
   /** Extract the page-anchor prefix and the mv= state string from a hash.
-   *  Returns {prefix: string, mvStr: string} — either may be empty.
+   *  Returns {prefix: string, mvStr: string}, either may be empty.
    *
    *  Canonical format: #prefix&mv=key=val  or  #mv=key=val (no prefix).
-   *  Legacy format:    #prefix-mv=key=val  (old commits — still parsed for back-compat).
+   *  Legacy format:    #prefix-mv=key=val  (old commits, still parsed for back-compat).
    */
   function splitHash(hash) {
     var raw = hash || '';
@@ -774,11 +774,11 @@ Optional mv_ctx keys:
     if (legacyIdx !== -1) {
       return { prefix: raw.slice(0, legacyIdx), mvStr: raw.slice(legacyIdx + 4) };
     }
-    // Bare '#mv=...' — no prefix.
+    // Bare '#mv=...', no prefix.
     if (raw.indexOf('mv=') === 0) {
       return { prefix: '', mvStr: raw.slice(3) };
     }
-    // No mv= at all — entire hash is a page anchor.
+    // No mv= at all, entire hash is a page anchor.
     return { prefix: raw, mvStr: '' };
   }
 
@@ -815,7 +815,7 @@ Optional mv_ctx keys:
         pairs.push(key + '=' + encodeURIComponent(Array.from(vals).join(',')));
       }
     });
-    // single-select (n_cells) — method removed 2026-08-23 (scanpy-only UI).
+    // single-select (n_cells), method removed 2026-08-23 (scanpy-only UI).
     if (flt.n_cells && flt.n_cells.value) pairs.push('n_cells=' + encodeURIComponent(flt.n_cells.value));
     // sort state
     var defaultSort = sortState.col === 'position' && sortState.dir === 'desc';
@@ -887,7 +887,7 @@ Optional mv_ctx keys:
     }
   }
 
-  // Parse and apply hash early — before load() so sort is ready before first render.
+  // Parse and apply hash early, before load() so sort is ready before first render.
   var _initialHash = parseHashFilters();
   applyHashFilters(_initialHash);
 
@@ -924,7 +924,7 @@ Optional mv_ctx keys:
   function render() {
     var rows = ALL_ROWS.slice();
 
-    // mff: dataset, group (catalog), module, tag — core row fields
+    // mff: dataset, group (catalog), module, tag, core row fields
     var mffDataset = mff.dataset ? mff.dataset.getValues() : null;
     var mffGroup   = mff.group   ? mff.group.getValues()   : null;
     var mffModule  = mff.module  ? mff.module.getValues()  : null;
@@ -981,7 +981,7 @@ Optional mv_ctx keys:
       });
     }
 
-    // single-select: n_cells bucket — cumulative lower bounds ("gt<N>" = nc > N).
+    // single-select: n_cells bucket, cumulative lower bounds ("gt<N>" = nc > N).
     if (flt.n_cells && flt.n_cells.value) {
       var bucket = flt.n_cells.value;
       rows = rows.filter(function (r) {
@@ -993,12 +993,12 @@ Optional mv_ctx keys:
         return true;
       });
     }
-    // Only keep one row per (mod × dataset × tag × source) — pick the
+    // Only keep one row per (mod × dataset × tag × source), pick the
     // "canonical" statistic for that tag: ω² for categorical, spearman
     // for numerical (spearman preferred over R² because it's signed).
     // Fallback: if the catalog has no omega2/spearman rows (e.g. older ingests
     // that only computed mean_score/F/eta2), use mean_score so the panel still
-    // renders instead of showing "No rows match — widen the filters."
+    // renders instead of showing "No rows match, widen the filters."
     var preferred = {};
     rows.forEach(function (r) {
       var isNum = NUMERICAL_TAGS[r.tag];
@@ -1008,7 +1008,7 @@ Optional mv_ctx keys:
       preferred[k] = r;
     });
     if (!Object.keys(preferred).length) {
-      // No preferred stats — fall back to mean_score (most universally present).
+      // No preferred stats, fall back to mean_score (most universally present).
       rows.forEach(function (r) {
         if (r.statistic !== 'mean_score') return;
         var k = r.module + '|' + r.catalog + '|' + r.dataset + '|' + r.tag + '|' + r.source;
@@ -1016,7 +1016,7 @@ Optional mv_ctx keys:
       });
     }
     rows = Object.keys(preferred).map(function (k) { return preferred[k]; });
-    // Sort — driven by sortState (column-header clicks).
+    // Sort, driven by sortState (column-header clicks).
     var sortMul = sortState.dir === 'asc' ? 1 : -1;
     var col = sortState.col;
     if (col === 'position') {
@@ -1045,7 +1045,7 @@ Optional mv_ctx keys:
     if (capBadgeEl) {
       if (rows.length === ROW_CAP) {
         capBadgeEl.textContent = 'Showing top ' + ROW_CAP + ' of ' + preCapCount
-          + ' — narrow filters to see more.';
+          + '. Narrow the filters to see more.';
         capBadgeEl.classList.add('mv-cap-visible');
       } else {
         capBadgeEl.textContent = '';
@@ -1083,7 +1083,7 @@ Optional mv_ctx keys:
       } else if (!hasAnyActiveFilter) {
         msg = 'No rows to display (statistics were dropped by the per-facet preferred-statistic step).';
       } else {
-        msg = 'No rows match — widen the filters.';
+        msg = 'No rows match. Widen the filters.';
       }
       rowsEl.innerHTML = '<tr><td colspan="{{ _empty_colspan }}" class="mv-empty">' + msg + '</td></tr>';
       return;
@@ -1133,7 +1133,8 @@ Optional mv_ctx keys:
       tds.push('<td class="mv-tag">' + formatColLabel(r.tag_column || r.tag) + '</td>');
       tds.push('<td class="mv-method">' + esc(METHOD_LABEL[r.source] || r.source) + '</td>');
       tds.push('<td class="mv-val">' + (+r.value).toFixed(3) + ' <span class="muted-2" style="font-size:9px;margin-left:3px">' + esc(r.statistic) + '</span></td>');
-      tds.push('<td class="mv-pos"' + (track ? '' : ' title="fewer than 4 peer modules"') + '>' + track + '</td>');
+      tds.push('<td class="mv-pos"' + (track ? '' : ' title="fewer than 4 peer modules"') + '>' + track
+        + (track ? '<span class="vw-bar-val">' + Math.round(pos * 100) + '%</span>' : '') + '</td>');
       var plotCell = (pu ? '<a href="' + pu + '" title="plot ' + esc(r.tag) + ' × ' + esc(r.module) + '">' + plotSvg + '</a>' : '')
         + (eu ? '<a href="' + eu + '" title="ECDF of ' + esc(r.module) + ' split by ' + esc(r.tag) + '">' + SVG_LINE + '</a>' : '')
         + (hu ? '<a href="' + hu + '" title="hexbin (density) of ' + esc(r.module) + ' in embedding">' + SVG_HEX + '</a>' : '')

@@ -7855,3 +7855,12 @@ def test_dataset_old_explorer_hashes_alias_to_facet_gs(client, monkeypatch):
     assert "/^tab-modules-mv=(.*)$/" in handle                         # legacy #tab-modules-mv=...
     assert "tabPart === 'modules' && h.indexOf('&mv=') >= 0" in handle  # #modules&mv=... from old gene set links
     assert "'#facet-gs&mv=' + mvState" in handle and "tabPart = 'facet-gs'" in handle
+
+
+def test_module_view_peer_bar_shows_percentage_and_has_no_em_dash(client):
+    html = client.get("/genesets/StudyX/Exp1").text
+    assert "'<span class=\"vw-bar-val\">' + Math.round(pos * 100) + '%</span>'" in html
+    assert "The dot is" not in html and "red, amber and green" not in html
+    assert "it is a position on that range, not a percentile" in html
+    template = (Path(browser.__file__).parent / "templates" / "_module_view.html").read_text(encoding="utf-8")
+    assert "\u2014" not in template
