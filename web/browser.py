@@ -3914,6 +3914,31 @@ def _embedding_kind(name: Any) -> str:
 templates.env.globals['embedding_kind'] = _embedding_kind
 
 
+def _view_card(db: Dict[str, Any]) -> Dict[str, str]:
+    """Plain-text facts for the hover card of a dataset name in the views (all strings, '' when unknown).
+
+    ``authors`` is "First ... Last" of the collection's author list, ``year`` its year; the rest comes from
+    the dataset's own annotation. Redaction is the API's: nothing here is read from outside ``/databases``.
+    """
+    collection = db.get('collection') if isinstance(db.get('collection'), dict) else {}
+    names = [str(name) for name in (collection.get('authors') or []) if name]
+    authors = names[0] if len(names) == 1 else (f'{names[0]} ... {names[-1]}' if len(names) > 2 else ' and '.join(names))
+    basename = str(db.get('basename') or '')
+    fields = {
+        'basename': basename if basename and basename != (db.get('title') or '') else '',
+        'collection': str(db.get('group') or collection.get('group') or ''),
+        'authors': authors,
+        'year': str(collection.get('year') or db.get('year') or ''),
+        'organism': _flatten_annotation_field(db.get('organism')),
+        'tissue': _flatten_annotation_field(db.get('tissue')),
+        'region': _flatten_annotation_field(db.get('region')),
+        'disease': _flatten_annotation_field(db.get('disease')),
+        'technology': _flatten_annotation_field(db.get('technology')),
+        'access': str(db.get('access') or ''),
+    }
+    return {key: str(value or '') for key, value in fields.items()}
+
+
 def _view_modality(db: Dict[str, Any]) -> str:
     """Nuclei or cells, for the modality tag of a dataset row in the view panels.
 
@@ -3999,7 +4024,7 @@ def _view_db_map(api_url: str) -> Dict[str, Dict[str, Any]]:
     ``celltype_col`` the per-cell cell type column (may be empty), ``scope`` is the facet scope, ``group`` the cell type group of the dataset-level
     cell type (empty when the dataset is mixed or has several cell types), ``human``
     whether the organism is human, ``secondary`` the reanalysis flag and ``modality``
-    nuclei versus cells (``_view_modality``), ``category`` the dataset category (``_view_category``), ``facet_exclude_reason`` why the dataset is outside the facet layer ('' when it is inside), ``default_embedding`` the embedding of the quick scatter icons ('' when none). Empty when the API is unreachable.
+    nuclei versus cells (``_view_modality``), ``category`` the dataset category (``_view_category``), ``facet_exclude_reason`` why the dataset is outside the facet layer ('' when it is inside), ``default_embedding`` the embedding of the quick scatter icons ('' when none), ``n_cells`` and ``card`` (the hover card facts, ``_view_card``). Empty when the API is unreachable.
     """
     result: Dict[str, Dict[str, Any]] = {}
     try:
@@ -4027,6 +4052,8 @@ def _view_db_map(api_url: str) -> Dict[str, Dict[str, Any]]:
             'category': _view_category(db),
             'facet_exclude_reason': str(db.get('facet_exclude_reason') or ''),
             'default_embedding': _default_embedding(db) or '',
+            'n_cells': db.get('n_cells'),
+            'card': _view_card(db),
         }
     return result
 

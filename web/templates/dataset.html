@@ -621,10 +621,10 @@
     <thead><tr>
       <th data-sortcol="star" title="◆ dataset favourite (from the collection's top_genes) · ♥ your personal favourite (set on /settings). Click to sort." style="width:2.2em;text-align:center">★</th>
       <th data-sortcol="gene">Gene</th>
+      <th data-sortcol="pct"><span class="vw-swatch m-expr"></span>Cells expressing (%) <span class="info" title="Percent of cells with at least one count of the gene; click to sort">&#9432;</span></th>
+      <th data-sortcol="rank"><span class="vw-swatch m-rank"></span>Rank among genes (%) <span class="info" title="Percent of genes detected in this dataset whose average expression over all cells (non-expressing cells counted as zero) is lower than this gene's. It compares genes, not cells. Values below about 50% mostly mean the gene is barely expressed. Click to sort.">&#9432;</span></th>
+      <th data-sortcol="var" class="g-sort-desc"><span class="vw-swatch m-std"></span>Std. dev. <span class="info" title="Standard deviation of the gene's log-normalised expression over all cells of the dataset, cells without a count included as zero (over samples for bulk datasets). It depends on the normalisation and depth of the dataset, so compare it within a dataset. The bar shows it relative to the highest value in the table. Click to sort.">&#9432;</span></th>
       <th class="obs-plots-th">Plots</th>
-      <th data-sortcol="pct">Cells expressing (%) <span class="info" title="Percent of cells with at least one count of the gene; click to sort">&#9432;</span></th>
-      <th data-sortcol="rank">Rank among genes (%) <span class="info" title="Percent of genes detected in this dataset whose average expression over all cells (non-expressing cells counted as zero) is lower than this gene's. It compares genes, not cells. Values below about 50% mostly mean the gene is barely expressed. Click to sort.">&#9432;</span></th>
-      <th data-sortcol="var" class="g-sort-desc">Std. dev. <span class="info" title="Standard deviation of the gene's log-normalised expression over all cells of the dataset, cells without a count included as zero (over samples for bulk datasets). It depends on the normalisation and depth of the dataset, so compare it within a dataset. The bar shows it relative to the highest value in the table. Click to sort.">&#9432;</span></th>
     </tr></thead>
     <tbody>
     {% if gene_panel and gene_panel.genes %}
@@ -633,6 +633,9 @@
     <tr class="gene-item gene-curated" data-gene="{{ gene }}" data-gene-lc="{{ gene|lower }}" data-pct="" data-rank="" data-var="">
       <td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap"><span class="g-flag-curated" title="dataset favourite (from this collection's top_genes)">&#9670;</span></td>
       <td class="colname">{{ gene }}</td>
+      <td class="g-pct-cell">{{ bar_scale('pct', 'cells expressing the gene', 'm-expr') }}<span class="vw-bar-val g-pct"></span></td>
+      <td class="g-rank-cell">{{ bar_scale('rank', 'rank among genes', 'm-rank') }}<span class="vw-bar-val g-rank"></span></td>
+      <td class="g-var-cell">{{ bar_scale('var', 'std. dev., scaled to the highest in the table', 'm-std') }}<span class="vw-bar-val g-var"></span></td>
       <td class="obs-plots">
         {% if has_duckdb %}
         <a class="obs-plot-icon" href="{{ _b }}/plot/histogram?x={{ gene|urlencode }}" title="histogram of {{ gene }}">{{ chart_icon('bar') }}</a>
@@ -640,9 +643,6 @@
         {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ gene|urlencode }}" title="{{ embedding_kind(default_embedding) }} scatter ({{ default_embedding }}), coloured by {{ gene }}">{{ chart_icon('umap') }}</a>{% endif %}
         {% endif %}
       </td>
-      <td class="g-pct-cell">{{ bar_scale('pct', 'cells expressing the gene') }}<span class="vw-bar-val g-pct"></span></td>
-      <td class="g-rank-cell">{{ bar_scale('rank', 'rank among genes', 'rank') }}<span class="vw-bar-val g-rank"></span></td>
-      <td class="g-var-cell">{{ bar_scale('var', 'std. dev., scaled to the highest in the table') }}<span class="vw-bar-val g-var"></span></td>
     </tr>
     {% endfor %}
     {% endif %}
@@ -1578,10 +1578,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     _row.innerHTML =
                           '<td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap">' + _heartHtml(true) + '</td>'
                         + '<td class="colname">' + _g + '</td>'
-                        + '<td class="obs-plots">' + _plotCell + '</td>'
-                        + '<td class="g-pct-cell">' + antBar.html(null, { stat: 'pct', title: 'cells expressing the gene' }) + '<span class="vw-bar-val g-pct"></span></td>'
-                        + '<td class="g-rank-cell">' + antBar.html(null, { stat: 'rank', kind: 'rank', title: 'rank among genes' }) + '<span class="vw-bar-val g-rank"></span></td>'
-                        + '<td class="g-var-cell">' + antBar.html(null, { stat: 'var', title: 'std. dev., scaled to the highest in the table' }) + '<span class="vw-bar-val g-var"></span></td>';
+                        + '<td class="g-pct-cell">' + antBar.html(null, { stat: 'pct', kind: 'm-expr', title: 'cells expressing the gene' }) + '<span class="vw-bar-val g-pct"></span></td>'
+                        + '<td class="g-rank-cell">' + antBar.html(null, { stat: 'rank', kind: 'm-rank', title: 'rank among genes' }) + '<span class="vw-bar-val g-rank"></span></td>'
+                        + '<td class="g-var-cell">' + antBar.html(null, { stat: 'var', kind: 'm-std', title: 'std. dev., scaled to the highest in the table' }) + '<span class="vw-bar-val g-var"></span></td>'
+                        + '<td class="obs-plots">' + _plotCell + '</td>';
                     _favTbody.insertBefore(_row, _favInsertAnchor);
                 });
             }
@@ -1655,9 +1655,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 var rankStr  = s && s.rank_mean != null ? (s.rank_mean * 100).toFixed(0) + '%' : '';
                 // std value in muted text (shared-scale bar does the panel-wide comparison).
                 var varStr   = s && s.std != null ? fnum(s.std) : '';
-                var pctSpark  = antBar.html(pct != null ? pct / 100 : null, { stat: 'pct', title: 'cells expressing the gene' });
-                var rankSpark = antBar.html(s && s.rank_mean != null ? s.rank_mean : null, { stat: 'rank', kind: 'rank', title: 'rank among genes' });
-                var varSpark  = antBar.html(null, { stat: 'var', title: 'std. dev., scaled to the highest in the table' });
+                var pctSpark  = antBar.html(pct != null ? pct / 100 : null, { stat: 'pct', kind: 'm-expr', title: 'cells expressing the gene' });
+                var rankSpark = antBar.html(s && s.rank_mean != null ? s.rank_mean : null, { stat: 'rank', kind: 'm-rank', title: 'rank among genes' });
+                var varSpark  = antBar.html(null, { stat: 'var', kind: 'm-std', title: 'std. dev., scaled to the highest in the table' });
                 var varFrac   = stdRankFrac != null ? stdRankFrac : null;
                 // data-pct/rank/var hold numeric sort keys (empty = unknown, sorts last).
                 var dataPct  = s && s.pct_nonzero != null  ? ' data-pct="'  + s.pct_nonzero + '"' : ' data-pct=""';
@@ -1666,10 +1666,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 var row = '<tr class="gene-item" data-gene="' + esc(geneName) + '" data-gene-lc="' + esc(geneName.toLowerCase()) + '"' + dataPct + dataRank + dataVar + '>'
                     + '<td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap">' + (starHtml || '') + '</td>'
                     + '<td class="colname">' + esc(geneName) + '</td>'
-                    + '<td class="obs-plots">' + plotHtml + '</td>'
                     + '<td class="g-pct-cell">' + pctSpark + '<span class="vw-bar-val g-pct">' + esc(pctStr) + '</span></td>'
                     + '<td class="g-rank-cell">' + rankSpark + '<span class="vw-bar-val g-rank">' + esc(rankStr) + '</span></td>'
                     + '<td class="g-var-cell">' + varSpark + '<span class="vw-bar-val g-var">' + esc(varStr) + '</span></td>'
+                    + '<td class="obs-plots">' + plotHtml + '</td>'
                     + '</tr>';
                 // Immediately position dot scales for cells we already know.
                 // (The DOM element doesn't exist yet — caller must call setGeneDots

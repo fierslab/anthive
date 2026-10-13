@@ -68,6 +68,20 @@
   tr.vw-sub td:first-child { padding-left: 28px; }
   tr.vw-scope-row td { background: #f7f9fa; font-weight: 500; font-size: 11.5px; color: #4b5563; }
 
+  /* ---- dataset name with hover card (shared by the Expression and Facet DE tables) ---- */
+  .vx-ds-name { display: inline-flex; align-items: baseline; max-width: 100%; vertical-align: bottom; }
+  .vx-ds-name a { display: inline-flex; align-items: baseline; gap: 4px; min-width: 0; color: var(--link); white-space: nowrap; }
+  .vx-ds-text { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .vx-ds-id { flex: none; color: var(--text-muted); font-size: 11px; }
+  .vx-ds-i { flex: none; margin-left: 5px; color: #9aa1a9; font-size: 11px; cursor: help; outline-offset: 1px; }
+  .vx-ds-i:hover, .vx-ds-i:focus { color: var(--link); }
+  #vx-card { position: fixed; z-index: 1000; max-width: 320px; box-sizing: border-box; padding: 8px 10px; background: #fff; border: 1px solid var(--border); border-radius: 5px;
+             box-shadow: 0 4px 14px rgba(0,0,0,.14); font-size: 11.5px; line-height: 1.45; color: #374151; pointer-events: none; }
+  #vx-card[hidden] { display: none; }
+  #vx-card .vx-card-title { font-weight: 600; font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
+  #vx-card .vx-card-line { color: var(--text-muted); overflow-wrap: anywhere; }
+  #vx-card .vx-card-details { margin-top: 4px; }
+
   /* ---- facet DE: units behind a cell, datasets outside the columns ---- */
   col.u-ds { width: 38%; } col.u-co { width: 20%; } col.u-n { width: 12%; } col.u-e { width: 15%; } col.u-q { width: 15%; }
   col.o-ds { width: 34%; } col.o-fc { width: 24%; }
@@ -664,14 +678,12 @@ window.antViews = window.antViews || (function () {
       '<th class="num">Donors ' + info('Donors in the test group vs the reference group for two-group facets, otherwise the number of donors (host mice in the xenograft block).') + '</th>' +
       '<th class="num">' + effect.label + ' ' + info(effect.tip) + '</th><th class="num">Adj. p ' + info(effect.pTip) + '</th>';
     var body = rows.map(function (row) {
-      return '<tr' + (row.counted ? '' : ' class="vw-grey"') + '><td title="' + esc(row.title) + '">' + dsLink(row.db_id, row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + ' <span class="muted">' + esc(row.db_id) + '</span>' +
+      return '<tr' + (row.counted ? '' : ' class="vw-grey"') + '><td>' + dsName(row.db_id, row.title, 46) +
         (row.counted ? '' : '<div class="muted">not counted' + (row.reason ? ': ' + esc(row.reason) : '') + '</div>') + '</td><td>' + esc(row.name) + '</td><td class="num">' + esc(row.stats && row.stats.donors || '') + '</td>' +
         '<td class="num">' + (row.est == null ? 'n/a' : signed(row.est, 2)) + '</td><td class="num">' + (row.q == null ? '<span class="muted" title="Descriptive only: no test">n/a</span>' : pfmt(row.q)) + '</td></tr>';
     }).join('');
     return '<div class="vw-box"><table class="vw-table fixed vd-units"><colgroup><col class="u-ds"><col class="u-co"><col class="u-n"><col class="u-e"><col class="u-q"></colgroup><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table></div>';
   }
-  // donor-pooled units (pool:<id>) have no dataset page
-  function dsLink(dbId, text) { return String(dbId).indexOf('pool:') === 0 ? esc(text) : '<a href="' + dbLink(dbId) + '">' + esc(text) + '</a>'; }
   var SHOWN_OTHER = 25;
   function excludedGroups(dbs) {
     var groups = {};
@@ -701,7 +713,7 @@ window.antViews = window.antViews || (function () {
     if (flat.length) {
       var line = function (entry) {
         var row = entry.row;
-        return '<tr' + (row.counted ? '' : ' class="vw-grey"') + '><td title="' + esc(row.title) + '">' + dsLink(row.db_id, row.title.length > 40 ? row.title.slice(0, 38) + '...' : row.title) + ' <span class="muted">' + esc(row.db_id) + '</span></td>' +
+        return '<tr' + (row.counted ? '' : ' class="vw-grey"') + '><td>' + dsName(row.db_id, row.title, 40) + '</td>' +
           '<td>' + esc(entry.item.facetLabel) + '<div class="muted">' + esc(plain(entry.item.group)) + (entry.item.scope === 'xenograft_human_in_mouse' ? ', xenograft' : '') + '</div></td><td class="num">' + esc(row.stats && row.stats.donors || '') + '</td>' +
           '<td class="num">' + (row.est == null ? 'n/a' : signed(row.est, 2)) + '</td><td class="num">' + (row.q == null ? '<span class="muted">n/a</span>' : pfmt(row.q)) + '</td></tr>';
       };
@@ -723,6 +735,59 @@ window.antViews = window.antViews || (function () {
         }).join('') + '</tbody></table></div></details>';
     }
     return html;
+  }
+
+  /* ---------- dataset names with a hover card ---------- */
+  // setDatasets(dbs, categories) registers the compact dataset map of the page (browser.py _view_db_map); dsName(dbId, text)
+  // renders the dataset name as a link plus an (i) glyph, and one floating card (hover, or focus: keyboard and tap) shows
+  // the details. Donor-pooled units (pool:<id>) have no dataset page and no card.
+  var DATASETS = {}, CATEGORIES = {};
+  function setDatasets(dbs, cats) { DATASETS = dbs || {}; CATEGORIES = cats || {}; initCards(); }
+  function cardHtml(dbId) {
+    var db = DATASETS[dbId];
+    if (!db) return '<div class="vx-card-title">' + esc(dbId) + '</div>';
+    var card = db.card || {};
+    var cat = CATEGORIES[db.category];
+    var details = [cat && db.category !== 'unclassified' ? cat.label : '', db.modality, card.organism, card.tissue, card.region, card.disease, card.technology,
+                   db.n_cells != null ? compact(db.n_cells) + (db.category === 'bulk' ? ' samples' : ' cells') : '', card.access === 'internal' ? 'internal access' : ''].filter(Boolean);
+    return '<div class="vx-card-title">' + esc(db.title || dbId) + '</div>' +
+      (card.basename ? '<div class="vx-card-line">' + esc(card.basename) + '</div>' : '') +
+      '<div class="vx-card-line">' + esc([card.collection, dbId].filter(Boolean).join(' / ')) + '</div>' +
+      (card.authors ? '<div class="vx-card-line">' + esc(card.authors + (card.year ? ', ' + card.year : '')) + '</div>' : '') +
+      (details.length ? '<div class="vx-card-details">' + details.map(esc).join(' &middot; ') + '</div>' : '');
+  }
+  function dsName(dbId, text, maxLength) {
+    var shown = maxLength && text.length > maxLength ? text.slice(0, maxLength - 2) + '...' : text;
+    if (String(dbId).indexOf('pool:') === 0) return '<span class="vx-ds-name">' + esc(shown) + ' <span class="muted">' + esc(dbId) + '</span></span>';
+    // the whole label (name and muted id) is one link; the card opens on hover or focus of the link or of the (i) glyph
+    return '<span class="vx-ds-name" data-card="' + esc(dbId) + '"><a href="' + dbLink(dbId) + '"><span class="vx-ds-text">' + esc(shown) + '</span> <span class="vx-ds-id">' + esc(dbId) + '</span></a><span class="vx-ds-i" tabindex="0" role="button" aria-label="Details of ' + esc(text) + '">&#9432;</span></span>';
+  }
+  var cardsReady = false;
+  function initCards() {
+    if (cardsReady) return;
+    cardsReady = true;
+    var card = document.createElement('div');
+    card.id = 'vx-card';
+    card.setAttribute('role', 'tooltip');
+    card.hidden = true;
+    document.body.appendChild(card);
+    function show(anchor) {
+      card.innerHTML = cardHtml(anchor.dataset.card);
+      card.hidden = false;
+      var box = anchor.getBoundingClientRect();
+      var width = card.offsetWidth, height = card.offsetHeight;
+      var left = Math.max(8, Math.min(box.left, window.innerWidth - width - 8));
+      var top = box.bottom + 4;
+      if (top + height > window.innerHeight - 8 && box.top - height - 4 > 8) top = box.top - height - 4;
+      card.style.left = left + 'px';
+      card.style.top = top + 'px';
+    }
+    function hide() { card.hidden = true; }
+    function anchorOf(event) { return event.target.closest ? event.target.closest('.vx-ds-name[data-card]') : null; }
+    document.addEventListener('mouseover', function (event) { var anchor = anchorOf(event); if (anchor) show(anchor); else if (!card.contains(event.target)) hide(); });
+    document.addEventListener('focusin', function (event) { var anchor = anchorOf(event); if (anchor) show(anchor); else hide(); });
+    document.addEventListener('keydown', function (event) { if (event.key === 'Escape') hide(); });
+    window.addEventListener('scroll', hide, true);
   }
 
   /* ---------- tabs ---------- */
@@ -775,7 +840,7 @@ window.antViews = window.antViews || (function () {
     gl: gl, pill: pill, GENE_FLAGS: GENE_FLAGS, getJson: getJson, cached: cached, docBlock: docBlock, afterRender: afterRender, facetMeta: facetMeta, geneFlagPills: geneFlagPills,
     info: info, helpBtn: helpBtn, compact: compact, CELLS: CELLS, cellFromRep: cellFromRep, cellKind: cellKind, cellHtml: cellHtml, forestHtml: forestHtml, bindForest: bindForest,
     replicationLine: replicationLine, sameDirection: sameDirection, isTwoGroup: isTwoGroup, pointStats: pointStats, smallPill: smallPill, informativeCount: informativeCount, MIN_GROUP: MIN_GROUP, MIN_TREND: MIN_TREND,
-    linksHtml: linksHtml, bindDonorPlot: bindDonorPlot, dbLink: dbLink, apiUrl: apiUrl, renderPanel2: renderPanel2, legendHtml: legendHtml, preselect: preselect, initTabs: initTabs, unitsTable: unitsTable, otherDatasetsHtml: otherDatasetsHtml
+    linksHtml: linksHtml, bindDonorPlot: bindDonorPlot, dbLink: dbLink, apiUrl: apiUrl, renderPanel2: renderPanel2, legendHtml: legendHtml, preselect: preselect, initTabs: initTabs, setDatasets: setDatasets, dsName: dsName, unitsTable: unitsTable, otherDatasetsHtml: otherDatasetsHtml
   };
 })();
 </script>

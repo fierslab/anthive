@@ -30,6 +30,9 @@
             --border: #e2e5e8;
             --border-light: #f1f3f5;
             --hover: #f7f9fa;
+            --metric-expr: #4f9a96;         /* muted teal: cells expressing (%) */
+            --metric-rank: #6277a8;         /* muted slate blue: rank among genes (%) */
+            --metric-std:  #c2a05a;         /* muted sand: std. dev. */
             --dot-track: #e2e5e8;           /* big-dot scale: light grey track */
             --dot-red:   #d7263d;           /* big-dot scale: low third */
             --dot-amber: #f4a300;           /* big-dot scale: middle third */
@@ -705,7 +708,11 @@
            Genes views. Fill width is set inline or by window.antBar.set; the value sits to the right in .vw-bar-val. ── */
         .vw-bar { position: relative; display: inline-block; width: 120px; height: 14px; vertical-align: middle; background: #e6e9ec; border-radius: 3px; border-right: 1px solid #b9c0c7; }
         .vw-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; min-width: 2px; background: #1f6f80; border-radius: 3px 0 0 3px; }
-        .vw-bar.rank .vw-bar-fill { background: #3d5f94; }
+        .vw-bar.rank .vw-bar-fill, .vw-bar.m-rank .vw-bar-fill { background: var(--metric-rank); }
+        .vw-bar.m-expr .vw-bar-fill { background: var(--metric-expr); }
+        .vw-bar.m-std .vw-bar-fill { background: var(--metric-std); }
+        .vw-swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: baseline; background: #cbd5e1; }
+        .vw-swatch.m-expr { background: var(--metric-expr); } .vw-swatch.m-rank { background: var(--metric-rank); } .vw-swatch.m-std { background: var(--metric-std); }
         .vw-bar-mark { position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 2px dotted #1b2127; }
         .vw-bar-val { display: inline-block; margin-left: 7px; font-size: 11.5px; font-weight: 600; color: #1f2937; vertical-align: middle; font-variant-numeric: tabular-nums; }
         .vw-bar-val .rng { font-weight: 400; color: var(--text-muted); font-size: 10.5px; margin-left: 4px; }

@@ -106,7 +106,8 @@ def test_view_db_map_groups_scope_and_flags(monkeypatch):
     monkeypatch.setattr(browser, "_api_get", _fake)
     result = browser._view_db_map("http://x")
     assert result["A/n1"] == {"title": "Nuclei microglia", "celltype_col": "ant_cell_type", "scope": "human_postmortem", "group": "microglia",
-                              "human": True, "secondary": False, "modality": "nuclei", "category": "post_mortem", "facet_exclude_reason": "", "default_embedding": ""}
+                              "human": True, "secondary": False, "modality": "nuclei", "category": "post_mortem", "facet_exclude_reason": "", "default_embedding": "", "n_cells": None,
+                              "card": {"basename": "", "collection": "", "authors": "", "year": "", "organism": "human", "tissue": "", "region": "", "disease": "", "technology": "", "access": ""}}
     assert result["A/c1"]["modality"] == "cells"
     assert result["B/x1"]["secondary"] is True and result["B/x1"]["modality"] == "sorted live cells"
     assert result["B/mix"]["group"] == ""          # several cell types: not summarised
@@ -638,7 +639,7 @@ def test_expression_rows_use_shared_plot_icons_and_no_dataset_page_link(client):
         assert "window.antPlotIcons.row(" in text and "dataset page" not in text.split('id="vt-expression"')[1].split('class="tab-panel', 1)[0]
         assert "plot by cell type" not in text.split("window.antExpression = ")[1].split("</script>")[0]
     assert "window.antPlotIcons = " in gene and "' scatter (' + embedding" in gene       # one helper, tooltip names UMAP / PCA / t-SNE
-    assert "showPct: true" in gene and "Cells expressing (%)" in gene and "showPct: false" in geneset
+    assert "var gene = config.kind === 'gene'" in gene and "Cells expressing (%)" in gene
     assert "expressing</div>" not in gene.split("window.antExpression = ")[1].split("</script>")[0] or True
     assert "average expression over all cells (non-expressing cells counted as zero)" in gene
 
@@ -655,6 +656,42 @@ def test_dataset_genes_tab_uses_bars_and_shared_icons():
 def test_gene_expression_has_std_dev_column_and_gene_sets_do_not(client):
     gene = client.get("/genes/PTPRG").text
     geneset = client.get("/genesets/Study1/Exp1/DAM").text
-    assert "showStd: true" in gene and "headerCell('Std. dev.', stdTip" in gene and "std: stat.std" in gene
+    assert "headerCell('Std. dev.', TIPS.std" in gene and "std: stat.std" in gene
     assert "over all cells of the dataset, cells without a count included as zero" in gene
-    assert "showStd" not in geneset.split("X.mount({ kind: 'geneset'")[1].split("rowsReady")[0]
+    assert "std:" not in geneset.split("X.mount({ kind: 'geneset'")[1].split("rowsReady")[0]
+
+
+def test_expression_columns_colours_and_not_pooled_label(client):
+    text = client.get("/genes/PTPRG").text
+    core = text.split("window.antExpression = ")[1].split("</script>")[0]
+    # one column order for gene pages: Cells, cells expressing, rank, std. dev., plots (plots in their own right-hand column)
+    order = [core.index(label) for label in ("headerCell('Cells'", "headerCell('Cells expressing (%)'", "headerCell('Rank among '", "headerCell('Std. dev.'", "headerCell('Plots'")]
+    assert order == sorted(order)
+    assert "'<td class=\"vx-plots\">' + config.icons(row)" in core and "vx-n" in core and "(n='" in core
+    assert "In vitro and bulk (not in the summary)" in core and "not pooled'" not in core.replace("not pooled into", "")
+    assert "Cultured cells and bulk samples are listed for comparison but not used for the cell type summary" in core
+    for token in ("--metric-expr", "--metric-rank", "--metric-std", ".vw-bar.m-std .vw-bar-fill", ".vw-swatch.m-expr"):
+        assert token in text
+    template = (_WEB_DIR / "templates" / "dataset.html").read_text(encoding="utf-8")
+    genes_head = template.split('<th data-sortcol="star"')[1].split("</tr></thead>")[0]
+    assert genes_head.index('data-sortcol="pct"') < genes_head.index('data-sortcol="rank"') < genes_head.index('data-sortcol="var"') < genes_head.index("Plots")
+
+
+def test_view_card_facts(monkeypatch):
+    database = {"id": "S/x", "title": "Village", "basename": "Village.6M", "group": "Sierksma2026", "organism": "human", "tissue": "brain", "access": "internal",
+                "collection": {"authors": ["Annerieke Sierksma", "Mark Fiers", "Bart de Strooper"], "year": 2025}, "n_cells": 5}
+    card = browser._view_card(database)
+    assert card["authors"] == "Annerieke Sierksma ... Bart de Strooper" and card["year"] == "2025" and card["basename"] == "Village.6M"
+    assert card["collection"] == "Sierksma2026" and card["access"] == "internal" and card["disease"] == ""
+    assert browser._view_card({"title": "A", "basename": "A", "collection": {"authors": ["Solo Author"]}})["authors"] == "Solo Author"
+    assert browser._view_card({"title": "A", "basename": "A"})["basename"] == ""      # same as the title: not repeated
+
+
+def test_dataset_label_is_one_link_with_hover_card(client):
+    for path in ("/genes/PTPRG", "/genesets/Study1/Exp1/DAM"):
+        text = client.get(path).text
+        helper = text.split("function dsName")[1].split("var cardsReady")[0]
+        assert "<a href=" in helper and helper.index("vx-ds-text") < helper.index("vx-ds-id") < helper.index("</a>") < helper.index("vx-ds-i\"")   # name and id inside one link
+        assert "setDatasets(" in text and "vx-open" in text and "id = 'vx-card'" in text
+        core = text.split("window.antExpression = ")[1].split("</script>")[0]
+        assert "categoryTag" not in core and "modalityTag" not in core                  # no tag pills in the rows
