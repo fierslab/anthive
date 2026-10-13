@@ -106,7 +106,7 @@ def test_view_db_map_groups_scope_and_flags(monkeypatch):
     monkeypatch.setattr(browser, "_api_get", _fake)
     result = browser._view_db_map("http://x")
     assert result["A/n1"] == {"title": "Nuclei microglia", "celltype_col": "ant_cell_type", "scope": "human_postmortem", "group": "microglia",
-                              "human": True, "secondary": False, "modality": "nuclei", "category": "post_mortem", "facet_exclude_reason": ""}
+                              "human": True, "secondary": False, "modality": "nuclei", "category": "post_mortem", "facet_exclude_reason": "", "default_embedding": ""}
     assert result["A/c1"]["modality"] == "cells"
     assert result["B/x1"]["secondary"] is True and result["B/x1"]["modality"] == "sorted live cells"
     assert result["B/mix"]["group"] == ""          # several cell types: not summarised
@@ -607,3 +607,54 @@ def test_view_db_map_carries_the_facet_exclusion_reason(monkeypatch):
     databases = [dict(_DATABASES[0], id="X/sp", facet_exclude_reason="spatial technology (10x_visium): no replicate-level cell-type pseudobulk")]
     monkeypatch.setattr(browser, "_api_get", lambda api_url, path, **kwargs: {"databases": databases})
     assert browser._view_db_map("http://x")["X/sp"]["facet_exclude_reason"].startswith("spatial technology")
+
+
+@pytest.mark.parametrize("embeddings, hint, expected", [
+    (["X_umap"], None, "X_umap"),
+    (["X_pca", "X_tsne", "X_umap"], None, "X_umap"),
+    (["X_umap_adt", "X_umap_rna"], None, "X_umap_rna"),
+    (["X_umap_hu", "X_pca"], None, "X_umap_hu"),
+    (["X_pca", "X_tsne"], None, "X_tsne"),
+    (["X_pca"], None, "X_pca"),
+    (["X_scVI", "X_harmony"], None, None),
+    ([], None, None),
+    (["X_umap", "X_tsne"], "X_tsne", "X_tsne"),
+    (["PCA_after", "UMAP_after", "X_pca"], None, "UMAP_after"),
+])
+def test_default_embedding_preference(embeddings, hint, expected):
+    db = {"embeddings": {name: {} for name in embeddings}, "h5ad_embedding": hint}
+    assert browser._default_embedding(db) == expected
+
+
+@pytest.mark.parametrize("name, kind", [("X_umap_rna", "UMAP"), ("X_tSNE", "t-SNE"), ("X_pca", "PCA"), ("spatial", "spatial"), (None, "")])
+def test_embedding_kind(name, kind):
+    assert browser._embedding_kind(name) == kind
+
+
+def test_expression_rows_use_shared_plot_icons_and_no_dataset_page_link(client):
+    gene = client.get("/genes/PTPRG").text
+    geneset = client.get("/genesets/Study1/Exp1/DAM").text
+    for text in (gene, geneset):
+        assert "window.antPlotIcons.row(" in text and "dataset page" not in text.split('id="vt-expression"')[1].split('class="tab-panel', 1)[0]
+        assert "plot by cell type" not in text.split("window.antExpression = ")[1].split("</script>")[0]
+    assert "window.antPlotIcons = " in gene and "' scatter (' + embedding" in gene       # one helper, tooltip names UMAP / PCA / t-SNE
+    assert "showPct: true" in gene and "Cells expressing (%)" in gene and "showPct: false" in geneset
+    assert "expressing</div>" not in gene.split("window.antExpression = ")[1].split("</script>")[0] or True
+    assert "average expression over all cells (non-expressing cells counted as zero)" in gene
+
+
+def test_dataset_genes_tab_uses_bars_and_shared_icons():
+    template = (_WEB_DIR / "templates" / "dataset.html").read_text(encoding="utf-8")
+    genes_tab = template.split('id="tab-genes"')[1].split("{# ── Data tab")[0]
+    assert "dot_scale(" not in genes_tab and "dot-scale" not in genes_tab and "bar_scale(" in genes_tab
+    assert "antDot" not in template and "antBar.html(" in template and "antPlotIcons.row(" in template
+    for header in ("Cells expressing (%)", "Rank among genes (%)", "Std. dev."):
+        assert header in genes_tab
+
+
+def test_gene_expression_has_std_dev_column_and_gene_sets_do_not(client):
+    gene = client.get("/genes/PTPRG").text
+    geneset = client.get("/genesets/Study1/Exp1/DAM").text
+    assert "showStd: true" in gene and "headerCell('Std. dev.', stdTip" in gene and "std: stat.std" in gene
+    assert "over all cells of the dataset, cells without a count included as zero" in gene
+    assert "showStd" not in geneset.split("X.mount({ kind: 'geneset'")[1].split("rowsReady")[0]

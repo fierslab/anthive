@@ -1,19 +1,7 @@
 {% extends "base.html" %}
-{% from "_macros.html" import col_label, dot_scale %}
+{% from "_macros.html" import col_label, dot_scale, chart_icon, bar_scale %}
 
 {% block title %}{{ dataset_name }} — anthive{% endblock %}
-
-{# Chart-type SVG icons for the obs/genes/modules tables. Sized via
-   CSS (.obs-plot-icon svg { width: 1em; height: 1em }). #}
-{% macro chart_icon(kind) -%}
-  {%- if kind == 'bar' -%}
-    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>
-  {%- elif kind == 'line' -%}
-    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>
-  {%- elif kind == 'umap' -%}
-    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>
-  {%- endif -%}
-{%- endmacro %}
 
 {% macro _fx_effects_block(column, slot) -%}
 {%- from "_facet_effects.html" import fx_table, fx_untested -%}
@@ -255,14 +243,6 @@
     table.ds-facets > tbody > tr > td.num { text-align: left; }
   }
   .obs-plots .obs-plots { border: none; padding: 0; }   /* nested cell macro (module scores): no double border */
-  .obs-plot-icon {
-    display: inline-flex; align-items: center; justify-content: center;
-    text-decoration: none; color: var(--text-muted);
-    font-size: 14px; padding: 0 4px; line-height: 1; cursor: pointer;
-    vertical-align: middle;
-  }
-  .obs-plot-icon svg { width: 1em; height: 1em; display: block; }
-  .obs-plot-icon:hover { color: var(--link); text-decoration: none; }
   /* Module-scores table — three method columns each carry their own icon
      triplet + stats, so let each row be as wide as it needs to be. */
   #obs-tbl-mod td, #obs-tbl-mod th { white-space: nowrap; }
@@ -564,17 +544,20 @@
 {% if info and info.n_genes %}
 <section class="tab-panel" id="tab-genes" role="tabpanel">
   <style>
-    /* Gene stats use the sitewide big-dot scale (.dot-scale, base.html).
-       Colour mapping (position = value on its range, high = green):
-       % expressed = pct/100; rank expression = percentile rank of the mean
-       among all genes; variability = std / highest std in the table. */
-    td.g-pct-cell, td.g-rank-cell, td.g-var-cell { --dot-w: 48px; }
+    /* Same look as the gene and gene set views (/genes/TREM2): a sans-serif table in a bordered box, small uppercase
+       column headers, embedded bars (.vw-bar, base.html) with the value to the right of the bar, the plot icons of
+       the dataset Genes tab. Bars: % expressed = pct/100, rank = share of the genes with a lower mean,
+       std. dev. = std / highest std in the table. */
+    #tab-genes .table-wrap { border: 1px solid var(--border); border-radius: 5px; background: #fff; }
+    #obs-tbl-genes { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4; }
+    #obs-tbl-genes th { text-align: left; padding: 5px 8px; border-bottom: 2px solid var(--border); color: var(--text-muted);
+                        font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
+    #obs-tbl-genes th .info { font-size: 11px; text-transform: none; margin-left: 3px; }
+    #obs-tbl-genes td { padding: 4px 8px; border-bottom: 1px solid var(--border-light); font-family: var(--font); color: var(--text); vertical-align: middle; }
+    #obs-tbl-genes th.obs-plots-th, #obs-tbl-genes td.obs-plots { border-left: none; border-right: none; text-align: left; white-space: nowrap; }
+    #obs-tbl-genes tbody tr:hover td { background: var(--hover); }
     td.g-pct-cell, td.g-rank-cell, td.g-var-cell { white-space: nowrap; }
-    td.g-pct-cell .g-pct, td.g-rank-cell .g-rank, td.g-var-cell .g-var {
-      display: inline-block; width: 4em; text-align: right;
-      font-family: var(--font-mono); font-size: 11px; color: #555;
-      margin-right: 4px; vertical-align: middle;
-    }
+    @media (max-width: 640px) { #obs-tbl-genes .vw-bar { width: 36px; } #obs-tbl-genes th, #obs-tbl-genes td { padding: 4px 5px; } }
     /* Sortable gene-table column headers */
     #obs-tbl-genes thead th[data-sortcol] { cursor: pointer; user-select: none; white-space: nowrap; }
     #obs-tbl-genes thead th[data-sortcol]:hover { background: #f1f5f9; }
@@ -612,7 +595,7 @@
     #obs-tbl-genes tbody tr.gene-item.g-hidden { display: none; }
   </style>
   <h2 class="section-head">Genes
-    <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Each dot sits at the gene's value on that statistic's range; red, amber and green mark the low, middle and high third. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
+    <span class="info" title="Click ▬ for a histogram of the gene's expression, or ◉ for an embedding scatter coloured by the gene. Each bar shows the gene's value on that statistic's range. Panel source: precomputed dataset favourites, or a canonical curated panel keyed on cell type (microglia / astrocyte / neuron).">ⓘ</span></h2>
   <div class="tab-loading plot-loading" data-tab-loading="genes" style="min-height:60px;display:none">
     <span class="spinner-lg"></span>
     <span>loading gene stats…<br><span class="muted" style="font-size:12px">first view can take a few seconds; cached after that</span></span>
@@ -637,11 +620,11 @@
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
     <thead><tr>
       <th data-sortcol="star" title="◆ dataset favourite (from the collection's top_genes) · ♥ your personal favourite (set on /settings). Click to sort." style="width:2.2em;text-align:center">★</th>
-      <th data-sortcol="gene">gene</th>
-      <th class="obs-plots-th">plot</th>
-      <th data-sortcol="pct" title="fraction of cells with expression > 0; click to sort">% expr</th>
-      <th data-sortcol="rank" title="percentile rank of this gene's mean expression among all genes in the dataset (0 = lowest, 1 = highest); click to sort">rank expr</th>
-      <th data-sortcol="var" class="g-sort-desc" title="Standard deviation of the gene's log-normalised expression across cells (already a relative, fold-scale spread); higher = more variable; click to sort">spread across cells</th>
+      <th data-sortcol="gene">Gene</th>
+      <th class="obs-plots-th">Plots</th>
+      <th data-sortcol="pct">Cells expressing (%) <span class="info" title="Percent of cells with at least one count of the gene; click to sort">&#9432;</span></th>
+      <th data-sortcol="rank">Rank among genes (%) <span class="info" title="Percent of genes detected in this dataset whose average expression over all cells (non-expressing cells counted as zero) is lower than this gene's. It compares genes, not cells. Values below about 50% mostly mean the gene is barely expressed. Click to sort.">&#9432;</span></th>
+      <th data-sortcol="var" class="g-sort-desc">Std. dev. <span class="info" title="Standard deviation of the gene's log-normalised expression over all cells of the dataset, cells without a count included as zero (over samples for bulk datasets). It depends on the normalisation and depth of the dataset, so compare it within a dataset. The bar shows it relative to the highest value in the table. Click to sort.">&#9432;</span></th>
     </tr></thead>
     <tbody>
     {% if gene_panel and gene_panel.genes %}
@@ -654,18 +637,12 @@
         {% if has_duckdb %}
         <a class="obs-plot-icon" href="{{ _b }}/plot/histogram?x={{ gene|urlencode }}" title="histogram of {{ gene }}">{{ chart_icon('bar') }}</a>
         <a class="obs-plot-icon" href="{{ _b }}/plot/ecdf?x={{ gene|urlencode }}" title="ECDF of {{ gene }}">{{ chart_icon('line') }}</a>
-        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ gene|urlencode }}" title="{{ default_embedding }} scatter, coloured by {{ gene }}">{{ chart_icon('umap') }}</a>{% endif %}
+        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ gene|urlencode }}" title="{{ embedding_kind(default_embedding) }} scatter ({{ default_embedding }}), coloured by {{ gene }}">{{ chart_icon('umap') }}</a>{% endif %}
         {% endif %}
       </td>
-      <td class="g-pct-cell">
-        <span class="g-pct"></span>{{ dot_scale('pct', '% expressing cells') }}
-      </td>
-      <td class="g-rank-cell">
-        <span class="g-rank"></span>{{ dot_scale('rank', 'rank expression (percentile rank of the mean among all genes)') }}
-      </td>
-      <td class="g-var-cell">
-        <span class="g-var"></span>{{ dot_scale('var', 'spread across cells (std), scaled to the highest in the table') }}
-      </td>
+      <td class="g-pct-cell">{{ bar_scale('pct', 'cells expressing the gene') }}<span class="vw-bar-val g-pct"></span></td>
+      <td class="g-rank-cell">{{ bar_scale('rank', 'rank among genes', 'rank') }}<span class="vw-bar-val g-rank"></span></td>
+      <td class="g-var-cell">{{ bar_scale('var', 'std. dev., scaled to the highest in the table') }}<span class="vw-bar-val g-var"></span></td>
     </tr>
     {% endfor %}
     {% endif %}
@@ -673,8 +650,8 @@
   </table></div>
   <div class="muted" style="font-size:11px;margin-top:4px">
     Stats from <code>/gene_stats</code> (log-normalised expression layer).
-    <b>rank expr</b> is the percentile rank of the gene's mean among all genes in the dataset.
-    <b>spread across cells</b> is the standard deviation of the log-normalised expression across cells; the dot shows its share of the panel-wide max.
+    <b>Rank among genes</b> is the percent of genes detected in this dataset whose average expression over all cells (zeros counted) is lower than this gene's; it depends on how many genes the dataset kept, so compare it within a dataset only.
+    <b>Std. dev.</b> is the standard deviation of the log-normalised expression over all cells (samples for bulk datasets), zeros included; the bar shows its share of the highest value in the table.
   </div>
 </section>
 {% endif %}
@@ -893,7 +870,7 @@
     <span class="obs-count muted" data-target="num" style="font-size:11px"></span>
   </div>
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-num">
-    <thead><tr><th>column</th><th class="obs-plots-th">plot</th><th>min</th><th>Q05</th><th>median</th><th>Q95</th><th>max</th></tr></thead>
+    <thead><tr><th>column</th><th class="obs-plots-th">Plots</th><th>min</th><th>Q05</th><th>median</th><th>Q95</th><th>max</th></tr></thead>
     <tbody>
     {% for col in _num_cols %}
     {% set _base = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
@@ -932,7 +909,7 @@
     <span class="obs-count muted" data-target="cat" style="font-size:11px"></span>
   </div>
   <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-cat">
-    <thead><tr><th>column</th><th class="obs-plots-th">plot</th><th># cats</th><th>top categories</th></tr></thead>
+    <thead><tr><th>column</th><th class="obs-plots-th">Plots</th><th># cats</th><th>top categories</th></tr></thead>
     <tbody>
     {% for col in _cat_cols %}
     {% set _base = '/browse/' ~ folder_browse_id ~ '/' ~ file_id %}
@@ -1597,31 +1574,14 @@ document.addEventListener('DOMContentLoaded', function() {
                     _row.dataset.pct    = '';
                     _row.dataset.rank   = '';
                     _row.dataset.var    = '';
-                    var _plotCell = '';
-                    if (_favHasDb) {
-                        var _histLink = _favBase + '/plot/histogram?x=' + encodeURIComponent(_g);
-                        var _ecdfLink = _favBase + '/plot/ecdf?x=' + encodeURIComponent(_g);
-                        _plotCell = ''
-                            + '<a class="obs-plot-icon" href="' + _histLink + '" title="histogram of ' + _g + '">'
-                            +   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>'
-                            + '</a>'
-                            + '<a class="obs-plot-icon" href="' + _ecdfLink + '" title="ECDF of ' + _g + '">'
-                            +   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>'
-                            + '</a>';
-                        if (_favDefEmb) {
-                            var _sctLink = _favBase + '/plot/scatter?embedding=' + encodeURIComponent(_favDefEmb) + '&color=' + encodeURIComponent(_g);
-                            _plotCell += '<a class="obs-plot-icon" href="' + _sctLink + '" title="' + _favDefEmb + ' scatter, coloured by ' + _g + '">'
-                                + '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>'
-                                + '</a>';
-                        }
-                    }
+                    var _plotCell = _favHasDb ? antPlotIcons.row(_favBase, _g, _favDefEmb) : '';
                     _row.innerHTML =
                           '<td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap">' + _heartHtml(true) + '</td>'
                         + '<td class="colname">' + _g + '</td>'
                         + '<td class="obs-plots">' + _plotCell + '</td>'
-                        + '<td class="g-pct-cell"><span class="g-pct"></span>' + antDot.html(null, { stat: 'pct', title: '% expressing cells' }) + '</td>'
-                        + '<td class="g-rank-cell"><span class="g-rank"></span>' + antDot.html(null, { stat: 'rank', title: 'rank expression (percentile rank of the mean among all genes)' }) + '</td>'
-                        + '<td class="g-var-cell"><span class="g-var"></span>' + antDot.html(null, { stat: 'var', title: 'spread across cells (std), scaled to the highest in the table' }) + '</td>';
+                        + '<td class="g-pct-cell">' + antBar.html(null, { stat: 'pct', title: 'cells expressing the gene' }) + '<span class="vw-bar-val g-pct"></span></td>'
+                        + '<td class="g-rank-cell">' + antBar.html(null, { stat: 'rank', kind: 'rank', title: 'rank among genes' }) + '<span class="vw-bar-val g-rank"></span></td>'
+                        + '<td class="g-var-cell">' + antBar.html(null, { stat: 'var', title: 'std. dev., scaled to the highest in the table' }) + '<span class="vw-bar-val g-var"></span></td>';
                     _favTbody.insertBefore(_row, _favInsertAnchor);
                 });
             }
@@ -1647,22 +1607,18 @@ document.addEventListener('DOMContentLoaded', function() {
             // curated batch and the top-var batch share one y-axis.
             function setGeneDots(row, statsObj, stdRankFrac) {
                 var pct = statsObj.pct_nonzero != null ? statsObj.pct_nonzero : null;
-                // pct track: 0-100 absolute
-                var pctTrack = row.querySelector('.dot-scale[data-stat="pct"]');
-                if (pctTrack && pct != null) {
-                    antDot.set(pctTrack, pct / 100, { title: pct.toFixed(1) + '% of cells express this gene' });
-                }
-                // rank_mean: server returns 0-1 percentile rank among ALL genes
-                var rankTrack = row.querySelector('.dot-scale[data-stat="rank"]');
-                if (rankTrack && statsObj.rank_mean != null) {
-                    antDot.set(rankTrack, statsObj.rank_mean,
-                        { title: 'mean expression ranks at the ' + (statsObj.rank_mean * 100).toFixed(0) + 'th percentile of all genes' });
-                }
+                // pct bar: 0-100 absolute
+                var pctTrack = row.querySelector('.vw-bar[data-stat="pct"]');
+                if (pctTrack && pct != null) antBar.set(pctTrack, pct / 100, { title: pct.toFixed(1) + '% of cells express this gene' });
+                // rank_mean: server returns 0-1 share of the genes with a lower mean
+                var rankTrack = row.querySelector('.vw-bar[data-stat="rank"]');
+                if (rankTrack && statsObj.rank_mean != null) antBar.set(rankTrack, statsObj.rank_mean,
+                    { title: 'higher average expression than ' + (statsObj.rank_mean * 100).toFixed(0) + '% of the genes detected in this dataset' });
                 // variability dot scale is set by refreshVarDots() below.
             }
 
             // Compute a shared std-max across every currently rendered row,
-            // then set every .dot-scale[data-stat="var"] dot to std / maxStd. This
+            // then set every .vw-bar[data-stat="var"] bar to std / maxStd. This
             // is what makes the curated batch and the top-var batch share one
             // scale: whether a row came from curated or top-var (or a search),
             // it competes with every other row on the same axis.
@@ -1678,10 +1634,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (!(maxStd > 0)) return;
                 allRows.forEach(function (row) {
                     var v = parseFloat(row.dataset.var);
-                    var varTrack = row.querySelector('.dot-scale[data-stat="var"]');
+                    var varTrack = row.querySelector('.vw-bar[data-stat="var"]');
                     if (!varTrack) return;
                     if (isNaN(v)) return;
-                    antDot.set(varTrack, v / maxStd, { title: 'std ' + fnum(v)
+                    antBar.set(varTrack, v / maxStd, { title: 'std ' + fnum(v)
                         + ' (highest in table: ' + fnum(maxStd) + ')' });
                 });
             }
@@ -1693,27 +1649,15 @@ document.addEventListener('DOMContentLoaded', function() {
             // favourite; renderTopVar/runGeneSearch decide what to pass.
             // stdRankFrac: 0-1 fraction for variability dot scale (null if unknown).
             function makeGeneRow(geneName, s, starHtml, stdRankFrac) {
-                var plotHtml = ''
-                    + '<a class="obs-plot-icon" href="' + _gBase + '/plot/histogram?x=' + encodeURIComponent(geneName) + '" title="histogram">'
-                    +   '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>'
-                    + '</a>'
-                    + '<a class="obs-plot-icon" href="' + _gBase + '/plot/ecdf?x=' + encodeURIComponent(geneName) + '" title="ECDF">'
-                    +   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>'
-                    + '</a>';
-                if (_defaultEmb) {
-                    // split to avoid literal 'scatter?embedding=' when no embedding exists
-                    plotHtml += '<a class="obs-plot-icon" href="' + _gBase + '/plot/scatter?' + 'embedding=' + encodeURIComponent(_defaultEmb) + '&color=' + encodeURIComponent(geneName) + '" title="scatter">'
-                        + '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>'
-                        + '</a>';
-                }
+                var plotHtml = antPlotIcons.row(_gBase, geneName, _defaultEmb);
                 var pct = s && s.pct_nonzero != null ? s.pct_nonzero : null;
-                var pctStr   = pct != null ? pct.toFixed(1) + '%' : '';
+                var pctStr   = pct != null ? pct.toFixed(pct < 10 ? 1 : 0) + '%' : '';
                 var rankStr  = s && s.rank_mean != null ? (s.rank_mean * 100).toFixed(0) + '%' : '';
                 // std value in muted text (shared-scale bar does the panel-wide comparison).
                 var varStr   = s && s.std != null ? fnum(s.std) : '';
-                var pctSpark  = antDot.html(null, { stat: 'pct',  title: '% expressing cells' });
-                var rankSpark = antDot.html(null, { stat: 'rank', title: 'rank expression (percentile rank of the mean among all genes)' });
-                var varSpark  = antDot.html(null, { stat: 'var',  title: 'spread across cells (std), scaled to the highest in the table' });
+                var pctSpark  = antBar.html(pct != null ? pct / 100 : null, { stat: 'pct', title: 'cells expressing the gene' });
+                var rankSpark = antBar.html(s && s.rank_mean != null ? s.rank_mean : null, { stat: 'rank', kind: 'rank', title: 'rank among genes' });
+                var varSpark  = antBar.html(null, { stat: 'var', title: 'std. dev., scaled to the highest in the table' });
                 var varFrac   = stdRankFrac != null ? stdRankFrac : null;
                 // data-pct/rank/var hold numeric sort keys (empty = unknown, sorts last).
                 var dataPct  = s && s.pct_nonzero != null  ? ' data-pct="'  + s.pct_nonzero + '"' : ' data-pct=""';
@@ -1723,9 +1667,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     + '<td class="g-flag-cell" style="text-align:center;font-size:13px;white-space:nowrap">' + (starHtml || '') + '</td>'
                     + '<td class="colname">' + esc(geneName) + '</td>'
                     + '<td class="obs-plots">' + plotHtml + '</td>'
-                    + '<td class="g-pct-cell"><span class="g-pct">' + esc(pctStr) + '</span>' + pctSpark + '</td>'
-                    + '<td class="g-rank-cell"><span class="g-rank">' + esc(rankStr) + '</span>' + rankSpark + '</td>'
-                    + '<td class="g-var-cell"><span class="g-var">' + esc(varStr) + '</span>' + varSpark + '</td>'
+                    + '<td class="g-pct-cell">' + pctSpark + '<span class="vw-bar-val g-pct">' + esc(pctStr) + '</span></td>'
+                    + '<td class="g-rank-cell">' + rankSpark + '<span class="vw-bar-val g-rank">' + esc(rankStr) + '</span></td>'
+                    + '<td class="g-var-cell">' + varSpark + '<span class="vw-bar-val g-var">' + esc(varStr) + '</span></td>'
                     + '</tr>';
                 // Immediately position dot scales for cells we already know.
                 // (The DOM element doesn't exist yet — caller must call setGeneDots
@@ -1760,7 +1704,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (!s) return;
                     var pctEl = row.querySelector('.g-pct');
                     if (pctEl && s.pct_nonzero != null) {
-                        pctEl.textContent = s.pct_nonzero.toFixed(1) + '%';
+                        pctEl.textContent = s.pct_nonzero.toFixed(s.pct_nonzero < 10 ? 1 : 0) + '%';
                         row.dataset.pct = String(s.pct_nonzero);
                     }
                     var rankEl = row.querySelector('.g-rank');

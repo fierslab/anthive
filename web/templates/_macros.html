@@ -300,3 +300,42 @@
 {% macro dot_scale(stat, title) -%}
 <span class="dot-scale" role="img" data-stat="{{ stat }}" title="{{ title }}" aria-label="{{ title }}"><span class="dot-scale-dot"></span></span>
 {%- endmacro %}
+
+
+{# Chart-type SVG icons for the obs/genes/modules tables. Sized via
+   CSS (.obs-plot-icon svg { width: 1em; height: 1em }). #}
+{% macro chart_icon(kind) -%}
+  {%- if kind == 'bar' -%}
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>
+  {%- elif kind == 'line' -%}
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>
+  {%- elif kind == 'umap' -%}
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>
+  {%- endif -%}
+{%- endmacro %}
+
+{# JS twin of chart_icon: window.antPlotIcons.row(baseUrl, name, embedding) returns the plot icon links of one gene or column
+   row (histogram, ECDF, embedding scatter), the same icons, titles and targets as the server-rendered rows of the dataset
+   Genes tab. baseUrl is /browse/<group>/<file>; embedding is the default embedding (empty: no scatter icon). #}
+{% macro plot_icons_js() -%}
+<script>
+window.antPlotIcons = (function () {
+  var SVG = { bar: {{ chart_icon('bar')|trim|tojson }}, line: {{ chart_icon('line')|trim|tojson }}, umap: {{ chart_icon('umap')|trim|tojson }} };
+  function attr(text) { return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
+  function link(href, title, svg) { return '<a class="obs-plot-icon" href="' + attr(href) + '" title="' + attr(title) + '">' + svg + '</a>'; }
+  function kind(embedding) { return /umap/i.test(embedding) ? 'UMAP' : /t-?sne/i.test(embedding) ? 't-SNE' : /pca/i.test(embedding) ? 'PCA' : embedding; }
+  function row(baseUrl, name, embedding) {
+    var enc = encodeURIComponent(name);
+    return link(baseUrl + '/plot/histogram?x=' + enc, 'histogram of ' + name, SVG.bar) +
+      link(baseUrl + '/plot/ecdf?x=' + enc, 'ECDF of ' + name, SVG.line) +
+      (embedding ? link(baseUrl + '/plot/scatter?' + 'embedding=' + encodeURIComponent(embedding) + '&color=' + enc, kind(embedding) + ' scatter (' + embedding + '), coloured by ' + name, SVG.umap) : '');
+  }
+  return { SVG: SVG, row: row };
+})();
+</script>
+{%- endmacro %}
+
+{# Embedded bar placeholder (sitewide bar style, see antBar in base.html): the fill is set by antBar.set. #}
+{% macro bar_scale(stat, title, kind='') -%}
+<span class="vw-bar {{ kind }}" role="img" data-stat="{{ stat }}" title="{{ title }}" aria-label="{{ title }}"><span class="vw-bar-fill" style="width:0"></span></span>
+{%- endmacro %}

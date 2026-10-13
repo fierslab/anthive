@@ -5080,10 +5080,9 @@ def test_genes_tab_uniform_column_headers(client):
     assert tbl_start != -1, "#obs-tbl-genes not found"
     thead_end = html.find('</thead>', tbl_start)
     thead = html[tbl_start:thead_end]
-    assert '% expr'     in thead or 'pct'  in thead.lower(), \
-        "#obs-tbl-genes thead missing % expr column"
-    assert 'rank expr'  in thead, "#obs-tbl-genes thead missing 'rank expr' column"
-    assert '>spread across cells<' in thead, "#obs-tbl-genes thead missing 'spread across cells' column"
+    assert 'Cells expressing (%)' in thead, "#obs-tbl-genes thead missing the cells expressing column"
+    assert 'Rank among genes (%)' in thead, "#obs-tbl-genes thead missing the rank column"
+    assert 'Std. dev.' in thead, "#obs-tbl-genes thead missing the std. dev. column"
     assert '>CoV<' not in html and 'g-cov' not in html, "the CoV column is gone"
     assert 'variability' not in thead, \
         "'variability' header must be renamed to 'std'"

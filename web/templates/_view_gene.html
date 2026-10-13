@@ -169,7 +169,7 @@
   }
   function datasetCell(row, flat) {
     return '<td title="' + V.esc(row.title) + '"><a href="' + V.dbLink(row.db_id) + '">' + V.esc(row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span> ' + categoryTag(row.category) + ' ' + modalityTag(row.modality) +
-      '<span class="vw-links"><a href="' + V.dbLink(row.db_id) + '">dataset page</a><a href="' + plotLink(row) + '" title="' + V.esc(GENE) + ' in this dataset' + (row.celltype_col ? ', by cell type' : '') + '">' + (row.celltype_col ? 'plot by cell type' : 'plot') + '</a></span></td>';
+      '<span class="vw-links"><a href="' + plotLink(row) + '" title="' + V.esc(GENE) + ' in this dataset' + (row.celltype_col ? ', by cell type' : '') + '">' + (row.celltype_col ? 'plot by cell type' : 'plot') + '</a></span></td>';
   }
   function renderP1(host, collected) {
     var rows = collected.rows;

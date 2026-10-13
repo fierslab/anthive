@@ -43,15 +43,9 @@
   .vw-cat.spatial { background: #e9f6f8; color: #1f5f6b; border-color: #bfe0e6; }
   .vw-cat.in_vitro { background: #fdeef0; color: #8a2f3d; border-color: #f0c8cf; }
   .vw-mods { white-space: normal; line-height: 1.9; margin-top: 2px; font-size: 11px; color: var(--text-muted); }
-  .vw-bar { position: relative; display: inline-block; width: 120px; height: 14px; vertical-align: middle; background: #e6e9ec; border-radius: 3px; border-right: 1px solid #b9c0c7; }
-  .vw-bar-fill { position: absolute; left: 0; top: 0; bottom: 0; min-width: 2px; background: #1f6f80; border-radius: 3px 0 0 3px; }
-  .vw-bar.rank .vw-bar-fill { background: #3d5f94; }
-  .vw-bar-mark { position: absolute; top: -3px; bottom: -3px; width: 0; border-left: 2px dotted #1b2127; }
   .vw-bar-track { position: relative; display: inline-block; width: 120px; height: 14px; vertical-align: middle; background: #e6e9ec; border-radius: 3px; }
   .vw-bar-range { position: absolute; top: 4px; height: 6px; background: #8dbcc6; border-radius: 2px; }
   .vw-bar-med { position: absolute; top: 0; bottom: 0; width: 2px; background: #1f5560; }
-  .vw-bar-val { display: inline-block; margin-left: 7px; font-size: 11.5px; font-weight: 600; color: #1f2937; vertical-align: middle; font-variant-numeric: tabular-nums; }
-  .vw-bar-val .rng { font-weight: 400; color: var(--text-muted); font-size: 10.5px; margin-left: 4px; }
   .vw-axis { display: flex; justify-content: space-between; width: 120px; font-size: 9px; color: #9aa1a9; letter-spacing: 0; text-transform: none; font-weight: 400; }
   table.vw-table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4; }
   /* fixed layout: column widths come from the colgroup, so opening a row never moves a column */
@@ -224,7 +218,6 @@
     .vw-axis { width: 36px; }
     .vw-mods { display: none; }
     td.vw-ds { white-space: normal; }
-    .vw-bar-val .rng { display: none; }
     table.vw-table th, table.vw-table td { padding: 4px 5px; }
     col.c-name { width: 34%; } col.c-ds { width: 14%; } col.c-pct { width: 26%; } col.c-rank { width: 26%; }
     table.vw-table { font-size: 11.5px; }
@@ -235,7 +228,6 @@
     col.c-ds { width: 14%; } 
     table.vw-table th { font-size: 9px; letter-spacing: 0; }
     table.vw-table th .info { margin-left: 1px; }
-    .vw-bar-val { margin-left: 4px; }
     .vw-frow .nm .vw-pill { display: none; }
     .vw-forest { padding: 4px 4px; }
     .vw-detail { padding: 8px 8px 10px; overflow-x: auto; }

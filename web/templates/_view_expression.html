@@ -14,11 +14,16 @@
 {% macro expression_styles() -%}
 <style>
   col.x-name { width: 32%; } col.x-ds { width: 24%; } col.x-rank { width: 44%; }
+  table.vx-std.vx-two col.x-name { width: 26%; } table.vx-std.vx-two col.x-ds { width: 14%; } table.vx-std.vx-two col.x-rank, table.vx-std.vx-two col.x-pct { width: 25%; } table.vx-std.vx-two col.x-std { width: 10%; }
+  table.vx-two col.x-name { width: 30%; } table.vx-two col.x-ds { width: 16%; } table.vx-two col.x-rank, table.vx-two col.x-pct { width: 27%; }
+  .vx-ico { display: inline-block; margin-left: 6px; white-space: nowrap; vertical-align: baseline; }
   #vx-other { margin-top: 20px; }
   .vx-prog { font-size: 11.5px; color: var(--text-muted); margin: 0 0 6px; min-height: 16px; }
   .vx-top { font-weight: 600; font-size: 12px; font-variant-numeric: tabular-nums; }
   @media (max-width: 640px) {
     col.x-name { width: 33%; } col.x-ds { width: 21%; } col.x-rank { width: 46%; }
+    table.vx-std.vx-two col.x-name { width: 28%; } table.vx-std.vx-two col.x-ds { width: 15%; } table.vx-std.vx-two col.x-rank, table.vx-std.vx-two col.x-pct { width: 23%; } table.vx-std.vx-two col.x-std { width: 11%; }
+    table.vx-two col.x-name { width: 30%; } table.vx-two col.x-ds { width: 18%; } table.vx-two col.x-rank, table.vx-two col.x-pct { width: 26%; }
   }
 </style>
 {%- endmacro %}
@@ -31,10 +36,14 @@
   {% call section_help('Expression rank by cell type', 'vx-help') %}
     <p>For each cell type this tab shows where the {{ what }} sits relative to all other {{ peers }} in the same dataset, so you see where it is expressed most strongly compared with everything else. The value is a percent: 76% means the {{ what }} has a higher mean than 76% of the {{ peers }} of that dataset. A longer bar and a higher percent mean stronger expression relative to the rest. The ranking is done inside one dataset only, so it does not depend on how a study normalised its counts, and ranks are never pooled across datasets other than as a median.</p>
     <h4>Cell type rows</h4>
-    <p>The value of a cell type row is the median percent over its datasets; the Datasets column gives how many there are. Cell types are sorted by that median, strongest first. Open a row to see its datasets: one bar per dataset, the dotted line marks the median of the cell type, a tag gives the category of the dataset and whether it was made from nuclei or cells, and the links open the dataset page and a plot of the {{ what }} in that dataset.</p>
+    <p>The value of a cell type row is the median percent over its datasets; the Datasets column gives how many there are. Cell types are sorted by that median, strongest first. Open a row to see its datasets: one bar per dataset, the dotted line marks the median of the cell type, a tag gives the category of the dataset and whether it was made from nuclei or cells, and the small plot icons open the histogram, the ECDF and the embedding plot (UMAP, else t-SNE, else PCA) of the {{ what }} in that dataset, the same icons as on the dataset Genes tab. The dataset name links to its page.</p>
     {% if kind == 'gene' %}
     <h4>What the percent is</h4>
-    <p>The share of the genes found in the dataset that have a lower mean (log-normalised) expression than {{ subject }}, taken over all cells of the dataset. Datasets in a cell type row consist of one known cell type, so this is the rank within that cell type. Genes with no count in any cell of the dataset are not part of the comparison. The percent of cells that express the gene is shown in small text under the number of cells.</p>
+    <p>The percent of genes detected in the dataset whose average expression over all cells (cells without a count counted as zero) is lower than that of {{ subject }}. It compares genes, not cells. Values below about 50% mostly mean the gene is barely expressed. Datasets in a cell type row consist of one known cell type, so this is the rank within that cell type. Genes with no count in any cell of the dataset are not part of the comparison. The baseline depends on how many genes a dataset kept, so ranks are compared within one dataset, never as a shared scale.</p>
+    <h4>Cells expressing</h4>
+    <p>The second bar is the percent of the cells of the dataset with at least one count of {{ subject }} (the median over datasets in a cell type row). Bulk samples have no cells, so it reads n/a for them.</p>
+    <h4>Std. dev.</h4>
+    <p>The standard deviation of the log-normalised expression of {{ subject }} over all cells of the dataset, cells without a count included as zero (over samples for bulk datasets). It depends on the normalisation and depth of each dataset, so it is shown per dataset only and left blank on cell type rows, where a median over datasets would mix different scales.</p>
     {% else %}
     <h4>What the percent is</h4>
     <p>The share of the other gene sets scored on the same cells of the same dataset that have a lower mean scanpy score than {{ subject }}, ties counting half. The scanpy score subtracts the mean of a matched control set of genes, so the means of different sets in one dataset are comparable. UCell is not used because it depends on the number of genes in a set. Only gene sets that apply to the cell type of the dataset are compared: a set built for one cell type is scored on those cells only, and sets that apply to every cell count everywhere. For microglia datasets this means the microglia sets plus the general sets, not the astrocyte sets. It needs at least 10 other sets scored on at least 20 cells, otherwise it reads n/a. The first visit of a dataset can take a moment while its scores are read.</p>
@@ -64,9 +73,9 @@ window.antExpression = window.antExpression || (function () {
   'use strict';
   var V = window.antViews;
   function pctOf(rank) { return Math.round(rank * 100) + '%'; }
-  function bar(value, mark) {
+  function bar(value, mark, kind) {
     var width = Math.max(0, Math.min(100, value));
-    return '<span class="vw-bar rank"><span class="vw-bar-fill" style="width:' + width + '%"></span>' + (mark != null ? '<span class="vw-bar-mark" style="left:' + Math.max(0, Math.min(100, mark)) + '%"></span>' : '') + '</span>';
+    return '<span class="vw-bar' + (kind === 'rank' ? ' rank' : '') + '"><span class="vw-bar-fill" style="width:' + width + '%"></span>' + (mark != null ? '<span class="vw-bar-mark" style="left:' + Math.max(0, Math.min(100, mark)) + '%"></span>' : '') + '</span>';
   }
   function isNumber(value) { return typeof value === 'number' && !isNaN(value); }
   function modalityTag(modality) {
@@ -82,17 +91,25 @@ window.antExpression = window.antExpression || (function () {
   function rankCell(row, mark) {
     if (row.rank === 'pending') return '<span class="muted">computing...</span>';
     if (!isNumber(row.rank)) return '<span class="muted" title="' + V.esc(row.reason || 'no rank available') + '">n/a</span>';
-    return '<span title="' + V.esc(row.tip || '') + '">' + bar(row.rank * 100, mark == null ? null : mark * 100) + '<span class="vw-bar-val">' + pctOf(row.rank) + '</span></span>';
+    return '<span title="' + V.esc(row.tip || '') + '">' + bar(row.rank * 100, mark == null ? null : mark * 100, 'rank') + '<span class="vw-bar-val">' + pctOf(row.rank) + '</span></span>';
   }
+  // "Cells expressing (%)": `pct` is 0..100 (bulk and gene sets have none: n/a).
+  function pctCell(row, mark) {
+    if (row.bulk) return '<span class="muted" title="Bulk samples have no cells, so there is no percent of cells expressing.">n/a</span>';
+    if (!isNumber(row.pct)) return '<span class="muted">n/a</span>';
+    return bar(row.pct, mark == null ? null : mark, '') + '<span class="vw-bar-val">' + pctText(row.pct) + '</span>';
+  }
+  function stdText(value) { return value >= 10 ? value.toFixed(1) : value.toFixed(2); }
+  function pctText(value) { return Math.round(value) + '%'; }
   function nCell(row) { return row.n_cells == null ? '' : 'n=' + V.compact(row.n_cells) + (row.bulk ? ' samples' : ''); }
   function byRank(a, b) { return (isNumber(b.rank) ? b.rank : -1) - (isNumber(a.rank) ? a.rank : -1); }
   function datasetCell(config, row) {
     var title = row.title || row.db_id;
     return '<td title="' + V.esc(title) + '"><a href="' + V.dbLink(row.db_id) + '">' + V.esc(title.length > 46 ? title.slice(0, 44) + '...' : title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span> ' + categoryTag(config.categories, row.category) + ' ' + modalityTag(row.modality) +
-      '<span class="vw-links"><a href="' + V.dbLink(row.db_id) + '">dataset page</a><a href="' + V.esc(config.plotLink(row)) + '">' + (row.celltype_col ? 'plot by cell type' : 'plot') + '</a></span></td>';
+      '<span class="vw-links">' + config.icons(row) + '</span></td>';
   }
-  function headerCell(label, tip, axis) {
-    return '<th>' + label + ' ' + V.info(tip) + (axis ? '<div class="vw-axis"><span>' + axis[0] + '</span><span>' + axis[1] + '</span></div>' : '') + '</th>';
+  function headerCell(label, tip, axis, cls) {
+    return '<th' + (cls ? ' class="' + cls + '"' : '') + '>' + label + ' ' + V.info(tip) + (axis ? '<div class="vw-axis"><span>' + axis[0] + '</span><span>' + axis[1] + '</span></div>' : '') + '</th>';
   }
   // The blocks: typed rows grouped per cell type, summarised by the median rank of the pooled datasets, and the rest.
   function buildBlocks(rows, settled) {
@@ -102,7 +119,7 @@ window.antExpression = window.antExpression || (function () {
       var listed = typed.filter(function (row) { return row.group === group; });
       var members = listed.filter(function (row) { return row.pooled; });
       var ranks = members.map(function (row) { return row.rank; }).filter(isNumber);
-      return { group: group, listed: listed, members: members, median: V.median(ranks), nRanked: ranks.length, low: ranks.length ? Math.min.apply(null, ranks) : null, high: ranks.length ? Math.max.apply(null, ranks) : null };
+      return { group: group, listed: listed, members: members, median: V.median(ranks), medianPct: V.median(members.filter(function (row) { return !row.bulk; }).map(function (row) { return row.pct; })), nRanked: ranks.length, low: ranks.length ? Math.min.apply(null, ranks) : null, high: ranks.length ? Math.max.apply(null, ranks) : null };
     }).filter(function (block) { return block.listed.length; });
     // sort by the summary once every rank is in (the order must not jump while ranks arrive)
     if (settled) blocks.sort(function (a, b) { return (isNumber(b.median) ? b.median : -1) - (isNumber(a.median) ? a.median : -1) || b.members.length - a.members.length; });
@@ -116,16 +133,19 @@ window.antExpression = window.antExpression || (function () {
     var opened = {};
     var peers = config.kind === 'gene' ? 'genes' : 'gene sets';
     var rankTip = config.kind === 'gene'
-      ? 'Percent of the genes found in the dataset with a lower mean (log-normalised) expression than this gene. Higher means stronger expression relative to the other genes. A cell type row shows the median over its datasets; in an opened row the dotted line is that median.'
+      ? 'Percent of genes detected in this dataset whose average expression over all cells (non-expressing cells counted as zero) is lower than this gene\'s. It compares genes, not cells. Values below about 50% mostly mean the gene is barely expressed. A cell type row shows the median over its datasets; in an opened row the dotted line is that median.'
       : 'Percent of the other gene sets scored on the same cells of the dataset (sets that apply to its cell type) with a lower mean scanpy score than this gene set. Higher means a stronger score relative to the other sets. A cell type row shows the median over its datasets; in an opened row the dotted line is that median.';
+    var pctTip = 'Percent of the cells of the dataset with at least one count of the gene. A cell type row shows the median over its datasets; in an opened row the dotted line is that median. Not defined for bulk samples.';
+    var two = !!config.showPct;
+    var std = !!config.showStd;
+    var stdTip = 'Standard deviation of the log-normalised expression of the gene over all cells of the dataset, cells without a count included as zero (over samples for bulk datasets). It depends on the normalisation and depth of each dataset, so compare it within a dataset; the cell type rows leave it blank because a median over datasets would mix different scales.';
     function tableHtml(firstLabel, firstTip, secondLabel, secondTip, body) {
-      return '<div class="vw-box"><table class="vw-table fixed vx-table"><colgroup><col class="x-name"><col class="x-ds"><col class="x-rank"></colgroup><thead><tr>' +
-        headerCell(firstLabel, firstTip) +
-        headerCell(secondLabel, secondTip) +
-        headerCell('Rank among ' + peers + ' (%)', rankTip, ['0', '100']) + '</tr></thead><tbody>' + body + '</tbody></table></div>';
+      return '<div class="vw-box"><table class="vw-table fixed vx-table' + (two ? ' vx-two' : '') + '"><colgroup><col class="x-name"><col class="x-ds"><col class="x-rank">' + (two ? '<col class="x-pct">' : '') + '</colgroup><thead><tr>' +
+        headerCell(firstLabel, firstTip) + headerCell(secondLabel, secondTip) +
+        headerCell('Rank among ' + peers + ' (%)', rankTip, ['0', '100']) + (two ? headerCell('Cells expressing (%)', pctTip, ['0', '100']) : '') + (std ? headerCell('Std. dev.', stdTip, null, 'num') : '') + '</tr></thead><tbody>' + body + '</tbody></table></div>';
     }
-    function datasetRow(row, attrs, mark) {
-      return '<tr class="vw-sub"' + attrs + '>' + datasetCell(config, row) + '<td class="vw-ds">' + nCell(row) + (row.note ? '<div class="muted">' + row.note + '</div>' : '') + '</td><td class="vw-bar-cell">' + rankCell(row, mark) + '</td></tr>';
+    function datasetRow(row, attrs, mark, pctMark) {
+      return '<tr class="vw-sub"' + attrs + '>' + datasetCell(config, row) + '<td class="vw-ds">' + nCell(row) + '</td><td class="vw-bar-cell">' + rankCell(row, mark) + '</td>' + (two ? '<td class="vw-bar-cell">' + pctCell(row, pctMark) + '</td>' : '') + (std ? '<td class="num">' + (isNumber(row.std) ? stdText(row.std) : '<span class="muted">n/a</span>') + '</td>' : '') + (std ? '<td class="num"></td>' : '') + '</tr>';
     }
     function draw(rows) {
       var pending = rows.filter(function (row) { return row.rank === 'pending'; }).length;
@@ -141,10 +161,10 @@ window.antExpression = window.antExpression || (function () {
         var summary;
         if (!block.members.length) summary = '<span class="muted" title="Only in vitro or bulk datasets: listed in the opened row, not pooled.">not pooled</span>';
         else if (!isNumber(block.median)) summary = block.members.some(function (row) { return row.rank === 'pending'; }) ? '<span class="muted">computing...</span>' : '<span class="muted" title="No dataset of this cell type could be ranked.">n/a</span>';
-        else summary = '<span title="Median over ' + block.nRanked + ' dataset(s), from ' + pctOf(block.low) + ' to ' + pctOf(block.high) + '">' + bar(block.median * 100, null) + '<span class="vw-bar-val">' + pctOf(block.median) + '</span></span>';
-        body += '<tr class="vw-toggle" data-key="' + V.esc(key) + '" data-i="' + index + '"><td><span class="caret">' + (isOpen ? '&#9662;' : '&#9656;') + '</span>' + V.esc(V.plain(block.group)) + '</td><td class="vw-ds">' + (block.members.length || '0') + ' <span class="muted">' + (block.members.length ? nCell({ n_cells: totalCells }) : '') + (extra ? ' +' + extra + ' not pooled' : '') + '</span></td><td class="vw-bar-cell">' + summary + '</td></tr>';
+        else summary = '<span title="Median over ' + block.nRanked + ' dataset(s), from ' + pctOf(block.low) + ' to ' + pctOf(block.high) + '">' + bar(block.median * 100, null, 'rank') + '<span class="vw-bar-val">' + pctOf(block.median) + '</span></span>';
+        body += '<tr class="vw-toggle" data-key="' + V.esc(key) + '" data-i="' + index + '"><td><span class="caret">' + (isOpen ? '&#9662;' : '&#9656;') + '</span>' + V.esc(V.plain(block.group)) + '</td><td class="vw-ds">' + (block.members.length || '0') + ' <span class="muted">' + (block.members.length ? nCell({ n_cells: totalCells }) : '') + (extra ? ' +' + extra + ' not pooled' : '') + '</span></td><td class="vw-bar-cell">' + summary + '</td>' + (two ? '<td class="vw-bar-cell">' + (isNumber(block.medianPct) ? '<span title="Median over ' + block.nRanked + ' dataset(s)">' + bar(block.medianPct, null, '') + '<span class="vw-bar-val">' + pctText(block.medianPct) + '</span></span>' : '<span class="muted">n/a</span>') + '</td>' : '') + '</tr>';
         block.listed.slice().sort(function (a, b) { return (b.pooled - a.pooled) || byRank(a, b); }).forEach(function (row) {
-          body += datasetRow(row, ' data-p="' + index + '"' + (isOpen ? '' : ' hidden'), row.pooled && isNumber(block.median) ? block.median : null);
+          body += datasetRow(row, ' data-p="' + index + '"' + (isOpen ? '' : ' hidden'), row.pooled && isNumber(block.median) ? block.median : null, row.pooled && isNumber(block.medianPct) ? block.medianPct : null);
         });
       });
       host.innerHTML = built.blocks.length ? tableHtml('Cell type', 'Cell type of the datasets in the row, strongest first. Click a row to list its datasets.', 'Datasets', 'Number of datasets pooled into the cell type and the cells in them (n). In vitro and bulk datasets are listed in the opened row but not pooled.', body) : '<div class="vw-placeholder">No dataset consists of one known cell type.</div>';
@@ -194,14 +214,14 @@ window.antExpression = window.antExpression || (function () {
       var rank = stat.rank_mean;
       var modality = (result.modality && result.modality !== 'unknown') ? (result.modality_note === 'sorted live cells' ? 'sorted live cells' : result.modality) : (db.modality || '');
       rows.push(X.classify({ db_id: result.db_id, title: db.title || result.title, group: db.group, category: category, bulk: bulk, pooled: !!CATS[category].typed, n_cells: result.n_cells,
-        rank: rank == null ? null : rank, peers: 0, reason: 'no rank available for this dataset', modality: modality, celltype_col: db.celltype_col || '',
-        note: bulk || stat.pct_nonzero == null ? '' : V.num(stat.pct_nonzero, stat.pct_nonzero < 10 ? 1 : 0) + '% expressing',
+        rank: rank == null ? null : rank, peers: 0, reason: 'no rank available for this dataset', modality: modality,
+        pct: bulk || stat.pct_nonzero == null ? null : stat.pct_nonzero, std: stat.std == null ? null : stat.std, embedding: db.default_embedding || '',
         tip: rank == null ? '' : GENE + ' has a higher mean expression than ' + Math.round(rank * 100) + ' percent of the genes found in this dataset' }, V.GROUPS));
     });
     return rows;
   }
-  X.mount({ kind: 'gene', subject: GENE, categories: CATS,
-    plotLink: function (row) { return V.dbLink(row.db_id) + '/plot/violin?' + (row.celltype_col ? 'x=' + enc(row.celltype_col) + '&' : '') + 'y=' + enc(GENE); },
+  X.mount({ kind: 'gene', subject: GENE, categories: CATS, showPct: true, showStd: true,
+    icons: function (row) { return window.antPlotIcons.row(V.dbLink(row.db_id), GENE, row.embedding); },
     rowsReady: function (draw) {
       V.cached(V.API + '/gene_stats_all?genes=' + enc(GENE)).then(function (stats) { draw(rowsFrom(stats)); })
         .catch(function () { document.getElementById('vx-body').innerHTML = '<div class="vw-error">The expression summary could not be loaded.</div>'; });
@@ -221,9 +241,8 @@ window.antExpression = window.antExpression || (function () {
   var CATS = {{ categories|tojson }};
   var enc = encodeURIComponent;
   var WORKERS = 3;
-  function plotLink(row) {
-    return V.dbLink(row.db_id) + '/plot/violin?' + (row.celltype_col ? 'x=' + enc(row.celltype_col) + '&' : '') + 'y=' + enc(PAYLOAD.column_name || NAME);
-  }
+  // the plot icons of the dataset Genes tab, on the module score column of the dataset
+  function icons(row) { return window.antPlotIcons.row(V.dbLink(row.db_id), PAYLOAD.column_name || NAME, row.embedding); }
   // one row per scored, non-secondary dataset; ranks fill in as each dataset answers (the first call per dataset reads its whole score file)
   function initialRows() {
     var rows = [];
@@ -232,7 +251,7 @@ window.antExpression = window.antExpression || (function () {
       if (!db || db.secondary) return;
       var category = CATS[db.category] ? db.category : 'unclassified';
       rows.push(X.classify({ db_id: dbId, title: db.title || dbId, group: db.group, category: category, bulk: category === 'bulk', pooled: !!CATS[category].typed, n_cells: null,
-        rank: 'pending', peers: 0, reason: '', modality: db.modality || '', celltype_col: db.celltype_col || '', note: '', tip: '' }, V.GROUPS));
+        rank: 'pending', peers: 0, reason: '', modality: db.modality || '', embedding: db.default_embedding || '', tip: '' }, V.GROUPS));
     });
     return rows;
   }
@@ -256,7 +275,7 @@ window.antExpression = window.antExpression || (function () {
       }
     }).catch(function () { row.rank = null; row.reason = 'the rank could not be computed'; });
   }
-  X.mount({ kind: 'geneset', subject: PAYLOAD.display_name || NAME, categories: CATS, plotLink: plotLink,
+  X.mount({ kind: 'geneset', subject: PAYLOAD.display_name || NAME, categories: CATS, showPct: false, icons: icons,
     rowsReady: function (draw) {
       var rows = initialRows();
       var visible = function () { return rows.filter(function (row) { return !row.drop; }); };

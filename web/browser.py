@@ -2800,23 +2800,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     ]
     obs = db.get('obs', {})
 
-    # Default embedding for the "quick scatter" icons on the obs table:
-    #   1. `h5ad_embedding` from .h5ad.mus if present + still visual
-    #   2. else X_umap if present
-    #   3. else X_tsne if present
-    #   4. else the first remaining visual embedding
-    #   5. else None (no scatter icon rendered)
-    _hint = db.get('h5ad_embedding')
-    if _hint and _hint in embeddings:
-        default_embedding = _hint
-    elif 'X_umap' in embeddings:
-        default_embedding = 'X_umap'
-    elif 'X_tsne' in embeddings:
-        default_embedding = 'X_tsne'
-    elif embeddings:
-        default_embedding = embeddings[0]
-    else:
-        default_embedding = None
+    default_embedding = _default_embedding(db)
 
     # Split numerical obs columns into module-score triples (grouped by
     # (catalog, module) so scanpy/starcat/ucell for the same module collapse
@@ -3884,6 +3868,52 @@ def _flatten_annotation_field(value: object) -> str:
 
 # ── gene, geneset and facet views (new tabs next to the atlas / geneset / facet pages) ──
 
+def _default_embedding(db: Dict[str, Any]) -> Optional[str]:
+    """Embedding of the quick scatter icon of a dataset (None when it has none, which hides the icon).
+
+    Preference: ``h5ad_embedding`` from ``.h5ad.mus`` when it is a visual layout; then a UMAP (``X_umap``, else
+    one with "rna" in its name, else the first); then t-SNE (``X_tsne`` first); then any other visual layout;
+    last PCA (``X_pca``, else the first PCA key; the plot page shows the first two components). Other latent
+    spaces (X_scVI, X_harmony, ...) are never offered (``_is_visual_embedding``).
+    """
+    names = list((db.get('embeddings') or {}).keys())
+    visual = [name for name in names if _is_visual_embedding(name)]
+    hint = db.get('h5ad_embedding')
+    if hint and hint in visual:
+        return hint
+
+    def pick(pattern: str, preferred: str) -> Optional[str]:
+        found = sorted(name for name in visual if re.search(pattern, name, re.IGNORECASE))
+        if not found:
+            return None
+        if preferred in found:
+            return preferred
+        return next((name for name in found if 'rna' in name.lower()), found[0])
+
+    umap = pick(r'umap', 'X_umap')
+    if umap:
+        return umap
+    tsne = pick(r't-?sne', 'X_tsne')
+    if tsne:
+        return tsne
+    if visual:
+        return visual[0]
+    pcas = sorted(name for name in names if re.fullmatch(r'(x_)?pca', name, re.IGNORECASE))
+    return pcas[0] if pcas else None
+
+
+def _embedding_kind(name: Any) -> str:
+    """Reader's name of an embedding key for tooltips: UMAP, t-SNE, PCA, else the key itself."""
+    text = str(name or '')
+    for pattern, label in ((r'umap', 'UMAP'), (r't-?sne', 't-SNE'), (r'pca', 'PCA')):
+        if re.search(pattern, text, re.IGNORECASE):
+            return label
+    return text
+
+
+templates.env.globals['embedding_kind'] = _embedding_kind
+
+
 def _view_modality(db: Dict[str, Any]) -> str:
     """Nuclei or cells, for the modality tag of a dataset row in the view panels.
 
@@ -3969,7 +3999,7 @@ def _view_db_map(api_url: str) -> Dict[str, Dict[str, Any]]:
     ``celltype_col`` the per-cell cell type column (may be empty), ``scope`` is the facet scope, ``group`` the cell type group of the dataset-level
     cell type (empty when the dataset is mixed or has several cell types), ``human``
     whether the organism is human, ``secondary`` the reanalysis flag and ``modality``
-    nuclei versus cells (``_view_modality``), ``category`` the dataset category (``_view_category``), ``facet_exclude_reason`` why the dataset is outside the facet layer ('' when it is inside). Empty when the API is unreachable.
+    nuclei versus cells (``_view_modality``), ``category`` the dataset category (``_view_category``), ``facet_exclude_reason`` why the dataset is outside the facet layer ('' when it is inside), ``default_embedding`` the embedding of the quick scatter icons ('' when none). Empty when the API is unreachable.
     """
     result: Dict[str, Dict[str, Any]] = {}
     try:
@@ -3996,6 +4026,7 @@ def _view_db_map(api_url: str) -> Dict[str, Dict[str, Any]]:
             'modality': _view_modality(db),
             'category': _view_category(db),
             'facet_exclude_reason': str(db.get('facet_exclude_reason') or ''),
+            'default_embedding': _default_embedding(db) or '',
         }
     return result
 

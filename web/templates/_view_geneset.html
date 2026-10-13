@@ -150,7 +150,7 @@
           rankCell(groupEntry, null, false) + '</td><td class="num">' + V.num(V.median(list.map(function (row) { return row.sd; })), 3) + '</td></tr>';
         list.forEach(function (row) {
           html += '<tr class="vw-sub" data-p="' + index + '"' + (isOpen ? '' : ' hidden') + '><td title="' + V.esc(row.title) + '"><a href="' + V.dbLink(row.db_id) + '">' + V.esc(row.title.length > 46 ? row.title.slice(0, 44) + '...' : row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span> ' + modalityTag(row.modality) +
-            '<span class="vw-links"><a href="' + V.dbLink(row.db_id) + '">dataset page</a><a href="' + plotLink(row) + '" title="Score of this set in this dataset, by cell type">plot by cell type</a></span></td><td class="num">n=' + V.compact(row.n_cells) + '</td><td class="vw-bar-cell" title="' + V.esc(rankTitle(row.rank)) + '">' + rankCell(row.rank, meanRank, true) + '</td><td class="num">' + V.num(row.sd, 3) + '</td></tr>';
+            '<span class="vw-links"><a href="' + plotLink(row) + '" title="Score of this set in this dataset, by cell type">plot by cell type</a></span></td><td class="num">n=' + V.compact(row.n_cells) + '</td><td class="vw-bar-cell" title="' + V.esc(rankTitle(row.rank)) + '">' + rankCell(row.rank, meanRank, true) + '</td><td class="num">' + V.num(row.sd, 3) + '</td></tr>';
         });
         index += 1;
       });
