@@ -827,7 +827,7 @@ class FacetResults:
         paths = result_paths(self.results_dir, group_folder, stem)
         gene_manifest = self._read_json(paths['gene_manifest'])
         module_manifest = self._read_json(paths['module_manifest'])
-        gene_frame = self._read_parquet(paths['genes'], GENE_UNIT_COLUMNS + ('q_value',))
+        gene_frame = self._read_parquet(paths['genes'], GENE_UNIT_COLUMNS + ('q_value', 'logFC'))
         module_frame = self._read_parquet(
             paths['modules'], ('facet', 'cell_type', 'celltype_source', 'method', 'source',
                                'q_param', 'q_perm', 'contrast', 'level_ref', 'level_test',
@@ -930,6 +930,7 @@ class FacetResults:
                 if kind == 'genes' and record.get('status') == 'ok':
                     unit['genes'] = {'n_tested': _as_int(record.get('n_genes_tested')),
                                      'n_q05': _as_int(record.get('n_sig_q05')),
+                                     'n_up': None, 'n_down': None,
                                      'source': 'manifest'}
 
         # The parquet rows are the results themselves: their counts win over
@@ -965,8 +966,16 @@ class FacetResults:
                     flags['composition_p'] = _finite(first['composition_p'])
                 if kind == 'genes':
                     q_values = pd.to_numeric(group.get('q_value'), errors='coerce')
+                    significant = q_values < Q_THRESHOLD
+                    # direction of the genes at q < 0.05 (logFC > 0 up in the test level, < 0 down)
+                    if 'logFC' in group.columns:
+                        log_fc = pd.to_numeric(group['logFC'], errors='coerce')
+                        n_up, n_down = int((significant & (log_fc > 0)).sum()), int((significant & (log_fc < 0)).sum())
+                    else:
+                        n_up = n_down = None
                     unit['genes'] = {'n_tested': int(len(group)),
-                                     'n_q05': int((q_values < Q_THRESHOLD).sum()),
+                                     'n_q05': int(significant.sum()),
+                                     'n_up': n_up, 'n_down': n_down,
                                      'source': 'results'}
                 else:
                     method_rows = []

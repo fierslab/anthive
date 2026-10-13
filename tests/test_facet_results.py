@@ -219,7 +219,9 @@ def test_summary_units_flags_and_counts(results):
     sex = by_facet['sex']
     assert sex['tested'] and sex['contrast'] == 'm_vs_f'
     assert (sex['level_ref'], sex['level_test'], sex['n_donors_ref'], sex['n_donors_test']) == ('f', 'm', 10, 8)
-    assert sex['genes'] == {'n_tested': len(GENES), 'n_q05': 4}
+    # n_up / n_down: the q < 0.05 genes split by the sign of logFC (XIST down; RPS4Y1, DDX3Y, UTY up)
+    assert sex['genes'] == {'n_tested': len(GENES), 'n_q05': 4, 'n_up': 3, 'n_down': 1}
+    assert {k: by_facet['braak']['genes'][k] for k in ('n_q05', 'n_up', 'n_down')} == {'n_q05': 2, 'n_up': 1, 'n_down': 1}
     methods = {(m['method'], m['source']): m for m in sex['modules']}
     assert methods[('cell_mean', 'geneset')] == {'method': 'cell_mean', 'source': 'geneset', 'n_modules': 3,
                                                  'n_q05_param': 1, 'n_q05_perm': 1}

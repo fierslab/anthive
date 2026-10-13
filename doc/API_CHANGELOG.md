@@ -172,6 +172,9 @@ New endpoints:
 
 Changed (additive):
 
+- `GET /databases/{id}/facet-tests`: each unit's `genes` adds `n_up` and `n_down`, the genes at q < 0.05 with a
+  positive or negative logFC (up or down in the test level, or with the trend). Counted from the gene results file;
+  null when only the run manifest has the counts. Used by the dataset page Facet > Gene matrix.
 - Every gene card replication entry (`/facets/{facet}/effects`, `/genes/{gene}/facet-effects`) and every module card
   replication entry and variant (`/genesets/{study}/{experiment}/{name}/facet-effects`) adds `links`: `{donor_plot,
   donor_plot_svg, donor_plot_adjusted, donor_values, donor_values_available (all counted anchors have stored values),
