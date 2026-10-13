@@ -874,3 +874,22 @@ starCAT modules/scores (`.description` on `/catalogs`). Wire each up when shippe
 - Facets and Facet GS are one grouped tab, `<span class="tab-group" id="tab-group-facet">` in the bar (a span so the bar stays one flat `<div>`), holding three plain `.tab-btn` buttons the existing tab wiring treats as ordinary tabs: the label **Facet** (`data-tab="facets"`, `.tab-group-label`, panel `#tab-facets`, hash `#facets`), the pill **Gene** (`data-tab="facet-gene"`, `.tab-sub`, panel `#tab-facet-gene`, hash `#facet-gene`) and the pill **GS** (`data-tab="facet-gs"`, `.tab-sub` plus `vw-preview`, panel `#tab-facet-gs`). CSS in dataset.html: `.tab-group` draws the tab outline, `.tab-group:has(.tab-btn.active)` makes it the open tab, the active pill is filled. On phones the bar scrolls inside itself as before (`flex: none`).
 - `#tab-facets` keeps the description: `#ds-facets` (heading, `ds-facets-about`, `#fx-unit-line`, `#fx-changed`, Analysed facets, Not analysed yet). `#tab-facet-gene` holds `#ds-facet-effects`: everything from `#facets-effects-head` on (fx_intro, effects blocks, `#fx-untested-extra`, `#fx-excluded`, `#fx-not-tested`) plus `fx_script()`, content unchanged. Both need `show_facets_tab`. With module scores but no facets the label is `.tab-empty` and opens `#ds-no-facets`; the Gene pill is not rendered. GS keeps its lazy load (`mv_ctx.lazy_tab`) and aliases.
 - Hash routing: `#facets`, `#facet-gene`, `#facet-gs` (plus the Facet GS aliases above), `#ds-facets` and `#ds-facet-effects`; any other hash that is the id of an element inside a tab panel (for example `#facets-effects-head`, `#fx-...`) opens that panel and scrolls to it. Clicking a pill writes its hash.
+
+## Facet > Gene matrix (2026-10-13)
+
+- The Gene sub-tab (`#tab-facet-gene`, registry key `dataset-facet-gene`, not approved: the pill is `vw-preview` and the panel starts with
+  `review_banner`) shows a facet x cell type matrix from `_facet_gene_matrix.html` (`fxg_matrix(matrix, by_facet)` markup,
+  `fxg_script(db_id, browse_base, default_embedding)` once at the end of the panel so the markup carries no script). Data:
+  `browser._facet_gene_matrix(summary)` (in `facet_tests.matrix`): columns are the unit strata ordered by cell type group like `V.GROUPS`
+  on the gene page (`_FXG_GROUP_ORDER`, then `celltype_groups.groups()` order), rows the facets with a tested or descriptive unit in
+  `_FXG_FACET_ORDER`; facets with no test anywhere go to `untested_rows` (one line under the matrix). Cells: `tested` (n at q < 0.05,
+  `n_up` / `n_down` from API 2.45, colour step `l0`..`l4` by `_fxg_level`), `descriptive` (below the p-value floor), `nt` with
+  `_fxg_short_reason` ('too few donors', 'one value only', 'no pathology data', ...), `none`.
+- Clicking a cell (one at a time, `.sel`) opens `#fxg-genes` under the matrix: `/facet-tests/genes?facet&cell_type&celltype_source&q=0.05&limit=2000`,
+  columns Gene (link) | log2 fold change (`antEffectBar.barHtml` with the CI, scale from `scaleKey(facet,'lfc')`) | q | donors | plot icons
+  (`antPlotIcons.row`), top 25 then "show all", search box, CSV (`format=csv`) and volcano (`/facet-tests/volcano.png`) links.
+- Per facet a hidden box `fxg-help-<facet>` (the (i) after the row label): age / App NL-G-F notes, then per unit the contrast and donors,
+  `fx_model`, `fx_sex_control`, flag pills, lambda, `fx_unit_notes` and the gene set counts per method (temporary home until donor-level
+  gene set results move to GS).
+- The earlier tables (`_fx_effects_block`, `#fx-table-ant_*`, `#fx-untested-extra`) sit in the hidden box `#fxg-full`, opened by the
+  "full effects table" toggle in the heading; `#fx-...` links open the Gene sub-tab (anchor fallback in `handleHash`) and the box (`openTarget`).

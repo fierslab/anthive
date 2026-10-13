@@ -7933,7 +7933,7 @@ def test_dataset_facet_group_holds_label_gene_and_gs(client, monkeypatch):
     label = re.search(r'<button[^>]*data-tab="facets"[^>]*>Facet', group).group(0)
     assert "tab-group-label" in label and "vw-preview" not in label and "tab-empty" not in label
     gene = re.search(r'<button[^>]*data-tab="facet-gene"[^>]*>Gene', group).group(0)
-    assert "tab-sub" in gene and "vw-preview" not in gene
+    assert "tab-sub" in gene and "vw-preview" in gene        # the matrix view is not approved yet
     gs = re.search(r'<button[^>]*data-tab="facet-gs"[^>]*>GS', group).group(0)
     assert "tab-sub" in gs and "vw-preview" in gs
     assert 'data-tab="facet-gs" role="tab" id="tab-btn-facet-gs"' in group
@@ -7993,3 +7993,63 @@ def test_doc_blocks_without_a_header_keep_the_summary_bar():
     for name in ("genes.html", "api_guide.html", "geneset_variability.html"):
         template = (Path(browser.__file__).parent / "templates" / name).read_text(encoding="utf-8", errors="replace")
         assert "summary=True" in template, name
+
+
+# ── Facet > Gene matrix (2026-10-13) ────────────────────────────────────────
+
+def _matrix_unit(facet, cell_type, tested=True, n=0, up=None, down=None, level='replicate', reason=None):
+    return {"facet": facet, "cell_type": cell_type, "celltype_source": "ant_cell_type", "tested": tested,
+            "analysis_level": level, "flags": {"descriptive_only": level == "below_floor"}, "reason": reason,
+            "genes": {"n_tested": 1000, "n_q05": n, "n_up": up, "n_down": down} if tested else None,
+            "level_ref": "f", "level_test": "m", "n_donors_ref": 5, "n_donors_test": 6, "facet_scope": "human_postmortem"}
+
+
+def test_facet_gene_matrix_orders_columns_like_the_gene_page_and_summarises_cells():
+    summary = {"status": "tested", "units": [
+        _matrix_unit("sex", "GABAergic neuron", n=3, up=2, down=1),
+        _matrix_unit("sex", "microglial cell", n=1500, up=900, down=600),
+        _matrix_unit("braak", "microglial cell", n=0, up=0, down=0, level="below_floor"),
+        _matrix_unit("disease", "microglial cell", tested=False, level="cell", reason="level with < 3 donors (control=0, AD=12)"),
+        _matrix_unit("disease", "GABAergic neuron", tested=False, level="cell", reason="level with < 3 donors (control=2, AD=12)"),
+        _matrix_unit("sex", "astrocyte", n=40, up=30, down=10),
+    ]}
+    matrix = browser._facet_gene_matrix(summary)
+    assert [c["cell_type"] for c in matrix["columns"]] == ["microglial cell", "astrocyte", "GABAergic neuron"]
+    assert [r["facet"] for r in matrix["rows"]] == ["sex", "braak"]
+    sex = {c.get("cell_type"): c for c in matrix["rows"][0]["cells"]}
+    assert sex["microglial cell"]["n"] == 1500 and sex["microglial cell"]["n_up"] == 900 and sex["microglial cell"]["level"] == 4
+    assert sex["GABAergic neuron"]["level"] == 1 and sex["astrocyte"]["level"] == 2
+    assert matrix["rows"][1]["cells"][0]["state"] == "descriptive" and matrix["rows"][1]["cells"][1]["state"] == "none"
+    assert matrix["untested_rows"] == [{"facet": "disease", "label": "Disease", "reason": "one value only, too few donors"}]
+    assert matrix["has_direction"] is True
+    assert browser._facet_gene_matrix({"status": "not_tested", "units": [_matrix_unit("sex", "x", tested=False)]}) is None
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("level with < 3 donors (f=2, m=9)", "too few donors"),
+    ("level with < 3 donors (control=0, nlgf=4)", "one value only"),
+    ("braak: 2 replicates / 1 distinct values (need 4 / 3)", "one value only"),
+    ("age: 3 replicates / 3 distinct values (need 4 / 3)", "too few donors"),
+    ("age_adjusted: no pathology covariate (Braak and disease known for fewer than 80 percent)", "no pathology data"),
+    ("host_sex: not recorded (no m or f value in ant_host_sex on any replicate)", "not recorded"),
+])
+def test_facet_gene_matrix_short_reasons(reason, expected):
+    assert browser._fxg_short_reason({"reason": reason}) == expected
+
+
+def test_dataset_gene_subtab_shows_the_matrix_and_keeps_the_full_table(client):
+    text = client.get("/browse/GroupA/ds1").text
+    panel = text.split('id="tab-facet-gene"')[1].split("</section>")[0]
+    assert 'data-view="dataset-facet-gene"' in panel                     # preview banner
+    assert 'id="fxg-matrix"' in panel and 'class="fxg-cell l' in panel
+    assert 'data-help-for="fxg-help-sex"' in panel and '<div class="doc-box" id="fxg-help-sex"' in panel
+    help_box = panel.split('id="fxg-help-sex"')[1].split('<div class="doc-box"')[0]
+    assert "Model:" in help_box and "Sex positive control" in help_box
+    # the earlier tables sit in the hidden full effects table box, reachable by the toggle next to the heading
+    assert 'data-help-for="fxg-full"' in panel.split("</h2>")[0]
+    full = panel.split('<div class="doc-box" id="fxg-full"')[1]
+    assert 'id="fx-table-ant_sex"' in full and 'hidden' in panel.split('id="fxg-full"')[1][:120]
+    # gene list script: genes endpoint, csv, volcano, plot icons, effect bar
+    for needle in ("/facet-tests", "/genes?", "&format=csv", "/volcano.png?", "antPlotIcons.row(", "antEffectBar", "show all "):
+        assert needle in panel, needle
+    assert "dataset-facet-gene" in browser.VIEW_REGISTRY and "dataset-facet-gene" not in browser.APPROVED_VIEWS

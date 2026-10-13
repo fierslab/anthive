@@ -226,6 +226,7 @@
   @media (max-width: 560px) { table.fx-keys th { white-space: normal; } }
   /* Empty-state tab (nothing to download, no caveats): muted and never highlighted, still clickable.
      Distinct from .vw-preview (a view that is not approved yet), which carries a "preview" marker. */
+  .fxg-full-toggle { font-size: 11.5px; margin-left: 12px; text-decoration: underline dotted; }
   .tab-btn.tab-empty, .tab-btn.tab-empty:hover, .tab-btn.tab-empty.active { color: #a3aab2; font-weight: 400; }
   .tab-btn.tab-empty.active { background: #fafbfc; }
   /* Caveats tab-button — filled palette-red pill so it reads instantly
@@ -524,7 +525,7 @@
      div, so the bar markup stays one flat <div>. #}
   <span class="tab-group" id="tab-group-facet">
     <button type="button" class="tab-btn tab-group-label{% if not show_facets_tab %} tab-empty{% endif %}" data-tab="facets" role="tab" id="tab-btn-facets" title="{{ 'The facets of this dataset and how its columns map onto them' if show_facets_tab else 'This dataset has no facet columns' }}">Facet{% if show_facets_tab %}<span class="tab-count">{{ n_facets_total }}</span>{% endif %}</button>
-    {% if show_facets_tab %}<button type="button" class="tab-btn tab-sub" data-tab="facet-gene" role="tab" id="tab-btn-facet-gene" title="Effects by facet: donor-level differences per facet and cell type">Gene</button>{% endif %}
+    {% if show_facets_tab %}<button type="button" class="tab-btn tab-sub {{ view_class('dataset-facet-gene') }}" data-tab="facet-gene" role="tab" id="tab-btn-facet-gene" title="{{ view_tip('dataset-facet-gene', 'Effects by facet: genes that differ between donors, per facet and cell type.') }}">Gene</button>{% endif %}
     {% if n_module_scores %}<button type="button" class="tab-btn tab-sub {{ view_class('dataset-facet-gs') }}" data-tab="facet-gs" role="tab" id="tab-btn-facet-gs" title="{{ view_tip('dataset-facet-gs', 'Gene set scores compared with the cell annotation columns, per cell and descriptive.') }}">GS</button>{% endif %}
   </span>
   {% endif %}
@@ -968,18 +969,27 @@
   </div>
 </section>
 
-{# ── Facet group, Gene sub-tab: the effects by facet, moved out of the Facets panel unchanged (2026-10-13). #}
+{# ── Facet group, Gene sub-tab (2026-10-13): the facet x cell type matrix of gene results (_facet_gene_matrix.html,
+   not approved yet: VIEW_REGISTRY key dataset-facet-gene). The earlier per facet and cell type tables are kept in the
+   hidden box #fxg-full ("full effects table"); #fx-... links open it. #}
+{% from "_facet_gene_matrix.html" import fxg_matrix, fxg_script %}
+{% from "_macros.html" import review_banner as _review_banner %}
 <section class="tab-panel" id="tab-facet-gene" role="tabpanel">
+  {{ _review_banner('dataset-facet-gene') }}
   <div id="ds-facet-effects">
     {% if facet_tests and facet_tests.n_units_tested %}
-    <h2 class="section-head" id="facets-effects-head">Effects by facet{{ doc_toggle('fx-about', 'About these effects and the flags') }}</h2>
+    <h2 class="section-head" id="facets-effects-head">Effects by facet{{ doc_toggle('fx-about', 'About these effects and the flags') }}<button type="button" class="doc-toggle fxg-full-toggle" data-help-for="fxg-full" aria-controls="fxg-full" aria-expanded="false" title="The earlier tables, one per facet and cell type: show or hide">full effects table</button></h2>
     {{ fx_intro('dataset', facet_tests.n_permutations) }}
+    {% if facet_tests.matrix %}{{ fxg_matrix(facet_tests.matrix, _fx) }}{% endif %}
+    {% call doc_block('Full effects table', id='fxg-full') %}
+    <p class="fx-intro">The earlier view: one table per facet with a row per cell type, its model and flags, and the genes and gene sets behind each row.</p>
     {% for f in dataset_facets + dataset_facets_other %}{% if _fx.get(f.facet) %}{{ _fx_effects_block(f.facet, _fx[f.facet]) }}{% endif %}{% endfor %}
     {% for col in _fx_extra %}{{ _fx_effects_block(col, _fx[col]) }}{% endfor %}
     {% if _fx_untested_extra %}
     <div class="fx-none" id="fx-untested-extra">
       {% for col in _fx_untested_extra %}<div>{{ col[4:]|capitalize }} was not tested ({% for item in _fx[col].untested %}{{ item.cell_type }}{% if item.analysis_level == 'cell' %} <span class="fx-pill warn" title="Too few replicates for a test: the numbers describe cells, not replicates.">cell-level, descriptive only</span>{% endif %}, {{ item.reason or 'no reason recorded' }}{{ '; ' if not loop.last }}{% endfor %}).</div>{% endfor %}</div>
     {% endif %}
+    {% endcall %}
     {% else %}
     {% if facet_tests and facet_tests.excluded %}
     <h2 class="section-head" id="facets-effects-head">Facet analysis{{ doc_toggle('fx-excluded-about', 'About datasets left out of the facet analysis') }}</h2>
@@ -997,6 +1007,7 @@
     {% endif %}
     {% endif %}
   </div>
+  {% if facet_tests and facet_tests.matrix %}{{ fxg_script(db_id, '/browse/' ~ folder_browse_id ~ '/' ~ file_id, default_embedding) }}{% endif %}
   {{ fx_script() }}
 </section>
 {% elif n_module_scores %}

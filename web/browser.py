@@ -66,6 +66,7 @@ VIEW_REGISTRY: Dict[str, str] = {
     'geneset-variability': 'Gene set page, Donor variability tab',
     'geneset-genes': 'Gene set page, Genes tab',
     'geneset-page': 'Gene set page, Gene set page (old) tab',
+    'dataset-facet-gene': 'Dataset page, Facet > Gene sub-tab (facet x cell type matrix of gene results)',
     'dataset-facet-gs': 'Dataset page, Facet GS tab (gene set scores by annotation column, per cell)',
 }
 APPROVED_VIEWS = frozenset({
@@ -5210,6 +5211,109 @@ def _fx_reason_text(status: Optional[str], reason: Optional[str]) -> str:
     return text or 'no reason was recorded'
 
 
+# Dataset Facet > Gene matrix (2026-10-13): facet rows in this order, cell type columns in the order of the gene page
+# Facet DE matrix (``V.GROUPS`` in _views.html), so microglia sits in the same place.
+_FXG_FACET_ORDER = ('sex', 'disease', 'braak', 'braak_threshold', 'age', 'age_adjusted', 'apoe4_carrier', 'apoe4_dose',
+                    'app_nlgf', 'graft_sex', 'host_sex')
+_FXG_GROUP_ORDER = ('microglia', 'astrocyte', 'oligodendrocyte', 'oligodendrocyte precursor cell', 'endothelial cell',
+                    'excitatory neuron', 'inhibitory neuron', 'perivascular macrophage')
+
+
+def _fxg_short_reason(unit: Dict[str, Any]) -> str:
+    """A few words why a facet x cell type unit has no test ('too few donors', 'one value only', ...)."""
+    reason = str(unit.get('reason') or unit.get('analysis_level_reason') or '')
+    noun = 'animals' if str(unit.get('replicate_unit') or '') in ('animal', 'host') or \
+        unit.get('facet_scope') == 'xenograft_human_in_mouse' else 'donors'
+    counts = [int(n) for n in re.findall(r'=(\d+)', reason)]
+    distinct = re.search(r'(\d+) replicates / (\d+) distinct values', reason)
+    if reason.startswith('level with <'):
+        return 'one value only' if counts and min(counts) == 0 else f'too few {noun}'
+    if distinct:
+        return 'one value only' if int(distinct.group(2)) <= 1 else f'too few {noun}'
+    if 'no pathology covariate' in reason:
+        return 'no pathology data'
+    if 'too few replicates' in reason:
+        return f'too few {noun}'
+    if 'not recorded' in reason:
+        return 'not recorded'
+    if 'mixed per animal' in reason:
+        return 'mixed per animal'
+    if 'excluded' in reason:
+        return 'excluded'
+    return 'not tested'
+
+
+def _fxg_level(count: int) -> int:
+    """Colour step of a matrix cell from its number of genes at q < 0.05 (0 to 4)."""
+    if count <= 0:
+        return 0
+    return 1 if count < 10 else 2 if count < 100 else 3 if count < 1000 else 4
+
+
+def _facet_gene_matrix(summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Facet x cell type matrix of one dataset's gene results, for the dataset Facet > Gene sub-tab.
+
+    Rows are the facets with at least one tested or descriptive unit; facets with no test in any cell type are
+    listed in ``untested_rows`` with a short reason. A cell carries the genes at q < 0.05 split by direction
+    (``n_up`` / ``n_down`` from the API, null on servers before 2.45), or the reason there is no test.
+    """
+    units = [u for u in summary.get('units') or [] if isinstance(u, dict) and u.get('facet')]
+    if not any(u.get('tested') for u in units):
+        return None
+    group_rank = {name: i for i, name in enumerate(_FXG_GROUP_ORDER)}
+    other_rank = {name: i for i, name in enumerate(celltype_groups.groups())}
+    columns: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for unit in units:
+        key = (str(unit.get('cell_type')), str(unit.get('celltype_source') or ''))
+        if key not in columns:
+            group = celltype_groups.group_of(unit.get('cell_type'))
+            stratum = _fx_stratum(unit).replace('|', ', ')
+            columns[key] = {'cell_type': key[0], 'celltype_source': key[1], 'group': group, 'stratum': stratum,
+                            'sort': (0, group_rank[group]) if group in group_rank
+                            else (1, other_rank.get(group, 999), key[0].lower()),
+                            'key': f'{key[0]}|{key[1]}'}
+    ordered_columns = sorted(columns.values(), key=lambda c: (c['sort'], c['cell_type'].lower(), c['stratum']))
+    facet_rank = {name: i for i, name in enumerate(_FXG_FACET_ORDER)}
+    by_facet: Dict[str, Dict[Tuple[str, str], Dict[str, Any]]] = {}
+    for unit in units:
+        by_facet.setdefault(str(unit['facet']), {})[(str(unit.get('cell_type')), str(unit.get('celltype_source') or ''))] = unit
+    rows, untested_rows = [], []
+    for facet in sorted(by_facet, key=lambda name: (facet_rank.get(name, 99), name)):
+        cells = []
+        has_result = False
+        for column in ordered_columns:
+            unit = by_facet[facet].get((column['cell_type'], column['celltype_source']))
+            if unit is None:
+                cells.append({'state': 'none'})
+                continue
+            no_test = unit.get('analysis_level') in ('cell', 'below_floor') or bool((unit.get('flags') or {}).get('descriptive_only'))
+            genes = unit.get('genes') or {}
+            if unit.get('tested') and not no_test and genes:
+                has_result = True
+                count = int(genes.get('n_q05') or 0)
+                cells.append({'state': 'tested', 'n': count, 'n_up': genes.get('n_up'), 'n_down': genes.get('n_down'),
+                              'n_tested': genes.get('n_tested'), 'level': _fxg_level(count),
+                              'facet': facet, 'cell_type': column['cell_type'],
+                              'celltype_source': column['celltype_source'],
+                              'contrast': _facet_contrast_label(unit), 'donors': _fx_donors_text(unit),
+                              'level_ref': unit.get('level_ref'), 'level_test': unit.get('level_test')})
+            elif unit.get('tested'):
+                has_result = True
+                cells.append({'state': 'descriptive', 'short': 'descriptive only',
+                              'title': f'Below the p-value floor ({_floor_text(unit)}): the estimate has no p or q value.'})
+            else:
+                cells.append({'state': 'nt', 'short': _fxg_short_reason(unit),
+                              'title': str(unit.get('reason') or unit.get('analysis_level_reason') or 'not tested')})
+        label = _FACET_TEST_LABELS.get(facet, facet.replace('_', ' '))
+        if has_result:
+            rows.append({'facet': facet, 'label': label, 'cells': cells})
+        else:
+            shorts = sorted({c['short'] for c in cells if c.get('short')})
+            untested_rows.append({'facet': facet, 'label': label, 'reason': ', '.join(shorts) or 'not tested'})
+    return {'columns': ordered_columns, 'rows': rows, 'untested_rows': untested_rows,
+            'has_direction': any(c.get('n_up') is not None for r in rows for c in r['cells'] if c['state'] == 'tested')}
+
+
 def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Optional[Dict[str, Any]]:
     """Dataset-page data for the facet effects, grouped by facet column.
 
@@ -5240,6 +5344,7 @@ def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Opt
         'facet_scope': summary.get('facet_scope') if summary.get('n_units') else None,
         'dataset_changed': bool(summary.get('dataset_changed')),
         'by_facet': by_facet,
+        'matrix': _facet_gene_matrix(summary),
         'n_units_tested': summary.get('n_units_tested') or 0,
         'cohort': summary.get('cohort') or None,
         # the summary names the unit; older servers only carry it on the units

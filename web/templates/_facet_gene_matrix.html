@@ -1,0 +1,197 @@
+{# Dataset page, Facet > Gene sub-tab (2026-10-13): facet x cell type matrix of the donor-level gene results.
+
+   fxg_matrix(matrix, by_facet)   markup; fxg_script(db_id, browse_base, default_embedding) the gene list script,
+   called once after it (kept apart so the matrix markup carries no script).
+     matrix:    browser._facet_gene_matrix(summary): {columns, rows, untested_rows, has_direction}
+     by_facet:  facet_tests.by_facet (unit views per facet column), for the per facet help boxes
+     db_id:     composite dataset id (API calls)
+     browse_base: /browse/<group>/<file> (plot icons)
+
+   Rows are facets, columns cell type strata in the gene page order (microglia first). A cell is the number of genes at
+   q < 0.05 with the up and down split; colour steps by count. Clicking a cell opens the gene list of that facet and
+   cell type under the matrix (one at a time), from /databases/{id}/facet-tests/genes. The model, flags, sex control
+   and gene set counts of each facet sit in a hidden box opened by the (i) after the facet name. #}
+{% from "_macros.html" import doc_block, doc_toggle %}
+{% from "_facet_effects.html" import fx_model, fx_sex_control, fx_unit_notes, fx_module_counts %}
+
+{% macro fxg_styles() -%}
+<style>
+  .fxg-wrap { margin: 6px 0 4px; }
+  table.fxg-matrix { border-collapse: separate; border-spacing: 3px; font-size: 12px; width: auto; }
+  table.fxg-matrix th, table.fxg-matrix td { border: 0; text-transform: none; letter-spacing: normal; background: none; }
+  table.fxg-matrix th { font-weight: 500; color: var(--text-muted); font-size: 11px; text-align: center; vertical-align: bottom; padding: 2px 4px; max-width: 110px; line-height: 1.25; }
+  table.fxg-matrix th.fxg-rowhead { max-width: none; text-align: left; color: var(--text); font-size: 12px; white-space: nowrap; vertical-align: middle; padding-right: 10px; }
+  table.fxg-matrix th .fxg-stratum { display: block; font-size: 10px; color: #94a3b8; }
+  table.fxg-matrix td { padding: 0; text-align: center; }
+  .fxg-cell { display: inline-flex; flex-direction: column; align-items: center; justify-content: center; min-width: 76px; min-height: 36px; padding: 3px 6px;
+              border-radius: 4px; border: 1px solid transparent; font: inherit; font-size: 12px; line-height: 1.25; font-variant-numeric: tabular-nums; cursor: pointer; }
+  .fxg-cell .n { font-weight: 600; }
+  .fxg-cell .ud { font-size: 10.5px; white-space: nowrap; }
+  .fxg-cell .up { color: #a8441f; } .fxg-cell .down { color: #235d94; }
+  .fxg-cell.l0 { background: #f1f3f5; color: #5b636b; }
+  .fxg-cell.l1 { background: #e3eef0; color: #1f3a40; }
+  .fxg-cell.l2 { background: #c6dde1; color: #14323a; }
+  .fxg-cell.l3 { background: #9cc4cc; color: #0e2a30; }
+  .fxg-cell.l4 { background: #6fa6b2; color: #08222a; }
+  .fxg-cell.l4 .up { color: #7a2c10; } .fxg-cell.l4 .down { color: #123f6b; }
+  .fxg-cell:hover { border-color: #335C67; }
+  .fxg-cell.sel { outline: 2px solid #E09F3E; outline-offset: 1px; }
+  .fxg-cell.nt, .fxg-cell.desc { cursor: default; background: #fafbfc; color: #9aa1a9; border: 1px dashed #dde1e5; font-size: 10.5px; }
+  .fxg-cell.desc { color: #8a6d2c; border-color: #ead9b0; }
+  .fxg-cell.none { cursor: default; background: none; color: #c9ced4; }
+  .fxg-legend { font-size: 11.5px; color: var(--text-muted); margin: 4px 0 2px; max-width: 900px; }
+  .fxg-untested { font-size: 11.5px; color: var(--text-muted); margin: 2px 0 8px; max-width: 900px; }
+  .fxg-help h4 { margin: 8px 0 2px; }
+  .fxg-genes { margin: 10px 0 14px; padding: 8px 12px; border: 1px solid var(--border); border-left: 4px solid #335C67; border-radius: 5px; max-width: 1000px; background: #fff; }
+  .fxg-genes[hidden] { display: none; }
+  .fxg-genes-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 6px; }
+  .fxg-genes-head .t { font-weight: 600; font-size: 13px; }
+  .fxg-genes-head .m { color: var(--text-muted); font-size: 11.5px; }
+  .fxg-genes-head input { font: inherit; font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; width: 150px; }
+  .fxg-genes-head a, .fxg-genes-head button.fxg-close { font-size: 11.5px; }
+  .fxg-genes-head button.fxg-close { background: none; border: 0; color: var(--link); cursor: pointer; padding: 0; margin-left: auto; }
+  table.fxg-gene-table { border-collapse: collapse; font-size: 12px; width: 100%; }
+  table.fxg-gene-table th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--text-muted); font-weight: 500; padding: 3px 8px; border-bottom: 1px solid var(--border); }
+  table.fxg-gene-table td { padding: 3px 8px; border-bottom: 1px solid var(--border-light); vertical-align: middle; }
+  table.fxg-gene-table td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  table.fxg-gene-table td.plots { white-space: nowrap; }
+  .fxg-more { background: none; border: 0; color: var(--link); cursor: pointer; font: inherit; font-size: 12px; padding: 4px 0; }
+  @media (max-width: 640px) {
+    .fxg-cell { min-width: 58px; }
+    table.fxg-matrix th.fxg-rowhead { white-space: normal; min-width: 90px; }
+    table.fxg-gene-table td.plots, table.fxg-gene-table th.plots { display: none; }
+  }
+</style>
+{%- endmacro %}
+
+{% macro fxg_cell(cell, row) -%}
+{%- if cell.state == 'tested' -%}
+<button type="button" class="fxg-cell l{{ cell.level }}" data-facet="{{ cell.facet }}" data-cell-type="{{ cell.cell_type }}" data-celltype-source="{{ cell.celltype_source }}"
+  data-label="{{ row.label }}" data-contrast="{{ cell.contrast }}" data-donors="{{ cell.donors }}" data-n="{{ cell.n }}"
+  title="{{ row.label }}, {{ cell.cell_type }}: {{ cell.n }} of {{ cell.n_tested or '?' }} genes at q &lt; 0.05{% if cell.n_up is not none %} ({{ cell.n_up }} up, {{ cell.n_down }} down){% endif %}. Click for the genes.">
+  <span class="n">{{ "{:,}".format(cell.n) }}</span>{% if cell.n and cell.n_up is not none %}<span class="ud"><span class="up">&uarr;{{ "{:,}".format(cell.n_up) }}</span> <span class="down">&darr;{{ "{:,}".format(cell.n_down) }}</span></span>{% endif %}</button>
+{%- elif cell.state == 'descriptive' -%}
+<span class="fxg-cell desc" title="{{ cell.title }}">descriptive<br>only</span>
+{%- elif cell.state == 'nt' -%}
+<span class="fxg-cell nt" title="Not tested: {{ cell.title }}">not tested<br>{{ cell.short }}</span>
+{%- else -%}
+<span class="fxg-cell none" title="No unit for this facet and cell type">&middot;</span>
+{%- endif -%}
+{%- endmacro %}
+
+{% macro fxg_matrix(matrix, by_facet) -%}
+{{ fxg_styles() }}
+<div class="fxg-wrap" id="fxg">
+  <p class="fxg-legend" id="fxg-legend">Each cell: genes at q &lt; 0.05 for that facet in that cell type{% if matrix.has_direction %}, split into <span style="color:#a8441f">&uarr; higher</span> and <span style="color:#235d94">&darr; lower</span> in the second group of the contrast (or with the trend){% endif %}. Darker means more genes. Click a cell for its genes.</p>
+  <div class="table-wrap"><table class="fxg-matrix" id="fxg-matrix">
+    <thead><tr><th></th>{% for col in matrix.columns %}<th scope="col" title="{{ col.cell_type }}{% if col.group != col.cell_type %} (group: {{ col.group }}){% endif %}">{{ col.cell_type }}{% if col.stratum %}<span class="fxg-stratum">{{ col.stratum }}</span>{% endif %}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for row in matrix.rows %}
+      <tr data-facet="{{ row.facet }}"><th scope="row" class="fxg-rowhead">{{ row.label }}{{ doc_toggle('fxg-help-' ~ row.facet, 'About ' ~ row.label ~ ': model, flags and gene set counts') }}</th>
+        {% for cell in row.cells %}<td>{{ fxg_cell(cell, row) }}</td>{% endfor %}</tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% if matrix.untested_rows %}<p class="fxg-untested" id="fxg-untested">Not tested in any cell type: {% for item in matrix.untested_rows %}{{ item.label }} ({{ item.reason }}){{ '; ' if not loop.last else '.' }}{% endfor %}</p>{% endif %}
+  {% for row in matrix.rows %}
+  {% call doc_block('About ' ~ row.label, id='fxg-help-' ~ row.facet) %}
+  <div class="fxg-help">
+    {% if row.facet == 'age' %}<p>Not adjusted for pathology: age and AD pathology go together in every brain bank, so this partly re-detects pathology. Compare it with the adjusted row. Donors under 60 are left out (<a href="/help#glossary-age-twins">glossary</a>).</p>{% endif %}
+    {% if row.facet == 'age_adjusted' %}<p>Adjusted for pathology: Braak stage (else pathologic AD) is in the model, so what remains is age beyond pathology. Donors under 60 are left out (<a href="/help#glossary-age-twins">glossary</a>).</p>{% endif %}
+    {% if row.facet == 'app_nlgf' %}<p>Host animals are the replicates. Large effects only (a handful of animals per genotype); live-cell isolation makes dissociation-response genes suspect. Animals are compared within one grafted line and timepoint (<a href="/help#glossary-app-nlgf">glossary</a>).</p>{% endif %}
+    {% for column, slot in by_facet.items() %}{% for unit in slot.tested if unit.facet == row.facet %}
+    <h4>{{ unit.cell_type }}{% if unit.stratum %} <span class="muted">({{ unit.stratum }})</span>{% endif %}</h4>
+    <div class="fx-model">{{ unit.contrast_label }}; {{ unit.donors_text }}</div>
+    {{ fx_model(unit) }}{{ fx_sex_control(unit) }}
+    {% if unit.pills %}<div class="fx-flags">{% for pill in unit.pills %}<span class="fx-pill {{ pill[1] }}" title="{{ pill[2] }}"{% if pill|length > 3 and pill[3] %} data-glossary="{{ pill[3] }}"{% endif %}>{{ pill[0] }}</span>{% endfor %}</div>{% endif %}
+    {% if unit.get('lambda_gc') is not none %}<div class="fx-model">Genomic inflation lambda {{ '%.2f'|format(unit.get('lambda_gc')) }}{% if unit.get('inflated') %}: many genes shift together, so read the p values with care{% endif %}.</div>{% endif %}
+    {{ fx_unit_notes(unit) }}
+    {% if unit.modules_view %}<div class="fx-model">Gene sets at q &lt; 0.05 (model test | permutation test, of those tested):</div><div class="fx-mods">{{ fx_module_counts(unit) }}</div>{% endif %}
+    {% endfor %}{% endfor %}
+  </div>
+  {% endcall %}
+  {% endfor %}
+  <div class="fxg-genes" id="fxg-genes" hidden aria-live="polite"></div>
+</div>
+{%- endmacro %}
+
+{# The click-to-open gene list script; call once after fxg_matrix (at the end of the panel). #}
+{% macro fxg_script(db_id, browse_base, default_embedding) -%}
+<script>
+(function () {
+  var root = document.getElementById('fxg');
+  if (!root) return;
+  var DB = {{ db_id|tojson }}, BASE = {{ browse_base|tojson }}, EMBEDDING = {{ (default_embedding or '')|tojson }};
+  var API = '/api/databases/' + DB.split('/').map(encodeURIComponent).join('/') + '/facet-tests';
+  var box = document.getElementById('fxg-genes');
+  var current = null, rows = [], shown = 25, query = '';
+  function esc(text) { return String(text == null ? '' : text).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function unitQuery(cell) {
+    return 'facet=' + encodeURIComponent(cell.dataset.facet) + '&cell_type=' + encodeURIComponent(cell.dataset.cellType) +
+      (cell.dataset.celltypeSource ? '&celltype_source=' + encodeURIComponent(cell.dataset.celltypeSource) : '');
+  }
+  function qText(q) { return q == null ? 'n/a' : q === 0 ? '&lt; 1e-300' : (q < 0.001 ? Number(q).toExponential(1) : Number(q).toFixed(3)); }
+  function donors(row) {
+    if (row.n_donors_ref != null && row.n_donors_test != null && row.level_ref) return esc(row.level_ref) + ' ' + row.n_donors_ref + ' / ' + esc(row.level_test) + ' ' + row.n_donors_test;
+    return row.n_donors != null ? String(row.n_donors) : '';
+  }
+  function effect(row, facet) {
+    var EB = window.antEffectBar;
+    if (!EB) return row.logFC == null ? '' : Number(row.logFC).toFixed(2);
+    var scale = EB.scaleKey(facet, 'lfc');
+    return '<span class="eb-row">' + EB.barHtml({ scale: scale, est: row.logFC, lo: row.ci_low, hi: row.ci_high, sig: row.q_value != null && row.q_value < 0.05, counted: true, whisker: 'ci',
+      title: 'log2 fold change ' + (row.logFC == null ? 'n/a' : Number(row.logFC).toFixed(2)) }) + ' ' + EB.signed(row.logFC, scale) + '</span>';
+  }
+  function draw() {
+    var facet = current.dataset.facet;
+    var q = query.trim().toUpperCase();
+    var list = q ? rows.filter(function (row) { return String(row.gene || '').toUpperCase().indexOf(q) >= 0; }) : rows;
+    var body = list.slice(0, shown).map(function (row) {
+      var gene = String(row.gene || '');
+      return '<tr><td><a href="/genes/' + encodeURIComponent(gene) + '">' + esc(gene) + '</a></td><td class="num">' + effect(row, facet) + '</td><td class="num">' + qText(row.q_value) +
+        '</td><td class="num">' + donors(row) + '</td><td class="plots obs-plots">' + (window.antPlotIcons ? window.antPlotIcons.row(BASE, gene, EMBEDDING) : '') + '</td></tr>';
+    }).join('');
+    var table = box.querySelector('tbody');
+    table.innerHTML = body || '<tr><td colspan="5" class="muted">No gene matches.</td></tr>';
+    var more = box.querySelector('.fxg-more');
+    more.hidden = list.length <= shown;
+    more.textContent = 'show all ' + list.length.toLocaleString();
+  }
+  function open(cell) {
+    if (current) current.classList.remove('sel');
+    if (current === cell && !box.hidden) { box.hidden = true; current = null; return; }
+    current = cell; cell.classList.add('sel'); shown = 25; query = ''; rows = [];
+    var label = cell.dataset.label + ' in ' + cell.dataset.cellType;
+    var params = unitQuery(cell);
+    box.innerHTML = '<div class="fxg-genes-head"><span class="t">' + esc(label) + '</span><span class="m">' + esc(cell.dataset.contrast) + '; ' + esc(cell.dataset.donors) + '</span>' +
+      '<input type="search" class="fxg-search" placeholder="search genes" aria-label="search the genes of this cell">' +
+      '<a href="' + API + '/genes?' + params + '&q=0.05&limit=100000&format=csv" download>CSV</a>' +
+      '<a href="' + API + '/volcano.png?' + params + '" target="_blank" rel="noopener" title="Volcano plot of this facet and cell type">volcano</a>' +
+      '<button type="button" class="fxg-close">close</button></div>' +
+      '<div class="table-wrap"><table class="fxg-gene-table"><thead><tr><th>Gene</th><th>log2 fold change</th><th>q</th><th>Donors</th><th class="plots">Plots</th></tr></thead>' +
+      '<tbody><tr><td colspan="5" class="muted">loading the genes&hellip;</td></tr></tbody></table></div><button type="button" class="fxg-more" hidden></button>';
+    box.hidden = false;
+    box.querySelector('.fxg-close').addEventListener('click', function () { box.hidden = true; if (current) current.classList.remove('sel'); current = null; });
+    box.querySelector('.fxg-search').addEventListener('input', function (event) { query = event.target.value; shown = 25; draw(); });
+    box.querySelector('.fxg-more').addEventListener('click', function () { shown = Infinity; draw(); });
+    var requested = cell;
+    fetch(API + '/genes?' + params + '&q=0.05&sort=q&limit=2000', { credentials: 'same-origin' })
+      .then(function (response) { if (!response.ok) throw new Error('HTTP ' + response.status); return response.json(); })
+      .then(function (data) {
+        if (current !== requested) return;
+        rows = data.rows || data.genes || [];
+        if (!rows.length) { box.querySelector('tbody').innerHTML = '<tr><td colspan="5" class="muted">No gene is below q 0.05 here.</td></tr>'; return; }
+        draw();
+      })
+      .catch(function (error) {
+        if (current !== requested) return;
+        box.querySelector('tbody').innerHTML = '<tr><td colspan="5" class="muted">The genes could not be loaded (' + esc(error.message) + ').</td></tr>';
+      });
+  }
+  root.addEventListener('click', function (event) {
+    var cell = event.target.closest ? event.target.closest('button.fxg-cell') : null;
+    if (cell) open(cell);
+  });
+})();
+</script>
+{%- endmacro %}
