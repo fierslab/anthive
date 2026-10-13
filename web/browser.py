@@ -131,6 +131,25 @@ def install_error_pages(app: Any) -> None:
         return _error_page(request, message, exc.status_code)
 
 
+# Display labels for controlled vocabulary values (S9): raw tokens stay in tooltips and the id strip.
+_VALUE_LABELS = {
+    '10x_chromium': '10x Chromium', '10x_chromium_3p_v2': '10x Chromium 3p v2', '10x_chromium_3p_v3': '10x Chromium 3p v3',
+    '10x_chromium_5p': '10x Chromium 5p', '10x_multiome': '10x Multiome', '10x_visium': '10x Visium', '10x_xenium': '10x Xenium',
+    '10x_scrna': '10x single cell', '10x_snrna': '10x single nucleus', 'smart-seq2': 'Smart-seq2', 'smart_seq2': 'Smart-seq2',
+    'post_mortem_tissue': 'post-mortem tissue', 'in_vitro_2d': 'in vitro (2D)', 'in_vitro_3d': 'in vitro (3D)',
+    'bulk_tissue': 'bulk tissue', 'human_postmortem': 'human post-mortem', 'xenograft_human_in_mouse': 'xenograft (human in mouse)',
+}
+
+
+def display_value(value: Any) -> str:
+    """A readable label for a controlled vocabulary value ('10x_chromium' -> '10x Chromium'); lists are joined."""
+    if isinstance(value, (list, tuple)):
+        return ', '.join(display_value(item) for item in value)
+    text = str(value if value is not None else '').strip()
+    return _VALUE_LABELS.get(text.lower(), text.replace('_', ' '))
+
+
+templates.env.filters['display_value'] = display_value
 templates.env.globals['view_approved'] = view_approved
 # MA plots need a mean expression, which only the pseudobulk-style DE methods store
 templates.env.globals['de_has_mean'] = lambda method: _de_method_level(method).startswith('donor')
@@ -2280,8 +2299,8 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             is_icon = css == 'icon'
             header_pills.append({
                 'cls': css,
-                'text': f'{abbrev} {full}' if is_icon else full,
-                'title': f'{label}: {full}',
+                'text': f'{abbrev} {display_value(full)}' if is_icon else display_value(full),
+                'title': f'{label}, {full}',
             })
         elif abbrev == 'mix':
             var_fields.append(field)   # differs between datasets → keep column

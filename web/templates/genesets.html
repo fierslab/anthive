@@ -256,7 +256,7 @@
             data-help="Organism(s) represented across the study's experiments.">Organism <span class="info" title="Click to sort by organism">ⓘ</span><span class="sort-ind"></span></th>
         <th class="sortable" data-col="n_experiments" data-help="Number of experiments under this study.">Experiments <span class="info" title="Click to sort by number of experiments">ⓘ</span><span class="sort-ind"></span></th>
         <th class="sortable" data-col="n_genesets" data-help="Total number of gene sets across all experiments in this study.">Gene sets <span class="info" title="Click to sort by number of gene sets">ⓘ</span><span class="sort-ind"></span></th>
-        <th data-help="DOI or PMID link when the study is annotated.">Ref</th>
+        <th data-help="Link to the paper (DOI or PubMed) when the study is annotated.">Paper</th>
       </tr>
     </thead>
     <tbody>
@@ -278,10 +278,9 @@
         <td data-label="Organism">{% for org in s.organisms %}<span class="ctx-pill" title="organism: {{ org }}">{{ org }}</span>{% if not loop.last %} {% endif %}{% else %}<span class="muted"></span>{% endfor %}</td>
         <td data-label="Experiments" class="muted">{{ s.n_experiments }}</td>
         <td data-label="Gene sets" class="muted">{{ s.n_genesets }}</td>
-        <td data-label="Ref" class="muted mono" style="font-size:11px">
-          {% if s.doi %}<a href="https://doi.org/{{ s.doi }}" target="_blank" rel="noopener" class="st-doi">doi</a>{% endif %}
-          {% if s.pmid %} <a href="https://pubmed.ncbi.nlm.nih.gov/{{ s.pmid }}/" target="_blank" rel="noopener" class="st-doi">pmid</a>{% endif %}
-          {% if not s.doi and not s.pmid %}-{% endif %}
+        <td data-label="Paper" class="muted" style="font-size:11px">
+          {% if s.doi %}<a href="https://doi.org/{{ s.doi }}" target="_blank" rel="noopener" class="st-doi" title="{{ s.doi }}">DOI</a>{% endif %}
+          {% if s.pmid %} <a href="https://pubmed.ncbi.nlm.nih.gov/{{ s.pmid }}/" target="_blank" rel="noopener" class="st-doi" title="PMID {{ s.pmid }}">PubMed</a>{% endif %}
         </td>
       </tr>
       {% endfor %}

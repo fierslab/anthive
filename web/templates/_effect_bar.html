@@ -24,8 +24,8 @@
   .eb .eb-tick { position: absolute; top: 5px; bottom: 5px; width: 1px; background: #d3d8de; }
   .eb .eb-bar { position: absolute; top: 5px; height: 8px; min-width: 2px; box-sizing: border-box; border: 1.5px solid var(--eb-color); background: var(--eb-color); border-radius: 1px; }
   .eb .eb-bar.open { background: #fff; }
-  .eb.up { --eb-color: #cf5a2e; }
-  .eb.down { --eb-color: #2c6fb0; }
+  .eb.up { --eb-color: var(--effect-up, #cf5a2e); }
+  .eb.down { --eb-color: var(--effect-down, #2c6fb0); }
   .eb.grey { --eb-color: #9aa1a9; }
   .eb .eb-whisker { position: absolute; top: 8px; height: 2px; background: #3b4754; opacity: .85; }
   .eb .eb-whisker.range { background: none; border-top: 2px solid #3b4754; height: 0; top: 8px; }
@@ -46,7 +46,7 @@
   .eb-num .q { color: var(--text-muted); font-size: 10.5px; margin-left: 5px; }
   .eb-legend { font-size: 11px; color: var(--text-muted); margin: 4px 0 0; max-width: 900px; line-height: 1.45; }
   .eb-legend .sw { display: inline-block; width: 18px; height: 7px; vertical-align: 0; margin: 0 2px; box-sizing: border-box; border: 1.5px solid #9aa1a9; background: #9aa1a9; }
-  .eb-legend .sw.up { border-color: #cf5a2e; background: #cf5a2e; } .eb-legend .sw.down { border-color: #2c6fb0; background: #2c6fb0; }
+  .eb-legend .sw.up { border-color: var(--effect-up); background: var(--effect-up); } .eb-legend .sw.down { border-color: var(--effect-down); background: var(--effect-down); }
   .eb-legend .sw.open { background: #fff; }
   @media (max-width: 640px) { .eb { min-width: 56px; } .eb-axis { font-size: 9px; } }
 </style>

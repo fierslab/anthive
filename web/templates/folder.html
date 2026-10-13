@@ -122,7 +122,7 @@
 {% from "_macros.html" import breadcrumb %}
 <div class="grp-top">
   <div class="grp-top-main">
-    {{ breadcrumb([("collections", None)], ids=[("collection", group_id)]) }}
+    {{ breadcrumb([(folder_name, None)], ids=[("collection", group_id)]) }}
     <h1 class="page-title" style="margin-top:4px">{{ folder_name }}{% if group_id and group_id != folder_name %} <span class="mono" style="font-size:13px;font-weight:normal;color:var(--text-muted)">({{ group_id }})</span>{% endif %}</h1>
   </div>
   {% if is_admin %}

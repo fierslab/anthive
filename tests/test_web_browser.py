@@ -5218,7 +5218,7 @@ def _bc_id_chips(bc_html: str) -> list[str]:
 
 
 @pytest.mark.parametrize("path,expected_current", [
-    ("/browse/GroupA",                "collections"),     # folder page: crumb is "collections"
+    ("/browse/GroupA",                "Group A Study"),   # folder page: crumb is the collection name
     ("/browse/GroupA/ds1",            "Dataset One"),     # dataset page
     ("/browse/GroupA/ds1/plot/scatter", "scatter"),       # plot page (partial match ok)
     ("/genesets/StudyX/Exp1/gs_up",   "gs_up"),           # geneset detail
@@ -8295,3 +8295,15 @@ def test_install_error_pages_renders_html_for_pages_and_json_for_api():
     assert page.status_code == 404 and 'id="error-card"' in page.text and "This page does not exist." in page.text
     api = test_client.get("/no/such/page", headers={"accept": "application/json"})
     assert api.status_code == 404 and api.json() == {"detail": "Not Found"}
+
+
+def test_labels_vocabulary_and_effect_colours_are_shared():
+    assert browser.display_value("10x_chromium") == "10x Chromium" and browser.display_value("post_mortem_tissue") == "post-mortem tissue"
+    assert browser.display_value(["a_b", "10x_multiome"]) == "a b, 10x Multiome"
+    base = (Path(browser.__file__).parent / "templates" / "base.html").read_text(encoding="utf-8", errors="replace")
+    assert "--effect-up: #cf5a2e; --effect-down: #2c6fb0" in base
+    bar = (Path(browser.__file__).parent / "templates" / "_effect_bar.html").read_text(encoding="utf-8")
+    assert "var(--effect-up" in bar and "var(--effect-down" in bar
+    dataset = (Path(browser.__file__).parent / "templates" / "dataset.html").read_text(encoding="utf-8")
+    assert "Stats from <code>/gene_stats</code>" not in dataset and "genes-numbers-about" in dataset
+    assert "facet_test_label(column)|lower if facet_test_label(column)[1:2].islower()" in dataset

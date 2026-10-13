@@ -7,7 +7,7 @@
 {%- from "_facet_effects.html" import fx_table, fx_untested -%}
 <div class="ds-facet-fx" data-facet="{{ column }}">
   {% if slot.tested %}
-  <h3 class="subsection-head">Effects of {{ facet_test_label(column)|lower if column[4:] in ('age', 'age_adjusted') else column[4:] }} {% if slot.scope %}<span class="fx-scope" data-scope="{{ slot.scope }}" title="Results are counted within one scope; scopes are never mixed.">{{ facet_scope_label(slot.scope) }}</span> {% endif %}<span class="muted">({{ slot.tested|length }} {{ 'cell type' if slot.tested|length == 1 else 'cell types' }} tested)</span></h3>
+  <h3 class="subsection-head">Effects of {{ facet_test_label(column)|lower if facet_test_label(column)[1:2].islower() else facet_test_label(column) }} {% if slot.scope %}<span class="fx-scope" data-scope="{{ slot.scope }}" title="Results are counted within one scope; scopes are never mixed.">{{ facet_scope_label(slot.scope) }}</span> {% endif %}<span class="muted">({{ slot.tested|length }} {{ 'cell type' if slot.tested|length == 1 else 'cell types' }} tested)</span></h3>
   {% if column in ('ant_age', 'ant_age_adjusted') %}<p class="fx-intro fx-age-note">{% if column == 'ant_age' %}Not adjusted for pathology: age and AD pathology go together in every brain bank, so this partly re-detects pathology. Compare it with the adjusted twin. Donors under 60 are left out.{% else %}Adjusted for pathology: Braak stage (else pathologic AD) is in the model, so what remains is age beyond pathology. Donors under 60 are left out.{% endif %} <a href="/help#glossary-age-twins">Glossary</a></p>{% endif %}
   {% if column == 'ant_app_nlgf' %}<p class="fx-intro fx-app-note">Host animals are the replicates. Large effects only (a handful of animals per genotype); live-cell isolation makes dissociation-response genes suspect. Animals are compared within one grafted line and timepoint. <a href="/help#glossary-app-nlgf">Glossary</a></p>{% endif %}
   {{ fx_table(slot.tested, 'fx-table-' ~ column) }}
@@ -699,11 +699,12 @@
     {% endif %}
     </tbody>
   </table></div>
-  <div class="muted" style="font-size:11px;margin-top:4px">
-    Stats from <code>/gene_stats</code> (log-normalised expression layer).
-    <b>Rank among genes</b> is the percent of genes detected in this dataset whose average expression over all cells (zeros counted) is lower than this gene's; it depends on how many genes the dataset kept, so compare it within a dataset only.
-    <b>Std. dev.</b> is the standard deviation of the log-normalised expression over all cells (samples for bulk datasets), zeros included; the bar shows its share of the highest value in the table.
-  </div>
+  {% from "_macros.html" import doc_block as _gdoc_block, doc_toggle as _gdoc_toggle %}
+  <div class="muted" style="font-size:11px;margin-top:4px">The numbers use the log-normalised expression layer.{{ _gdoc_toggle('genes-numbers-about', 'About these numbers') }}</div>
+  {% call _gdoc_block('About these numbers', id='genes-numbers-about') %}
+    <p><b>Rank among genes</b> is the percent of genes detected in this dataset whose average expression over all cells (zeros counted) is lower than this gene's; it depends on how many genes the dataset kept, so compare it within a dataset only.
+    <b>Std. dev.</b> is the standard deviation of the log-normalised expression over all cells (samples for bulk datasets), zeros included; the bar shows its share of the highest value in the table.</p>
+  {% endcall %}
 </section>
 {% endif %}
 
@@ -730,12 +731,12 @@
     <table class="obs-stats-tbl auto" style="font-size:12px">
       <tbody>
       {% if context_bar %}{% set _cb = context_bar %}
-        {% if _cb.organism.full %}<tr><td class="colname">organism</td><td title="{{ _cb.organism.full }}">{{ _cb.organism.full }}</td></tr>{% endif %}
-        {% if _cb.technology.full %}<tr><td class="colname">technology</td><td title="{{ _cb.technology.full }}">{{ _cb.technology.full }}</td></tr>{% endif %}
-        {% if _cb.celltype.full %}<tr><td class="colname">cell type</td><td title="{{ _cb.celltype.full }}">{{ _cb.celltype.full }}</td></tr>{% endif %}
-        {% if _cb.tissue.full %}<tr><td class="colname">tissue</td><td title="{{ _cb.tissue.full }}">{{ _cb.tissue.full }}</td></tr>{% endif %}
-        {% if _cb.disease.full %}<tr><td class="colname">disease</td><td title="{{ _cb.disease.full }}">{{ _cb.disease.full }}</td></tr>{% endif %}
-        {% if _cb.suspension_type.full %}<tr><td class="colname">prep</td><td title="{{ _cb.suspension_type.full }}">{{ _cb.suspension_type.full }}</td></tr>{% endif %}
+        {% if _cb.organism.full %}<tr><td class="colname">organism</td><td title="{{ _cb.organism.full }}">{{ _cb.organism.full|display_value }}</td></tr>{% endif %}
+        {% if _cb.technology.full %}<tr><td class="colname">technology</td><td title="{{ _cb.technology.full }}">{{ _cb.technology.full|display_value }}</td></tr>{% endif %}
+        {% if _cb.celltype.full %}<tr><td class="colname">cell type</td><td title="{{ _cb.celltype.full }}">{{ _cb.celltype.full|display_value }}</td></tr>{% endif %}
+        {% if _cb.tissue.full %}<tr><td class="colname">tissue</td><td title="{{ _cb.tissue.full }}">{{ _cb.tissue.full|display_value }}</td></tr>{% endif %}
+        {% if _cb.disease.full %}<tr><td class="colname">disease</td><td title="{{ _cb.disease.full }}">{{ _cb.disease.full|display_value }}</td></tr>{% endif %}
+        {% if _cb.suspension_type.full %}<tr><td class="colname">prep</td><td title="{{ _cb.suspension_type.full }}">{{ _cb.suspension_type.full|display_value }}</td></tr>{% endif %}
         {% if _cb.year %}<tr><td class="colname">year</td><td>{{ _cb.year }}</td></tr>{% endif %}
       {% endif %}
       {% if dataset_meta %}
@@ -913,7 +914,7 @@
   <div class="fxg-wrap" id="fxs">
     <div class="fxg-variants" role="group" aria-label="Gene set score variant">{% for v in _mods.variants %}<button type="button" data-variant="{{ v.key }}" class="{{ 'on' if v.key == _mods.default }}" aria-pressed="{{ 'true' if v.key == _mods.default else 'false' }}">{{ v.label }}</button>{% endfor %}</div>
     <span class="fxg-variant-label">showing: {% for v in _mods.variants if v.key == _mods.default %}{{ v.label }}{% endfor %}</span>
-    <p class="fxg-legend" id="fxs-legend">Each cell: gene sets significant for that facet in that cell type, split into <span style="color:#a8441f">&uarr; higher</span> and <span style="color:#235d94">&darr; lower</span> in the second group of the contrast (or with the trend). Darker means more gene sets. Click a cell for its gene sets.</p>
+    <p class="fxg-legend" id="fxs-legend">Each cell: gene sets significant for that facet in that cell type, split into <span style="color:var(--effect-up-ink)">&uarr; higher</span> and <span style="color:var(--effect-down-ink)">&darr; lower</span> in the second group of the contrast (or with the trend). Darker means more gene sets. Click a cell for its gene sets.</p>
     {% for v in _mods.variants %}{{ fxg_matrix(v.matrix, 'fxs-' ~ v.key, 'modules', hidden=(v.key != _mods.default)) }}{% endfor %}
     {% set _seen = [] %}{% set _rows = [] %}{% for v in _mods.variants %}{% for row in v.matrix.rows %}{% if row.facet not in _seen %}{% set _ = _seen.append(row.facet) %}{% set _ = _rows.append(row) %}{% endif %}{% endfor %}{% endfor %}
     {{ fxg_help_boxes(_rows, facet_tests.by_facet, 'modules') }}
@@ -1030,7 +1031,7 @@
     {% if facet_tests.matrix %}
     {{ fxg_styles() }}
     <div class="fxg-wrap" id="fxg">
-      <p class="fxg-legend" id="fxg-legend">Each cell: genes at q &lt; 0.05 for that facet in that cell type{% if facet_tests.matrix.has_direction %}, split into <span style="color:#a8441f">&uarr; higher</span> and <span style="color:#235d94">&darr; lower</span> in the second group of the contrast (or with the trend){% endif %}. Darker means more genes. Click a cell for its genes.</p>
+      <p class="fxg-legend" id="fxg-legend">Each cell: genes at q &lt; 0.05 for that facet in that cell type{% if facet_tests.matrix.has_direction %}, split into <span style="color:var(--effect-up-ink)">&uarr; higher</span> and <span style="color:var(--effect-down-ink)">&darr; lower</span> in the second group of the contrast (or with the trend){% endif %}. Darker means more genes. Click a cell for its genes.</p>
       {{ fxg_matrix(facet_tests.matrix, 'fxg') }}
       {{ fxg_help_boxes(facet_tests.matrix.rows, _fx, 'genes') }}
       <div class="fxg-genes" id="fxg-genes" hidden aria-live="polite"></div>
