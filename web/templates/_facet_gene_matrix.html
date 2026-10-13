@@ -33,12 +33,12 @@
   .fxg-cell.l2 { background: #c6dde1; color: #14323a; }
   .fxg-cell.l3 { background: #9cc4cc; color: #0e2a30; }
   .fxg-cell.l4 { background: #6fa6b2; color: #08222a; }
-  .fxg-cell.l4 .up { color: #7a2c10; } .fxg-cell.l4 .down { color: #123f6b; }
+  /* the up and down counts sit on a light chip so the one warm/cool ink pair reads on every colour step */
+  .fxg-cell .ud .up, .fxg-cell .ud .down { background: rgba(255,255,255,.82); border-radius: 3px; padding: 0 2px; }
   .fxg-cell:hover { border-color: #335C67; }
   .fxg-cell.sel { outline: 2px solid #E09F3E; outline-offset: 1px; }
   /* cell-level (descriptive) DE: one flat colour, never a count scale */
   .fxg-cell.lcell { background: #eef0f2; color: #6b7280; border: 1px solid #dde1e5; }
-  .fxg-cell.lcell .up, .fxg-cell.lcell .down { color: #6b7280; }
   table.fxg-matrix th.fxg-corner { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: #94a3b8; vertical-align: bottom; }
   .ode-term-toggle { background: none; border: 0; padding: 4px 0 0; font: inherit; font-size: 12px; font-weight: 600; color: var(--text); cursor: pointer; text-align: left; }
   .ode-term-toggle::before { content: "\25B8  "; font-size: 9px; color: var(--text-muted); }

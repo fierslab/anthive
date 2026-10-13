@@ -22,6 +22,7 @@ modules.
 
 import importlib.util
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -8307,3 +8308,83 @@ def test_labels_vocabulary_and_effect_colours_are_shared():
     dataset = (Path(browser.__file__).parent / "templates" / "dataset.html").read_text(encoding="utf-8")
     assert "Stats from <code>/gene_stats</code>" not in dataset and "genes-numbers-about" in dataset
     assert "facet_test_label(column)|lower if facet_test_label(column)[1:2].islower()" in dataset
+
+
+# ── Regression guards from the 2026-10-13 sweep ─────────────────────────────
+
+def _visible_html(html):
+    import re
+    html = re.sub(r"<script.*?</script>", "", html, flags=re.S)
+    return re.sub(r"<style.*?</style>", "", html, flags=re.S)
+
+
+@pytest.mark.parametrize("variant", ["plain", "lineage", "scores", "bulk", "other_de", "ds2"])
+def test_dataset_page_renders_no_raw_template_text(client, monkeypatch, variant):
+    def fake(api_url, path, **kwargs):
+        if variant == "other_de":
+            return _other_de_fake(api_url, path, **kwargs)
+        result = _fake_api_get(api_url, path)
+        if path.endswith("/info") and isinstance(result, dict):
+            result = dict(result)
+            if variant == "lineage":
+                result.update(designation="reanalysis", reanalysis_of=["GroupA/ds2"], donor_group="rosmap", has_donor_uid=True)
+            if variant == "scores":
+                obs = dict(result.get("obs", {}))
+                obs["numerical"] = list(obs.get("numerical", [])) + ["Sierksma2025::WGCNA::Brown_Lysosome"]
+                result["obs"] = obs
+            if variant == "bulk":
+                result.update(technology="bulk_rna", experimental_system="bulk_tissue")
+        return result
+    monkeypatch.setattr(browser, "_api_get", fake)
+    html = client.get("/browse/GroupA/ds2" if variant == "ds2" else "/browse/GroupA/ds1").text
+    visible = _visible_html(html)
+    assert "{{" not in visible and "}}" not in visible and "{%" not in visible and "%}" not in visible, variant
+
+
+@pytest.mark.parametrize("path", ["/", "/browse/GroupA", "/genesets", "/library", "/facets", "/donor-groups",
+                                  "/browse/GroupA/ds1/plot/violin", "/browse/GroupA/ds1/plot/donor?facet=sex&cell_type=x&gene=XIST"])
+def test_other_pages_render_no_raw_template_text(client, path):
+    visible = _visible_html(client.get(path).text)
+    assert "{{" not in visible and "}}" not in visible and "{%" not in visible, path
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize("path", ["/browse/GroupA/ds1", "/browse/GroupA/ds1/plot/violin", "/browse/GroupA",
+                                  "/browse/GroupA/ds1/plot/donor?facet=sex&cell_type=x&gene=XIST", "/library", "/"])
+def test_rendered_page_scripts_parse(client, tmp_path, path):
+    import re, subprocess
+    html = client.get(path).text
+    for index, script in enumerate(re.findall(r"<script>(.*?)</script>", html, re.S)):
+        target = tmp_path / f"s{index}.js"
+        target.write_text(script, encoding="utf-8")
+        done = subprocess.run(["node", "--check", str(target)], capture_output=True, text=True)
+        assert done.returncode == 0, f"{path} script {index}: {done.stderr[:400]}"
+
+
+def test_up_is_warm_and_down_is_cool_from_one_token_pair():
+    import re
+    templates = Path(browser.__file__).parent / "templates"
+    matrix = (templates / "_facet_gene_matrix.html").read_text(encoding="utf-8")
+    # every rule that colours .up / .down text uses the ink tokens, and nothing overrides them per colour step
+    rules = re.findall(r"([^{}\n]*\.(?:up|down)\b[^{}]*)\{([^}]*)\}", matrix)
+    coloured = [(sel, body) for sel, body in rules if "color:" in body.replace("background", "")]
+    assert coloured, "no up/down colour rule found"
+    for selector, body in coloured:
+        colour = re.search(r"(?<!background-)color:\s*([^;]+)", body).group(1)
+        if ".up" in selector:
+            assert "--effect-up" in colour, selector
+        if ".down" in selector:
+            assert "--effect-down" in colour, selector
+    base = (templates / "base.html").read_text(encoding="utf-8", errors="replace")
+    up = re.search(r"--effect-up: (#[0-9a-f]{6})", base).group(1)
+    down = re.search(r"--effect-down: (#[0-9a-f]{6})", base).group(1)
+    assert int(up[1:3], 16) > int(up[5:7], 16) and int(down[5:7], 16) > int(down[1:3], 16)    # warm red-orange, cool blue
+    for name in ("dataset.html", "_other_de.html", "_facet_gene_matrix.html"):
+        text = (templates / name).read_text(encoding="utf-8")
+        assert "#a8441f" not in text and "#235d94" not in text and "#7a2c10" not in text, name
+
+
+def test_tab_bar_stays_compact():
+    base = (Path(browser.__file__).parent / "templates" / "base.html").read_text(encoding="utf-8", errors="replace")
+    assert "padding: 6px 10px; font-size: 12px;" in base                       # tab buttons
+    assert "min-width: 14px; padding: 0 3px; margin-left: 3px;" in base         # badges

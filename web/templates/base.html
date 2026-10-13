@@ -17,9 +17,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         :root {
-            --tab-group-tint: #eef4f5;
+            --tab-group-tint: #eef4f5;   /* faint teal behind the dataset Facet tab group (Facet / Gene / GS) */
             /* signed effects, the same warm (up) and cool (down) everywhere; *-ink are the same hues darker, for text */
-            --effect-up: #cf5a2e; --effect-down: #2c6fb0; --effect-up-ink: #a8441f; --effect-down-ink: #235d94;   /* faint teal behind the dataset Facet tab group (Facet / Gene / GS) */
+            --effect-up: #cf5a2e; --effect-down: #2c6fb0; --effect-up-ink: #a8441f; --effect-down-ink: #235d94;
             /* Palette refresh - dark teal is the new primary, cream for warn
                backgrounds, amber medium, red high, dark red high accent. */
             --bar-bg: #335C67;
@@ -405,7 +405,7 @@
         }
         .tab-btn {
             background: transparent; border: 1px solid transparent; border-bottom: none;
-            padding: 6px 14px; font-size: 12px; font-family: var(--font);
+            padding: 6px 10px; font-size: 12px; font-family: var(--font);
             color: var(--text-muted); cursor: pointer;
             border-radius: 6px 6px 0 0;
             position: relative;
@@ -418,8 +418,8 @@
         }
         /* one tab badge style site-wide; overrides (caveats) change colour only */
         .tab-btn .tab-count, .tab-count {
-            display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 6px; border-radius: 9px;
-            line-height: 16px; font-size: 10.5px; font-weight: 600; text-align: center; color: var(--text-muted);
+            display: inline-block; min-width: 14px; padding: 0 3px; margin-left: 3px; border-radius: 8px;
+            line-height: 15px; font-size: 10px; font-weight: 600; text-align: center; color: var(--text-muted);
             font-family: var(--font-mono); box-sizing: border-box;
         }
         .tab-btn.active .tab-count { color: var(--text); }

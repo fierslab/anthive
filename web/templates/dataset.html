@@ -206,17 +206,17 @@
   .data-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; margin-top: 8px; }
   /* Facet tab group (2026-10-13): one bordered tab holding the label and the Gene / GS sub-tab pills.
      The buttons are plain .tab-btn for the tab wiring; the group draws the tab outline. */
-  .tab-group { display: inline-flex; align-items: center; flex: none; gap: 3px; padding: 0 6px 0 0; background: var(--tab-group-tint);
+  .tab-group { display: inline-flex; align-items: center; flex: none; gap: 2px; padding: 0 4px 0 0; background: var(--tab-group-tint);
                border: 1px solid var(--border-light, #e5e7eb); border-bottom: none; border-radius: 6px 6px 0 0; }
   /* open: keeps the tint, gains the full border and joins the panel; the open label is bold and an open pill is filled */
   .tab-group:has(.tab-btn.active) { border-color: var(--border); margin-bottom: -1px; padding-bottom: 1px; box-shadow: inset 0 2px 0 #335C67; }
   .tab-group .tab-btn.tab-sub { background: #fff; }
   .tab-group .tab-btn, .tab-group .tab-btn.active { border-color: transparent; margin-bottom: 0; background: transparent; }
   .tab-group .tab-btn.tab-group-label.active { color: var(--text); font-weight: 600; }
-  .tab-group .tab-btn.tab-sub { padding: 1px 9px; font-size: 11px; line-height: 1.6; border: 1px solid var(--border); border-radius: 10px; }
+  .tab-group .tab-btn.tab-sub { padding: 1px 7px; font-size: 11px; line-height: 1.6; border: 1px solid var(--border); border-radius: 10px; }
   .tab-group .tab-btn.tab-sub:hover { background: var(--hover); }
   .tab-group .tab-btn.tab-sub.active { background: #2f4f5f; border-color: #2f4f5f; color: #fff; }
-  .tab-group .tab-btn.tab-sub.vw-preview::after { margin-left: 4px; }
+  .tab-group .tab-btn.tab-sub.vw-preview::after { margin-left: 3px; padding: 0 3px; font-size: 8px; letter-spacing: .2px; }
   .tab-group .tab-btn.tab-sub.vw-preview.active::after { background: rgba(255,255,255,.2); color: #fff; }
   /* Facet label panel: key/value tags with an (i) per label. */
   table.fx-keys { border-collapse: collapse; font-size: 12.5px; margin: 2px 0 10px; }
@@ -487,8 +487,8 @@
 <div class="ds-lineage" id="ds-lineage">
   {% set _desig = info.designation %}
   <span class="lineage-pill {{ _desig }}" id="ds-designation" title="{% if _desig == 'primary' %}Primary data: these cells are served by this dataset only. It counts in pooled numbers and towards facet replication.{% elif _desig == 'reanalysis' %}Reanalysis: these cells are also served by another dataset. It is left out of pooled numbers and never counts towards facet replication.{% else %}Not yet classified as primary or reanalysis (no is_secondary key in the .md).{% endif %}">{{ 'primary data' if _desig == 'primary' else ('reanalysis' if _desig == 'reanalysis' else 'designation unresolved') }}</span>
-  {% if info.reanalysis_of %}<span id="ds-reanalysis-of"><span class="pk">reanalysis of</span> {% for parent in info.reanalysis_of %}<a href="/browse/{{ parent }}">parent }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
-  {% if info.donor_group %}<span id="ds-donor-group"><span class="pk">donor group</span> <a href="/donor-groups#dg-{{ info.donor_group }}" title="Datasets whose donors come from the same donor collection">info.donor_group }}</a></span>{% endif %}
+  {% if info.reanalysis_of %}<span id="ds-reanalysis-of"><span class="pk">reanalysis of</span> {% for parent in info.reanalysis_of %}<a href="/browse/{{ parent }}">{{ parent }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
+  {% if info.donor_group %}<span id="ds-donor-group"><span class="pk">donor group</span> <a href="/donor-groups#dg-{{ info.donor_group }}" title="Datasets whose donors come from the same donor collection">{{ info.donor_group }}</a></span>{% endif %}
   {% if info.has_donor_uid %}<span class="muted" title="The dataset publishes ant_donor_uid, so its donors can be matched across datasets of the group">donor ids published</span>{% endif %}
 </div>
 {% endif %}
@@ -689,9 +689,9 @@
       <td class="g-var-cell">{{ bar_scale('var', 'std. dev., scaled to the highest in the table', 'm-std') }}<span class="vw-bar-val g-var"></span></td>
       <td class="obs-plots">
         {% if has_duckdb %}
-        <a class="obs-plot-icon" href="{{ _b }}/plot/histogram?x={{ gene|urlencode }}" title="histogram of {{ gene }}">chart_icon('bar') }}</a>
-        <a class="obs-plot-icon" href="{{ _b }}/plot/ecdf?x={{ gene|urlencode }}" title="ECDF of {{ gene }}">chart_icon('line') }}</a>
-        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ gene|urlencode }}" title="{{ embedding_kind(default_embedding) }} scatter ({{ default_embedding }}), coloured by {{ gene }}">chart_icon('umap') }}</a>{% endif %}
+        <a class="obs-plot-icon" href="{{ _b }}/plot/histogram?x={{ gene|urlencode }}" title="histogram of {{ gene }}">{{ chart_icon('bar') }}</a>
+        <a class="obs-plot-icon" href="{{ _b }}/plot/ecdf?x={{ gene|urlencode }}" title="ECDF of {{ gene }}">{{ chart_icon('line') }}</a>
+        {% if default_embedding %}<a class="obs-plot-icon" href="{{ _b }}/plot/scatter?embedding={{ default_embedding|urlencode }}&color={{ gene|urlencode }}" title="{{ embedding_kind(default_embedding) }} scatter ({{ default_embedding }}), coloured by {{ gene }}">{{ chart_icon('umap') }}</a>{% endif %}
         {% endif %}
       </td>
     </tr>
@@ -785,7 +785,7 @@
     <h2 class="section-head">Embeddings <span class="info" title="Per-cell 2D layouts (UMAP, tSNE, custom). Each links to a scatter plot on that embedding.">ⓘ</span></h2>
     <div style="margin-bottom:4px">
       {% for emb in info.obsm_keys %}
-        {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
+        {% if has_duckdb %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/scatter?embedding={{ emb|urlencode }}" class="chip" title="scatter on {{ emb }}">{{ emb }}</a>{% else %}<code>{{ emb }}</code>{% endif %}
       {% endfor %}
     </div>
   </div>
@@ -857,7 +857,7 @@
         var rank = row.rank == null ? '<span class="muted" title="' + esc(row.reason || 'too few cells or too few other gene sets to rank') + '">n/a</span>'
           : antBar.html(row.rank, { kind: 'm-rank', title: 'higher mean score than ' + Math.round(row.rank * 100) + '% of the ' + row.n_modules_compared + ' other gene sets scored on the same cells' }) + '<span class="vw-bar-val">' + Math.round(row.rank * 100) + '%</span>';
         var std = row.std == null ? '<span class="muted">n/a</span>' : antBar.html(row.std / maxStd, { kind: 'm-std', title: 'std. dev. ' + row.std.toFixed(3) }) + '<span class="vw-bar-val">' + (row.std >= 10 ? row.std.toFixed(1) : row.std.toFixed(2)) + '</span>';
-        return '<tr class="gene-item"><td class="colname"><a href="/genesets/' + encodeURIComponent(row.study) + '/' + encodeURIComponent(row.experiment) + '/' + encodeURIComponent(row.name) + '">+ esc(row.display_name) + '</a> <span class="muted" style="font-size:11px">' + esc(row.study + '/' + row.experiment) + '</span></td>' +
+        return '<tr class="gene-item"><td class="colname"><a href="/genesets/' + encodeURIComponent(row.study) + '/' + encodeURIComponent(row.experiment) + '/' + encodeURIComponent(row.name) + '">' + esc(row.display_name) + '</a> <span class="muted" style="font-size:11px">' + esc(row.study + '/' + row.experiment) + '</span></td>' +
           '<td class="num g-num-cell">' + (row.n_cells == null ? '' : esc(compact(row.n_cells))) + '</td><td class="g-rank-cell">' + rank + '</td><td class="g-var-cell">' + std + '</td><td class="obs-plots">' + window.antPlotIcons.row(base, row.column_name, embedding) + '</td></tr>';
       }).join('');
       countEl.textContent = '(' + list.length + (list.length === rows.length ? '' : ' of ' + rows.length) + ')';
@@ -969,7 +969,7 @@
         {% call doc_block('About the control animals', id='fx-help-control') %}<p>What the control hosts of an App NL-G-F comparison are. A humanised-App host isolates the familial AD mutations; a wild-type host does not (<a href="/help#glossary-app-nlgf">glossary</a>).</p>{% endcall %}</td></tr>{% endif %}
       {% if replicate and replicate.disease_text %}<tr id="fx-disease-basis"><th>Disease basis{{ doc_toggle('fx-help-disease', 'About the disease basis') }}</th><td><span class="fx-tag">{{ replicate.disease_text }}</span>{% if replicate.disease_basis not in ['braak_cerad', 'nia_reagan', 'adnc'] %} <span class="fx-key-note">not pathology based, so not combined with other cohorts</span>{% endif %}
         {% call doc_block('About the disease basis', id='fx-help-disease') %}<p>How this dataset defines AD versus control. Only pathology-based definitions (Braak and CERAD, NIA-Reagan or ADNC) are combined across cohorts; clinical or author diagnoses are shown but never counted (<a href="/help#glossary-disease-basis">glossary</a>).</p>{% endcall %}</td></tr>{% endif %}
-      {% if info and info.donor_group %}<tr id="fx-donor-group"><th>Donor group{{ doc_toggle('fx-help-donor-group', 'About donor groups') }}</th><td><a class="fx-tag" href="/donor-groups#dg-{{ info.donor_group }}">info.donor_group }}</a>
+      {% if info and info.donor_group %}<tr id="fx-donor-group"><th>Donor group{{ doc_toggle('fx-help-donor-group', 'About donor groups') }}</th><td><a class="fx-tag" href="/donor-groups#dg-{{ info.donor_group }}">{{ info.donor_group }}</a>
         {% call doc_block('About donor groups', id='fx-help-donor-group') %}<p>The datasets whose donors come from the same donor collection, so the same people can appear in several of them. Agreement within one group is not independent replication (<a href="/donor-groups">all donor groups</a>).</p>{% endcall %}</td></tr>{% endif %}
       {% if info and info.designation %}<tr id="fx-designation"><th>Data{{ doc_toggle('fx-help-designation', 'About primary data and reanalyses') }}</th><td><span class="fx-tag">{{ 'primary data' if info.designation == 'primary' else ('reanalysis' if info.designation == 'reanalysis' else 'designation unresolved') }}</span>{% if info.designation == 'reanalysis' %} <span class="fx-key-note">Reanalysis, never counted towards replication across datasets</span>{% endif %}
         {% call doc_block('About primary data and reanalyses', id='fx-help-designation') %}<p>Primary data means this dataset is the one that serves these cells. A reanalysis uses cells another dataset already serves; it is shown, but it is never counted towards replication, so the same cells do not count twice.</p>{% endcall %}</td></tr>{% endif %}
@@ -995,7 +995,7 @@
     {% call _facet_mapping_table(_groups.tested) %}
         {% for col in _groups.extra %}
         <tr class="ds-facet-row" data-facet="{{ col }}">
-          <td data-label="Facet"><a class="fct-name" href="/facets/{{ (('ant_' ~ {'ant_age_adjusted': 'age', 'ant_braak_threshold': 'braak', 'ant_apoe4_dose': 'apoe4_carrier'}.get(col, col[4:]))|urlencode) }}" title="{{ col }}">facet_test_label(col) }}</a></td>
+          <td data-label="Facet"><a class="fct-name" href="/facets/{{ (('ant_' ~ {'ant_age_adjusted': 'age', 'ant_braak_threshold': 'braak', 'ant_apoe4_dose': 'apoe4_carrier'}.get(col, col[4:]))|urlencode) }}" title="{{ col }}">{{ facet_test_label(col) }}</a></td>
           <td colspan="4" class="fm-note">Not published as a column of this dataset; the facet test derived it ({{ facet_derived_note(col) }}).</td>
         </tr>
         {% endfor %}
