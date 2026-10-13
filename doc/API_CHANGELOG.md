@@ -141,7 +141,9 @@ New endpoints:
   ranks among ALL gene sets scored in the same dataset (a mean module score is not comparable between datasets, a rank within a dataset
   is). Shape: `{geneset_id, primary_source: 'geneset', secondary_source: 'ucell', min_cells: 20, min_peers: 10, datasets: [{db_id,
   geneset: R, ucell: R}], not_available: [{db_id, reason}], help_topics}` with `R = {available, reason, rank, n_modules_compared,
-  n_cells, mean, cell_types: [{cell_type, n_cells, mean, rank, n_modules_compared}]}`. `rank` runs from 0 (lowest mean) to 1 (highest):
+  n_cells, mean, std, cell_types: [{cell_type, n_cells, mean, std, rank, n_modules_compared}]}`. `std` is the standard deviation of the score over the scored
+  cells of the module (spread between cells, not donors; per cell type group, and pooled over the groups for the dataset value; null
+  for a single cell; caches written before this field are rebuilt on the next request). `rank` runs from 0 (lowest mean) to 1 (highest):
   the fraction of the other modules of the same source, any catalog, with a lower mean (ties half), taken per cell type group on the
   cells of that group (modules are scored on the cells of their cell type scope, `all` modules on every cell; '' = all cells of a
   dataset without cell types) and averaged weighted by the cells of the module for the dataset value. At least 10 peers and 20 cells
@@ -150,6 +152,10 @@ New endpoints:
   means between datasets. Computed from the `.scores.parquet` sidecar joined with `ant_cell_type`, cached per dataset under
   `<tmp_dir>/module_rank/` until the sidecar or the duckdb changes (first request of a dataset reads its whole sidecar: seconds to
   about a minute; `scores_index.parquet` has no cell type column and can lag the sidecars, so it is not used).
+- `GET /databases/{db_id}/module_ranks`: the dataset view of the rank route: one row per gene set scored in the dataset (`geneset` source)
+  with `rank`, `n_modules_compared`, `n_cells`, `mean`, `std` (standard deviation of the score over the scored cells, not donors), `column_name` and
+  `display_name`; `available: false` with a `reason` for a dataset without per-cell scores. Same cached table and rules as `/rank`; within one
+  dataset only.
 - `GET /genesets/{study}/{experiment}/{name}/donor-variability` (`scope`, `cell_type`, `rung`, `method`, `source`,
   `exclude_secondary`): the same card for a gene set (the `pseudobulk` variant unless `method` is given); `k`, `p_rank_product` and `r_value` are
   null (no ranking test for modules).

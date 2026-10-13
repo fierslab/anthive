@@ -243,6 +243,20 @@
     table.ds-facets > tbody > tr > td.num { text-align: left; }
   }
   .obs-plots .obs-plots { border: none; padding: 0; }   /* nested cell macro (module scores): no double border */
+    /* Same look as the gene and gene set views (/genes/TREM2): a sans-serif table in a bordered box, small uppercase
+     column headers, embedded bars (.vw-bar, base.html) with the value to the right of the bar, the plot icons of
+     the dataset Genes tab. Bars: % expressed = pct/100, rank = share of the genes with a lower mean,
+     std. dev. = std / highest std in the table. */
+  div.gx-wrap { border: 1px solid var(--border); border-radius: 5px; background: #fff; }
+  table.gx-table { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4; }
+  table.gx-table th { text-align: left; padding: 5px 8px; border-bottom: 2px solid var(--border); color: var(--text-muted);
+                      font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
+  table.gx-table th .info { font-size: 11px; text-transform: none; margin-left: 3px; }
+  table.gx-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-light); font-family: var(--font); color: var(--text); vertical-align: middle; }
+  table.gx-table th.obs-plots-th, table.gx-table td.obs-plots { border-left: none; border-right: none; text-align: left; white-space: nowrap; }
+  table.gx-table tbody tr:hover td { background: var(--hover); }
+  td.g-pct-cell, td.g-rank-cell, td.g-var-cell, td.g-num-cell { white-space: nowrap; }
+  @media (max-width: 640px) { table.gx-table .vw-bar { width: 36px; } table.gx-table th, table.gx-table td { padding: 4px 5px; } }
   /* Module-scores table — three method columns each carry their own icon
      triplet + stats, so let each row be as wide as it needs to be. */
   #obs-tbl-mod td, #obs-tbl-mod th { white-space: nowrap; }
@@ -544,27 +558,13 @@
 {% if info and info.n_genes %}
 <section class="tab-panel" id="tab-genes" role="tabpanel">
   <style>
-    /* Same look as the gene and gene set views (/genes/TREM2): a sans-serif table in a bordered box, small uppercase
-       column headers, embedded bars (.vw-bar, base.html) with the value to the right of the bar, the plot icons of
-       the dataset Genes tab. Bars: % expressed = pct/100, rank = share of the genes with a lower mean,
-       std. dev. = std / highest std in the table. */
-    #tab-genes .table-wrap { border: 1px solid var(--border); border-radius: 5px; background: #fff; }
-    #obs-tbl-genes { width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4; }
-    #obs-tbl-genes th { text-align: left; padding: 5px 8px; border-bottom: 2px solid var(--border); color: var(--text-muted);
-                        font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
-    #obs-tbl-genes th .info { font-size: 11px; text-transform: none; margin-left: 3px; }
-    #obs-tbl-genes td { padding: 4px 8px; border-bottom: 1px solid var(--border-light); font-family: var(--font); color: var(--text); vertical-align: middle; }
-    #obs-tbl-genes th.obs-plots-th, #obs-tbl-genes td.obs-plots { border-left: none; border-right: none; text-align: left; white-space: nowrap; }
-    #obs-tbl-genes tbody tr:hover td { background: var(--hover); }
-    td.g-pct-cell, td.g-rank-cell, td.g-var-cell { white-space: nowrap; }
-    @media (max-width: 640px) { #obs-tbl-genes .vw-bar { width: 36px; } #obs-tbl-genes th, #obs-tbl-genes td { padding: 4px 5px; } }
     /* Sortable gene-table column headers */
     #obs-tbl-genes thead th[data-sortcol] { cursor: pointer; user-select: none; white-space: nowrap; }
     #obs-tbl-genes thead th[data-sortcol]:hover { background: #f1f5f9; }
-    #obs-tbl-genes thead th.g-sort-asc::after  { content: ' ▲'; font-size: 9px; color: var(--link); }
-    #obs-tbl-genes thead th.g-sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--link); }
+    #obs-tbl-genes thead th.g-sort-asc::after, #obs-tbl-modrank thead th.g-sort-asc::after  { content: ' ▲'; font-size: 9px; color: var(--link); }
+    #obs-tbl-genes thead th.g-sort-desc::after, #obs-tbl-modrank thead th.g-sort-desc::after { content: ' ▼'; font-size: 9px; color: var(--link); }
     .gene-search-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-    #gene-search { padding: 3px 7px; font-family: inherit; font-size: 12px;
+    #gene-search, #modrank-search { padding: 3px 7px; font-family: inherit; font-size: 12px;
       border: 1px solid #ccc; border-radius: 4px; outline: none; width: 200px; }
     #gene-search-count { font-size: 11px; color: var(--text-muted); }
     /* Row-flag glyphs in the first column. Curator's ◆ is the dataset's
@@ -617,7 +617,7 @@
      place: non-matching rows get .g-hidden, dataset-wide server matches not
      already in the tbody are appended and then filtered. Clearing the search
      un-hides everything. #}
-  <div class="table-wrap"><table class="obs-stats-tbl auto" id="obs-tbl-genes">
+  <div class="table-wrap gx-wrap"><table class="obs-stats-tbl auto gx-table" id="obs-tbl-genes">
     <thead><tr>
       <th data-sortcol="star" title="◆ dataset favourite (from the collection's top_genes) · ♥ your personal favourite (set on /settings). Click to sort." style="width:2.2em;text-align:center">★</th>
       <th data-sortcol="gene">Gene</th>
@@ -760,6 +760,86 @@
    no rows for a given method get a blank cell. #}
 {% if n_module_scores %}
 <section class="tab-panel" id="tab-modules" role="tabpanel">
+  {# One row per gene set scored in this dataset, in the same table and bar style as the Genes tab: rank among gene sets, std. dev., plot icons. #}
+  <h2 class="section-head">Gene sets <span class="muted" id="modrank-count" style="font-size:12px;font-weight:normal"></span></h2>
+  <div class="gene-search-row">
+    <input id="modrank-search" type="search" placeholder="search gene sets..." autocomplete="off" aria-label="search the gene sets of this dataset">
+    <span id="modrank-status" class="muted" style="font-size:11px"></span>
+  </div>
+  <div class="table-wrap gx-wrap"><table class="obs-stats-tbl auto gx-table" id="obs-tbl-modrank">
+    <thead><tr>
+      <th data-sort="name" style="cursor:pointer">Gene set</th>
+      <th data-sort="n_cells" style="cursor:pointer" class="num">Cells <span class="info" title="Cells of the dataset the gene set was scored on (a set is scored on the cells of its cell type). Click to sort.">&#9432;</span></th>
+      <th data-sort="rank" style="cursor:pointer" class="g-sort-desc"><span class="vw-swatch m-rank"></span>Rank among gene sets (%) <span class="info" title="Percent of the other gene sets scored on the same cells of this dataset (sets that apply to its cell type) with a lower mean scanpy score than this gene set. Higher means a stronger score relative to the other sets; it compares gene sets within this dataset only. Click to sort.">&#9432;</span></th>
+      <th data-sort="std" style="cursor:pointer"><span class="vw-swatch m-std"></span>Std. dev. <span class="info" title="Standard deviation of the module score over all cells in the dataset (samples for bulk). Scores from different scoring methods are on different scales, so compare within one dataset, not across datasets. The bar is scaled to the highest value in the table. Click to sort.">&#9432;</span></th>
+      <th class="obs-plots-th">Plots</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table></div>
+  <p><button type="button" class="btn-grey" id="modrank-more" hidden></button></p>
+  <script>
+  (function () {
+    var table = document.getElementById('obs-tbl-modrank');
+    var section = document.getElementById('tab-modules');
+    if (!table || !section) return;
+    var tbody = table.querySelector('tbody');
+    var base = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
+    var apiBase = '/api/databases/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
+    var embedding = {{ default_embedding | tojson }};
+    var PAGE = 25;
+    var rows = [], sortKey = 'rank', sortDir = -1, shown = PAGE, started = false;
+    var statusEl = document.getElementById('modrank-status'), countEl = document.getElementById('modrank-count');
+    var moreButton = document.getElementById('modrank-more'), searchInput = document.getElementById('modrank-search');
+    function esc(text) { return String(text == null ? '' : text).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    function compact(count) { return count >= 1e6 ? (Math.round(count / 1e5) / 10) + 'M' : count >= 1e4 ? Math.round(count / 1e3) + 'k' : count >= 1e3 ? (Math.round(count / 100) / 10) + 'k' : String(count); }
+    function value(row, key) { var v = row[key]; return v == null ? -Infinity : (typeof v === 'string' ? v.toLowerCase() : v); }
+    function visible() {
+      var needle = searchInput.value.trim().toLowerCase();
+      var list = rows.filter(function (row) { return !needle || (row.display_name + ' ' + row.name + ' ' + row.geneset_id).toLowerCase().indexOf(needle) >= 0; });
+      return list.sort(function (a, b) { var x = value(a, sortKey), y = value(b, sortKey); return (x < y ? -1 : x > y ? 1 : 0) * sortDir; });
+    }
+    function draw() {
+      var list = visible();
+      var maxStd = Math.max.apply(null, rows.map(function (row) { return row.std || 0; }).concat([0])) || 1;
+      tbody.innerHTML = list.slice(0, shown).map(function (row) {
+        var rank = row.rank == null ? '<span class="muted" title="' + esc(row.reason || 'too few cells or too few other gene sets to rank') + '">n/a</span>'
+          : antBar.html(row.rank, { kind: 'm-rank', title: 'higher mean score than ' + Math.round(row.rank * 100) + '% of the ' + row.n_modules_compared + ' other gene sets scored on the same cells' }) + '<span class="vw-bar-val">' + Math.round(row.rank * 100) + '%</span>';
+        var std = row.std == null ? '<span class="muted">n/a</span>' : antBar.html(row.std / maxStd, { kind: 'm-std', title: 'std. dev. ' + row.std.toFixed(3) }) + '<span class="vw-bar-val">' + (row.std >= 10 ? row.std.toFixed(1) : row.std.toFixed(2)) + '</span>';
+        return '<tr class="gene-item"><td class="colname"><a href="/genesets/' + encodeURIComponent(row.study) + '/' + encodeURIComponent(row.experiment) + '/' + encodeURIComponent(row.name) + '">' + esc(row.display_name) + '</a> <span class="muted" style="font-size:11px">' + esc(row.study + '/' + row.experiment) + '</span></td>' +
+          '<td class="num g-num-cell">' + (row.n_cells == null ? '' : esc(compact(row.n_cells))) + '</td><td class="g-rank-cell">' + rank + '</td><td class="g-var-cell">' + std + '</td><td class="obs-plots">' + window.antPlotIcons.row(base, row.column_name, embedding) + '</td></tr>';
+      }).join('');
+      countEl.textContent = '(' + list.length + (list.length === rows.length ? '' : ' of ' + rows.length) + ')';
+      moreButton.hidden = list.length <= shown;
+      moreButton.textContent = 'Show all ' + list.length + ' gene sets';
+    }
+    function load() {
+      if (started) return;
+      started = true;
+      statusEl.textContent = 'computing ranks (the first view of a dataset can take up to a minute, later views are cached)...';
+      fetch(apiBase + '/module_ranks', { credentials: 'same-origin' }).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); }).then(function (data) {
+        rows = data.modules || [];
+        statusEl.textContent = data.available ? '' : (data.reason || 'no per-cell scores for this dataset');
+        draw();
+      }).catch(function () { statusEl.textContent = 'The gene set ranks could not be loaded.'; });
+    }
+    table.querySelectorAll('th[data-sort]').forEach(function (th) {
+      th.addEventListener('click', function () {
+        var key = th.dataset.sort;
+        sortDir = sortKey === key ? -sortDir : (key === 'name' ? 1 : -1);
+        sortKey = key;
+        table.querySelectorAll('th[data-sort]').forEach(function (other) { other.classList.remove('g-sort-asc', 'g-sort-desc'); });
+        th.classList.add(sortDir > 0 ? 'g-sort-asc' : 'g-sort-desc');
+        draw();
+      });
+    });
+    searchInput.addEventListener('input', function () { shown = PAGE; draw(); });
+    moreButton.addEventListener('click', function () { shown = Infinity; draw(); });
+    if ('IntersectionObserver' in window) {
+      var observer = new IntersectionObserver(function (entries) { if (entries.some(function (entry) { return entry.isIntersecting; })) { observer.disconnect(); load(); } });
+      observer.observe(table);
+    } else { load(); }
+  })();
+  </script>
   <h2 class="section-head">Geneset scores
     <span class="muted" style="font-size:12px;font-weight:normal">({{ n_module_scores }} genesets)</span>
     <span class="info" data-glossary="per-cell-association" title="Gene set scores compared with the cell annotation columns, sorted by how far each stands out from its peers.">ⓘ</span>

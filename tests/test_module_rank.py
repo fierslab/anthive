@@ -16,8 +16,9 @@ SERVE_PATH = Path(__file__).resolve().parent.parent / 'bin' / 'api' / 'ant-serve
 CATALOG = 'Study/Exp'
 
 
-def means_frame(rows: List[Tuple[str, str, str, str, int, float]]) -> pd.DataFrame:
-    return pd.DataFrame(rows, columns=module_rank.MEANS_COLUMNS)
+def means_frame(rows: List[Tuple]) -> pd.DataFrame:
+    """Frame of stratum means; rows without a std get 1.0."""
+    return pd.DataFrame([row if len(row) == 7 else tuple(row) + (1.0,) for row in rows], columns=module_rank.MEANS_COLUMNS)
 
 
 def many_modules(n_modules: int, stratum: str = 'microglia', n_cells: int = 100, source: str = 'geneset') -> List[Tuple]:
@@ -29,7 +30,8 @@ def test_rank_is_fraction_of_peers_with_lower_mean():
     result = module_rank.module_rank(frame, 'geneset', CATALOG, 'MINE')
     assert result['available'] and result['rank'] == pytest.approx(15 / 20)
     assert result['n_modules_compared'] == 20 and result['n_cells'] == 100 and result['mean'] == 14.5
-    assert result['cell_types'] == [{'cell_type': 'microglia', 'n_cells': 100, 'mean': 14.5, 'rank': 0.75, 'n_modules_compared': 20}]
+    assert result['cell_types'] == [{'cell_type': 'microglia', 'n_cells': 100, 'mean': 14.5, 'std': 1.0, 'rank': 0.75, 'n_modules_compared': 20}]
+    assert result['std'] == pytest.approx(1.0)
 
 
 def test_rank_extremes_and_ties():
@@ -46,7 +48,7 @@ def test_only_the_same_source_counts_and_the_module_is_not_its_own_peer():
     result = module_rank.module_rank(frame, 'geneset', CATALOG, 'MINE')
     assert result['n_modules_compared'] == 12
     assert module_rank.module_rank(frame, 'ucell', CATALOG, 'MINE') == {
-        'available': False, 'reason': 'no score of this gene set was found in the score file of this dataset', 'rank': None, 'n_modules_compared': 0, 'n_cells': 0, 'mean': None, 'cell_types': []}
+        'available': False, 'reason': 'no score of this gene set was found in the score file of this dataset', 'rank': None, 'n_modules_compared': 0, 'n_cells': 0, 'mean': None, 'std': None, 'cell_types': []}
 
 
 def test_same_module_name_in_another_catalog_is_a_peer():
@@ -184,7 +186,7 @@ def test_store_rebuilds_a_corrupt_cache_file(tmp_path):
 # ---- the route ----
 
 _ROUTE_WANTED = {'_MODULE_RANK_STORE', '_MODULE_RANK_LOCK', '_MODULE_RANK_HELP_TOPICS', '_module_rank_store', '_module_rank_means',
-                 'get_geneset_rank', '_require_geneset_registry'}
+                 'get_geneset_rank', '_require_geneset_registry', 'get_database_module_ranks'}
 
 
 class _Pool:
@@ -198,9 +200,15 @@ class _Pool:
         conn.close()
 
 
+class _Gene:
+    def to_detail(self) -> Dict[str, Any]:
+        return {'display_name': 'Mine set'}
+
+
 class _Registry:
     def __init__(self, paths: Dict[str, str]):
         self.paths = paths
+        self.databases = {db_id: object() for db_id in paths}
 
     def get_database_path(self, db_id: str) -> str:
         return self.paths[db_id]
@@ -220,13 +228,14 @@ def build_route(tmp_path: Path, paths: Dict[str, str], scored_in: Dict[str, List
         if name in _ROUTE_WANTED:
             body.append(node)
     app = FastAPI()
-    known = {'Study/Exp/MINE': object()}
+    known = {'Study/Exp/MINE': _Gene()}
     geneset_registry = type('G', (), {'get': staticmethod(lambda geneset_id: known.get(geneset_id))})()
     namespace: Dict[str, Any] = {
         'app': app, 'registry': _Registry(paths), 'connection_pool': _Pool({}), 'geneset_registry': geneset_registry,
         '_score_index_by_geneset': scored_in, 'module_rank_lib': module_rank, 'threading': threading,
         'get_tmp_dir': lambda: tmp_path / 'tmp', 'HTTPException': HTTPException, 'Query': Query,
         '_with_help': lambda payload, *topics: {**payload, 'help_topics': list(topics)},
+        'SCORE_COLUMN_TEMPLATE': '{study}::{experiment}::{name}',
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple, 'Path': Path, 'GenesetRegistry': object,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
@@ -258,3 +267,38 @@ def test_route_filters_one_dataset_and_rejects_unknown_ones(tmp_path):
 
 def test_route_is_registered_in_the_source():
     assert '@app.get("/genesets/{study}/{experiment}/{name}/rank"' in SERVE_PATH.read_text()
+
+
+def test_pooled_std_combines_strata_like_one_sample():
+    first, second = np.array([1.0, 2.0, 3.0, 4.0]), np.array([10.0, 11.0, 12.0])
+    frame = means_frame([('geneset', CATALOG, 'M', 'a', len(first), first.mean(), first.std(ddof=1)),
+                         ('geneset', CATALOG, 'M', 'b', len(second), second.mean(), second.std(ddof=1))])
+    result = module_rank.module_rank(frame, 'geneset', CATALOG, 'M')
+    assert result['std'] == pytest.approx(np.concatenate([first, second]).std(ddof=1))
+    assert sorted(entry['std'] for entry in result['cell_types']) == pytest.approx(sorted([first.std(ddof=1), second.std(ddof=1)]))
+
+
+def test_std_missing_for_a_single_cell():
+    frame = means_frame([('geneset', CATALOG, 'M', 'a', 1, 2.0, float('nan'))])
+    assert module_rank.module_rank(frame, 'geneset', CATALOG, 'M')['std'] is None
+
+
+def test_store_rebuilds_a_cache_written_without_std(tmp_path):
+    store = module_rank.ModuleRankStore(tmp_path)
+    old = pd.DataFrame([('geneset', CATALOG, 'M', 'a', 10, 1.0)], columns=module_rank.MEANS_COLUMNS[:-1])
+    old.to_parquet(store._file('A/b', 'fp'), index=False)
+    fresh = means_frame([('geneset', CATALOG, 'M', 'a', 10, 1.0, 0.5)])
+    assert list(store.get('A/b', 'fp', lambda: fresh).columns) == module_rank.MEANS_COLUMNS
+
+
+def test_dataset_route_lists_every_scored_gene_set_with_rank_and_std(tmp_path):
+    duckdb_path, _ = make_dataset(tmp_path)
+    client = build_route(tmp_path, {'G/ds': str(duckdb_path), 'G/remote': 's3://bucket/x.duckdb'}, {'Study/Exp/MINE': ['G/ds']})
+    body = client.get('/databases/G/ds/module_ranks').json()
+    assert body['available'] and body['help_topics'] == ['geneset-view', 'module-scores']
+    mine = [row for row in body['modules'] if row['geneset_id'] == 'Study/Exp/MINE'][0]
+    assert mine['rank'] == pytest.approx(0.5) and mine['display_name'] == 'Mine set' and mine['column_name'] == 'Study::Exp::MINE'
+    assert mine['std'] is not None and mine['n_cells'] > 0 and len(body['modules']) == 13
+    assert client.get('/databases/G/remote/module_ranks').json() == {'db_id': 'G/remote', 'available': False,
+                                                                    'reason': 'the dataset is not stored on this server', 'modules': []}
+    assert client.get('/databases/G/none/module_ranks').status_code == 404

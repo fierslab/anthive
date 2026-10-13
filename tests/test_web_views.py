@@ -667,7 +667,7 @@ def test_expression_columns_colours_and_not_pooled_label(client):
     # one column order for gene pages: Cells, cells expressing, rank, std. dev., plots (plots in their own right-hand column)
     order = [core.index(label) for label in ("headerCell('Cells'", "headerCell('Cells expressing (%)'", "headerCell('Rank among '", "headerCell('Std. dev.'", "headerCell('Plots'")]
     assert order == sorted(order)
-    assert "'<td class=\"vx-plots\">' + config.icons(row)" in core and "vx-n" in core and "(n='" in core
+    assert "<td class=\"vx-plots\">' + config.icons(row)" in core and "vx-n" in core and "(n='" in core
     assert "In vitro and bulk (not in the summary)" in core and "not pooled'" not in core.replace("not pooled into", "")
     assert "Cultured cells and bulk samples are listed for comparison but not used for the cell type summary" in core
     for token in ("--metric-expr", "--metric-rank", "--metric-std", ".vw-bar.m-std .vw-bar-fill", ".vw-swatch.m-expr"):
@@ -695,3 +695,12 @@ def test_dataset_label_is_one_link_with_hover_card(client):
         assert "setDatasets(" in text and "vx-open" in text and "id = 'vx-card'" in text
         core = text.split("window.antExpression = ")[1].split("</script>")[0]
         assert "categoryTag" not in core and "modalityTag" not in core                  # no tag pills in the rows
+
+
+def test_geneset_expression_has_std_dev_in_the_shared_table(client):
+    text = client.get("/genesets/Study1/Exp1/DAM").text
+    core = text.split("window.antExpression = ")[1].split("</script>")[0]
+    assert "vx-set" in core and "row.std = scored.std" in text
+    assert "Standard deviation of the module score over all cells in the dataset (samples for bulk)" in core
+    order = [core.index(label) for label in ("headerCell('Cells'", "headerCell('Rank among '", "headerCell('Std. dev.'", "headerCell('Plots'")]
+    assert order == sorted(order) and "(gene ? headerCell('Cells expressing" in core

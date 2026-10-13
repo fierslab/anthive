@@ -5176,8 +5176,8 @@ def test_dot_scale_component_in_base(client):
     assert ".ss {" not in html and ".ss-mark" not in html, "old sparkline CSS must be gone"
 
 
-def test_module_view_peer_position_uses_dot_scale(client, monkeypatch):
-    """Module view peer-position cells render through antDot, not the old mv-track."""
+def test_module_view_peer_position_uses_bar(client, monkeypatch):
+    """Module view peer-position cells render through antBar (the sitewide bar), not the old dot scale or mv-track."""
     def _with_scores(api_url, path):
         result = _fake_api_get(api_url, path)
         if path.endswith('/info') and isinstance(result, dict):
@@ -5188,7 +5188,7 @@ def test_module_view_peer_position_uses_dot_scale(client, monkeypatch):
         return result
     monkeypatch.setattr(browser, '_api_get', _with_scores)
     html = client.get("/browse/GroupA/ds1").text
-    assert "antDot.html(pos" in html
+    assert "antBar.html(pos" in html and "antDot.html(pos" not in html
     assert "mv-track" not in html and "mv-mark" not in html
 
 
@@ -6202,7 +6202,7 @@ def test_module_view_peer_position_has_no_score_range_text(client):
         "min–max range text still emitted next to peer-position sparkline"
     )
     # The dot itself must remain.
-    assert "antDot.html(pos" in html
+    assert "antBar.html(pos" in html
 
 
 def test_module_view_merges_plot_and_umap_columns(client):
@@ -7774,3 +7774,23 @@ def test_help_covers_the_v3_facet_topics(client):
                  "tissue-umbrella", "facet-exclusion", "gene-class-flags", "sex-check", "scope"):
         assert f'id="glossary-{slug}"' in glossary, slug
     assert "\u2014" not in effects and "\u2014" not in glossary
+
+
+def test_dataset_geneset_tab_has_rank_table_in_the_genes_tab_style(client, monkeypatch):
+    """The Genesets tab opens with one row per scored gene set: rank bar, std. dev. bar and plot icons, like the Genes tab."""
+    def _with_scores(api_url, path):
+        result = _fake_api_get(api_url, path)
+        if path.endswith('/info') and isinstance(result, dict):
+            result = dict(result)
+            obs = dict(result.get('obs', {}))
+            obs['numerical'] = ['n_genes', 'pseudotime', 'studyA::expB::Mod1']
+            result['obs'] = obs
+        return result
+    monkeypatch.setattr(browser, '_api_get', _with_scores)
+    html = client.get("/browse/GroupA/ds1").text
+    section = html.split('id="tab-modules"')[1].split("Geneset scores")[0]
+    assert 'id="obs-tbl-modrank"' in section and "/module_ranks" in section and "gx-table" in section
+    for header in ("Rank among gene sets (%)", "Std. dev.", "Plots", "Cells"):
+        assert header in section
+    assert "antBar.html(" in section and "antPlotIcons.row(" in section and "antDot" not in section
+    assert "Standard deviation of the module score over all cells in the dataset (samples for bulk)" in section

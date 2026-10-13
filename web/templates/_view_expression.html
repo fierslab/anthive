@@ -15,6 +15,7 @@
 <style>
   /* One component for gene and gene set pages: Dataset | Cells | metric bars | Plots (gene sets have the rank bar only). */
   table.vx-table col.x-name { width: 36%; } table.vx-table col.x-cells { width: 14%; } table.vx-table col.x-rank { width: 30%; } table.vx-table col.x-plots { width: 20%; }
+  table.vx-set col.x-name { width: 33%; } table.vx-set col.x-cells { width: 11%; } table.vx-set col.x-rank { width: 24%; } table.vx-set col.x-std { width: 14%; } table.vx-set col.x-plots { width: 18%; }
   table.vx-gene col.x-name { width: 27%; } table.vx-gene col.x-cells { width: 9%; } table.vx-gene col.x-pct { width: 21%; } table.vx-gene col.x-rank { width: 21%; } table.vx-gene col.x-std { width: 9%; } table.vx-gene col.x-plots { width: 13%; }
   td.vx-plots, th.vx-plots { white-space: nowrap; text-align: left; }
   tr.vx-sublabel td { font-size: 10.5px; color: var(--text-muted); text-transform: none; background: #f7f9fa; padding-left: 28px; }
@@ -27,6 +28,7 @@
   .vx-prog { font-size: 11.5px; color: var(--text-muted); margin: 0 0 6px; min-height: 16px; }
   @media (max-width: 640px) {
     table.vx-table col.x-name { width: 30%; } table.vx-table col.x-cells { width: 16%; } table.vx-table col.x-rank { width: 30%; } table.vx-table col.x-plots { width: 24%; }
+    table.vx-set col.x-name { width: 28%; } table.vx-set col.x-cells { width: 14%; } table.vx-set col.x-rank { width: 24%; } table.vx-set col.x-std { width: 14%; } table.vx-set col.x-plots { width: 20%; }
     table.vx-gene col.x-name { width: 25%; } table.vx-gene col.x-cells { width: 12%; } table.vx-gene col.x-pct { width: 17%; } table.vx-gene col.x-rank { width: 17%; } table.vx-gene col.x-std { width: 12%; } table.vx-gene col.x-plots { width: 17%; }
     table.vx-table .obs-plot-icon { padding: 0 2px; }
   }
@@ -139,21 +141,23 @@ window.antExpression = window.antExpression || (function () {
         ? 'Percent of genes detected in this dataset whose average expression over all cells (non-expressing cells counted as zero) is lower than this gene\'s. It compares genes, not cells. Values below about 50% mostly mean the gene is barely expressed. A cell type row shows the median over its datasets; in an opened row the dotted line is that median.'
         : 'Percent of the other gene sets scored on the same cells of the dataset (sets that apply to its cell type) with a lower mean scanpy score than this gene set. Higher means a stronger score relative to the other sets. A cell type row shows the median over its datasets; in an opened row the dotted line is that median.',
       pct: 'Percent of the cells of the dataset with at least one count of the gene. A cell type row shows the median over its datasets; in an opened row the dotted line is that median. Not defined for bulk samples.',
-      std: 'Standard deviation of the log-normalised expression of the gene over all cells of the dataset, cells without a count included as zero (over samples for bulk datasets). The bar is scaled to the 95th percentile of the values in the table, so a few extreme datasets do not flatten the others; bulk samples are not shown. It depends on the normalisation and depth of each dataset, so compare it within a dataset; the cell type rows leave it blank because a median over datasets would mix different scales.',
+      std: gene
+        ? 'Standard deviation of the log-normalised expression of the gene over all cells of the dataset, cells without a count included as zero (over samples for bulk datasets). The bar is scaled to the 95th percentile of the values in the table, so a few extreme datasets do not flatten the others; bulk samples are not shown. It depends on the normalisation and depth of each dataset, so compare it within a dataset; the cell type rows leave it blank because a median over datasets would mix different scales.'
+        : 'Standard deviation of the module score over all cells in the dataset (samples for bulk). Scores from different scoring methods are on different scales, so compare within one dataset, not across datasets; the cell type rows leave it blank for the same reason. The bar is scaled to the 95th percentile of the values in the table; bulk samples are not shown.',
       cells: 'Cells in the dataset (samples for bulk). In a cell type row: the total over the datasets pooled into the summary; n in brackets is how many datasets that is.',
       plots: 'Histogram, ECDF and embedding plot of ' + (gene ? 'the gene' : 'the module score') + ' in this dataset (UMAP, else t-SNE, else PCA; no embedding plot when the dataset has none).'
     };
     var NOT_POOLED_TIP = 'Cultured cells and bulk samples are listed for comparison but not used for the cell type summary, because they are not tissue and bulk has no single-cell detection.';
-    var span = gene ? 6 : 4;
+    var span = gene ? 6 : 5;
     function tableHtml(firstLabel, firstTip, body) {
-      return '<div class="vw-box"><table class="vw-table fixed vx-table' + (gene ? ' vx-gene' : '') + '"><colgroup><col class="x-name"><col class="x-cells">' + (gene ? '<col class="x-pct">' : '') + '<col class="x-rank">' + (gene ? '<col class="x-std">' : '') + '<col class="x-plots"></colgroup><thead><tr>' +
+      return '<div class="vw-box"><table class="vw-table fixed vx-table' + (gene ? ' vx-gene' : ' vx-set') + '"><colgroup><col class="x-name"><col class="x-cells">' + (gene ? '<col class="x-pct">' : '') + '<col class="x-rank"><col class="x-std"><col class="x-plots"></colgroup><thead><tr>' +
         headerCell(firstLabel, firstTip) + headerCell('Cells', TIPS.cells, null, 'num') +
         (gene ? headerCell('Cells expressing (%)', TIPS.pct, ['0', '100'], null, 'm-expr') : '') + headerCell('Rank among ' + peers + ' (%)', TIPS.rank, ['0', '100'], null, 'm-rank') +
-        (gene ? headerCell('Std. dev.', TIPS.std, null, null, 'm-std') : '') + headerCell('Plots', TIPS.plots, null, 'vx-plots') + '</tr></thead><tbody>' + body + '</tbody></table></div>';
+        headerCell('Std. dev.', TIPS.std, null, null, 'm-std') + headerCell('Plots', TIPS.plots, null, 'vx-plots') + '</tr></thead><tbody>' + body + '</tbody></table></div>';
     }
     function datasetRow(row, attrs, marks) {
       return '<tr class="vw-sub"' + attrs + '>' + datasetCell(config, row) + '<td class="num">' + cellsText(row) + '</td>' + (gene ? '<td class="vw-bar-cell">' + pctCell(row, marks.pct) + '</td>' : '') +
-        '<td class="vw-bar-cell">' + rankCell(row, marks.rank) + '</td>' + (gene ? '<td class="vw-bar-cell">' + stdCell(row, null) + '</td>' : '') + '<td class="vx-plots">' + config.icons(row) + '</td></tr>';
+        '<td class="vw-bar-cell">' + rankCell(row, marks.rank) + '</td><td class="vw-bar-cell">' + stdCell(row, null) + '</td><td class="vx-plots">' + config.icons(row) + '</td></tr>';
     }
     function draw(rows) {
       var pending = rows.filter(function (row) { return row.rank === 'pending'; }).length;
@@ -173,7 +177,7 @@ window.antExpression = window.antExpression || (function () {
         var rankSummary = !block.members.length ? '' : isNumber(block.median) ? '<span title="Median over ' + block.nRanked + ' dataset(s), from ' + pctOf(block.low) + ' to ' + pctOf(block.high) + '">' + bar(block.median * 100, null, 'm-rank') + '<span class="vw-bar-val">' + pctOf(block.median) + '</span></span>' : (pendingRank ? '<span class="muted">computing...</span>' : NA);
         var pctSummary = !block.members.length ? '' : isNumber(block.medianPct) ? '<span title="Median over the pooled datasets">' + bar(block.medianPct, null, 'm-expr') + '<span class="vw-bar-val">' + pctText(block.medianPct) + '</span></span>' : NA;
         body += '<tr class="vw-toggle' + (isOpen ? ' vx-open' : '') + '" data-key="' + V.esc(key) + '" data-i="' + index + '"><td><span class="caret">' + (isOpen ? '&#9662;' : '&#9656;') + '</span>' + V.esc(V.plain(block.group)) + '<span class="vx-n" title="Datasets pooled into the summary">(n=' + block.members.length + ')</span></td><td class="num">' + (block.members.length ? V.compact(totalCells) : '') + '</td>' +
-          (gene ? '<td class="vw-bar-cell">' + pctSummary + '</td>' : '') + '<td class="vw-bar-cell">' + rankSummary + '</td>' + (gene ? '<td></td>' : '') + '<td></td></tr>';
+          (gene ? '<td class="vw-bar-cell">' + pctSummary + '</td>' : '') + '<td class="vw-bar-cell">' + rankSummary + '</td><td></td><td></td></tr>';
         var marks = { rank: isNumber(block.median) ? block.median : null, pct: isNumber(block.medianPct) ? block.medianPct : null };
         var hiddenAttr = isOpen ? '' : ' hidden';
         block.members.slice().sort(byRank).forEach(function (row) { body += datasetRow(row, ' data-p="' + index + '"' + hiddenAttr, marks); });
@@ -270,7 +274,7 @@ window.antExpression = window.antExpression || (function () {
       if (!db || db.secondary) return;
       var category = CATS[db.category] ? db.category : 'unclassified';
       rows.push(X.classify({ db_id: dbId, title: db.title || dbId, group: db.group, category: category, bulk: category === 'bulk', pooled: !!CATS[category].typed, n_cells: null,
-        rank: 'pending', peers: 0, reason: '', modality: db.modality || '', embedding: db.default_embedding || '', tip: '' }, V.GROUPS));
+        rank: 'pending', peers: 0, reason: '', std: null, modality: db.modality || '', embedding: db.default_embedding || '', tip: '' }, V.GROUPS));
     });
     return rows;
   }
@@ -284,6 +288,7 @@ window.antExpression = window.antExpression || (function () {
       var scored = entry && entry.geneset;
       if (!entry) { row.drop = true; return; }
       row.n_cells = scored.n_cells;
+      row.std = scored.std == null ? null : scored.std;
       if (scored.available) {
         row.rank = scored.rank;
         row.peers = scored.n_modules_compared;

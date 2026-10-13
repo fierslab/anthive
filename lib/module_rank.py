@@ -39,11 +39,11 @@ SECONDARY_SOURCE = 'ucell'
 MIN_CELLS = 20
 MIN_PEERS = 10
 UNLABELLED = 'unlabelled'
-MEANS_COLUMNS = ['source', 'catalog', 'module', 'stratum', 'n', 'mean']
+MEANS_COLUMNS = ['source', 'catalog', 'module', 'stratum', 'n', 'mean', 'std']
 
 _STRATUM_SQL = (
     "SELECT s.source, s.catalog, s.module, {stratum} AS stratum, "
-    "COUNT(*) AS n, AVG(s.score) AS mean "
+    "COUNT(*) AS n, AVG(s.score) AS mean, STDDEV_SAMP(s.score) AS std "
     "FROM read_parquet(?) s {join} WHERE s.score IS NOT NULL GROUP BY 1, 2, 3, 4"
 )
 
@@ -95,7 +95,24 @@ def stratum_means(conn: Any, sidecar: Path, strata: Optional[pd.DataFrame]) -> p
 
 def _empty(reason: str) -> Dict[str, Any]:
     return {'available': False, 'reason': reason, 'rank': None, 'n_modules_compared': 0,
-            'n_cells': 0, 'mean': None, 'cell_types': []}
+            'n_cells': 0, 'mean': None, 'std': None, 'cell_types': []}
+
+
+def _finite(value: Any) -> Optional[float]:
+    """Float of a possibly missing or NaN number, else None."""
+    return None if value is None or pd.isna(value) else float(value)
+
+
+def _pooled_std(mine: pd.DataFrame, overall_mean: float) -> Optional[float]:
+    """Standard deviation over all scored cells of a module from its per-stratum n, mean and std."""
+    total = int(mine['n'].sum())
+    if total < 2:
+        return None
+    spread = 0.0
+    for row in mine.itertuples():
+        within = 0.0 if pd.isna(row.std) else float(row.std) ** 2 * (row.n - 1)
+        spread += within + row.n * (float(row.mean) - overall_mean) ** 2
+    return float(np.sqrt(spread / (total - 1)))
 
 
 def module_rank(means: pd.DataFrame, source: str, catalog: str, module: str,
@@ -111,7 +128,7 @@ def module_rank(means: pd.DataFrame, source: str, catalog: str, module: str,
         min_peers: a stratum needs this many peer modules to give a rank.
 
     Returns:
-        ``{available, reason, rank, n_modules_compared, n_cells, mean, cell_types}``;
+        ``{available, reason, rank, n_modules_compared, n_cells, mean, std, cell_types}``;
         ``rank`` runs from 0 (lowest mean) to 1 (highest), ``n_modules_compared`` is the number of
         peers in the stratum with most cells of the module, ``mean`` the mean over all its
         scored cells, ``cell_types`` one ``{cell_type, n_cells, mean, rank, n_modules_compared}``
@@ -128,7 +145,7 @@ def module_rank(means: pd.DataFrame, source: str, catalog: str, module: str,
     strata: List[Dict[str, Any]] = []
     for row in mine.sort_values('n', ascending=False).itertuples():
         peers = others.loc[others['stratum'] == row.stratum, 'mean'].to_numpy()
-        entry: Dict[str, Any] = {'cell_type': row.stratum, 'n_cells': int(row.n), 'mean': float(row.mean),
+        entry: Dict[str, Any] = {'cell_type': row.stratum, 'n_cells': int(row.n), 'mean': float(row.mean), 'std': _finite(row.std),
                                  'rank': None, 'n_modules_compared': int(len(peers))}
         if row.n >= min_cells and len(peers) >= min_peers:
             entry['rank'] = float((np.sum(peers < row.mean) + 0.5 * np.sum(peers == row.mean)) / len(peers))
@@ -136,13 +153,13 @@ def module_rank(means: pd.DataFrame, source: str, catalog: str, module: str,
     ranked = [entry for entry in strata if entry['rank'] is not None]
     if not ranked:
         return {**_empty('too few cells or too few other modules scored on the same cells to rank'),
-                'n_cells': total_cells, 'mean': overall_mean, 'cell_types': strata,
+                'n_cells': total_cells, 'mean': overall_mean, 'std': _pooled_std(mine, overall_mean), 'cell_types': strata,
                 'n_modules_compared': strata[0]['n_modules_compared']}
     weights = np.array([entry['n_cells'] for entry in ranked], dtype=float)
     rank = float(np.average([entry['rank'] for entry in ranked], weights=weights))
     return {'available': True, 'reason': None, 'rank': rank,
             'n_modules_compared': ranked[0]['n_modules_compared'],
-            'n_cells': total_cells, 'mean': overall_mean, 'cell_types': strata}
+            'n_cells': total_cells, 'mean': overall_mean, 'std': _pooled_std(mine, overall_mean), 'cell_types': strata}
 
 
 class ModuleRankStore:
@@ -186,6 +203,8 @@ class ModuleRankStore:
                     frame = pd.read_parquet(path)
                 except (OSError, ValueError):
                     frame = None
+                if frame is not None and not set(MEANS_COLUMNS) <= set(frame.columns):
+                    frame = None      # written before a column was added: rebuild
             else:
                 frame = None
             if frame is None:

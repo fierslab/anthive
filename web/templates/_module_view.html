@@ -80,11 +80,8 @@ URL hash scheme (feature: back-button / shareable filter state):
     .mv-panel .mv-ds-tip .tip-id { font-family: var(--font-mono); color: var(--text-muted); font-size: 10px; margin-top: 4px; }
     .mv-panel .mv-val    { font-family: var(--font-mono); text-align: right; }
     .mv-panel .mv-pos    { min-width: 160px; }
-    /* Peer position uses the sitewide big-dot scale (.dot-scale, base.html):
-       position = value between the min and max of the peer modules, colour by
-       third (high = strongest association = green). Wider than the gene-tab
-       dots so the column stays legible across 500+ rows. */
-    .mv-panel .mv-pos .dot-scale { --dot-w: 96px; }
+    /* Peer position is a bar (.vw-bar, base.html): its length is the value between the min and max of the peer modules. */
+    .mv-panel .mv-pos .vw-bar { width: 96px; }
     .mv-panel .mv-icons a { display: inline-flex; text-decoration: none; color: var(--text-muted); font-size: 14px; padding: 0 3px; position: relative; }
     .mv-panel .mv-icons a:hover { color: var(--link); }
     .mv-panel .mv-icons svg { width: 1em; height: 1em; }
@@ -1089,7 +1086,7 @@ URL hash scheme (feature: back-button / shareable filter state):
     var html = rows.map(function (r) {
       var pos = positionOf(r, PEER_INDEX);
       var g = PEER_INDEX[peerKey(r)] || { min: r.value, max: r.value, n: 1 };
-      var track = !hasPeers(r, PEER_INDEX) ? '' : antDot.html(pos, { title: 'this module ' + (+r.value).toFixed(3)
+      var track = !hasPeers(r, PEER_INDEX) ? '' : antBar.html(pos, { kind: 'm-rank', title: 'this module ' + (+r.value).toFixed(3)
         + ' · across ' + g.n + ' peer modules: ' + (+g.min).toFixed(3) + '…' + (+g.max).toFixed(3) });
       var dsParts = String(r.dataset).split('/');
       var dsHref = datasetUrl(r);
