@@ -83,7 +83,7 @@
       <li><strong>Who you are matters.</strong> The API sees your username, so admin-only endpoints work for admins and refuse everybody else (see <a href="#permissions">below</a>).</li>
     </ul>
     {% endif %}
-    {% call doc_block('About MCP links (separate from the API)', id='api-guide-mcp-about') %}
+    {% call doc_block('About MCP links (separate from the API)', id='api-guide-mcp-about', summary=True) %}
     <p>The personal links on your <a href="/account/mcp" id="api-guide-mcp-link">MCP page</a> are for AI assistants. Each link is its own token that acts as your login on the MCP server (<code>/mcp</code>); it does not work on the REST API, and your password does not go into an MCP client. Treat a link like a password and revoke it there if it leaks.</p>
     {% endcall %}
   </section>

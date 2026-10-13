@@ -6857,7 +6857,7 @@ def test_dataset_facets_card_shows_effects_per_facet(client):
     assert 'data-facet="ant_braak"' in card and ">descriptive only</span>" in card
     # untested disease unit is listed with its reason
     assert "level with &lt; 3 donors (control=2, AD=19)" in card or "level with < 3 donors (control=2, AD=19)" in card
-    assert "Cohort CohortX, anchor" in card
+    assert "yes, cohort CohortX, anchor" in card
     # expand logic loaded, and tables scroll inside their box
     assert "/facet-tests" in text and "volcano.png" in text
     assert '<div class="table-wrap">\n<table class="fx-table card-table"' in card
@@ -6866,9 +6866,9 @@ def test_dataset_facets_card_shows_effects_per_facet(client):
 
 def test_dataset_facets_tab_unit_line_has_replicate_unit_and_disease_basis(client):
     text = client.get("/browse/GroupA/ds1").text
-    unit_line = text.split('id="fx-unit-line"')[1].split("</p>")[0]
-    assert 'id="fx-replicate">Replicate unit: <strong>donor (ant_donor)</strong>' in unit_line
-    assert "Disease basis: <strong>AD vs control: pathologic (Braak x CERAD)</strong>" in unit_line
+    unit_line = text.split('id="fx-unit-line"')[1].split("</table>")[0]
+    assert 'id="fx-replicate"><th>Replicate unit' in unit_line and '<span class="fx-tag">donor (ant_donor)</span>' in unit_line
+    assert 'Disease basis' in unit_line and '<span class="fx-tag">AD vs control: pathologic (Braak x CERAD)</span>' in unit_line
     assert 'id="fx-overlap-unknown"' in unit_line and "not checked" in unit_line
     # the Biology card of the Data tab repeats the unit, small
     bio = text.split('id="bio-replicate-unit"')[1].split("</tr>")[0]
@@ -6882,7 +6882,7 @@ def test_dataset_facets_tab_replicate_unit_not_recorded(client, monkeypatch):
                         for unit in summary["units"]]
     monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/facet-tests": summary}))
     text = client.get("/browse/GroupA/ds1").text
-    assert "Replicate unit: <strong>not recorded for this dataset</strong>" in text
+    assert '<span class="fx-tag">not recorded for this dataset</span>' in text
     assert 'id="bio-replicate-unit"' not in text and 'id="fx-disease-basis"' not in text
 
 
@@ -6890,8 +6890,8 @@ def test_dataset_info_replicate_fields_win_over_the_test_summary(client, monkeyp
     info = dict(_INFO["GroupA/ds1"], replicate_unit="animal", replicate_column="hash.ID",
                 replicate_basis="declared", disease_basis="author_dx")
     monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": info}))
-    unit_line = client.get("/browse/GroupA/ds1").text.split('id="fx-unit-line"')[1].split("</p>")[0]
-    assert "<strong>animal (hash.ID)</strong>" in unit_line and "AD vs control: author diagnosis" in unit_line
+    unit_line = client.get("/browse/GroupA/ds1").text.split('id="fx-unit-line"')[1].split("</table>")[0]
+    assert '<span class="fx-tag">animal (hash.ID)</span>' in unit_line and "AD vs control: author diagnosis" in unit_line
     assert "not pathology based" in unit_line
 
 
@@ -7215,13 +7215,25 @@ def test_help_has_the_ptprg_walkthrough(client):
     assert "proves" not in section and "confirms" not in section
 
 
-def test_doc_block_macro_renders_a_closed_labelled_details_element():
+def test_doc_block_macro_renders_a_hidden_box_toggled_by_an_info_button():
     template = browser.templates.env.from_string(
-        '{% from "_macros.html" import doc_block %}{% call doc_block("About this", id="x") %}body{% endcall %}'
-        '{% call doc_block("About that", open=True) %}other{% endcall %}')
+        '{% from "_macros.html" import doc_block, doc_toggle %}<h2>Head{{ doc_toggle("x", "About this") }}</h2>'
+        '{% call doc_block("About this", id="x") %}body{% endcall %}'
+        '{% call doc_block("About that", open=True) %}other{% endcall %}'
+        '{% call doc_block("About more", id="y", summary=True) %}more{% endcall %}')
     html = template.render()
-    assert '<details class="doc-block" id="x"><summary>&#9432; About this</summary><div class="doc-body">body</div></details>' in html
+    # hidden box, no visible summary; the header (i) is a button wired to it
+    assert '<div class="doc-box" id="x" role="region" aria-label="About this" hidden><div class="doc-body">body</div></div>' in html
+    assert '<button type="button" class="doc-toggle" data-help-for="x" aria-controls="x" aria-expanded="false"' in html
+    # fallbacks: no id, or summary=True, keep the collapsible bar
     assert '<details class="doc-block" open><summary>&#9432; About that' in html
+    assert '<details class="doc-block" id="y"><summary>&#9432; About more' in html
+
+
+def test_base_toggles_doc_boxes_and_opens_them_for_a_hash(client):
+    text = client.get("/").text
+    assert "closest('.help-btn, .doc-toggle')" in text
+    assert "node.classList.contains('doc-box')" in text and ".doc-box[hidden]" in text
 
 
 def test_base_has_doc_block_styles_hash_opening_and_remembering(client):
@@ -7310,7 +7322,7 @@ def test_dataset_page_shows_lineage(client, monkeypatch):
     assert 'id="ds-reanalysis-of"' in lineage and 'href="/browse/GroupA/ds2"' in lineage
     assert 'href="/donor-groups#dg-rosmap"' in lineage
     # the Facets tab repeats designation and donor group in its unit line
-    unit_line = text.split('id="fx-unit-line"')[1].split("</p>")[0]
+    unit_line = text.split('id="fx-unit-line"')[1].split("</table>")[0]
     assert "Reanalysis" in unit_line and "never counted" in unit_line
     assert 'href="/donor-groups#dg-rosmap"' in unit_line
 
@@ -7957,3 +7969,27 @@ def test_dataset_hash_routing_opens_panels_holding_an_anchor(client):
     handle = text.split("function handleHash(hash)")[1].split("window.addEventListener('hashchange'")[0]
     assert "anchorEl.closest('.tab-panel')" in handle and "scrollIntoView" in handle
     assert "tabPart === 'ds-facet-effects'" in handle
+
+
+def test_facet_label_panel_uses_key_value_tags_with_help_toggles(client):
+    text = client.get("/browse/GroupA/ds1").text
+    panel = text.split('id="tab-facets"')[1].split("</section>")[0]
+    # the mapping help is hidden; the (i) after the heading toggles it
+    head = panel.split('<h2 class="section-head">Facets')[1].split("</h2>")[0]
+    assert 'data-help-for="ds-facets-about"' in head
+    assert '<div class="doc-box" id="ds-facets-about" role="region" aria-label="About the facet mappings" hidden>' in panel
+    assert '<summary>&#9432; About the facet mappings' not in panel
+    keys = panel.split('id="fx-unit-line"')[1].split("</table>")[0]
+    for row, help_id in (("fx-replicate", "fx-help-replicate"), ("fx-cohort", "fx-help-cohort"), ("fx-disease-basis", "fx-help-disease")):
+        cells = keys.split('id="%s"' % row)[1].split("</tr>")[0]
+        assert 'data-help-for="%s"' % help_id in cells and 'id="%s"' % help_id in cells
+    cohort = keys.split('id="fx-cohort"')[1].split("</tr>")[0]
+    assert "Counts towards replication" in cohort and "counts each cohort once" in cohort
+    assert "draft awaiting sign-off" in cohort and "DRAFT" not in keys
+    assert 'href="/help#facet-effects">About facets and their effects</a>' in cohort
+
+
+def test_doc_blocks_without_a_header_keep_the_summary_bar():
+    for name in ("genes.html", "api_guide.html", "geneset_variability.html"):
+        template = (Path(browser.__file__).parent / "templates" / name).read_text(encoding="utf-8", errors="replace")
+        assert "summary=True" in template, name

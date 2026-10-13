@@ -471,6 +471,21 @@
         details.doc-block > .doc-body ul { margin: 4px 0 6px 18px; padding: 0; }
         details.doc-block > .doc-body dl { margin: 4px 0; }
         details.doc-block details.doc-block { margin: 6px 0; }
+        /* Hidden help box (doc_block with an id) and its (i) toggle (doc_toggle) after a header or label. */
+        .doc-box { max-width: 900px; margin: 6px 0 12px; border: 1px solid var(--border-light); border-left: 3px solid var(--border);
+                   border-radius: 4px; background: #fafbfc; font-size: 12.5px; line-height: 1.5; font-weight: normal; color: var(--text); }
+        .doc-box[hidden] { display: none; }
+        .doc-box > .doc-body { padding: 6px 12px 8px; }
+        .doc-box > .doc-body > :first-child { margin-top: 2px; }
+        .doc-box > .doc-body p { margin: 4px 0 6px; }
+        .doc-box > .doc-body ul { margin: 4px 0 6px 18px; padding: 0; }
+        .doc-box > .doc-body dl { margin: 4px 0; }
+        .doc-box h4 { font-size: 12.5px; margin: 8px 0 2px; color: #254850; }
+        .doc-toggle { background: none; border: 0; padding: 0 2px; margin-left: 4px; font: inherit; font-size: 12px; font-weight: normal; line-height: 1;
+                      color: var(--text-muted); cursor: pointer; vertical-align: baseline; border-radius: 3px; }
+        .doc-toggle:hover, .doc-toggle.on { color: var(--link); }
+        .doc-toggle.on { font-weight: 700; }
+        .doc-toggle:focus-visible { outline: 2px solid var(--link); outline-offset: 1px; }
         /* Site-wide help convention. Two clearly different devices:
            (?) .help-btn: a filled teal circle in a section header that opens a larger
                explanation panel (.help-panel) directly below it, closed by default.
@@ -1977,7 +1992,7 @@
       }
       window.antHelpOpen = function (panel) { setHelp(panel, true); };
       document.addEventListener('click', function (event) {
-        var button = event.target.closest ? event.target.closest('.help-btn') : null;
+        var button = event.target.closest ? event.target.closest('.help-btn, .doc-toggle') : null;
         if (!button) return;
         var panel = document.getElementById(button.getAttribute('data-help-for'));
         if (panel) setHelp(panel, panel.hidden);
@@ -2012,7 +2027,7 @@
         var changed = false;
         for (var node = target; node; node = node.parentElement) {
           if (node.tagName === 'DETAILS' && !node.open) { node.open = true; changed = true; }
-          if (node.classList && node.classList.contains('help-panel') && node.hidden) { window.antHelpOpen(node); changed = true; }
+          if (node.classList && (node.classList.contains('help-panel') || node.classList.contains('doc-box')) && node.hidden) { window.antHelpOpen(node); changed = true; }
         }
         if (changed || target.tagName === 'DETAILS') target.scrollIntoView();
       }

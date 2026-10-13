@@ -458,20 +458,31 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   card loses its top margin automatically; use `.section-head.first` where a
   wrapper already provides spacing. Headings inside markdown descriptions
   (`.md-body`) stay neutral so sections remain distinct.
-- **Documentation is collapsible, closed by default.** Every explanatory, intro
-  or methods block longer than a line goes in `{% call doc_block('About ...',
-  id='...') %}...{% endcall %}` (`_macros.html`; renders
-  `<details class="doc-block">` with an "ⓘ About ..." summary, CSS and JS in
-  `base.html`). One short essential line stays visible next to it (for
-  example "Exploratory. Effects are tested per donor within one cell type.",
-  "Disease means pathologic AD", the composition one-liner on facet cards).
-  JS-built markup uses the same classes (`docBlock()` in `_facet_effects.html`)
-  and calls `window.antDocRestore(root)` after rendering. Open/closed state is
-  remembered per block in `localStorage` (`doc.open.<path>#<id>`); a `#hash`
-  link opens every closed `<details>` ancestor of its target (also on click of
-  the link already in the hash), which is how the help TOC and glossary links
-  work. `/help` sections are `<details class="help-section">` (quickstart open,
-  expand/collapse-all buttons, the search opens matching sections).
+- **Help boxes are hidden, opened by an (i) after the header (2026-10-13, sitewide rule).** Every explanatory,
+  intro or methods block longer than a line is `{% call doc_block('About ...', id='...') %}...{% endcall %}`
+  (`_macros.html`), which renders `<div class="doc-box" role="region" hidden>` with no visible summary, plus
+  `{{ doc_toggle('<id>', 'About ...') }}` placed right after the section header text (or the label it explains):
+  a `<button class="doc-toggle" data-help-for aria-controls aria-expanded>` (i) that shows and hides the box.
+  The toggle JS is the same as the (?) panels (`.help-btn, .doc-toggle` in base.html); a `#hash` pointing at the
+  box or anything inside it opens it (`openTarget`). Open state is not remembered: boxes start hidden on every
+  load. One short essential line stays visible next to it (for example "Exploratory. Effects are tested per
+  donor within one cell type."). **Fallback:** `doc_block(..., summary=True)`, or a doc_block without an id,
+  keeps the older `<details class="doc-block">` bar with an "(i) About ..." summary (remembered in
+  `localStorage`), for boxes with no header to hang an (i) on. Current fallbacks: `fx-methods` (facet page,
+  second box under one header), `mv-stats-help` (variability heatmap, second box), `gv-hm-about` (gene
+  heatmap, JS-revealed block), `api-guide-mcp-about` (inside the Signing in section), the explorer box
+  `<id>-about` in `_module_view.html` unless `mv_ctx.about_in_header` (true on the dataset GS panel), and the
+  JS-built `docBlock()` boxes in `_facet_effects.html` and `_views.html` (call `window.antDocRestore(root)`
+  after rendering). The effects box `fx-about` (from `fx_intro`) now also holds the flag legend
+  (`#fx-flag-legend` is an `<h4>` inside it); its (i) sits on the header above `fx_intro`
+  ("Effects by facet" on the dataset Gene sub-tab, "Effects across datasets" on the facet page). `/help`
+  sections stay `<details class="help-section">`.
+- **Facet label panel tags.** `#fx-unit-line` is a `table.fx-keys` (wrapped in `.table-wrap`): one row per
+  key (`#fx-scope`, `#fx-replicate`, `#fx-control-basis`, `#fx-disease-basis`, `#fx-donor-group`,
+  `#fx-designation`, `#fx-cohort` "Counts towards replication"), the value as a `.fx-tag` pill, an (i) per
+  label opening a `doc-box` (`fx-help-*`) inside the value cell. The cohort help explains the curated
+  cohort table (a draft awaiting sign-off) and holds the "About facets and their effects" link. The
+  "dataset changed" warning `#fx-changed` stays visible.
 - **Tooltips link to the glossary.** An `.info` or `.fx-pill` with
   `data-glossary="<term>"` shows its one-sentence `title` text plus a "More in
   the glossary" link to `/help#glossary-<term>` in the click bubble. Every slug

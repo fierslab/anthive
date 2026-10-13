@@ -3073,6 +3073,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
             "id": "mv-modules-tab",
             # Lives in the Facet GS tab; fetch /module-variability only when that tab opens.
             "lazy_tab": "facet-gs",
+            # The GS panel header carries the (i) for the explorer's help box.
+            "about_in_header": True,
             # For the empty-state branching in _module_view.html: does this
             # dataset carry any facet (`ant_*`) obs columns at all?
             # No facets means variability cannot be computed, so the message

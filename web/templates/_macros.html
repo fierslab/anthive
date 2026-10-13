@@ -199,14 +199,28 @@
    The home icon is the word "home" styled as a muted link - keeps it subtle
    and screen-reader-friendly.
 #}
-{# Collapsible documentation block, closed by default (sitewide pattern).
-   Usage:  {% call doc_block('About these effects', id='fx-about') %}...{% endcall %}
-   title: summary text, starts with "About ..."; the ⓘ is added here.
-   id: optional anchor; a #id link opens the block, and the open/closed state is
-       remembered per block in localStorage (base.html).
-   open: render open (only for blocks a page must not hide). #}
-{% macro doc_block(title, id=None, open=False) -%}
+{# Help box, hidden by default (sitewide rule, 2026-10-13).
+   Usage:  <h2 class="section-head">Facets {{ doc_toggle('ds-facets-about', 'About the facet mappings') }}</h2>
+           {% call doc_block('About the facet mappings', id='ds-facets-about') %}...{% endcall %}
+   The box renders hidden, with no visible summary; the (i) button from doc_toggle after the section
+   header (or the label it explains) shows and hides it. A #id link to the box, or to anything
+   inside it, opens it (base.html).
+   id: required for the hidden box; without an id the macro falls back to the summary bar.
+   summary: True keeps the older collapsible bar with an "(i) About ..." summary, for boxes that
+            have no header to hang an (i) on.
+   open: render open (only for boxes a page must not hide). #}
+{% macro doc_block(title, id=None, open=False, summary=False) -%}
+{%- if summary or not id -%}
 <details class="doc-block"{% if id %} id="{{ id }}"{% endif %}{% if open %} open{% endif %}><summary>&#9432; {{ title }}</summary><div class="doc-body">{{ caller() }}</div></details>
+{%- else -%}
+<div class="doc-box" id="{{ id }}" role="region" aria-label="{{ title }}"{% if not open %} hidden{% endif %}><div class="doc-body">{{ caller() }}</div></div>
+{%- endif -%}
+{%- endmacro %}
+
+{# The (i) button that shows or hides a hidden doc_block. Place it right after the section header
+   text (or a label). id: the doc_block id; title: what the box explains (tooltip and screen readers). #}
+{% macro doc_toggle(id, title) -%}
+<button type="button" class="doc-toggle" data-help-for="{{ id }}" aria-controls="{{ id }}" aria-expanded="false" title="{{ title }}: show or hide">&#9432;</button>
 {%- endmacro %}
 
 {# Section header with a (?) help button (sitewide convention, see base.html).

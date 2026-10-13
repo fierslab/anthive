@@ -114,7 +114,8 @@ Optional mv_ctx keys:
     .mv-panel .mv-cap-badge.mv-cap-visible { display: inline-block; }
   </style>
   <p class="mv-short" id="{{ _id }}-short" style="font-size:12px;margin:2px 0 4px"><strong>Exploratory.</strong> These are per-cell associations (descriptive), not tests.</p>
-  {% call doc_block('About per-cell associations', id=_id ~ '-about') %}
+  {# With mv_ctx.about_in_header the page header carries doc_toggle(<id>-about); otherwise the summary bar is the fallback. #}
+  {% call doc_block('About per-cell associations', id=_id ~ '-about', summary=not _mv.get('about_in_header')) %}
     <p>Each value describes how a gene set score differs with a cell annotation column, computed over individual cells rather than donors. Cells of one donor are not independent, and every cell carries its donor's facet value, so these numbers mostly show how different donors are from each other. They help to spot candidates; they are not significance tests.</p>
     <p>Donor and cluster columns are off by default because they explain a lot by construction. For effects tested per donor use the Gene sub-tab of a dataset's Facet tab (<a href="/help#glossary-per-cell-association">glossary</a>).</p>
   {% endcall %}

@@ -213,6 +213,17 @@
   .tab-group .tab-btn.tab-sub.active { background: #2f4f5f; border-color: #2f4f5f; color: #fff; }
   .tab-group .tab-btn.tab-sub.vw-preview::after { margin-left: 4px; }
   .tab-group .tab-btn.tab-sub.vw-preview.active::after { background: rgba(255,255,255,.2); color: #fff; }
+  /* Facet label panel: key/value tags with an (i) per label. */
+  table.fx-keys { border-collapse: collapse; font-size: 12.5px; margin: 2px 0 10px; }
+  table.fx-keys th { text-align: left; font-weight: 500; color: var(--text-muted); padding: 3px 14px 3px 0; vertical-align: top; white-space: nowrap; }
+  table.fx-keys td { padding: 3px 0; vertical-align: top; }
+  table.fx-keys .fx-tag { display: inline-block; padding: 0 8px; border: 1px solid var(--border); border-radius: 10px; background: #f6f8f9; color: var(--text); line-height: 1.6; }
+  table.fx-keys .fx-tag.yes { background: #eef6f0; border-color: #b9d8c1; }
+  table.fx-keys .fx-tag.no { background: #f7f3ee; border-color: #e1d4c3; }
+  table.fx-keys .fx-key-note { color: var(--text-muted); margin-left: 4px; }
+  table.fx-keys .fx-reason { display: block; margin-top: 2px; }
+  table.fx-keys .doc-box { margin: 4px 0 6px; }
+  @media (max-width: 560px) { table.fx-keys th { white-space: normal; } }
   /* Empty-state tab (nothing to download, no caveats): muted and never highlighted, still clickable.
      Distinct from .vw-preview (a view that is not approved yet), which carries a "preview" marker. */
   .tab-btn.tab-empty, .tab-btn.tab-empty:hover, .tab-btn.tab-empty.active { color: #a3aab2; font-weight: 400; }
@@ -875,11 +886,11 @@
 </section>
 
 {# ── Facet GS tab: the per-cell association explorer (_module_view.html), moved out of the Genesets tab. Not approved yet (VIEW_REGISTRY key dataset-facet-gs). Loads on first open of the tab (mv_ctx.lazy_tab). Old #modules&mv=... and #tab-modules-mv=... links open this tab. #}
-{% from "_macros.html" import review_banner as _review_banner %}
+{% from "_macros.html" import review_banner as _review_banner, doc_toggle %}
 <section class="tab-panel" id="tab-facet-gs" role="tabpanel">
   {{ _review_banner('dataset-facet-gs') }}
   <h2 class="section-head">Gene set scores by annotation column
-    <span class="info" data-glossary="per-cell-association" title="Gene set scores compared with the cell annotation columns, sorted by how far each stands out from its peers.">ⓘ</span>
+{{ doc_toggle('mv-modules-tab-about', 'About per-cell associations') }}
   </h2>
   <div class="tab-loading plot-loading" data-tab-loading="facet-gs" style="min-height:60px;display:none">
     <span class="spinner-lg"></span>
@@ -893,7 +904,7 @@
 {% if show_facets_tab %}
 {% from "_facet_mapping.html" import facet_mapping_styles %}
 {% from "_facet_effects.html" import fx_styles, fx_intro, fx_script %}
-{% from "_macros.html" import doc_block %}
+{% from "_macros.html" import doc_block, doc_toggle %}
 <section class="tab-panel" id="tab-facets" role="tabpanel">
   {{ facet_mapping_styles() }}
   {{ fx_styles() }}
@@ -901,26 +912,39 @@
   {% set _fx_shown = (dataset_facets + dataset_facets_other)|map(attribute='facet')|list %}
   {% set _fx_extra = [] %}{% set _fx_untested_extra = [] %}{% for col in _fx %}{% if col not in _fx_shown %}{% if _fx[col].tested %}{% set _ = _fx_extra.append(col) %}{% elif _fx[col].untested %}{% set _ = _fx_untested_extra.append(col) %}{% endif %}{% endif %}{% endfor %}
   <div id="ds-facets">
-    <h2 class="section-head">Facets <span class="muted">({{ n_facets_total }})</span>
-      <span class="info" data-glossary="facet" title="Standardised donor-level variables of this dataset and how its own columns map onto them.">ⓘ</span></h2>
+    <h2 class="section-head">Facets <span class="muted">({{ n_facets_total }})</span>{{ doc_toggle('ds-facets-about', 'About the facet mappings') }}</h2>
     {% call doc_block('About the facet mappings', id='ds-facets-about') %}
       <p>Facets are the standardised <code>ant_</code> columns of this dataset. For each one the table shows the author column it comes from, how it was mapped (renamed, derived through a value map, or one constant value) and how each author value was translated, with cell counts.</p>
       <p>For facets that were tested, the Gene sub-tab shows the differences between donors per cell type. Click a facet for its definition and the other datasets that carry it. Terms are explained in the <a href="/help#glossary">glossary</a>.</p>
     {% endcall %}
     {% if not (facet_tests and facet_tests.excluded) %}
-    <p class="fx-intro" id="fx-unit-line">
-      {% set _scope = (info.facet_scope if info and info.facet_scope else (facet_tests.facet_scope if facet_tests else None)) %}
-      {% if _scope and not (facet_tests and facet_tests.excluded) %}<span id="fx-scope">Scope: <span class="fx-scope" data-scope="{{ _scope }}" title="Facet results are tested, counted and replicated within one scope; scopes are never mixed.">{{ facet_scope_label(_scope) }}</span> <a href="/help#glossary-scope">what is a scope</a>.</span>{% endif %}
-      <span id="fx-replicate">Replicate unit: <strong>{{ replicate.text if replicate and replicate.unit else 'not recorded for this dataset' }}</strong>.</span>
-      {% if info and info.control_basis %}<span id="fx-control-basis">Control animals: <strong>{{ facet_control_basis(info.control_basis) }}</strong>.</span>{% endif %}
-      {% if replicate and replicate.disease_text %}<span id="fx-disease-basis">Disease basis: <strong>{{ replicate.disease_text }}</strong>{% if replicate.disease_basis not in ['braak_cerad', 'nia_reagan', 'adnc'] %} (not pathology based, so not combined with other cohorts){% endif %}.</span>{% endif %}
-      {% if info and info.designation %}<span id="fx-designation"><b>{{ 'Primary data' if info.designation == 'primary' else ('Reanalysis' if info.designation == 'reanalysis' else 'Designation unresolved') }}</b>{% if info.designation == 'reanalysis' %}, never counted towards replication across datasets{% endif %}.</span>{% endif %}
-      {% if info and info.donor_group %}<span id="fx-donor-group">Donor group <a href="/donor-groups#dg-{{ info.donor_group }}">{{ info.donor_group }}</a>.</span>{% endif %}
-      {% if facet_tests and facet_tests.cohort %}<span id="fx-cohort">Cohort {{ facet_tests.cohort.cohort_label }}, {{ facet_tests.cohort.role }}{% if not facet_tests.cohort.counted %} (not counted towards replication across datasets){% endif %}; from the DRAFT cohort selection table.</span>
-      {% elif facet_tests and facet_tests.n_units_tested %}<span id="fx-cohort">This dataset is not in the DRAFT cohort selection table, so it does not count towards replication across datasets.</span>{% endif %}
-      {% if facet_tests and facet_tests.cohort and facet_tests.cohort.overlap_unknown %}<span id="fx-overlap-unknown" class="fx-reason">Donor overlap with other cohorts was not checked for this cohort.</span>{% endif %}
-      <a href="/help#facet-effects">About facets and their effects</a>
-    </p>
+    {% set _scope = (info.facet_scope if info and info.facet_scope else (facet_tests.facet_scope if facet_tests else None)) %}
+    {# Key/value tags, one row each; every label has an (i) that shows a short help box under the value. #}
+    <div class="table-wrap"><table class="fx-keys" id="fx-unit-line">
+      {% if _scope %}<tr id="fx-scope"><th>Scope{{ doc_toggle('fx-help-scope', 'About the scope') }}</th><td><span class="fx-scope" data-scope="{{ _scope }}">{{ facet_scope_label(_scope) }}</span>
+        {% call doc_block('About the scope', id='fx-help-scope') %}<p>Facet results are tested, counted and replicated within one scope: human post-mortem tissue, or human cells grafted into mouse hosts. Scopes are never mixed (<a href="/help#glossary-scope">what is a scope</a>).</p>{% endcall %}</td></tr>{% endif %}
+      <tr id="fx-replicate"><th>Replicate unit{{ doc_toggle('fx-help-replicate', 'About the replicate unit') }}</th><td><span class="fx-tag">{{ replicate.text if replicate and replicate.unit else 'not recorded for this dataset' }}</span>
+        {% call doc_block('About the replicate unit', id='fx-help-replicate') %}<p>The independent unit of the tests: one profile per donor for human cohorts, per host animal for xenografts and mouse data. Cells of one donor are not independent, so they are added up first (<a href="/help#glossary-replicate-unit">glossary</a>).</p>{% endcall %}</td></tr>
+      {% if info and info.control_basis %}<tr id="fx-control-basis"><th>Control animals{{ doc_toggle('fx-help-control', 'About the control animals') }}</th><td><span class="fx-tag">{{ facet_control_basis(info.control_basis) }}</span>
+        {% call doc_block('About the control animals', id='fx-help-control') %}<p>What the control hosts of an App NL-G-F comparison are. A humanised-App host isolates the familial AD mutations; a wild-type host does not (<a href="/help#glossary-app-nlgf">glossary</a>).</p>{% endcall %}</td></tr>{% endif %}
+      {% if replicate and replicate.disease_text %}<tr id="fx-disease-basis"><th>Disease basis{{ doc_toggle('fx-help-disease', 'About the disease basis') }}</th><td><span class="fx-tag">{{ replicate.disease_text }}</span>{% if replicate.disease_basis not in ['braak_cerad', 'nia_reagan', 'adnc'] %} <span class="fx-key-note">not pathology based, so not combined with other cohorts</span>{% endif %}
+        {% call doc_block('About the disease basis', id='fx-help-disease') %}<p>How this dataset defines AD versus control. Only pathology-based definitions (Braak and CERAD, NIA-Reagan or ADNC) are combined across cohorts; clinical or author diagnoses are shown but never counted (<a href="/help#glossary-disease-basis">glossary</a>).</p>{% endcall %}</td></tr>{% endif %}
+      {% if info and info.donor_group %}<tr id="fx-donor-group"><th>Donor group{{ doc_toggle('fx-help-donor-group', 'About donor groups') }}</th><td><a class="fx-tag" href="/donor-groups#dg-{{ info.donor_group }}">{{ info.donor_group }}</a>
+        {% call doc_block('About donor groups', id='fx-help-donor-group') %}<p>The datasets whose donors come from the same donor collection, so the same people can appear in several of them. Agreement within one group is not independent replication (<a href="/donor-groups">all donor groups</a>).</p>{% endcall %}</td></tr>{% endif %}
+      {% if info and info.designation %}<tr id="fx-designation"><th>Data{{ doc_toggle('fx-help-designation', 'About primary data and reanalyses') }}</th><td><span class="fx-tag">{{ 'primary data' if info.designation == 'primary' else ('reanalysis' if info.designation == 'reanalysis' else 'designation unresolved') }}</span>{% if info.designation == 'reanalysis' %} <span class="fx-key-note">Reanalysis, never counted towards replication across datasets</span>{% endif %}
+        {% call doc_block('About primary data and reanalyses', id='fx-help-designation') %}<p>Primary data means this dataset is the one that serves these cells. A reanalysis uses cells another dataset already serves; it is shown, but it is never counted towards replication, so the same cells do not count twice.</p>{% endcall %}</td></tr>{% endif %}
+      {% if facet_tests and (facet_tests.cohort or facet_tests.n_units_tested) %}
+      {% set _cohort = facet_tests.cohort %}
+      <tr id="fx-cohort"><th>Counts towards replication{{ doc_toggle('fx-help-cohort', 'About counting towards replication') }}</th><td>
+        {% set _role = (_cohort.role or '') if _cohort else '' %}{% set _short_role = _role and _role|length <= 24 %}
+        {% if _cohort and _cohort.counted %}<span class="fx-tag yes">yes, cohort {{ _cohort.cohort_label }}{% if _short_role %}, {{ _role }}{% endif %}</span>{% if _role and not _short_role %} <span class="fx-key-note">{{ _role }}</span>{% endif %}
+        {% elif _cohort %}<span class="fx-tag no">no</span> <span class="fx-key-note">cohort {{ _cohort.cohort_label }}{% if _role %}, {{ _role }}{% endif %}; not counted towards replication across datasets</span>
+        {% else %}<span class="fx-tag no">no</span> <span class="fx-key-note">not in the cohort selection table</span>{% endif %}
+        {% if _cohort and _cohort.overlap_unknown %}<span id="fx-overlap-unknown" class="fx-reason">Donor overlap with other cohorts was not checked for this cohort.</span>{% endif %}
+        {% call doc_block('About counting towards replication', id='fx-help-cohort') %}<p>Replication across datasets counts each cohort once. A curated table names which dataset represents each cohort (its anchor; other datasets of that cohort are supplements), so donors shared between datasets are not counted twice. Datasets that are not in that table still show their own results, but they do not add to the replication count. The table is a draft awaiting sign-off.</p>
+          <p><a href="/help#facet-effects">About facets and their effects</a></p>{% endcall %}</td></tr>
+      {% endif %}
+    </table></div>
     {% endif %}
     {% if facet_tests and facet_tests.dataset_changed %}<p class="fx-intro" id="fx-changed" style="color:#7a4b0c">The dataset has changed since the facet tests were run; the effects describe the earlier version.</p>{% endif %}
 
@@ -948,7 +972,7 @@
 <section class="tab-panel" id="tab-facet-gene" role="tabpanel">
   <div id="ds-facet-effects">
     {% if facet_tests and facet_tests.n_units_tested %}
-    <h2 class="section-head" id="facets-effects-head">Effects by facet</h2>
+    <h2 class="section-head" id="facets-effects-head">Effects by facet{{ doc_toggle('fx-about', 'About these effects and the flags') }}</h2>
     {{ fx_intro('dataset', facet_tests.n_permutations) }}
     {% for f in dataset_facets + dataset_facets_other %}{% if _fx.get(f.facet) %}{{ _fx_effects_block(f.facet, _fx[f.facet]) }}{% endif %}{% endfor %}
     {% for col in _fx_extra %}{{ _fx_effects_block(col, _fx[col]) }}{% endfor %}
@@ -958,13 +982,13 @@
     {% endif %}
     {% else %}
     {% if facet_tests and facet_tests.excluded %}
-    <h2 class="section-head" id="facets-effects-head">Facet analysis</h2>
+    <h2 class="section-head" id="facets-effects-head">Facet analysis{{ doc_toggle('fx-excluded-about', 'About datasets left out of the facet analysis') }}</h2>
     <p class="facet-excluded" id="fx-excluded"><strong>This dataset is not part of the facet analysis.</strong> {{ facet_tests.excluded_text }}</p>
     {% call doc_block('About datasets left out of the facet analysis', id='fx-excluded-about') %}
       <p>The facet analysis needs single cells (or nuclei) that can be grouped by cell type and by donor, so that each donor gives one profile per cell type. Spatial data, proteomics, metacell sets (each row an aggregate of cells) and pure mouse datasets do not fit, and a few sets are set aside on purpose by the curators. Such a dataset keeps its facet columns for browsing and plotting, but it is never tested and never counted towards replication ({% if facet_tests.reason %}recorded reason: <code>{{ facet_tests.reason }}</code>; {% endif %}<a href="/help#glossary-facet-exclusion">glossary</a>).</p>
     {% endcall %}
     {% else %}
-    <h2 class="section-head" id="facets-effects-head">Effects by facet</h2>
+    <h2 class="section-head" id="facets-effects-head">Effects by facet{{ doc_toggle('fx-not-tested-about', 'About when facets are tested') }}</h2>
     <p class="fx-none" id="fx-not-tested">{% if facet_tests %}No facet tests for this dataset: {{ facet_tests.reason_text }}.{% else %}Facet test results could not be loaded.{% endif %}
       </p>
     {% call doc_block('About when facets are tested', id='fx-not-tested-about') %}

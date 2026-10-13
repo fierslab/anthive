@@ -47,10 +47,10 @@
   table.mv td.mv-cell:hover { outline: 2px solid #111; outline-offset: -2px; }
 </style>
 
-{% from "_macros.html" import breadcrumb, doc_block %}
+{% from "_macros.html" import breadcrumb, doc_block, doc_toggle %}
 {{ breadcrumb([("gene sets", "/genesets"), ("geneset variability", None)]) }}
 <h1 class="page-title">Geneset variability across the fleet
-  <span class="info" data-glossary="per-cell-association" title="Rows are gene sets, columns are datasets, colour is a per-cell statistic; it is descriptive, not a test.">ⓘ</span></h1>
+  {{ doc_toggle('mv-about', 'About this heatmap') }}</h1>
 
 <p class="mv-intro">Which gene sets track a biological axis, and in which datasets. Pick a cell annotation column (for example braak or sex) and a statistic; each cell of the map is a <strong>per-cell association (descriptive)</strong>, not a tested effect.</p>
 
@@ -58,7 +58,7 @@
   <p>Each value compares a gene set score with a cell annotation column across individual cells in one dataset. Because the cells of a donor are not independent and all carry the donor's value, these numbers mostly reflect differences between donors and are only loosely comparable across datasets. Use them to spot candidates, then confirm with a donor-level test on the Facets tab of a dataset (<a href="/help#glossary-per-cell-association">glossary</a>).</p>
 {% endcall %}
 
-{% call doc_block('About the statistics', id='mv-stats-help') %}
+{% call doc_block('About the statistics', id='mv-stats-help', summary=True) %}
   <table class="mv-stats-table">
     <thead><tr><th>statistic</th><th>tag kind</th><th>range</th><th>reads as</th></tr></thead>
     <tbody>

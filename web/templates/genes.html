@@ -344,7 +344,7 @@
   <span class="muted" id="gene-meta-hm"></span>
 </div>
 <div id="gv-hm-about-wrap" style="display:none">
-{% call doc_block('About the heatmap values', id='gv-hm-about') %}
+{% call doc_block('About the heatmap values', id='gv-hm-about', summary=True) %}
   <ul>
     <li><strong>Abundance (scaled 0 to 1).</strong> Mean log-normalised expression, clipped to the 5th to 95th percentile across genes of that dataset and rescaled, so datasets are comparable.</li>
     <li><strong>% cells expressing.</strong> Fraction of cells with a non-zero count.</li>

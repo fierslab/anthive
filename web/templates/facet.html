@@ -166,13 +166,14 @@
 {% endif %}
 {% if facet_effects_pending %}
 {% from "_facet_effects.html" import fx_styles, fx_intro, fx_methods_box, fx_script, fx_recurring %}
+{% from "_macros.html" import doc_block, doc_toggle %}
 {{ fx_styles() }}
 <div class="card" id="facet-effects">
   <h2 class="section-head">Effects across datasets {% if facet_scope %}<span class="fx-scope" data-scope="{{ facet_scope }}" title="Results are counted within one scope; scopes are never mixed.">{{ facet_scope_label(facet_scope) }}</span>{% endif %}
-    <span class="info" data-glossary="replicate-unit" title="Tests of this facet per donor, one row per dataset and cell type, with replication counted across cohorts.">ⓘ</span></h2>
+    {{ doc_toggle('fx-about', 'About these effects and the flags') }}</h2>
   {{ fx_intro('facet') }}
   {% if facet_name == 'ant_app_nlgf' %}
-  <p class="fx-intro" id="fx-app-nlgf-short"><strong>Host animals, not donors.</strong> The replicate is the mouse. This test detects large effects only (a handful of animals per genotype), and the cells were isolated live, so dissociation-response genes are suspect. <a href="/help#glossary-app-nlgf">Glossary</a></p>
+  <p class="fx-intro" id="fx-app-nlgf-short"><strong>Host animals, not donors.</strong> The replicate is the mouse. This test detects large effects only (a handful of animals per genotype), and the cells were isolated live, so dissociation-response genes are suspect. <a href="/help#glossary-app-nlgf">Glossary</a>{{ doc_toggle('fx-app-nlgf-about', 'About the App NL-G-F comparison') }}</p>
   {% call doc_block('About the App NL-G-F comparison', id='fx-app-nlgf-about') %}
     <p>The facet contrasts App NL-G-F knock-in host mice with control hosts in xenograft studies of human microglia. The control is stated on every unit (the humanised-App host, App hu/hu, isolates the three familial AD mutations; a wild-type host does not). Animals are compared within one grafted human line and one timepoint, because the amyloid response grows with age and differs between lines; a stratum where genotype cannot be separated from line or timepoint is not tested. The genotype of the grafted cells themselves is the facet <a href="/facets/ant_genotype">ant_genotype</a>; the host's is <a href="/facets/ant_host_genotype">ant_host_genotype</a>.</p>
     <p>Few animals mean wide intervals and low power: a gene that is not detected here is not shown to be unchanged. Strata of one dataset (lines, timepoints) share one vote in the replication count, so a study counts once.</p>
@@ -185,7 +186,7 @@
   {% for variant in facet_variants %}<p class="fx-intro fx-variant-note" id="fx-variant-note-{{ variant.name[4:] }}" data-variant="{{ variant.name }}"{% if not loop.first %} hidden{% endif %}>{{ variant.note }}</p>{% endfor %}
   {% endif %}
   {% if facet_name == 'ant_disease' %}
-<p class="fx-intro" id="fx-disease-definition"><strong>Disease means pathologic AD</strong> (Braak and CERAD neuropathology), not a clinical diagnosis. Some of these donors had no dementia.</p>
+<p class="fx-intro" id="fx-disease-definition"><strong>Disease means pathologic AD</strong> (Braak and CERAD neuropathology), not a clinical diagnosis. Some of these donors had no dementia.{{ doc_toggle('fx-disease-about', 'About the disease definition') }}</p>
   {% call doc_block('About the disease definition', id='fx-disease-about') %}
     <p>Datasets define AD versus control in different ways. Only cohorts with a pathology-based definition (Braak and CERAD, NIA-Reagan or ADNC) are combined for replication; clinical or author diagnoses are listed in the tables and never counted. Each unit below states its definition. Braak stage and pathologic AD are one axis read twice, so a gene replicated under both is one observation, not two findings (<a href="/help#glossary-disease-basis">glossary</a>).</p>
   {% endcall %}

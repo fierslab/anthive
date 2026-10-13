@@ -39,10 +39,10 @@
   }
 </style>
 
-{% from "_macros.html" import breadcrumb, experimental_notice, doc_block %}
+{% from "_macros.html" import breadcrumb, experimental_notice, doc_block, doc_toggle %}
 {{ breadcrumb([("facets", None)]) }}
 
-<h1 class="page-title">Facets</h1>
+<h1 class="page-title">Facets{{ doc_toggle('facets-about', 'About facets') }}</h1>
 {{ experimental_notice("facets") }}
 
 <p class="facet-desc" id="facets-short">A facet is a donor-level (or animal-level) variable that anthive has standardised across datasets, such as sex, pathologic AD or Braak stage. Click a facet to see its definition and how expression differs with it across datasets.</p>

@@ -7,7 +7,7 @@
     Kept as separate macros so the layout can be revised without touching
     the data plumbing. -#}
 
-{% from "_macros.html" import doc_block %}
+{% from "_macros.html" import doc_block, doc_toggle %}
 {% macro fx_styles() -%}
 <style>
   .fx-intro { font-size: 12.5px; line-height: 1.55; max-width: 860px; margin: 0 0 8px; }
@@ -98,7 +98,7 @@
 {# n_permutations: the module-test run's permutation count (run manifest),
    when one run covers the whole scope; otherwise the text gives the default. #}
 {% macro fx_flag_legend() -%}
-{% call doc_block('About the flags', id='fx-flag-legend') %}
+<h4 id="fx-flag-legend">About the flags</h4>
   <dl class="fx-flag-dl">
     <dt><span class="fx-pill" data-glossary="analysis-level">replicate level (donor)</span></dt><dd>Tested with one profile per replicate (donor, animal or sample). The replicate, not the cell, is the unit.</dd>
     <dt><span class="fx-pill warn" data-glossary="descriptive-only">cell-level, descriptive only</span></dt><dd>Too few replicates for a test (fewer than 3 in a group, or no replicate column). The numbers describe cells; there is no p or q value because cells of one donor are not independent.</dd>
@@ -115,9 +115,9 @@
     <dt><span class="fx-pill warn" data-glossary="donor-overlap">donor overlap not checked</span></dt><dd>Nobody has verified whether this cohort shares donors with another one. Shared donors make cohorts agree for the wrong reason.</dd>
     <dt><span class="fx-pill warn" data-glossary="cohort">reanalysis, not counted</span></dt><dd>A reanalysis of cells another dataset serves: shown, never counted.</dd>
   </dl>
-{% endcall %}
 {%- endmacro %}
 
+{# The header above fx_intro carries doc_toggle('fx-about', ...): the box holds the effects text and the flag legend. #}
 {% macro fx_intro(scope='dataset', n_permutations=None) -%}
 <p class="fx-intro" id="fx-intro"><strong>Exploratory.</strong> Effects are tested per donor within one cell type.
   <a href="/help#facet-howto">How to read this</a></p>
@@ -126,8 +126,8 @@
     The cells of one donor in that cell type are added up into one profile per donor (a <a href="/help#glossary-pseudobulk">pseudobulk</a>), and genes are compared between donors with limma-voom, adjusting for sex, age and post-mortem interval where these are known. The donor, not the cell, is the <a href="/help#glossary-replicate-unit">replicate unit</a>. Module scores are tested with a linear model and {% if n_permutations %}{{ "{:,}".format(n_permutations) }} label permutations{% else %}label permutations (10,000 by default; each row's model line gives its own number){% endif %}.</p>
   <p>Across cohorts, a gene <a href="/help#glossary-r-value">replicates</a> when the same direction is seen in at least 2 cohorts. The r-value is a false discovery rate for the whole list of genes, not a probability for one gene, and it says nothing about effect size; the <a href="/help#glossary-effect-filter">effect filter</a> (at least a 10% change in 2 cohorts) is shown separately. Each cohort counts once, through one anchor unit, so datasets that share donors do not count twice.</p>
   <p>No hit means "not detected with this many donors", not "no effect". "AD" means pathologic AD (Braak and CERAD), not a clinical diagnosis, and only cohorts with a pathology-based definition are combined. A change of a whole cell type can also be a change in the mix of cell states within it. Terms are explained in the <a href="/help#glossary">glossary</a>.</p>
+  {{ fx_flag_legend() }}
 {% endcall %}
-{{ fx_flag_legend() }}
 {%- endmacro %}
 
 {# The model behind one unit: a compact line and a details disclosure. #}
@@ -246,7 +246,7 @@
 
 {# Short methods box for the facet page. #}
 {% macro fx_methods_box() -%}
-{% call doc_block('About the methods', id='fx-methods') %}
+{% call doc_block('About the methods', id='fx-methods', summary=True) %}
   <ul>
     <li><strong>Unit of analysis.</strong> The replicate (donor for human cohorts, host animal for mouse and xenograft data). Raw counts are summed per replicate within one cell type (at least 10 cells per replicate).</li>
     <li><strong>Genes.</strong> limma-voom with quality weights and robust moderation; model <code>expression ~ facet + sex + age + pmi [+ batch]</code>, covariates only when known for enough donors. q values are Benjamini-Hochberg within one dataset, cell type and facet. A second test, limma treat, asks whether the change exceeds a 10% minimum; its q is shown as q (&ge;10% change).</li>
@@ -882,8 +882,7 @@ window.antFx = window.antFx || (function () {
 {{ fx_styles() }}
 {{ fx_forest_assets() }}
 <section id="gene-facet-effects" class="fx-gene-panel" data-gene="{{ gene }}">
-  <h2 class="section-head">Facet effects <span class="muted">(donor level, exploratory)</span>
-    <span class="info" data-glossary="pseudobulk" title="Each row is one dataset and cell type, tested on its own with one profile per donor.">ⓘ</span></h2>
+  <h2 class="section-head">Facet effects <span class="muted">(donor level, exploratory)</span>{{ doc_toggle('gene-fx-about', 'About these effects') }}</h2>
   <p class="fx-intro" id="gene-fx-short"><strong>Exploratory.</strong> How {{ gene }} differs with each facet, tested per donor within one cell type. <a href="/help#facet-howto">How to read this</a></p>
   {% call doc_block('About these effects', id='gene-fx-about') %}
     <p>Each dataset and cell type is tested on its own, with one profile per donor (a <a href="/help#glossary-pseudobulk">pseudobulk</a>). One line per cell type group says whether {{ gene }} <a href="/help#glossary-r-value">replicates</a> across cohorts: the same direction in at least 2 cohorts, counted through one anchor unit per cohort. Open a line for its anchors and datasets.</p>
