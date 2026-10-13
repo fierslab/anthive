@@ -602,7 +602,7 @@ def test_opened_cell_is_a_plain_table_without_plots(client):
         text = client.get(path).text
         detail_source = text.split("function detail")[1].split("/* ----------")[0]
         assert "V.unitsTable(" in detail_source and "forestHtml(" not in detail_source and "linksHtml(" not in detail_source
-    assert "Adj. p" in client.get("/genes/PTPRG").text and "label: 'LFC'" in client.get("/genes/PTPRG").text
+    assert "'</th><th class=\"num\">q ' + info(effect.pTip)" in client.get("/genes/PTPRG").text and "label: 'LFC'" in client.get("/genes/PTPRG").text
     assert "label: 'Effect (SD)'" in client.get("/genesets/Study1/Exp1/DAM").text
 
 

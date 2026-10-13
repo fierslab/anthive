@@ -53,7 +53,7 @@
       views. Applies to the module drilldown table and the module-variability heatmap.
     </div>
     <fieldset class="radio-row">
-      <label><input type="radio" name="module_algorithm" value="geneset"> scanpy (gene sets) — default</label>
+      <label><input type="radio" name="module_algorithm" value="geneset"> scanpy (gene sets), default</label>
       <label><input type="radio" name="module_algorithm" value="ucell"> UCell</label>
     </fieldset>
 
@@ -90,7 +90,7 @@
      * Parse a comma/newline-separated string of gene symbols into a
      * normalised list of upper-case tokens (deduped, no empties).
      *
-     * Only [A-Z0-9._-] characters survive normalisation — this both matches
+     * Only [A-Z0-9._-] characters survive normalisation, this both matches
      * the shape of real HGNC symbols (letters, digits, hyphens, occasional
      * dot for antisense/withdrawn ids) and neutralises any HTML-like input
      * so the stored value is safe to concatenate into markup on other pages

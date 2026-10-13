@@ -7,7 +7,7 @@
   .de-page { display: grid; grid-template-columns: 280px 1fr; gap: 14px; align-items: start; }
   @media (max-width: 820px) {
     .de-page { grid-template-columns: 1fr; }
-    /* stacked above the table on narrow screens — keep the rail short so the
+    /* stacked above the table on narrow screens, keep the rail short so the
        gene table stays reachable without a long scroll. */
     .de-rail { max-height: 32vh; }
   }
@@ -84,7 +84,7 @@
   {% if study.target %}<div>target: <span class="val">{{ study.target }}</span></div>{% endif %}
   {% if study.reference_type %}<div>reference: <span class="val">{{ study.reference_type }}</span></div>{% endif %}
   <div>terms: <span class="val">{{ study.n_terms if study.n_terms is not none else (study.terms|length) }}</span></div>
-  <div>contrasts: <span class="val">{{ study.n_contrasts if study.n_contrasts is not none else '—' }}</span></div>
+  <div>contrasts: <span class="val">{{ study.n_contrasts if study.n_contrasts is not none else '' }}</span></div>
   {% if study.n_rows %}<div>rows: <span class="val">{{ "{:,}".format(study.n_rows) }}</span></div>{% endif %}
 </div>
 {% if study.description %}<p style="font-size:12px;color:#555;margin:2px 0 8px">{{ study.description }}</p>{% endif %}
@@ -111,7 +111,7 @@
       <div class="fld">
         <label>sort by</label>
         <select id="f-sort">
-          <option value="padj">padj</option>
+          <option value="padj">adj. p</option>
           <option value="effsize">effect size</option>
           <option value="estimate">estimate</option>
         </select>
@@ -266,7 +266,7 @@
       const recap = `sorted by ${sort}, ${dir}` +
         `${padj ? `, padj≤${padj}` : ''}${l2fc ? `, |log2FC|≥${l2fc}` : ''}`;
       summaryEl.title = recap;
-      summaryEl.innerHTML = `<b>${curTerm}</b> · <b>${curContrast}</b> — showing <b>${offset}</b> genes`;
+      summaryEl.innerHTML = `<b>${curTerm}</b> · <b>${curContrast}</b>, showing <b>${offset}</b> genes`;
       loadMoreWrap.style.display = (rows.length === PAGE) ? '' : 'none';
     } catch (e) {
       tableWrap.innerHTML = `<div class="de-err">failed to load genes (${e.message})</div>`;
@@ -280,7 +280,7 @@
       <table class="de-gene-tbl">
         <thead><tr>
           <th>gene</th><th style="text-align:right">log2FC / effect</th>
-          <th style="text-align:right">padj</th><th style="text-align:right">pvalue</th>
+          <th style="text-align:right">adj. p</th><th style="text-align:right">p</th>
           <th style="text-align:right">estimate</th><th style="text-align:right">95% CI</th>
           <th>plots</th>
         </tr></thead>
@@ -325,7 +325,7 @@
   document.getElementById('de-more').addEventListener('click', () => loadGenes(true));
 
   // If a freshly-opened term has exactly one contrast, select it (so a
-  // single-contrast term needs no extra click) — mirrors the dropdown
+  // single-contrast term needs no extra click), mirrors the dropdown
   // auto-select on the plot page.
   async function autoSelectSoleContrast(termEl, term) {
     const cs = termEl.querySelectorAll('.de-contrast');

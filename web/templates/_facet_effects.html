@@ -328,12 +328,12 @@
             var tau = rows.length && rows[0].tau_log2 != null ? Number(rows[0].tau_log2) : null;
             var html = '<h3 class="subsection-head">Genes</h3><div class="muted fx-note">' + esc(res.note) + '</div>';
             if (hasTreat) {
-                html += '<div class="muted fx-note">q (≥10% change) is the limma treat q: it tests whether the change exceeds tau = ' + (tau == null ? 'log2(1.1)' : num(tau, 3) + ' log2 units') + ', a 10% change (Braak: per stage, log2(1.1)/3). Replication uses this q.</div>';
+                html += '<div class="muted fx-note">q (10 percent change) is the limma treat q: it tests whether the change exceeds tau = ' + (tau == null ? 'log2(1.1)' : num(tau, 3) + ' log2 units') + ', a 10% change (Braak: per stage, log2(1.1)/3). Replication uses this q.</div>';
             }
             if (rows.length) {
                 html += '<div class="table-wrap"><table class="auto fx-genes"><thead><tr><th>Gene</th>' +
                     '<th>log2FC [95% CI] <span class="info" data-glossary="log2-fold-change" title="Size of the change on a log2 scale: 1 is two-fold, 0.14 about 10 percent.">ⓘ</span></th><th>q <span class="info" data-glossary="fdr" title="Adjusted for the thousands of genes tested; among genes below 0.05, about 5 percent are expected to be false.">ⓘ</span></th>' +
-                    (hasTreat ? '<th>q (≥10% change) <span class="info" data-glossary="treat" title="Tests whether the change is larger than 10 percent, not just larger than zero.">ⓘ</span></th>' : '') +
+                    (hasTreat ? '<th>q (10 percent change) <span class="info" data-glossary="treat" title="Tests whether the change is larger than 10 percent, not just larger than zero.">ⓘ</span></th>' : '') +
                     '<th title="average log2 CPM over the donor pseudobulks">mean log2 CPM</th></tr></thead><tbody>';
                 rows.forEach(function (g) {
                     html += '<tr><td><a href="/genes/' + encodeURIComponent(g.gene) + '">' + esc(g.gene) + '</a></td>' +
@@ -381,8 +381,8 @@
                 html += '<div class="table-wrap"><table class="auto fx-modules"><thead><tr><th>Module</th><th>Method</th>' +
                     '<th title="facet coefficient in score units, 95% confidence interval">estimate [95% CI]</th>' +
                     '<th title="estimate divided by the SD of the donor-level score">std effect</th>' +
-                    '<th title="Benjamini-Hochberg q of the t test">q_param</th>' +
-                    '<th title="Benjamini-Hochberg q of the permutation p (' + permText(row) + ')">q_perm</th></tr></thead><tbody>';
+                    '<th title="Benjamini-Hochberg q of the t test (model)">q (model)</th>' +
+                    '<th title="Benjamini-Hochberg q of the permutation p (' + permText(row) + ')">q (permutation)</th></tr></thead><tbody>';
                 rows.forEach(function (m) {
                     html += '<tr><td title="' + esc(m.catalog) + '">' + esc(m.module) + ' <span class="muted-2">' + esc(m.catalog) + '</span></td>' +
                         '<td>' + esc(METHOD[m.method + '/' + m.source] || (m.method + ', ' + m.source)) + '</td>' +
@@ -803,7 +803,7 @@ window.antFx = window.antFx || (function () {
             var scaleKey = window.antEffectBar.scaleKey(facet.name, 'lfc');
             var unknown = rep.cohorts_overlap_unknown || [];
             var carriers = rep.r_cohorts || [], gateCohorts = rep.effect_gate_cohorts || [];
-            var out = '<div class="fxf-anchors"><div class="fxf-anchors-title">Anchors: the unit that counted for each cohort</div><div class="table-wrap"><table class="fxf fxa"><thead><tr><th>Cohort</th><th>Anchor unit</th><th>' + (unitNoun === 'animals' ? 'Animals' : 'Donors') + '</th><th class="fxf-bar">' + window.antEffectBar.axisHtml(scaleKey) + '</th><th>log2FC</th><th>p</th><th>q</th><th>p (≥10% change)</th><th>q (≥10% change)</th>' + (showDisease ? '<th>Disease definition</th>' : '') + '</tr></thead><tbody>';
+            var out = '<div class="fxf-anchors"><div class="fxf-anchors-title">Anchors: the unit that counted for each cohort</div><div class="table-wrap"><table class="fxf fxa"><thead><tr><th>Cohort</th><th>Anchor unit</th><th>' + (unitNoun === 'animals' ? 'Animals' : 'Donors') + '</th><th class="fxf-bar">' + window.antEffectBar.axisHtml(scaleKey) + '</th><th>log2FC</th><th>p</th><th>q</th><th>p (≥10% change)</th><th>q (10 percent change)</th>' + (showDisease ? '<th>Disease definition</th>' : '') + '</tr></thead><tbody>';
             anchors.forEach(function (a) {
                 var label = a.cohort_label || a.cohort;
                 var marks = (carriers.indexOf(label) >= 0 ? ' <span class="fx-pill" data-glossary="r-value" title="One of the two cohorts with the smallest p values: they carry the r-value.">carries r</span>' : '') +
@@ -822,7 +822,7 @@ window.antFx = window.antFx || (function () {
             var rows = g.rows;
             var scaleKey = window.antEffectBar.scaleKey(facet.name, 'lfc');
             var twoGroup = rows.some(function (u) { return window.antEffectBar.pointStats(u, facet.name).twoGroup; });
-            var out = '<div class="fxf-card"><div class="table-wrap"><table class="fxf"><thead><tr><th>Dataset</th><th class="fxf-donors-col">' + (unitNoun === 'animals' ? 'Animals' : 'Donors') + (twoGroup ? ' <span class="info" title="Donors in the test group vs the reference group of the contrast, for example AD vs no AD.">ⓘ</span>' : '') + '</th><th class="fxf-bar">' + window.antEffectBar.axisHtml(scaleKey) + '</th><th>Effect and q <span class="info" data-glossary="fdr" title="q of this cohort on its own (false discovery rate over the genes tested in it). A filled bar means q below 0.05.">ⓘ</span></th><th>q (≥10% change)</th><th>Flags</th></tr></thead><tbody>';
+            var out = '<div class="fxf-card"><div class="table-wrap"><table class="fxf"><thead><tr><th>Dataset</th><th class="fxf-donors-col">' + (unitNoun === 'animals' ? 'Animals' : 'Donors') + (twoGroup ? ' <span class="info" title="Donors in the test group vs the reference group of the contrast, for example AD vs no AD.">ⓘ</span>' : '') + '</th><th class="fxf-bar">' + window.antEffectBar.axisHtml(scaleKey) + '</th><th>Effect and q <span class="info" data-glossary="fdr" title="q of this cohort on its own (false discovery rate over the genes tested in it). A filled bar means q below 0.05.">ⓘ</span></th><th>q (10 percent change)</th><th>Flags</th></tr></thead><tbody>';
             // Rows not counted towards replication are folded behind a toggle
             // (unless nothing is counted), so the counted cohorts stay in view.
             var fold = g.counted.length > 0 && g.counted.length < rows.length;

@@ -52,7 +52,7 @@
 
   <div class="about-hero">
     {% if logo_data_uri %}
-    <img src="{{ logo_data_uri }}" alt="anthive — single cell · omics" width="380" height="361">
+    <img src="{{ logo_data_uri }}" alt="anthive, single cell · omics" width="380" height="361">
     {% else %}
     <div style="color:#fff;font-size:28px;font-weight:700">anthive</div>
     {% endif %}
@@ -61,7 +61,7 @@
 
   <p class="about-lead">
     <b>anthive</b> makes a collection of curated single-cell RNA-seq datasets
-    explorable in the browser — no download, no setup. Each dataset can be
+    explorable in the browser, no download, no setup. Each dataset can be
     filtered, plotted (embeddings, distributions, differential expression,
     module scores) and exported, straight from the catalogue. The same data is
     reachable programmatically through a REST API, an MCP server, and
@@ -70,11 +70,11 @@
 
   <div class="about-stats">
     <div class="about-stat">
-      <div class="num">{{ n_datasets if n_datasets is not none else '—' }}</div>
+      <div class="num">{{ n_datasets if n_datasets is not none else '' }}</div>
       <div class="lbl">datasets</div>
     </div>
     <div class="about-stat">
-      <div class="num">{{ n_collections if n_collections is not none else '—' }}</div>
+      <div class="num">{{ n_collections if n_collections is not none else '' }}</div>
       <div class="lbl">collections</div>
     </div>
     <div class="about-stat">

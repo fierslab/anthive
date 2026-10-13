@@ -8,7 +8,7 @@
   .summary-row { display:flex; gap:14px; align-items:center; margin:2px 0 6px; font-size:12px; color:var(--text-muted); flex-wrap:wrap; }
   .summary-row .val { font-weight:600; color:var(--text); }
 
-  /* Uniform neutral pill for all landing-page columns — colour didn't
+  /* Uniform neutral pill for all landing-page columns, colour didn't
      disambiguate; column headers already say what each is. */
   .ctx-pill {
     display:inline-block; padding:0 4px; border-radius:2px;
@@ -22,7 +22,7 @@
     font-family:var(--font-mono); font-size:9.5px; letter-spacing:.2px;
     background:#f3f4f6; color:#374151; border:1px solid #e5e7eb;
   }
-  /* Per-organism colours dropped — the abbrev (Hs/Mm/…) identifies it. */
+  /* Per-organism colours dropped, the abbrev (Hs/Mm/…) identifies it. */
 
   .tech-class {
     display:inline-block; padding:1px 6px; border-radius:2px;
@@ -241,7 +241,7 @@
   }
 </style>
 
-{# Ontology tissue tree — used by the Tissue column popover to render the
+{# Ontology tissue tree, used by the Tissue column popover to render the
    nested filter. Also carries a lower-cased term → descendants map so the
    client can expand a subtree selection into the flat value set the existing
    filter machinery understands. #}
@@ -323,7 +323,7 @@
       <th class="sortable" data-col="n_datasets" data-help="Number of distinct .h5ad datasets in this collection">Datasets <span class="info" title="Click to sort by number of datasets in the collection">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="cells" data-help="Total cells summed across the collection's datasets">Cells <span class="info" title="Click to sort by total cells across the collection">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="date" data-help="Publication year (when known and published), or upload date (mtime) otherwise">Date <span class="info" title="Click to sort by publication year / upload date">ⓘ</span><span class="sort-ind"></span></th>
-      <th class="sortable" data-col="tissue" data-help="Ordered by ontology hierarchy (brain → cortex → subregions → CSF/spinal cord at the bottom). Choose 'anatomical (brain tree)' in the sort dropdown for the full tree order. Filter picks a subtree — ticking a parent (e.g. cortex) auto-selects every descendant." data-filter-fields="tissue">Tissue <span class="info" title="Click to sort by ontology, or filter by a subtree (tick 'cortex' to include every cortical subregion)">ⓘ</span><span class="sort-ind"></span></th>
+      <th class="sortable" data-col="tissue" data-help="Ordered by ontology hierarchy (brain → cortex → subregions → CSF/spinal cord at the bottom). Choose 'anatomical (brain tree)' in the sort dropdown for the full tree order. Filter picks a subtree, ticking a parent (e.g. cortex) auto-selects every descendant." data-filter-fields="tissue">Tissue <span class="info" title="Click to sort by ontology, or filter by a subtree (tick 'cortex' to include every cortical subregion)">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="organism" data-help="Organism(s) in the collection. Chips: Hs=human, Mm=mouse, Rn=rat, Dr=zebrafish, Dm=drosophila, Mf=macaque, Ce=C.elegans." data-filter-fields="organism">Org <span class="info" title="Click to sort or filter by organism">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="tech_class" data-help="Top-level technology class: sc/sn RNA · bulk RNA · proteomics · spatial · other." data-filter-fields="tech_class">Tech <span class="info" title="Click to sort or filter by technology class">ⓘ</span><span class="sort-ind"></span></th>
       <th class="sortable" data-col="celltype"
@@ -351,7 +351,7 @@
     {% set _paper_title = folder.paper_title or '' %}
     {% set _first_author = folder.first_author or '' %}
     {% set _last_author  = folder.last_author or '' %}
-    {# Searchable blob for the client-side text filter — mirrors id + name +
+    {# Searchable blob for the client-side text filter, mirrors id + name +
        paper_title + author names so the search input hits the paper row too
        even though it renders as raw text on line 2. #}
     {% set _search_blob = (folder.group_id ~ ' ' ~ folder.name ~ ' ' ~ _paper_title ~ ' ' ~ _first_author ~ ' ' ~ _last_author)|trim %}
@@ -374,13 +374,13 @@
       data-acc="{{ _icon.access or '' }}"
       data-pub="{{ _icon.publication or '' }}"
       data-search="{{ _search_blob|lower }}">
-      <td data-label="ID" class="muted-2 mono" style="font-size:11px">{{ folder.group_id or "—" }}</td>
+      <td data-label="ID" class="muted-2 mono" style="font-size:11px">{{ folder.group_id or "" }}</td>
       <td class="card-title">
         {% if _icon.glyph %}<span class="ap-icon" style="color:{{ _icon.color }}" title="{{ _icon.tooltip }}">{{ _icon.glyph|safe }}</span>{% endif %}<a href="/browse/{{ folder.browse_id }}"{% if folder.summary and folder.summary != 'na' %} title="{{ folder.summary }}"{% endif %}><strong>{{ folder.name }}</strong></a>{% if folder.has_secondary %}<span class="badge-secondary" title="This collection contains one or more secondary datasets (cells that also appear in other deposits). Do not double-count if pooling with other collections.">(2)</span>{% endif %}
       </td>
       <td data-label="Datasets" class="muted">{{ folder.dataset_count }}</td>
-      <td data-label="Cells" class="muted mono" style="font-size:11px">{{ format_count(folder.total_cells) or "—" }}</td>
-      <td data-label="Date" data-sort-ts="{{ _date.sort_ts or 0 }}" class="muted mono" style="font-size:11px;white-space:nowrap">{{ _date.iso or "—" }}</td>
+      <td data-label="Cells" class="muted mono" style="font-size:11px">{{ format_count(folder.total_cells) or "" }}</td>
+      <td data-label="Date" data-sort-ts="{{ _date.sort_ts or 0 }}" class="muted mono" style="font-size:11px;white-space:nowrap">{{ _date.iso or "" }}</td>
       {# Whitespace-strip inside these <td>s: on mobile (≤760px) the shared
          .card-table rule uses :empty to collapse a cell out of the card.
          A cell containing only newlines + a Jinja {% if %} guard is NOT
@@ -395,7 +395,7 @@
     </tr>
     {%- if _paper_title %}
     {# Paper row (line 2): italic first_author, italic last_author, bold
-       paper_title — comma-separated, wraps on narrow viewports. Missing
+       paper_title, comma-separated, wraps on narrow viewports. Missing
        authors drop out cleanly (no dangling commas). Only rendered when
        paper_title is non-empty; a collection with no paper info shows just
        the primary row. Paired to its primary via data-group-id so sort /
@@ -423,12 +423,12 @@
   const infoEl        = document.getElementById('coll-info');
   const showAllLink   = document.getElementById('show-all-link');
   const clearFiltersBtn = document.getElementById('coll-clear-filters');
-  // Each collection is ONE or TWO rows: a .row-primary (columnar values —
+  // Each collection is ONE or TWO rows: a .row-primary (columnar values,
   // id / name / datasets / cells / date / tissue / …) and an OPTIONAL
   // .row-paper (italic authors + bold paper_title, rendered only when the
   // collection has paper info). Sort/filter reorder the primary rows; the
   // paper row is paired via data-group-id and always moved / shown / hidden
-  // together with its primary — a collection without a paper row simply has
+  // together with its primary, a collection without a paper row simply has
   // no secondary to move (secondaryFor returns null).
   const rows = Array.from(document.querySelectorAll('#coll-table tbody tr.row-primary'));
   const secondaryByGroup = {};
@@ -678,7 +678,7 @@
     sortModeEl.addEventListener('change', () => {
       sortMode = sortModeEl.value;
       if (sortMode === 'tissue-tree') {
-        // sortCol/dir stay symbolic — applySort branches on sortMode
+        // sortCol/dir stay symbolic, applySort branches on sortMode
       } else if (sortMode === 'date-desc') { sortCol = 'date'; sortDir = 'desc'; }
       else if (sortMode === 'date-asc')  { sortCol = 'date'; sortDir = 'asc'; }
       else if (sortMode === 'name-asc')  { sortCol = 'name'; sortDir = 'asc'; }
@@ -688,7 +688,7 @@
   }
 
   function rowMatches(row) {
-    // text search — match against the primary row's textContent (id / name /
+    // text search, match against the primary row's textContent (id / name /
     // columnar values), the paired paper row's textContent (authors + paper
     // title), AND the pre-lowered data-search blob so the search input hits
     // paper info even for collections whose paper row is missing.
@@ -701,7 +701,7 @@
       const wanted = valueFilters[col];
       if (!wanted || !wanted.size) continue;
       // The tissue filter is populated from the ontology tree (lower-case)
-      // while the row's data-tissue keeps original casing — match with a
+      // while the row's data-tissue keeps original casing, match with a
       // case-insensitive helper. Other filters match verbatim, keeping the
       // existing behaviour for organism/tech/celltype/disease/…
       if (col === 'tissue') {
@@ -794,7 +794,7 @@
   headers.forEach(th => {
     th.addEventListener('click', e => {
       // Clicks INSIDE an open popover (filter checkboxes, clear links) bubble
-      // up to this th because the popover is a child of it. Ignore them here —
+      // up to this th because the popover is a child of it. Ignore them here,
       // the popover's own handlers do the work; otherwise this would close the
       // popover (and flip the sort) before a checkbox's change event fires.
       if (activePopover && activePopover.contains(e.target)) return;
@@ -845,7 +845,7 @@
       sortBtns.appendChild(ascBtn); sortBtns.appendChild(descBtn);
       pop.appendChild(sortBtns);
 
-      // Value filter — one section per component field, each with its own
+      // Value filter, one section per component field, each with its own
       // <h5> heading and its own checklist + clear link.
       const filterableCols = new Set(
         ['organism','technology','tech_class','celltype','suspension_type','tissue','disease','acc','pub']

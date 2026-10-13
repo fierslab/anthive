@@ -272,16 +272,16 @@
         data-n_genesets="{{ s.n_genesets }}"
       >
         <td class="card-title"><a class="st-title" href="/genesets/{{ s.study }}">{{ s.study }}</a></td>
-        <td data-label="Title" class="muted">{{ s.title or '—' }}</td>
-        <td data-label="Year" class="muted">{{ s.year or '—' }}</td>
-        <td data-label="Cell types">{% for cell in s.celltypes %}<span class="ctx-pill" title="cell type: {{ cell }}">{{ cell }}</span>{% if not loop.last %} {% endif %}{% else %}<span class="muted">—</span>{% endfor %}</td>
-        <td data-label="Organism">{% for org in s.organisms %}<span class="ctx-pill" title="organism: {{ org }}">{{ org }}</span>{% if not loop.last %} {% endif %}{% else %}<span class="muted">—</span>{% endfor %}</td>
+        <td data-label="Title" class="muted">{{ s.title or '' }}</td>
+        <td data-label="Year" class="muted">{{ s.year or '' }}</td>
+        <td data-label="Cell types">{% for cell in s.celltypes %}<span class="ctx-pill" title="cell type: {{ cell }}">{{ cell }}</span>{% if not loop.last %} {% endif %}{% else %}<span class="muted"></span>{% endfor %}</td>
+        <td data-label="Organism">{% for org in s.organisms %}<span class="ctx-pill" title="organism: {{ org }}">{{ org }}</span>{% if not loop.last %} {% endif %}{% else %}<span class="muted"></span>{% endfor %}</td>
         <td data-label="Experiments" class="muted">{{ s.n_experiments }}</td>
         <td data-label="Gene sets" class="muted">{{ s.n_genesets }}</td>
         <td data-label="Ref" class="muted mono" style="font-size:11px">
           {% if s.doi %}<a href="https://doi.org/{{ s.doi }}" target="_blank" rel="noopener" class="st-doi">doi</a>{% endif %}
           {% if s.pmid %} <a href="https://pubmed.ncbi.nlm.nih.gov/{{ s.pmid }}/" target="_blank" rel="noopener" class="st-doi">pmid</a>{% endif %}
-          {% if not s.doi and not s.pmid %}—{% endif %}
+          {% if not s.doi and not s.pmid %}-{% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -587,7 +587,7 @@
       gsets.forEach(function (m) {
         html += '<tr><td class="card-title"><a href="' + linkFor(m) + '">' + esc(m.display_name || m.name) + '</a></td>'
           + '<td data-label="Study / experiment" class="muted mono" style="font-size:11px">' + esc(m.study) + ' / ' + esc(m.experiment) + '</td>'
-          + '<td data-label="Rank" class="muted">' + (m.rank == null ? '—' : m.rank) + '</td></tr>';
+          + '<td data-label="Rank" class="muted">' + (m.rank == null ? '' : m.rank) + '</td></tr>';
       });
       html += '</tbody></table></div>';
     }
@@ -597,7 +597,7 @@
       progs.forEach(function (m) {
         html += '<tr><td class="card-title mono" style="font-size:12px"><a href="' + linkFor(m) + '">' + esc(m.name) + '</a></td>'
           + '<td data-label="Catalog" class="muted mono" style="font-size:11px">' + esc(m.catalog_id) + '</td>'
-          + '<td data-label="Weight" class="muted">' + (m.weight == null ? '—' : (+m.weight).toFixed(3)) + '</td></tr>';
+          + '<td data-label="Weight" class="muted">' + (m.weight == null ? '' : (+m.weight).toFixed(3)) + '</td></tr>';
       });
       html += '</tbody></table></div>';
     }

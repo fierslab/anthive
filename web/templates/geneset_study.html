@@ -33,7 +33,7 @@
     background:#f3f4f6; color:#374151; border:1px solid #e5e7eb;
     font-family:var(--font-mono); font-size:9.5px; letter-spacing:.2px;
   }
-  /* Study-header title row — organism pill sits inline with the h1 so it
+  /* Study-header title row, organism pill sits inline with the h1 so it
      is immediately visible on landing. Bigger than the small .org-chip on
      the landing page: this is a page-level identity marker, not a table
      cell. */
@@ -60,7 +60,7 @@
   .prov-title { font-style: italic; color: var(--text); font-size: 13px; margin: 4px 0 6px; }
   .exp-open-link { font-size: 11px; color: var(--link); margin-left: auto; }
 
-  /* Algorithm picker — small dropdown that switches which score source
+  /* Algorithm picker, small dropdown that switches which score source
      (scanpy / UCell / both) the per-geneset "Scored" column reflects.
      Persisted via URL hash `#alg=scanpy|ucell|both`, defaults to the
      stored /settings preference. On-page choice does NOT persist. */
@@ -173,9 +173,9 @@
         <tr data-module="{{ g.name }}">
           <td class="card-title"><a href="/genesets/{{ study }}/{{ exp.name }}/{{ g.name }}">{{ g.display_name or g.name }}</a></td>
           <td data-label="Format" class="muted">{{ g.format }}</td>
-          <td data-label="n genes" class="muted">{{ g.n_genes if g.n_genes is not none else '—' }}</td>
-          <td data-label="Direction" class="muted">{{ g.direction or '—' }}</td>
-          <td data-label="Scored" class="scored-cell"><span class="scored-none">—</span></td>
+          <td data-label="n genes" class="muted">{{ g.n_genes if g.n_genes is not none else '' }}</td>
+          <td data-label="Direction" class="muted">{{ g.direction or '' }}</td>
+          <td data-label="Scored" class="scored-cell"><span class="scored-none"></span></td>
           <td data-label="Description" class="muted">{{ g.description or '' }}</td>
         </tr>
         {% endfor %}
@@ -192,7 +192,7 @@
      *
      * Reads the initial value from URL fragment `#alg=scanpy|ucell|both`;
      * falls back to the user's /settings preference (geneset ↔ scanpy).
-     * The choice is NOT written to settings — it's a per-view override that
+     * The choice is NOT written to settings, it's a per-view override that
      * lives in the URL hash so a link like `/genesets/Habib2020#alg=both` is
      * shareable. Legacy `#alg=aucell` migrates to `ucell` on read.
      *
@@ -276,7 +276,7 @@
                 + '">' + label + '</span>');
         });
         if (!pieces.length) {
-            td.innerHTML = '<span class="scored-none">—</span>';
+            td.innerHTML = '<span class="scored-none"></span>';
         } else {
             td.innerHTML = pieces.join(' ');
         }

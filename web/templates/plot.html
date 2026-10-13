@@ -24,14 +24,14 @@
 {% macro info(text) %}<span class="info" title="{{ text }}" aria-label="{{ text }}">ⓘ</span>{% endmacro %}
 
 {# Bin-continuous-colour widget (REST API 2.34+). Rendered inside the colour /
-   split-by fieldset it augments — reads as an option of that selector, not a
+   split-by fieldset it augments, reads as an option of that selector, not a
    separate section. N blank = don't bin (use as continuous). The client-side
    logic in the trailing <script> disables the whole block when colour is empty
    or categorical; on rolling, disables the method select when N is empty (so
    buildUrl doesn't emit bin_color_method alone). #}
 {% macro bin_color_widget() %}
 <div class="bin-color-widget" id="bin-color-widget" hidden>
-  <label>bin colour into N groups {{ info('Only for continuous colour (numerical obs or gene). Discretises the colour into N equal-count (quantile) or equal-width bins. Leave N blank to keep the colour continuous. On rolling plots with a continuous split-by, N is REQUIRED — the server rejects continuous colour without a bin count.') }}</label>
+  <label>bin colour into N groups {{ info('Only for continuous colour (numerical obs or gene). Discretises the colour into N equal-count (quantile) or equal-width bins. Leave N blank to keep the colour continuous. On rolling plots with a continuous split-by, N is REQUIRED, the server rejects continuous colour without a bin count.') }}</label>
   <div class="bin-color-row">
     <input type="number" name="bin_color" id="f-bin_color" min="2" max="20" step="1" placeholder="don't bin">
     <select name="bin_color_method" id="f-bin_color_method" title="quantile = equal-count bins (pd.qcut); width = equal-width bins (pd.cut)">
@@ -44,7 +44,7 @@
 
 {% block content %}
 <style>
-  /* Plot-page-specific styles — kept inline so the rest of the site is unaffected */
+  /* Plot-page-specific styles, kept inline so the rest of the site is unaffected */
   .plot-page { display: grid; grid-template-columns: 248px 1fr; gap: 12px; align-items: start; }
   @media (max-width: 760px) { .plot-page { grid-template-columns: 1fr; } }
 
@@ -125,7 +125,7 @@
   .ac-suggest div { padding: 3px 8px; font-size: 12px; cursor: pointer; }
   .ac-suggest div:hover, .ac-suggest div.active { background: #eef2ff; }
 
-  /* Suggestion chips — clickable shortcuts populated from the dataset's
+  /* Suggestion chips, clickable shortcuts populated from the dataset's
      curated metadata (top_genes, top_cat, top_num) and pattern-detected
      trajectory / cluster fields.  Sit beneath each text/select input. */
   .picks-row {
@@ -185,7 +185,7 @@
 
   /* (.info help-icon styles are sitewide in base.html now.) */
   /* A select with only one possible value is shown as inert greyed text
-     (set by collapseSingleSelects), not a dropdown — nothing to choose. */
+     (set by collapseSingleSelects), not a dropdown, nothing to choose. */
   .field-static {
     display: block; padding: 3px 6px; font-size: 12px;
     color: var(--text-muted, #6b7280); background: #f8fafc;
@@ -195,7 +195,7 @@
   /* Orientation toggle in the settings size presets. */
   .orient-btn.active { background: #1d4ed8; color: #fff; border-color: #1d4ed8; }
 
-  /* Bin-color widget — visually merged with the colour-by/split-by field it
+  /* Bin-color widget, visually merged with the colour-by/split-by field it
      augments.  Sits below the colour input INSIDE the same fieldset (no
      nested fieldset frame, no extra border), so it reads as an option of
      that selector, not a separate section. Greys out when disabled. */
@@ -223,7 +223,7 @@
    Same list dataset.html shows, placed here above the plot preview so
    caveats that directly bias the current plot (e.g. SP4/MPF astro-
    doublets) can't be missed. Reuses the .caveats-card CSS from
-   dataset.html — cloned here so plot.html stays self-contained. #}
+   dataset.html, cloned here so plot.html stays self-contained. #}
 {{ plot_caveats_panel(caveats, caveats_summary) }}
 
 <div class="plot-page">
@@ -254,7 +254,7 @@
         <input type="text" name="x" id="f-x" autocomplete="off" placeholder="e.g. CD4, TREM2, total_counts">
         <div class="ac-suggest" id="ac-x"></div>
       </div>
-      <label style="margin-top:4px"><input type="checkbox" name="log_x" id="f-log_x"> log<sub>1p</sub>(x) — recommended for raw counts / heavy-tailed expression</label>
+      <label style="margin-top:4px"><input type="checkbox" name="log_x" id="f-log_x"> log<sub>1p</sub>(x), recommended for raw counts / heavy-tailed expression</label>
     </fieldset>
     <fieldset>
       <legend>y axis (continuous)</legend>
@@ -267,7 +267,7 @@
     </fieldset>
     <fieldset>
       <legend>colour by (optional)</legend>
-      <label>any field — gene, numerical, or categorical</label>
+      <label>any field, gene, numerical, or categorical</label>
       <div class="ac-wrap">
         <input type="text" name="color" id="f-color" autocomplete="off" placeholder="(empty = blue / hex density)">
         <div class="ac-suggest" id="ac-color"></div>
@@ -277,9 +277,9 @@
       <input type="number" name="gridsize" id="f-gridsize" value="60" min="10" max="200">
       <label style="margin-top:4px">min cells per hex</label>
       <input type="number" name="mincnt" id="f-mincnt" value="1" min="1" max="100">
-      <label style="margin-top:4px">vmin (colorbar lower clip — blank = auto)</label>
+      <label style="margin-top:4px">vmin (colorbar lower clip, blank = auto)</label>
       <input type="number" name="vmin" id="f-vmin" step="any" placeholder="auto">
-      <label style="margin-top:4px">vmax (colorbar upper clip — blank = auto)</label>
+      <label style="margin-top:4px">vmax (colorbar upper clip, blank = auto)</label>
       <input type="number" name="vmax" id="f-vmax" step="any" placeholder="auto">
       {% endif %}
     </fieldset>
@@ -287,10 +287,10 @@
     {% elif geom == 'scatter' or geom == 'hexbin' %}
     {# Polymorphic geom: 'embedding' mode plots an obsm map coloured by a field;
        'X vs Y' mode plots any two continuous variables against each other.
-       The mode radio toggles which x/y widgets are active — only the enabled
+       The mode radio toggles which x/y widgets are active, only the enabled
        ones are submitted (buildUrl skips disabled + _-prefixed names). #}
     <fieldset>
-      <legend>mode {{ info('Embedding: a UMAP/PCA map coloured by a field. X vs Y: any two continuous variables — gene-vs-gene, module-score vs PRS, expression vs age.') }}</legend>
+      <legend>mode {{ info('Embedding: a UMAP/PCA map coloured by a field. X vs Y: any two continuous variables, gene-vs-gene, module-score vs PRS, expression vs age.') }}</legend>
       <label style="display:inline-flex;gap:4px;align-items:center;margin-right:12px;color:var(--text)">
         <input type="radio" name="_xymode" value="embedding" id="m-emb" {% if plot_meta.embeddings %}checked{% endif %}> embedding
       </label>
@@ -343,17 +343,17 @@
       <label style="margin-top:4px">min cells per hex</label>
       <input type="number" name="mincnt" id="f-mincnt" value="1" min="1" max="100">
       {% endif %}
-      {# vmin/vmax clip the continuous colour scale — supported for both the
+      {# vmin/vmax clip the continuous colour scale, supported for both the
          embedding scatter and hexbin (server _handle_scatter/_handle_hexbin
          pass them through). Ignored for categorical or no colour. #}
-      <label style="margin-top:4px">vmin (colour scale lower clip — blank = auto) {{ info('Clamp the low end of the continuous colour scale so a few extreme cells do not wash out the gradient. Applies to gene / numerical colour; ignored for categorical colour or plain density.') }}</label>
+      <label style="margin-top:4px">vmin (colour scale lower clip, blank = auto) {{ info('Clamp the low end of the continuous colour scale so a few extreme cells do not wash out the gradient. Applies to gene / numerical colour; ignored for categorical colour or plain density.') }}</label>
       <input type="number" name="vmin" id="f-vmin" step="any" placeholder="auto">
-      <label style="margin-top:4px">vmax (colour scale upper clip — blank = auto)</label>
+      <label style="margin-top:4px">vmax (colour scale upper clip, blank = auto)</label>
       <input type="number" name="vmax" id="f-vmax" step="any" placeholder="auto">
       {% if geom == 'hexbin' %}
-      {# Density-mode (no colour) quantile clip — big readability win on
+      {# Density-mode (no colour) quantile clip, big readability win on
          200k+ cell plots where a few dense hexes wash out the gradient. #}
-      <label style="margin-top:6px"><input type="checkbox" id="f-autoclip" name="_autoclip"> clip density to percentiles {{ info('Clips the colour scale to the lower/upper density quantiles below, so a few ultra-dense hexes do not wash out the gradient. Ticking pre-fills 0.10 / 0.90 — edit either bound to taste.') }}</label>
+      <label style="margin-top:6px"><input type="checkbox" id="f-autoclip" name="_autoclip"> clip density to percentiles {{ info('Clips the colour scale to the lower/upper density quantiles below, so a few ultra-dense hexes do not wash out the gradient. Ticking pre-fills 0.10 / 0.90, edit either bound to taste.') }}</label>
       <div class="row" style="margin-top:2px">
         <div><label>lower quantile</label><input type="number" name="vmin_quantile" id="f-vmin_quantile" step="0.01" min="0" max="1" placeholder="auto"></div>
         <div><label>upper quantile</label><input type="number" name="vmax_quantile" id="f-vmax_quantile" step="0.01" min="0" max="1" placeholder="auto"></div>
@@ -365,7 +365,7 @@
     <fieldset>
       <legend>group by (x)</legend>
       <select name="x" id="f-x">
-        <option value="">— pick categorical —</option>
+        <option value="">pick categorical</option>
         {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
       </select>
     </fieldset>
@@ -379,7 +379,7 @@
       {% if geom == 'bar' %}
       <label style="margin-top:4px"><input type="checkbox" name="ci" id="f-ci" checked> show 95% CI</label>
       {# stat= (task #252). Controls how y is aggregated per bar. Default
-         'mean' matches scanpy — includes the zero-mass. 'mean_nonzero'
+         'mean' matches scanpy, includes the zero-mass. 'mean_nonzero'
          drops zero cells before the mean; 'pct_expressing' shows
          %-of-cells-expressing on a 0..100 axis. Only meaningful when y
          resolves to a gene; server silently coerces back to 'mean' when
@@ -396,30 +396,30 @@
       <legend>split by (optional)</legend>
       <label>second categorical{% if geom == 'bar' %} → bars per group{% else %} → side-by-side {{ geom }}s{% endif %}</label>
       <select name="color" id="f-color">
-        <option value="">— none —</option>
+        <option value="">none</option>
         {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
       </select>
       {% if geom == 'bar' %}
       {# stacked composition (REST API 2.6): one bar per x, stacked by the split
-         categorical — e.g. cell composition per sample. #}
+         categorical, e.g. cell composition per sample. #}
       <label style="margin-top:6px">layout (when split set) {{ info('Stacked + count y = composition per group (e.g. donor mix per sample). Tick 100% to normalise each bar to proportions.') }}</label>
       <select name="bar_mode" id="f-bar_mode">
         <option value="dodge">side-by-side</option>
         <option value="stack">stacked (composition)</option>
       </select>
       <label style="margin-top:4px"><input type="checkbox" name="normalize" id="f-normalize"> 100% (proportions)</label>
-      {# group_by (REST API 2.6): in-plot clustering — one axes, bars ordered
+      {# group_by (REST API 2.6): in-plot clustering, one axes, bars ordered
          into groups by a 3rd categorical (e.g. mice grouped by Village), with
          separators + a group-label band. Distinct from facet (separate panels). #}
-      <label style="margin-top:6px">group by (cluster in one plot) {{ info('Orders the bars into groups within ONE plot — separators + a group-label band, ordered by a 3rd categorical (e.g. mice grouped by Village).') }}</label>
+      <label style="margin-top:6px">group by (cluster in one plot) {{ info('Orders the bars into groups within ONE plot, separators + a group-label band, ordered by a 3rd categorical (e.g. mice grouped by Village).') }}</label>
       <select name="group_by" id="f-group_by">
-        <option value="">— none —</option>
+        <option value="">none</option>
         {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
       </select>
-      {# facet: small multiples — one SEPARATE panel per value of a 3rd categorical. #}
-      <label style="margin-top:6px">facet — separate panels {{ info('Small multiples — one SEPARATE panel per value of a 3rd categorical (≤8 levels). Shared y and colours. Distinct from group-by, which stays in one plot.') }}</label>
+      {# facet: small multiples, one SEPARATE panel per value of a 3rd categorical. #}
+      <label style="margin-top:6px">facet separate panels {{ info('Small multiples one SEPARATE panel per value of a 3rd categorical (≤8 levels). Shared y and colours. Distinct from group-by, which stays in one plot.') }}</label>
       <select name="facet" id="f-facet">
-        <option value="">— none —</option>
+        <option value="">none</option>
         {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
       </select>
       {% endif %}
@@ -437,7 +437,7 @@
       <input type="number" name="bins" id="f-bins" value="20" min="2" max="500">
       {% endif %}
       {% if geom in ('histogram', 'kde') %}
-      {# task #251 — drop y=0 cells before binning / KDE fit. Only meaningful
+      {# task #251, drop y=0 cells before binning / KDE fit. Only meaningful
          when x is a gene; server silently ignores it for numerical obs. #}
       <label style="margin-top:4px"><input type="checkbox" name="exclude_zero" id="f-exclude_zero"> exclude zeros (shape of expressers) {{ info('When x is a gene, drop cells with expression == 0 before fitting. Reveals the shape of the expressing population without the zero-mass swamping the picture. Ignored for numerical obs x (zeros there may be meaningful).') }}</label>
       {% endif %}
@@ -456,7 +456,7 @@
     <fieldset>
       <legend>group by (rows)</legend>
       <select name="y" id="f-y">
-        <option value="">— pick categorical —</option>
+        <option value="">pick categorical</option>
         {% for c in plot_meta.cat_fields %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
       </select>
     </fieldset>
@@ -474,7 +474,7 @@
 
     {% elif geom == 'rolling' %}
     <fieldset>
-      <legend>x axis — trajectory (continuous)</legend>
+      <legend>x axis, trajectory (continuous)</legend>
       <label>e.g. pseudotime, distance_to_*, an ordered numerical obs</label>
       <div class="ac-wrap">
         <input type="text" name="x" id="f-x" autocomplete="off" placeholder="pseudotime">
@@ -483,7 +483,7 @@
     </fieldset>
     <fieldset>
       <legend>y fields (continuous)</legend>
-      <label>comma-separated genes or numerical obs — one line per field</label>
+      <label>comma-separated genes or numerical obs, one line per field</label>
       <div class="ac-wrap">
         <input type="text" name="y" id="f-y" autocomplete="off" placeholder="e.g. TREM2, APOE, CST7">
         <div class="ac-suggest" id="ac-y"></div>
@@ -492,14 +492,14 @@
       <input type="number" name="window" id="f-window" value="200" min="2" max="50000">
       <label style="margin-top:4px">step size {{ info("Stride between plotted rolling-window centers. 1 = every cell (default). Higher values subsample the line for speed AND enter the 95% CI corrected formula: n_eff = min(window, actual_n) · step_size / window. Setting step_size = window gives independent windows (n_eff = window).") }}</label>
       <input type="number" name="step_size" id="f-step_size" value="1" min="1" max="50000">
-      <label style="margin-top:4px"><input type="checkbox" name="show_band" id="f-show_band"> show IQR band {{ info("Wide band: q25..q75 within each rolling window — visualises within-window spread.") }}</label>
+      <label style="margin-top:4px"><input type="checkbox" name="show_band" id="f-show_band"> show IQR band {{ info("Wide band: q25..q75 within each rolling window, visualises within-window spread.") }}</label>
       <label style="margin-top:4px"><input type="checkbox" name="show_ci" id="f-show_ci"> show 95% CI {{ info("Narrow band: 95% confidence interval of the rolling mean (±1.96·SE, SE = rolling std / √window). Complements the IQR band; both may be shown together.") }}</label>
       <label style="margin-top:4px"><input type="checkbox" name="show_ci_corrected" id="f-show_ci_corrected"> show 95% CI corrected {{ info("Wide band: 95% CI corrected for autocorrelation between adjacent rolling windows (which overlap by window-1). Uses n_eff = min(window, actual_n) · step_size / window (step_size=1 for every-point plotting → n_eff ≈ 1), so SE ≈ rolling_std. Prefer this over the naive CI on large windows. n_eff is logged server-side per trace.") }}</label>
       <label style="margin-top:4px"><input type="checkbox" name="rank_x" id="f-rank_x"> rank x-axis {{ info("Plot against cell-order along x (rank) instead of raw x values. Each cell gets its sorted position; evenly-spaced-in-rank regions get equal visual weight. Useful when pseudotime is clumped. Per-group when 'split by' is set.") }}</label>
     </fieldset>
     <fieldset>
       <legend>split by (optional)</legend>
-      <label>categorical (one line per group) — OR a continuous field to bin</label>
+      <label>categorical (one line per group), OR a continuous field to bin</label>
       <div class="ac-wrap">
         <input type="text" name="color" id="f-color" autocomplete="off" placeholder="obs field or gene (blank = one line per y)">
         <div class="ac-suggest" id="ac-color"></div>
@@ -547,7 +547,7 @@
       <input type="number" name="kde_n" id="f-kde_n" placeholder="auto" min="16" max="512">
       <label style="margin-top:6px"><input type="checkbox" name="iso_overlay" id="f-iso_overlay"> iso contour lines</label>
       <label><input type="checkbox" name="point_overlay" id="f-point_overlay"> overlay raw points</label>
-      {# task #251 — exclude zeros for KDE2D. When either axis is a gene,
+      {# task #251, exclude zeros for KDE2D. When either axis is a gene,
          drop cells where that gene axis == 0 before fitting. #}
       <label style="margin-top:4px"><input type="checkbox" name="exclude_zero" id="f-exclude_zero"> exclude zeros (shape of co-expressers) {{ info('When x or y is a gene, drop cells where that axis == 0 before fitting the KDE. Reveals the shape of the co-expressing population. Ignored on numerical obs axes.') }}</label>
     </fieldset>
@@ -558,7 +558,7 @@
     <fieldset>
       <legend>DE study</legend>
       <select name="study" id="f-study">
-        <option value="">— select study —</option>
+        <option value="">select study</option>
         {% for s in plot_meta.de_studies %}
         <option value="{{ s.study_id }}" data-method="{{ s.method }}">{{ s.name }} · {{ s.method }} ({{ s.n_contrasts }} contrasts)</option>
         {% endfor %}
@@ -570,12 +570,12 @@
     <fieldset>
       <legend>term</legend>
       <label>model term (covariate / interaction)</label>
-      <select name="term" id="f-term"><option value="">— select study first —</option></select>
+      <select name="term" id="f-term"><option value="">select study first</option></select>
     </fieldset>
     <fieldset>
       <legend>contrast</legend>
       <label>level within the term</label>
-      <select name="contrast" id="f-contrast"><option value="">— select term first —</option></select>
+      <select name="contrast" id="f-contrast"><option value="">select term first</option></select>
     </fieldset>
     {% if geom == 'volcano' %}
     <fieldset>
@@ -589,28 +589,28 @@
     </fieldset>
     <fieldset>
       <legend>axis clamp (optional) {{ info('Saturate the axes so a padj≈0 / huge-fold-change cluster collapses to the boundary instead of squashing the rest of the distribution. Blank = no clamp; labels ride the clamp edge and the title notes the clip.') }}</legend>
-      <label>|log<sub>2</sub>FC| clamp — x axis (blank = none)</label>
+      <label>|log<sub>2</sub>FC| clamp, x axis (blank = none)</label>
       <input type="number" name="log2fc_clip" id="f-log2fc_clip" step="any" min="0.1" max="50" placeholder="none">
-      <label style="margin-top:4px">−log<sub>10</sub>(padj) clamp — y axis</label>
+      <label style="margin-top:4px">−log<sub>10</sub>(adj. p) clamp, y axis</label>
       <input type="number" name="neglog10p_clip" id="f-neglog10p_clip" step="any" min="1" max="400" placeholder="none">
     </fieldset>
     {% else %}
     <fieldset>
-      <legend>MA note {{ info('MA needs a per-gene base mean, which only DESeq2 / edgeR ingests carry. GLMM / Wilcoxon studies return an error here — use Volcano for those.') }}</legend>
-      <small style="color:#b45309">MA needs a base mean — DESeq2 / edgeR only. Use Volcano for GLMM / Wilcoxon.</small>
+      <legend>MA note {{ info('MA needs a per-gene base mean, which only DESeq2 / edgeR ingests carry. GLMM / Wilcoxon studies return an error here, use Volcano for those.') }}</legend>
+      <small style="color:#b45309">MA needs a base mean, DESeq2 / edgeR only. Use Volcano for GLMM / Wilcoxon.</small>
     </fieldset>
     <fieldset>
       <legend>axis clamp (optional) {{ info('Saturate the axes so a saturation cluster collapses to the boundary instead of squashing the rest. Blank = no clamp; the title notes the clip.') }}</legend>
-      <label>|log<sub>2</sub>FC| clamp — y axis (blank = none)</label>
+      <label>|log<sub>2</sub>FC| clamp, y axis (blank = none)</label>
       <input type="number" name="log2fc_clip" id="f-log2fc_clip" step="any" min="0.1" max="50" placeholder="none">
-      <label style="margin-top:4px">log<sub>10</sub>(mean) clamp — x axis</label>
+      <label style="margin-top:4px">log<sub>10</sub>(mean) clamp, x axis</label>
       <input type="number" name="logmean_clip" id="f-logmean_clip" step="any" min="-10" max="10" placeholder="none">
     </fieldset>
     {% endif %}
 
     {% elif geom == 'forest' %}
     {# Forest: one gene across many contrasts.  Optional study/term/contrast
-       narrowing (recommended for big studies — the PNG can get tall). #}
+       narrowing (recommended for big studies, the PNG can get tall). #}
     <fieldset>
       <legend>gene (required)</legend>
       <div class="ac-wrap">
@@ -622,15 +622,15 @@
       <legend>narrow (optional) {{ info('A gene across every contrast can be tall. Narrowing by study / term keeps the figure readable for large studies.') }}</legend>
       <label>study</label>
       <select name="study" id="f-study">
-        <option value="">— all studies —</option>
+        <option value="">all studies</option>
         {% for s in plot_meta.de_studies %}
         <option value="{{ s.study_id }}">{{ s.name }} · {{ s.method }}</option>
         {% endfor %}
       </select>
       <label style="margin-top:4px">term</label>
-      <select name="term" id="f-term"><option value="">— all terms —</option></select>
+      <select name="term" id="f-term"><option value="">all terms</option></select>
       <label style="margin-top:4px">contrast</label>
-      <select name="contrast" id="f-contrast"><option value="">— all contrasts —</option></select>
+      <select name="contrast" id="f-contrast"><option value="">all contrasts</option></select>
     </fieldset>
 
     {% elif geom == 'de_heatmap' %}
@@ -641,7 +641,7 @@
     <fieldset>
       <legend>DE study</legend>
       <select name="study" id="f-study">
-        <option value="">— select study —</option>
+        <option value="">select study</option>
         {% for s in plot_meta.de_studies %}
         <option value="{{ s.study_id }}" data-method="{{ s.method }}">{{ s.name }} · {{ s.method }} ({{ s.n_contrasts }} contrasts)</option>
         {% endfor %}
@@ -653,7 +653,7 @@
     <fieldset>
       <legend>term</legend>
       <label>model term (covariate / interaction)</label>
-      <select name="term" id="f-term"><option value="">— select study first —</option></select>
+      <select name="term" id="f-term"><option value="">select study first</option></select>
     </fieldset>
     <fieldset>
       <legend>value</legend>
@@ -702,18 +702,18 @@
        dataset). Genes off the diagonal disagree. Two independent cascades; the
        Y study is pre-seeded to the X study. (API 2.12) #}
     <fieldset>
-      <legend>X axis — this dataset {{ info('The first DE contrast. Each gene is plotted at (X-statistic, Y-statistic); genes far off the diagonal behave differently between the two contrasts (discordant).') }}</legend>
+      <legend>X axis, this dataset {{ info('The first DE contrast. Each gene is plotted at (X-statistic, Y-statistic); genes far off the diagonal behave differently between the two contrasts (discordant).') }}</legend>
       <select name="study" id="f-study">
-        <option value="">— select study —</option>
+        <option value="">select study</option>
         {% for s in plot_meta.de_studies %}
         <option value="{{ s.study_id }}" data-method="{{ s.method }}">{{ s.name }} · {{ s.method }} ({{ s.n_contrasts }} contrasts)</option>
         {% endfor %}
       </select>
       {% if not plot_meta.de_studies %}<small style="color:#b45309;margin-top:4px">No differential-expression data ingested for this dataset.</small>{% endif %}
       <label style="margin-top:4px">term</label>
-      <select name="term" id="f-term"><option value="">— select study first —</option></select>
+      <select name="term" id="f-term"><option value="">select study first</option></select>
       <label style="margin-top:4px">contrast</label>
-      <select name="contrast" id="f-contrast"><option value="">— select term first —</option></select>
+      <select name="contrast" id="f-contrast"><option value="">select term first</option></select>
       <label style="margin-top:4px">statistic</label>
       <select name="axis_x" id="f-axis_x">
         <option value="log2fc">log2 fold-change</option>
@@ -726,11 +726,11 @@
       <label>compare against dataset</label>
       <input type="text" name="db_y" id="f-db_y" list="dl-datasets" autocomplete="off" placeholder="this dataset">
       <label style="margin-top:4px">study</label>
-      <select name="study_y" id="f-study_y"><option value="">— select study —</option></select>
+      <select name="study_y" id="f-study_y"><option value="">select study</option></select>
       <label style="margin-top:4px">term</label>
-      <select name="term_y" id="f-term_y"><option value="">— select study first —</option></select>
+      <select name="term_y" id="f-term_y"><option value="">select study first</option></select>
       <label style="margin-top:4px">contrast</label>
-      <select name="contrast_y" id="f-contrast_y"><option value="">— select term first —</option></select>
+      <select name="contrast_y" id="f-contrast_y"><option value="">select term first</option></select>
       <label style="margin-top:4px">statistic</label>
       <select name="axis_y" id="f-axis_y">
         <option value="log2fc">log2 fold-change</option>
@@ -797,7 +797,7 @@
       <input type="text" name="subset" id="f-subset" autocomplete="off" placeholder="field:value or field:v1,v2">
     </fieldset>
 
-    {# Apply button removed — the form auto-renders on every change
+    {# Apply button removed, the form auto-renders on every change
        (debounced ~400ms via scheduleRefresh).  Kept here only as a
        hidden hook so the existing JS doesn't need a null-check. #}
     <button type="button" id="apply-btn" hidden></button>
@@ -808,7 +808,7 @@
     <div class="plot-toolbar">
       <a class="dl-primary" id="dl-png">⬇ PNG</a>
       <a id="dl-svg">⬇ SVG</a>
-      <a id="dl-pdf" title="vector PDF — publication quality">⬇ PDF</a>
+      <a id="dl-pdf" title="vector PDF, publication quality">⬇ PDF</a>
       <a id="dl-data" title="download the data behind this plot (CSV)">⬇ data</a>
       <span style="flex:1"></span>
       <span class="settings-menu">
@@ -817,7 +817,7 @@
           <div class="pair">
             <label>width (mm)</label><input type="number" id="s-width" min="20" max="900" step="1">
             <label>height (mm)</label><input type="number" id="s-height" min="20" max="900" step="1">
-            <label title="output resolution — sets dots-per-inch under the hood">resolution</label>
+            <label title="output resolution, sets dots-per-inch under the hood">resolution</label>
             <select id="s-dpi">
               <option value="96">screen (96)</option>
               <option value="150">balanced (150)</option>
@@ -900,7 +900,7 @@
 
   const SETTINGS_KEY = 'anthive.plot.settings';
   // Figure size is stored + sent in INCHES (matplotlib figsize). The two size
-  // inputs DISPLAY mm and convert on read — so the API contract and any
+  // inputs DISPLAY mm and convert on read, so the API contract and any
   // previously-saved (inch) settings are unchanged. Metric UI, imperial wire.
   const MM_PER_IN = 25.4;
   const _MM_FIELDS = new Set(['width', 'height']);
@@ -912,7 +912,7 @@
     categorical: ['tab10','tab20','tab20b','tab20c','Set1','Set2','Set3','Paired','Dark2','Accent','Pastel1','Pastel2'],
     continuous:  ['viridis','magma','inferno','plasma','cividis','mako','rocket','turbo','crest','flare','Blues','Greens','Oranges','Greys','YlGnBu','YlOrRd',
                   // single-hue white→colour ramps (anthive REST 2.6+); handy for
-                  // brand/manuscript colours — e.g. WGCNA module-coloured maps.
+                  // brand/manuscript colours, e.g. WGCNA module-coloured maps.
                   'magenta','blue','red','green','orange','purple','cyan','yellow','black','tan','greenyellow','turquoise','hotpink','brown'],
     divergent:   ['RdBu','coolwarm','bwr','seismic','Spectral','RdYlBu','RdYlGn','PiYG','PRGn','BrBG','PuOr','vlag','icefire'],
   };
@@ -943,12 +943,12 @@
   }
 
   // ── default settings (used until user saves their own); width/height in inches.
-  //    Default = 16:9 (254 × 143 mm) — matches the '16:9' screen preset; good for
+  //    Default = 16:9 (254 × 143 mm), matches the '16:9' screen preset; good for
   //    slides/screens. Users who've saved a size keep theirs (localStorage).
   const DEFAULT_SETTINGS = {
     width: 254 / MM_PER_IN, height: 143 / MM_PER_IN, dpi: 150, point_size: 3, alpha: 0.8,
     font_family: 'DejaVu Sans', font_size: 10,
-    // Three palette families — each used for the matching data kind:
+    // Three palette families, each used for the matching data kind:
     palette_categorical: 'tab10',
     palette_continuous:  'inferno_r',
     palette_divergent:   'RdBu_r',
@@ -991,10 +991,10 @@
   // ── build API URL from form state
   //
   // Hits the per-geom endpoint at /databases/{id}/plot/{geom} (REST API 2.2+).
-  // The geom is encoded in the path, NOT in the query string — keeps URL
+  // The geom is encoded in the path, NOT in the query string, keeps URL
   // params focused on what actually shapes the plot.
   // attach_sessions: repeatable, NON-form query params (module-score / analytics
-  // virtual obs columns — REST 2.19.0). Captured from the page URL and passed
+  // virtual obs columns, REST 2.19.0). Captured from the page URL and passed
   // through on every plot request + kept in the address bar, so a bot-navigated
   // session-coloured UMAP actually renders (buildUrl otherwise only emits form
   // fields). Survives form edits until the session ages out → clean 400 in-status.
@@ -1009,7 +1009,7 @@
       const name = el.getAttribute('name');
       if (!name) return;
       if (name.startsWith('_')) return;   // UI-only control (e.g. mode radio)
-      if (el.disabled) return;            // inactive mode's widget — don't submit
+      if (el.disabled) return;            // inactive mode's widget, don't submit
       if (el.type === 'checkbox') {
         // Emit only when state differs from the form default.  For
         // default-OFF boxes that means we only send 'true' when ticked;
@@ -1087,11 +1087,11 @@
     }
     return typeof d === 'object' ? JSON.stringify(d) : String(d);
   }
-  // A short, actionable follow-up for the common recoverable errors — keyed off
+  // A short, actionable follow-up for the common recoverable errors, keyed off
   // the server's message so it tracks whatever ant-serve actually said.
   function errorHint(msg) {
     if (/is not a known embedding|not a known .*field.*or gene|unknown (field|gene|column)/i.test(msg))
-      return 'Check the spelling and case — field and gene names are case-sensitive. Use a suggestion chip below the input, or pick from this dataset’s observation columns.';
+      return 'Check the spelling and case, field and gene names are case-sensitive. Use a suggestion chip below the input, or pick from this dataset’s observation columns.';
     if (/requires? .*base_mean|needs base_mean/i.test(msg))
       return 'This study doesn’t carry the base-mean values an MA plot needs. Try a volcano plot instead.';
     if (/cap|capped|too many|exceeds|maximum/i.test(msg))
@@ -1125,10 +1125,10 @@
     // Force-refresh: append a one-shot cache-buster so the request misses both
     // the browser HTTP cache AND the server's plot cache (its key hashes the
     // full query string), yielding a fresh render. NOT added to syncURL or the
-    // download links — the shareable URL stays clean.
+    // download links, the shareable URL stays clean.
     if (opts.bust) url += '&_cb=' + Date.now();
     // Prominent loading state right in the plot canvas (large spinner), so it's
-    // obvious a render is in flight — not just a small line under the figure.
+    // obvious a render is in flight, not just a small line under the figure.
     imgBox.innerHTML = '<div class="plot-loading"><span class="spinner-lg"></span><span>'
       + (opts.bust ? 're-rendering…' : 'rendering…') + '</span></div>';
     status.textContent = '';
@@ -1158,16 +1158,16 @@
       const rawCaption = response.headers.get('X-Plot-Caption') || '';
       captionEl.textContent = rawCaption;
       // Biology-keyed tab title (ant-serve 2.9 X-Plot-Title), e.g.
-      // "S25/V6A: P2RY12 expression on X_umap" — sharper than the static title.
+      // "S25/V6A: P2RY12 expression on X_umap", sharper than the static title.
       const plotTitle = response.headers.get('X-Plot-Title');
-      if (plotTitle) document.title = plotTitle + ' — anthive';
+      if (plotTitle) document.title = plotTitle + ', anthive';
     } catch (e) {
       if (my !== renderToken) return;
-      // Network / abort / decode failure — not an HTTP error body.
+      // Network / abort / decode failure, not an HTTP error body.
       imgBox.innerHTML = '<div class="plot-error"><div class="pe-icon">⚠️</div>'
         + '<div class="pe-msg">Could not reach the render service.</div>'
         + '<div class="pe-hint">' + (e && e.message ? String(e.message) : 'network error')
-        + ' — check your connection and try again.</div></div>';
+        + ', check your connection and try again.</div></div>';
       status.textContent = '';
       captionEl.innerHTML = '';
     }
@@ -1186,7 +1186,7 @@
         const detail = apiErrorMessage(await r.text().catch(function () { return ''; }));
         status.textContent = '';
         const span = document.createElement('span'); span.className = 'err';
-        span.textContent = 'download failed — ' + (detail || ('HTTP ' + r.status));
+        span.textContent = 'download failed, ' + (detail || ('HTTP ' + r.status));
         status.appendChild(span);
         return;
       }
@@ -1216,7 +1216,7 @@
   // Carry over as much state as possible to the new geom. The address bar
   // (location.search) already holds the #plot-form fields (kept in sync); the
   // settings-panel values (palette_*, color_scale, width/height/dpi, point_size,
-  // alpha, fonts) live OUTSIDE the form and syncURL doesn't write them — so
+  // alpha, fonts) live OUTSIDE the form and syncURL doesn't write them, so
   // without this the colormap etc. reset on every switch. Overlay them from
   // readSettingsFromForm() on top of the current query so the new geom keeps
   // the same field AND the same appearance. Params the target geom lacks are
@@ -1233,7 +1233,7 @@
     window.location = BROWSE + e.target.value + (qs ? '?' + qs : '');
   });
 
-  // ── URL sync — every form change is also pushed into window.location's
+  // ── URL sync, every form change is also pushed into window.location's
   //     query string via history.replaceState, so the browser address bar
   //     is always copy/share-able and a paste of that URL on another
   //     machine reproduces the exact same plot.  We strip empty values to
@@ -1389,7 +1389,7 @@
   // ── copy URL
   document.getElementById('copy-url').addEventListener('click', e => {
     e.preventDefault();
-    // Share the interactive plot PAGE (full absolute URL incl. domain) — syncURL
+    // Share the interactive plot PAGE (full absolute URL incl. domain), syncURL
     // keeps window.location's query string in step with the form, so this
     // reproduces the exact configured plot on another machine.
     const url = window.location.href;
@@ -1421,7 +1421,7 @@
     setTimeout(() => e.target.textContent = orig, 1200);
   });
 
-  // ── force refresh — re-render bypassing caches (server fixes, changed data)
+  // ── force refresh, re-render bypassing caches (server fixes, changed data)
   document.getElementById('force-refresh').addEventListener('click', e => {
     e.preventDefault();
     refresh({ bust: true });
@@ -1438,7 +1438,7 @@
   //   embedded ('plot.ipynb?study=…&term=…') and JupyterLab can't open it.
   //   The base64-path-encoded URL has zero query string → clean basename.
   //   With API 2.9.2 we first hit /api/notebook/{b64}/meta to pull the
-  //   biology-keyed filename, then put that into the URL — so JupyterLite
+  //   biology-keyed filename, then put that into the URL, so JupyterLite
   //   saves the file as e.g. 'S25_V6A_scatter_P2RY12.ipynb' instead of
   //   the literal 'plot.ipynb'.
   document.getElementById('open-notebook').addEventListener('click', async e => {
@@ -1600,15 +1600,15 @@
 
   // ── bin-continuous-colour widget (REST API 2.34 / 2.36)
   // The server accepts bin_color / bin_color_method on scatter, hexbin,
-  // rolling, kde2d, histogram, ecdf, and kde — but ONLY when the resolved
+  // rolling, kde2d, histogram, ecdf, and kde, but ONLY when the resolved
   // colour is continuous (numerical obs or gene). On rolling / kde2d /
   // histogram / ecdf / kde, a continuous colour REQUIRES bin_color (else 400).
   //
   // Client-side classification of the colour field value:
   //   '' → OFF   (disable widget entirely)
-  //   value ∈ OBS_CAT   → categorical (disable widget — bin_color ignored server-side)
+  //   value ∈ OBS_CAT   → categorical (disable widget, bin_color ignored server-side)
   //   value ∈ OBS_NUM   → continuous  (enable widget)
-  //   otherwise         → assume gene (continuous) — we can't verify without
+  //   otherwise         → assume gene (continuous), we can't verify without
   //                       hitting /genes, and mistakes just fail on the API
   //                       side with a clean 400 that showRenderError surfaces.
   //
@@ -1633,26 +1633,26 @@
       if (!v) return 'none';
       if (OBS_CAT.includes(v)) return 'categorical';
       if (OBS_NUM.includes(v)) return 'continuous';
-      return 'gene';   // best-effort — treated as continuous
+      return 'gene';   // best-effort, treated as continuous
     }
     // Publicly exposed so buildUrl/canRender/etc. can read the current state
-    // without re-classifying — a single source of truth.
+    // without re-classifying, a single source of truth.
     window.__antBinColorKind = 'none';
 
     function syncBinColorWidget() {
       const kind = classifyColor(colorEl.value);
       window.__antBinColorKind = kind;
       const continuous = (kind === 'continuous' || kind === 'gene');
-      // Reveal only when the current colour is (likely) continuous — no
+      // Reveal only when the current colour is (likely) continuous, no
       // grey ghost widget when it can never apply. For scatter/hexbin
       // (where color is optional) we also hide when there's no colour.
       wrap.hidden = !continuous;
       wrap.classList.toggle('disabled', !continuous);
-      // Disable the inputs when hidden — buildUrl/syncURL skip disabled, so
+      // Disable the inputs when hidden, buildUrl/syncURL skip disabled, so
       // stale values (e.g. after switching from a numerical to a categorical
       // colour) don't leak into the URL.
       nInput.disabled = !continuous;
-      // method is only meaningful when N is set — disable it otherwise so it
+      // method is only meaningful when N is set, disable it otherwise so it
       // isn't emitted alone.
       const nSet = !!(nInput.value || '').trim();
       method.disabled = !continuous || !nSet;
@@ -1661,7 +1661,7 @@
     colorEl.addEventListener('change', syncBinColorWidget);
     nInput.addEventListener('input',   syncBinColorWidget);
     nInput.addEventListener('change',  syncBinColorWidget);
-    // Initial sync — run after prefillFromURL/prefillAndChips have populated
+    // Initial sync, run after prefillFromURL/prefillAndChips have populated
     // the colour field. Those run synchronously earlier in this IIFE cascade,
     // so a direct call here reflects the seeded value.
     syncBinColorWidget();
@@ -1683,7 +1683,7 @@
       renderHint = function () {
         const kind = window.__antBinColorKind;
         if ((kind === 'continuous' || kind === 'gene') && !(nInput.value || '').trim())
-          return 'a continuous group-by needs a bin count — set N (2–20) in the widget';
+          return 'a continuous group-by needs a bin count, set N (2–20) in the widget';
         return _hintOrig();
       };
     }
@@ -1714,12 +1714,12 @@
     } catch (e) { return null; }
   }
   // Returns the effective term (explicit selection, else the sole term when
-  // there's only one — so a single-term study needs no manual pick), or ''.
+  // there's only one, so a single-term study needs no manual pick), or ''.
   async function populateTerms(study, selected) {
     const sel = document.getElementById('f-term');
     if (!sel) return '';
-    const allOpt = GEOM === 'forest' ? '<option value="">— all terms —</option>'
-                                     : '<option value="">— select term —</option>';
+    const allOpt = GEOM === 'forest' ? '<option value="">all terms</option>'
+                                     : '<option value="">select term</option>';
     sel.innerHTML = allOpt;
     if (!study) return '';
     const data = await _deFetch(`/de/${encodeURIComponent(study)}`);
@@ -1738,8 +1738,8 @@
   async function populateContrasts(study, term, selected) {
     const sel = document.getElementById('f-contrast');
     if (!sel) return;
-    const allOpt = GEOM === 'forest' ? '<option value="">— all contrasts —</option>'
-                                     : '<option value="">— select contrast —</option>';
+    const allOpt = GEOM === 'forest' ? '<option value="">all contrasts</option>'
+                                     : '<option value="">select contrast</option>';
     sel.innerHTML = allOpt;
     if (!study || !term) return;
     const data = await _deFetch(`/de/${encodeURIComponent(study)}/terms/${encodeURIComponent(term)}`);
@@ -1748,7 +1748,7 @@
       const o = document.createElement('option');
       o.value = c.contrast;
       const nsig = c['n_sig_padj_lt_0.05'];
-      o.textContent = nsig != null ? `${c.contrast} — ${nsig} sig` : c.contrast;
+      o.textContent = nsig != null ? `${c.contrast}, ${nsig} sig` : c.contrast;
       sel.appendChild(o);
     });
     const chosen = selected || (contrasts.length === 1 ? contrasts[0].contrast : '');
@@ -1781,7 +1781,7 @@
       const name = sel.getAttribute('name');
       if (!name || name.startsWith('_')) return;
       // Only truly single-option selects (no placeholder / no "none"/"all"
-      // alternative) — so optional split/colour pickers keep their dropdown.
+      // alternative), so optional split/colour pickers keep their dropdown.
       if (sel.options.length === 1) makeStatic(sel);
     });
   }
@@ -1790,7 +1790,7 @@
   // <select> and show a static-text twin whenever it has a single real option,
   // and reveal the dropdown again if it repopulates to several. The <select>
   // stays in the DOM (value set), so buildUrl/syncURL still read it. Net effect
-  // matches makeStatic visually (.field-static) — consistent across the form.
+  // matches makeStatic visually (.field-static), consistent across the form.
   function reflectSingle(sel) {
     if (!sel) return;
     let twin = sel.nextElementSibling;
@@ -1845,7 +1845,7 @@
       const term = await populateTerms(studySel.value, p.get('term'));
       if (term) await populateContrasts(studySel.value, term, p.get('contrast'));
     }
-    reflectDeCascade();   // study/term/contrast now final — show singular ones as static
+    reflectDeCascade();   // study/term/contrast now final, show singular ones as static
     refresh();
   }
 
@@ -1864,7 +1864,7 @@
       }
     });
     // Colour-family controls (palette_*/color_scale) live in the settings panel
-    // (id="s-<key>"), NOT the form — so the loop above misses them. A curated
+    // (id="s-<key>"), NOT the form, so the loop above misses them. A curated
     // viz link carries them as URL params; apply them here so a shared link
     // reproduces its exact colours in the live preview. URL wins over the
     // user's saved settings for this page load only (set directly → no change
@@ -1885,16 +1885,16 @@
   // top_num from the dataset's .md, plus pattern-detected "smart" picks
   // across the full obs lists):
   //
-  //   1. PREFILL — set the first sensible value for every empty field
+  //   1. PREFILL, set the first sensible value for every empty field
   //      (so /plot/bar lands on a working plot, /plot/rolling auto-picks
   //      pseudotime when present, etc).  URL params win; we only fill
   //      what the URL didn't.
-  //   2. CHIPS — surface the *other* curated picks as clickable chips
+  //   2. CHIPS, surface the *other* curated picks as clickable chips
   //      beneath each input, so users see what's recommended without
   //      having to type or hit the autocomplete.
   //
   // Pattern detection (the "smart" chips, highlighted in amber) scans the
-  // FULL obs lists, not just the curated top_* subsets — so pseudotime
+  // FULL obs lists, not just the curated top_* subsets, so pseudotime
   // gets found even on datasets where the curator didn't add it to
   // top_num.  Datasets often have well-known column names; this catches
   // the common ones without forcing per-dataset curation.
@@ -1921,7 +1921,7 @@
     return { curated: curatedList, smart: extra };
   }
 
-  // ── chip label formatter — mirrors the Jinja col_label macro ────────────
+  // ── chip label formatter, mirrors the Jinja col_label macro ────────────
   // Returns HTML to display as a chip label.  ant_* columns get a bold
   // stripped label plus a facet pill; everything else is plain-escaped text.
   // The actual `value` submitted to the API always stays the raw ant_* name.
@@ -1937,8 +1937,8 @@
 
   // ── chip injection helper
   // Inserts a row of clickable chips beneath an input.  ``mode``:
-  //   'replace' (default) — chip click sets input.value to the chip text
-  //   'append'            — chip click appends "<text>, " to existing value
+  //   'replace' (default), chip click sets input.value to the chip text
+  //   'append'           , chip click appends "<text>, " to existing value
   //                         (skips if already present), for CSV fields
   //                         like heatmap-x and rolling-y.
   function attachChips(fieldName, chipSpec, mode) {
@@ -2032,7 +2032,7 @@
       });
       attachChips('color', { label: 'gene', curated: topGenes.slice(0, 4) });
       // XY mode: x and y take continuous fields (numerical obs + genes). Prefill
-      // them too (harmless in embedding mode — disabled fields aren't submitted)
+      // them too (harmless in embedding mode, disabled fields aren't submitted)
       // so a no-embedding dataset, which starts in XY mode, still renders on load.
       setIfEmpty('#f-x-xy', topNum[0] || topGenes[0] || OBS_NUM[0]);
       setIfEmpty('#f-y-xy', topNum[1] || topGenes[1] || topGenes[0] || OBS_NUM[1] || OBS_NUM[0]);
@@ -2090,7 +2090,7 @@
         label: 'axis',
         ...mergeSmart(topNum.slice(0, 3), trajectory),
       });
-      // y: csv of continuous fields — both gene chips and num chips,
+      // y: csv of continuous fields, both gene chips and num chips,
       // both with append behaviour. Fall back to any numeric obs so the plot
       // renders on first load even with no curated favourites.
       const yField = document.querySelector('form [name="y"]');
@@ -2123,7 +2123,7 @@
   //    path). The shared initDeCascade only knows one triple, so de_quadrant has
   //    its own init with db-parameterised fill helpers. The Y study is pre-seeded
   //    to the X study (a sensible default), but the two cascades don't otherwise
-  //    couple — changing X never silently mutates Y (predictable).
+  //    couple, changing X never silently mutates Y (predictable).
   async function _deFetchDb(dbId, path) {
     try {
       const r = await fetch(`${API_URL.replace(/\/$/, '')}/databases/${dbId}${path}`);
@@ -2131,7 +2131,7 @@
     } catch (e) { return null; }
   }
   async function _fillStudies(sel, dbId, selected) {
-    sel.innerHTML = '<option value="">— select study —</option>';
+    sel.innerHTML = '<option value="">select study</option>';
     const data = await _deFetchDb(dbId, '/de');
     (data?.studies || []).forEach(s => {
       const o = document.createElement('option');
@@ -2145,7 +2145,7 @@
     return sel.value || '';
   }
   async function _fillTermsDb(sel, dbId, study, selected) {
-    sel.innerHTML = '<option value="">— select study first —</option>';
+    sel.innerHTML = '<option value="">select study first</option>';
     if (!study) { reflectSingle(sel); return ''; }
     const data = await _deFetchDb(dbId, `/de/${encodeURIComponent(study)}`);
     (data?.terms || []).forEach(t => {
@@ -2160,14 +2160,14 @@
     return sel.value || '';
   }
   async function _fillContrastsDb(sel, dbId, study, term, selected) {
-    sel.innerHTML = '<option value="">— select term first —</option>';
+    sel.innerHTML = '<option value="">select term first</option>';
     if (!study || !term) { reflectSingle(sel); return; }
     const data = await _deFetchDb(dbId, `/de/${encodeURIComponent(study)}/terms/${encodeURIComponent(term)}`);
     (data?.contrasts || []).forEach(c => {
       const o = document.createElement('option');
       o.value = c.contrast;
       const n = c['n_sig_padj_lt_0.05'];
-      o.textContent = n != null ? `${c.contrast} — ${n} sig` : c.contrast;
+      o.textContent = n != null ? `${c.contrast}, ${n} sig` : c.contrast;
       sel.appendChild(o);
     });
     const real = [...sel.options].filter(o => o.value);
@@ -2192,7 +2192,7 @@
       }
     } catch (e) {}
 
-    // X cascade (path dataset) — independent
+    // X cascade (path dataset), independent
     if (!aStudy.value) { const real = [...aStudy.options].filter(o => o.value); if (real.length === 1) aStudy.value = real[0].value; }
     if (p.get('study')) aStudy.value = p.get('study');
     aStudy.addEventListener('change', async () => {
@@ -2204,7 +2204,7 @@
       await _fillContrastsDb(aContrast, DB_ID, aStudy.value, aTerm.value); scheduleRefresh();
     });
 
-    // Y cascade (bDb) — independent; study pre-seeded to X's study
+    // Y cascade (bDb), independent; study pre-seeded to X's study
     dbY.addEventListener('change', async () => {
       await _fillStudies(bStudy, bDb(), aStudy.value);            // new dataset → new study list
       const t = await _fillTermsDb(bTerm, bDb(), bStudy.value);

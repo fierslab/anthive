@@ -32,7 +32,7 @@
   .ef-row input.off-vocab { border-color: #f59e0b; background: #fffbeb; }
   #mus-loading { font-size: 12px; }
 
-  /* Tab bar / tab buttons live in base.html — shared with the dataset page. */
+  /* Tab bar / tab buttons live in base.html, shared with the dataset page. */
 
   /* ── API section ─────────────────────────────────────────── */
   .api-toolbar { display: flex; align-items: center; gap: 10px; margin: 8px 0 12px 0; flex-wrap: wrap; }
@@ -137,7 +137,7 @@
     ("edit", None)
 ], ids=[("collection", group_id), ("dataset", file_id)]) }}
 <h1 class="page-title">Edit dataset <span class="mono">{{ db_id }}</span>
-  <span class="info" title="Admin only. Writes the dataset .md to disk. Most fields are machine-generated (id, hashes, counts, layer stats) and are read-only; biology annotation lives in the .mus sidecar. It's a git repo — commit the change yourself.">ⓘ</span></h1>
+  <span class="info" title="Admin only. Writes the dataset .md to disk. Most fields are machine-generated (id, hashes, counts, layer stats) and are read-only; biology annotation lives in the .mus sidecar. It's a git repo, commit the change yourself.">ⓘ</span></h1>
 <p class="muted" style="font-size:12px;margin-top:-8px">
   Paper title, authors, DOI, and journal are collection-level fields.
   <a href="/admin/edit/{{ group_id|urlencode }}">Edit collection metadata →</a>
@@ -157,21 +157,21 @@
     <button type="button" class="tab-btn"        data-tab="info"      role="tab">Info<span class="tab-dirty"></span></button>
   </div>
 
-  <!-- Tab: Basics — title / description / year -->
+  <!-- Tab: Basics, title / description / year -->
   <section class="tab-panel active" id="tab-basics" role="tabpanel" aria-labelledby="tab-basics-btn">
     <h2>Basics
       <span class="info" title="Curated dataset metadata. Title and one-line description are what users see on the dataset page. Year is the publication year.">ⓘ</span></h2>
     <div id="ef-fields-basics" class="ef-grid"></div>
   </section>
 
-  <!-- Tab: Favorites — top_genes / top_cat / top_num -->
+  <!-- Tab: Favorites, top_genes / top_cat / top_num -->
   <section class="tab-panel" id="tab-favorites" role="tabpanel">
     <h2>Favorites
       <span class="info" title="Curated defaults that drive the plot form's pre-population and the dataset page's context chips. Comma-separated lists. Auto-suggested by ant-suggest-tops.">ⓘ</span></h2>
     <div id="ef-fields-favorites" class="ef-grid"></div>
   </section>
 
-  <!-- Tab: Layers — which h5ad layers are served -->
+  <!-- Tab: Layers, which h5ad layers are served -->
   <section class="tab-panel" id="tab-layers" role="tabpanel">
     <h2>Layers
       <span class="info" title="Toggle which h5ad layers are served through the API. layer_stats stays as-is (it lists every layer in the h5ad); layers_include/exclude on the .md decide what /info and plot endpoints see. The default_layer is always served and cannot be hidden.">ⓘ</span></h2>
@@ -182,10 +182,10 @@
     <div id="layers-fields"></div>
   </section>
 
-  <!-- Tab: Biology — the .h5ad.mus sidecar -->
+  <!-- Tab: Biology, the .h5ad.mus sidecar -->
   <section class="tab-panel" id="tab-biology" role="tabpanel">
-    <h2>Biology annotation <span class="ed-note">— the <code>.h5ad.mus</code> sidecar (organism, tissue, cell type, …)</span>
-      <span class="info" title="Controlled fields are vocab-gated server-side: a value outside the controlled vocabulary rejects the whole save. Fields shown faded are inherited from the folder .env cascade — set one here to override it for this dataset. Saves write the .h5ad.mus sidecar (a separate file from the .md); it's a git repo, commit yourself.">ⓘ</span></h2>
+    <h2>Biology annotation <span class="ed-note">the <code>.h5ad.mus</code> sidecar (organism, tissue, cell type, …)</span>
+      <span class="info" title="Controlled fields are vocab-gated server-side: a value outside the controlled vocabulary rejects the whole save. Fields shown faded are inherited from the folder .env cascade, set one here to override it for this dataset. Saves write the .h5ad.mus sidecar (a separate file from the .md); it's a git repo, commit yourself.">ⓘ</span></h2>
     <div id="ai-mus-note" title="biology annotation lives in the .h5ad.mus sidecar"></div>
     <div id="mus-loading" class="muted">loading .mus…</div>
     <div id="mus-box" style="display:none">
@@ -199,10 +199,10 @@
     <div id="mus-error" class="plot-status"></div>
   </section>
 
-  <!-- Tab: API — obs column rename / hide (per-column + per-value) -->
+  <!-- Tab: API, obs column rename / hide (per-column + per-value) -->
   <section class="tab-panel" id="tab-api" role="tabpanel">
     <h2>API surface
-      <span class="info" title="Rename or hide obs columns before they reach public API consumers (vark, pyvark, plot endpoints). Also rename/hide individual values inside categorical columns. Applied by rebuilding the obscat/obsnum DuckDB views. NOTE: any bookmarked URL or notebook that referenced the old column name will 400 after a rename — anthive does not auto-map old to new.">ⓘ</span>
+      <span class="info" title="Rename or hide obs columns before they reach public API consumers (vark, pyvark, plot endpoints). Also rename/hide individual values inside categorical columns. Applied by rebuilding the obscat/obsnum DuckDB views. NOTE: any bookmarked URL or notebook that referenced the old column name will 400 after a rename, anthive does not auto-map old to new.">ⓘ</span>
     </h2>
     <p class="ed-note" style="margin: -4px 0 10px 0">
       Renames/hides apply immediately on save. The <code>.md</code>'s
@@ -233,17 +233,17 @@
     <div id="api-error" class="plot-status"></div>
   </section>
 
-  <!-- Tab: Description — the .md markdown body -->
+  <!-- Tab: Description, the .md markdown body -->
   <section class="tab-panel" id="tab-desc" role="tabpanel">
-    <h2>Long Description <span class="ed-note">— the dataset's .md body (markdown)</span>
+    <h2>Long Description <span class="ed-note">the dataset's .md body (markdown)</span>
       <button id="md-toggle" type="button" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle">👁 preview</button></h2>
     <textarea id="md-body" spellcheck="true" placeholder="# Dataset notes…"></textarea>
     <div id="md-preview" style="display:none"></div>
   </section>
 
-  <!-- Tab: Info — read-only machine-generated fields -->
+  <!-- Tab: Info, read-only machine-generated fields -->
   <section class="tab-panel" id="tab-info" role="tabpanel">
-    <h2>Read-only <span class="ed-note">— machine-generated, not editable</span></h2>
+    <h2>Read-only <span class="ed-note">machine-generated, not editable</span></h2>
     <div id="ef-ro" class="ef-grid"></div>
   </section>
 
@@ -279,10 +279,10 @@
     { key: 'top_cat',      label: 'top categories (comma-separated)',  kind: 'list',   tab: 'favorites' },
     { key: 'top_num',      label: 'top numeric (comma-separated)',     kind: 'list',   tab: 'favorites' },
   ];
-  // Machine-generated identity/computed fields — shown read-only for context.
+  // Machine-generated identity/computed fields, shown read-only for context.
   const RO_SHOW = ['id', 'version', 'sha256', 'date', 'n_obs', 'n_vars', 'default_layer'];
 
-  let original = {};   // full loaded frontmatter — everything not in EDITABLE round-trips untouched
+  let original = {};   // full loaded frontmatter, everything not in EDITABLE round-trips untouched
   let layersDefault = 'X';   // captured from the loaded frontmatter's default_layer so the save side can force-include it
 
   const loading = document.getElementById('ed-loading'),
@@ -571,7 +571,7 @@
   // editor load in parallel, so whichever finishes second triggers the attach.
   function fmtProposed(v) { return Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v)); }
   var curationProposals = null;   // {path: {proposed, confidence, rationale}}
-  function chipTitle(p, conf) { return (p.rationale || 'AI suggestion') + (conf ? ' · confidence ' + conf : '') + ' — click to use'; }
+  function chipTitle(p, conf) { return (p.rationale || 'AI suggestion') + (conf ? ' · confidence ' + conf : '') + ', click to use'; }
   function attachMdChips() {
     if (!curationProposals) return;
     Object.keys(curationProposals).forEach(function (path) {
@@ -642,15 +642,15 @@
       addEditable(original); addReadonly(original);
       renderLayersTab(original);
       body.value = d.body || '';
-      if (!d.exists) statusEl.innerHTML = '<span class="muted">no .md yet — saving will create it</span>';
-      // .md carries the api: section — render the API tab from it.
+      if (!d.exists) statusEl.innerHTML = '<span class="muted">no .md yet, saving will create it</span>';
+      // .md carries the api: section, render the API tab from it.
       renderApiTab(original.api || {});
       loadCuration();
       // Deep-link the initial tab from the URL fragment.
       var initHash = (location.hash || '').replace(/^#/, '');
       if (initHash) activateTab(initHash, { push: false });
     })
-    .catch(e => { loading.style.display = 'none'; errBox.innerHTML = '<span class="err">could not load .md — ' + esc(e.message) + '</span>'; });
+    .catch(e => { loading.style.display = 'none'; errBox.innerHTML = '<span class="err">could not load .md, ' + esc(e.message) + '</span>'; });
 
   // redirect=true → return to the dataset page after saving (the Save button);
   // redirect=false → intermediate save, stay put (Cmd/Ctrl-S).
@@ -661,7 +661,7 @@
   // → refreshing to reflect it is the honest confirmation. We do NOT collapse
   // the api section into the /source PUT because ant-serve's _DATASET_LOCKED
   // fields don't include `api`, but the api-config endpoint owns validation
-  // (obs_rename collision, value-rename shape, etc.) — using the specific
+  // (obs_rename collision, value-rename shape, etc.), using the specific
   // endpoint keeps the safety net in place.
   var saving = false;
   function doSave(redirect) {
@@ -687,21 +687,21 @@
     return apiPromise
       .then(function () {
         if (redirect) {
-          statusEl.innerHTML = '<span style="color:#16a34a">✓ saved — returning…</span>';
+          statusEl.innerHTML = '<span style="color:#16a34a">✓ saved, returning…</span>';
           showToast('✓ saved', 'ok');
           window.location = '/browse/{{ group_id|urlencode }}/{{ file_id|urlencode }}';
         } else {
           saving = false; saveBtn.disabled = false;
           statusEl.innerHTML = '<span style="color:#16a34a">✓ saved (⌘/Ctrl-S)</span>';
-          showToast('✓ saved — reloading', 'ok');
+          showToast('✓ saved, reloading', 'ok');
           // Refresh so tabs reflect the new state (esp. API views rebuilt).
           setTimeout(function () { window.location.reload(); }, 400);
         }
       })
       .catch(e => {
         saving = false; saveBtn.disabled = false;
-        statusEl.innerHTML = '<span class="err">save failed — ' + esc(e.message) + '</span>';
-        showToast('save failed — ' + e.message, 'err');
+        statusEl.innerHTML = '<span class="err">save failed, ' + esc(e.message) + '</span>';
+        showToast('save failed, ' + e.message, 'err');
       });
   }
   saveBtn.addEventListener('click', function () { doSave(true); });   // Save → back to the dataset page
@@ -721,7 +721,7 @@
   var MUS_SOFT = ['disease', 'condition', 'sex', 'age', 'strain', 'contributor', 'doi', 'pmid', 'accession', 'link', 'license', 'source_description'];
   var MUS_SELECT = ['organism', 'access', 'source', 'suspension_type', 'sex'];   // single-value, small vocab → <select>
   var MUS_CTRL_FALLBACK = ['organism', 'access', 'source', 'suspension_type', 'sex', 'cell_type', 'technology', 'tissue', 'disease'];
-  var MUS_HIDE = ['title', 'year', 'sha256', 'created', 'updated', 'schema_version'];   // machine/duplicated — edited via .md or locked
+  var MUS_HIDE = ['title', 'year', 'sha256', 'created', 'updated', 'schema_version'];   // machine/duplicated, edited via .md or locked
 
   var musFields  = document.getElementById('mus-fields'),
       musBox     = document.getElementById('mus-box'),
@@ -774,15 +774,15 @@
       var row = document.createElement('div'); row.className = 'ef-row';
       var lab = document.createElement('label'); lab.textContent = key;
       if (musRequired(key)) { var st = document.createElement('span'); st.className = 'req-star'; st.textContent = '*'; lab.appendChild(st); }
-      if (musControlled(key)) { var ct = document.createElement('span'); ct.className = 'mus-tag ctrl'; ct.textContent = 'vocab'; ct.title = 'controlled vocabulary — a value outside it is rejected on save'; lab.appendChild(ct); }
-      if (inherited) { var ih = document.createElement('span'); ih.className = 'mus-tag inherited'; ih.textContent = 'inherited'; ih.title = 'inherited from the folder .env cascade — set a value to override it for this dataset'; lab.appendChild(ih); }
+      if (musControlled(key)) { var ct = document.createElement('span'); ct.className = 'mus-tag ctrl'; ct.textContent = 'vocab'; ct.title = 'controlled vocabulary, a value outside it is rejected on save'; lab.appendChild(ct); }
+      if (inherited) { var ih = document.createElement('span'); ih.className = 'mus-tag inherited'; ih.textContent = 'inherited'; ih.title = 'inherited from the folder .env cascade, set a value to override it for this dataset'; lab.appendChild(ih); }
       row.appendChild(lab);
 
       var allowed = musAllowed(key), control;
       if (allowed && MUS_SELECT.indexOf(key) >= 0) {
         control = document.createElement('select');
         var blank = document.createElement('option');
-        blank.value = ''; blank.textContent = inherited ? '(inherit: ' + ser(resolved) + ')' : '—';
+        blank.value = ''; blank.textContent = inherited ? '(inherit: ' + ser(resolved) + ')' : '';
         control.appendChild(blank);
         allowed.forEach(function (v) { var o = document.createElement('option'); o.value = v; o.textContent = v; control.appendChild(o); });
         var dv = ser(direct);
@@ -839,7 +839,7 @@
         musStatus.innerHTML = '<span style="color:#16a34a">✓ saved ' + n + ' field' + (n === 1 ? '' : 's') + '</span>';
         musFields.querySelectorAll('[data-mkey]').forEach(function (c) { if (c.dataset.mkey in changes) c.dataset.orig = (c.value || '').trim(); });
       })
-      .catch(function (e) { musSaving = false; musSaveBtn.disabled = false; musStatus.innerHTML = '<span class="err">save failed — ' + esc(e.message) + '</span>'; });
+      .catch(function (e) { musSaving = false; musSaveBtn.disabled = false; musStatus.innerHTML = '<span class="err">save failed, ' + esc(e.message) + '</span>'; });
   }
   musSaveBtn.addEventListener('click', saveMus);
 
@@ -853,11 +853,11 @@
     musVocab = res[0];
     var m = res[1];
     musLoading.style.display = 'none';
-    if (m && m.__err) { musErr.innerHTML = '<span class="err">could not load .mus — ' + esc(m.__err.message) + '</span>'; return; }
+    if (m && m.__err) { musErr.innerHTML = '<span class="err">could not load .mus, ' + esc(m.__err.message) + '</span>'; return; }
     musData = m || {};
     renderMusFields();
     musBox.style.display = '';
-    if (!musData.exists) musStatus.innerHTML = '<span class="muted">no .mus yet — saving will create it</span>';
+    if (!musData.exists) musStatus.innerHTML = '<span class="muted">no .mus yet, saving will create it</span>';
     musLoaded = true;
     attachMusChips();   // curation may have arrived first
   });
@@ -884,7 +884,7 @@
   var apiCurrent = null;
   // apiSummaryByCol: {col: {type, n_unique, pct_missing, top: [{value,count,pct}]}}
   var apiSummaryByCol = null;
-  // For each col, the input elements — filled in by renderApiTab().
+  // For each col, the input elements, filled in by renderApiTab().
   var apiRowRefs = {};
 
   function normalizeApi(api) {
@@ -911,7 +911,7 @@
       })
       .catch(e => {
         apiLoading.style.display = 'none';
-        apiErr.innerHTML = '<span class="err">could not load obs summary — ' + esc(e.message) + '</span>';
+        apiErr.innerHTML = '<span class="err">could not load obs summary, ' + esc(e.message) + '</span>';
         // Still draw rows (with empty stats) so hides/renames remain editable.
         apiSummaryByCol = {};
         drawApiRows();
@@ -1013,7 +1013,7 @@
         stats.appendChild(nullBadge);
       }
     } else {
-      stats.textContent = '—';
+      stats.textContent = '';
     }
     tdStats.appendChild(stats);
     tr.appendChild(tdStats);
@@ -1030,9 +1030,9 @@
     );
     expandBtn.textContent = '↓ values' + (hasVal ? ' •' : '');
     if (!canExpand) {
-      if (!isCat) expandBtn.title = 'numerical column — no value-level editing';
+      if (!isCat) expandBtn.title = 'numerical column, no value-level editing';
       else if (!summary) expandBtn.title = 'no summary available for this column';
-      else expandBtn.title = summary.n_unique + ' distinct values — too many for inline editing (>' + VALUE_EXPAND_MAX + '); edit the .md directly';
+      else expandBtn.title = summary.n_unique + ' distinct values, too many for inline editing (>' + VALUE_EXPAND_MAX + '); edit the .md directly';
     } else {
       expandBtn.title = 'edit value-level rename / hide';
     }
@@ -1047,7 +1047,7 @@
   function toggleValuesPanel(tr, col) {
     var refs = apiRowRefs[col];
     if (refs.valuesTr) {
-      // collapse — but preserve state so re-opening keeps unsaved edits.
+      // collapse, but preserve state so re-opening keeps unsaved edits.
       // Simpler: rip it out and rebuild from apiCurrent + pending state.
       refs.valuesTr.remove();
       refs.valuesTr = null; refs.valuesInputs = null;
@@ -1090,14 +1090,14 @@
       if (v._carry) {
         var tag = document.createElement('span'); tag.className = 'api-val-carry';
         tag.textContent = 'not in top-N';
-        tag.title = 'This value is not in the observed top values from obs_summary — it comes from the .md.';
+        tag.title = 'This value is not in the observed top values from obs_summary, it comes from the .md.';
         tdVal.appendChild(tag);
       }
       row.appendChild(tdVal);
       // count
       var tdCnt = document.createElement('td');
       tdCnt.className = 'api-val-count';
-      tdCnt.textContent = (v.count == null) ? '—' : (v.count.toLocaleString() + (v.pct != null ? ' (' + v.pct + '%)' : ''));
+      tdCnt.textContent = (v.count == null) ? '' : (v.count.toLocaleString() + (v.pct != null ? ' (' + v.pct + '%)' : ''));
       row.appendChild(tdCnt);
       // rename to
       var tdRen = document.createElement('td');
@@ -1153,7 +1153,7 @@
   // Diff the current UI state against the baseline (apiCurrent) and return
   // the FULL new api-config body (or null when there are no changes). The
   // /admin/api-config endpoint interprets a missing field as "leave alone",
-  // so we send ONLY the fields we actually changed — but each field goes
+  // so we send ONLY the fields we actually changed, but each field goes
   // in as the FULL desired list/dict, not a delta.
   function collectApiChanges() {
     if (!apiCurrent) return null;
@@ -1180,8 +1180,8 @@
       }
     });
 
-    // Any column in apiCurrent that isn't in our render loop (shouldn't happen —
-    // makeApiRow covers them — but defensive) is preserved verbatim.
+    // Any column in apiCurrent that isn't in our render loop (shouldn't happen,
+    // makeApiRow covers them, but defensive) is preserved verbatim.
 
     // Change detection against baseline. Only include the fields that actually changed.
     var changes = {};

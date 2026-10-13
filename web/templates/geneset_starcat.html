@@ -42,7 +42,7 @@
         <option value="200">200</option>
     </select>
     genes by |weight|
-    <span class="info" title="starCAT program gene loadings (NMF weights). A high weight means the gene contributes strongly to this program. Note: a gene can load on several programs — a high weight here is not by itself a claim of specificity to this program.">ⓘ</span>
+    <span class="info" title="starCAT program gene loadings (NMF weights). A high weight means the gene contributes strongly to this program. Note: a gene can load on several programs, a high weight here is not by itself a claim of specificity to this program.">ⓘ</span>
 </div>
 
 <div class="sc-state" id="sc-state">loading…</div>
@@ -88,7 +88,7 @@
       var neg = w != null && w < 0;
       return '<tr><td class="r">' + (g.rank != null ? g.rank : (i + 1)) + '</td>'
         + '<td><code>' + esc(g.gene) + '</code></td>'
-        + '<td class="w">' + (w == null ? '—' : w.toFixed(4)) + '</td>'
+        + '<td class="w">' + (w == null ? '' : w.toFixed(4)) + '</td>'
         + '<td class="bar"><span class="wbar' + (neg ? ' neg' : '') + '" style="width:' + pct.toFixed(1) + '%" title="' + (w == null ? '' : w.toFixed(4)) + '"></span></td></tr>';
     }).join('');
     table.innerHTML = '<thead><tr><th class="r">#</th><th>Gene</th><th class="w">Weight</th><th>&nbsp;</th></tr></thead><tbody>' + rows + '</tbody>';
@@ -107,7 +107,7 @@
       .then(render)
       .catch(function (e) {
         stateEl.style.display = ''; stateEl.className = 'sc-state err';
-        stateEl.textContent = 'could not load — ' + (e && e.message ? e.message : e);
+        stateEl.textContent = 'could not load, ' + (e && e.message ? e.message : e);
       });
   }
 

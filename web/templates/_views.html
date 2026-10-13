@@ -682,7 +682,7 @@ window.antViews = window.antViews || (function () {
     if (!rows.length) return '<div class="vw-placeholder">No dataset result is available for this cell.</div>';
     var head = '<th>Dataset ' + info('Dataset behind the cell, with its id. Click for the dataset page.') + '</th><th>Cohort ' + info('The cohort the dataset belongs to; replication counts one dataset per cohort.') + '</th>' +
       '<th class="num">Donors ' + info('Donors in the test group vs the reference group for two-group facets, otherwise the number of donors (host mice in the xenograft block).') + '</th>' +
-      '<th class="num">' + effect.label + ' ' + info(effect.tip) + '</th><th class="num">Adj. p ' + info(effect.pTip) + '</th>';
+      '<th class="num">' + effect.label + ' ' + info(effect.tip) + '</th><th class="num">q ' + info(effect.pTip) + '</th>';
     var body = rows.map(function (row) {
       return '<tr' + (row.counted ? '' : ' class="vw-grey"') + '><td>' + dsName(row.db_id, row.title, 46) +
         (row.counted ? '' : '<div class="muted">not counted' + (row.reason ? ': ' + esc(row.reason) : '') + '</div>') + '</td><td>' + esc(row.name) + '</td><td class="num">' + esc(row.stats && row.stats.donors || '') + '</td>' +
@@ -724,7 +724,7 @@ window.antViews = window.antViews || (function () {
           '<td class="num">' + (row.est == null ? 'n/a' : signed(row.est, 2)) + '</td><td class="num">' + (row.q == null ? '<span class="muted">n/a</span>' : pfmt(row.q)) + '</td></tr>';
       };
       var head = '<th>Dataset ' + info('Dataset without a single cell type column in the matrix: mixed, unmapped or other cell types. Click for the dataset page.') + '</th><th>Facet and cell type ' + info('The facet tested and the cell type group of the result (the label of the group the dataset holds).') + '</th>' +
-        '<th class="num">Donors ' + info('Donors in the test group vs the reference group for two-group facets, otherwise the number of donors.') + '</th><th class="num">' + effect.label + ' ' + info(effect.tip) + '</th><th class="num">Adj. p ' + info(effect.pTip) + '</th>';
+        '<th class="num">Donors ' + info('Donors in the test group vs the reference group for two-group facets, otherwise the number of donors.') + '</th><th class="num">' + effect.label + ' ' + info(effect.tip) + '</th><th class="num">q ' + info(effect.pTip) + '</th>';
       var table = function (entries) { return '<div class="vw-box"><table class="vw-table fixed vd-units vd-other"><colgroup><col class="o-ds"><col class="o-fc"><col class="u-n"><col class="u-e"><col class="u-q"></colgroup><thead><tr>' + head + '</tr></thead><tbody>' + entries.map(line).join('') + '</tbody></table></div>'; };
       html += table(flat.slice(0, SHOWN_OTHER));
       if (flat.length > SHOWN_OTHER) html += '<details class="vw-more"><summary>Show the other ' + (flat.length - SHOWN_OTHER) + ' rows</summary>' + table(flat.slice(SHOWN_OTHER)) + '</details>';

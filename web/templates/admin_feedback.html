@@ -91,8 +91,8 @@
 
     tr.innerHTML =
       '<td class="card-title fb-when" data-label="when">' + esc(fmtWhen(it.created_at)) + '</td>' +
-      '<td class="fb-user" data-label="user">' + esc(it.user || '—') + '</td>' +
-      '<td data-label="category"><span class="fb-cat ' + catCls + '">' + esc(cat || '—') + '</span></td>' +
+      '<td class="fb-user" data-label="user">' + esc(it.user || '') + '</td>' +
+      '<td data-label="category"><span class="fb-cat ' + catCls + '">' + esc(cat || '') + '</span></td>' +
       '<td class="fb-comment ' + (comment ? '' : 'empty') + '" data-label="comment">' + (comment ? esc(comment) : 'no comment') + '</td>' +
       '<td class="fb-msg" data-label="flagged message"></td>' +
       '<td class="fb-ref" data-label="ref">t' + esc(it.turn_seq) + '·r' + esc(it.round_idx) + '<br>' + esc(String(it.session_id || '').slice(0, 8)) + '</td>';
@@ -115,7 +115,7 @@
         }
       });
     } else {
-      msgCell.innerHTML = '<span class="muted">— (message not found)</span>';
+      msgCell.innerHTML = '<span class="muted">(message not found)</span>';
     }
     return tr;
   }
@@ -127,7 +127,7 @@
     fetch('/api/chat/feedback?limit=' + encodeURIComponent(limit), { credentials: 'same-origin' })
       .then(function (r) {
         if (r.status === 404) throw new Error('the chat assistant is not active on this deployment');
-        if (r.status === 403) throw new Error('not authorized — admin only');
+        if (r.status === 403) throw new Error('not authorized, admin only');
         if (!r.ok) return r.text().then(function (t) { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 160)); });
         return r.json();
       })

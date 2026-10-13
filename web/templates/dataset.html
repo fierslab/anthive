@@ -46,7 +46,7 @@
 
 {% block content %}
 <style>
-  /* Context bar — uniform neutral pill; no per-category colours (the label
+  /* Context bar, uniform neutral pill; no per-category colours (the label
      under each pill's tooltip already identifies the field). */
   .ds-ctx { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 10px; }
   .ds-ctx .pill {
@@ -58,7 +58,7 @@
   .ds-ctx .pill.year { font-family: var(--font-mono); }
 
   /* Quick external-link badges (DOI / PubMed / accession / URL) under the
-     context bar — small and inconspicuous (plain links, not filled pills). */
+     context bar, small and inconspicuous (plain links, not filled pills). */
   .ds-links { display: flex; flex-wrap: wrap; gap: 12px; margin: -4px 0 10px; }
   .ds-links .lnk {
     font-size: 11px; color: var(--text-muted); text-decoration: none; white-space: nowrap;
@@ -97,7 +97,7 @@
   .viz-cat.de a { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
   .viz-cat.de a:hover { background: #ea580c; color: #fff; border-color: #ea580c; }
 
-  /* ID strip — copy-pasteable identifiers right under the breadcrumb. */
+  /* ID strip, copy-pasteable identifiers right under the breadcrumb. */
   .id-strip { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 4px 0 6px; }
   .idchip { display: inline-flex; align-items: baseline; gap: 5px; font-size: 11px; border: 1px solid var(--border); border-radius: 5px; padding: 1px 7px; background: #f8fafc; cursor: default; }
   .idchip .idk { color: #94a3b8; text-transform: uppercase; letter-spacing: .4px; font-size: 9px; }
@@ -136,7 +136,7 @@
   /* Consolidated header row: breadcrumb (macro) + action buttons. */
   .ds-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 4px 0 8px; }
   .ds-bc { flex: 1; min-width: 0; }
-  /* Align Visualize + Edit buttons on the same baseline — matched padding + line-height. */
+  /* Align Visualize + Edit buttons on the same baseline, matched padding + line-height. */
   .ds-actions { display: flex; align-items: stretch; gap: 6px; flex-shrink: 0; position: relative; }
   .ds-actions > * { align-self: stretch; display: inline-flex; align-items: center; }
   .ds-actions-group { display: flex; align-items: stretch; gap: 6px; }
@@ -172,7 +172,7 @@
   .btn-grey .caret { font-size: 9px; opacity: .8; margin-left: 3px; }
   .btn-grey.btn-icon { padding: 6px 11px; }
   .ds-acc { font-size: 15px; cursor: default; align-self: center; padding: 0 1px; filter: grayscale(1); }   /* monochrome */
-  /* Header pub icon — larger version of the same fixed-width glyph as the
+  /* Header pub icon, larger version of the same fixed-width glyph as the
      row-level indicator, so the visual language stays consistent. */
   .ds-pub-icon {
     display: inline-flex; align-items: center; justify-content: center;
@@ -181,12 +181,12 @@
   }
   .ds-pub-icon svg { width: 22px; height: 22px; display: block; }
   #viz-menu-panel a { filter: grayscale(1); }   /* b/w the plot-category emoji in the dropdown */
-  /* descriptive biology metadata — responsive grid, more columns as width grows */
+  /* descriptive biology metadata, responsive grid, more columns as width grows */
   .ds-meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 6px; margin: 6px 0 10px; }
   .ds-meta .mi { display: flex; gap: 7px; align-items: baseline; border: 1px solid var(--border); border-radius: 5px; padding: 4px 9px; font-size: 12px; background: #fff; min-width: 0; }
   .ds-meta .mk { color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .4px; flex: none; }
   .ds-meta .mv { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* title header below the breadcrumb — present but not oversized */
+  /* title header below the breadcrumb, present but not oversized */
   .ds-title { font-size: 17px; font-weight: 600; color: var(--text); margin: 2px 0 6px; line-height: 1.3; }
   .ds-title .ds-title-base { font-size: 13px; font-weight: normal; color: #94a3b8; font-family: var(--font-mono); margin-left: 6px; }
   /* split obs stat tables */
@@ -234,7 +234,7 @@
   .fxg-full-toggle { font-size: 11.5px; margin-left: 12px; text-decoration: underline dotted; }
   .tab-btn.tab-empty, .tab-btn.tab-empty:hover, .tab-btn.tab-empty.active { color: #a3aab2; font-weight: 400; }
   .tab-btn.tab-empty.active { background: #fafbfc; }
-  /* Caveats tab-button — filled palette-red pill so it reads instantly
+  /* Caveats tab-button, filled palette-red pill so it reads instantly
      as a warning. Not shy. */
   .tab-btn.caveat-tab {
     background: #9E2A2B; color: #fff; border-color: #7c1e1f;
@@ -292,7 +292,7 @@
   /* bulk datasets: one profile per sample, so 'cells expressing' has no meaning */
   .ds-bulk th[data-sortcol="pct"], .ds-bulk td.g-pct-cell { display: none; }
   @media (max-width: 640px) { table.gx-table .vw-bar { width: 36px; } table.gx-table th, table.gx-table td { padding: 4px 5px; } }
-  /* Module-scores table — three method columns each carry their own icon
+  /* Module-scores table, three method columns each carry their own icon
      triplet + stats, so let each row be as wide as it needs to be. */
   #obs-tbl-mod td, #obs-tbl-mod th { white-space: nowrap; }
   .obs-sub { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin: 10px 0 2px; }
@@ -347,7 +347,7 @@
     display: flex; gap: 10px; flex-wrap: wrap;
   }
   .caveats-card .cv-foot .fk { color: #94a3b8; text-transform: uppercase; letter-spacing: .3px; font-size: 9px; margin-right: 3px; }
-  /* Severity accents — subdued, monochrome-adjacent. */
+  /* Severity accents, subdued, monochrome-adjacent. */
   .caveats-card.caveat-low    { border-left-color: #94a3b8; background: #f8fafc; }
   .caveats-card.caveat-low    .cv-chip.lvl { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
   .caveats-card.caveat-medium { border-left-color: #d97706; background: #fffbeb; }
@@ -411,8 +411,8 @@
       <div class="viz-cat">
         <div class="viz-cat-label">spatial</div>
         <div class="viz-cat-items">
-          <a href="{{ _base }}/plot/scatter" title="2D scatter — embedding (UMAP/PCA) or any pair of continuous variables">🗺 scatter</a>
-          <a href="{{ _base }}/plot/hexbin" title="2D hexbin — embedding or any pair of continuous variables">⬣ hexbin</a>
+          <a href="{{ _base }}/plot/scatter" title="2D scatter, embedding (UMAP/PCA) or any pair of continuous variables">🗺 scatter</a>
+          <a href="{{ _base }}/plot/hexbin" title="2D hexbin, embedding or any pair of continuous variables">⬣ hexbin</a>
         </div>
       </div>
       {% endif %}
@@ -467,7 +467,7 @@
 <div class="ds-version" id="ds-version">{% if dataset_version %}<span title="Dataset version. Minor bump = data changed, patch bump = metadata only.">v{{ dataset_version.lstrip('v') }}</span>{% endif %}{% if dataset_version and dataset_updated %} &middot; {% endif %}{% if dataset_updated %}<span>updated {{ dataset_updated }}</span>{% endif %}</div>
 {% endif %}
 
-<!-- Provenance — compact row (access/source moved to icons by the visualize button). -->
+<!-- Provenance, compact row (access/source moved to icons by the visualize button). -->
 {% if dataset_meta and (dataset_meta.license or dataset_meta.contributor or dataset_meta.doi or dataset_meta.pmid or dataset_meta.accession or dataset_meta.link) %}
 <div class="ds-prov">
   {% if dataset_meta.license %}<span><span class="pk">license</span> <span class="pv">{{ dataset_meta.license }}</span></span>{% endif %}
@@ -503,10 +503,10 @@
 
 
 {# ═══════════════════════════════════════════════════════════════════════
-   Tab bar — persistent header above; tabs deep-link via URL hash.
+   Tab bar, persistent header above; tabs deep-link via URL hash.
    Order: Overview (includes Embeddings), Data, Numerical cols,
    Categorical cols, Differential expression (only when data present),
-   Downloads (only when a downloadable h5ad is available — filled by JS
+   Downloads (only when a downloadable h5ad is available, filled by JS
    from /files).
    ═══════════════════════════════════════════════════════════════════════ #}
 {% set _num_cols = obs_columns | selectattr('type', 'equalto', 'num') | list %}
@@ -551,7 +551,7 @@
 
 {# ── Overview tab ──────────────────────────────────────────────────────
    Nothing but the rendered index.md. Curated top_cat / top_num chip rows
-   dropped — same information is one click away in the Categorical / Numerical
+   dropped, same information is one click away in the Categorical / Numerical
    tabs, with proper stats. If markdown_content is empty the tab-init JS
    below auto-jumps to Data. #}
 {% if markdown_content %}
@@ -653,8 +653,8 @@
   </div>
   <div class="muted" style="font-size:11px;margin-bottom:6px">
     {% if gene_panel and gene_panel.source == 'precomputed' %}Curated favourites shipped with this dataset.
-    {% elif gene_panel and gene_panel.source != 'none' %}<em>Generic {{ gene_panel.label.split(' ', 1)[1] if ' ' in gene_panel.label else gene_panel.label }}</em> — dataset did not precompute a favourite list.
-    {% else %}No curated gene panel for this cell type — showing top-variable genes.{% endif %}
+    {% elif gene_panel and gene_panel.source != 'none' %}<em>Generic {{ gene_panel.label.split(' ', 1)[1] if ' ' in gene_panel.label else gene_panel.label }}</em>, dataset did not precompute a favourite list.
+    {% else %}No curated gene panel for this cell type, showing top-variable genes.{% endif %}
   </div>
   <div class="gene-search-row">
     <input id="gene-search" type="search" placeholder="search any gene…" autocomplete="off"
@@ -726,7 +726,7 @@
   {% endif %}
 
   <div class="data-card">
-    <h2 class="section-head">Biology <span class="info" title="Headline biology — organism, technology, cell type, tissue, disease, prep — plus per-donor attributes when known.">ⓘ</span></h2>
+    <h2 class="section-head">Biology <span class="info" title="Headline biology, organism, technology, cell type, tissue, disease, prep, plus per-donor attributes when known.">ⓘ</span></h2>
     <table class="obs-stats-tbl auto" style="font-size:12px">
       <tbody>
       {% if context_bar %}{% set _cb = context_bar %}
@@ -1253,7 +1253,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (e.key === 'Escape') { menu.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); }
             });
         }
-        // Hamburger for narrow screens — collapses notebook/visualize/edit
+        // Hamburger for narrow screens, collapses notebook/visualize/edit
         // behind ☰ when the top-right action row would otherwise wrap.
         var acts = document.querySelector('.ds-actions');
         var actsBtn = document.getElementById('ds-actions-toggle');
@@ -1276,7 +1276,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Calls the dataset-notebook endpoint (`/api/notebook/{b64}/dataset.ipynb`)
     // which returns a starter notebook for THIS dataset: connect + info +
     // obs slice + module_scores + gene_stats + flagship UMAP. NOT the
-    // plot-notebook endpoint — that returns a specific-plot notebook,
+    // plot-notebook endpoint, that returns a specific-plot notebook,
     // which is the wrong artifact for the dataset page. Filename stays
     // literal `dataset.ipynb` so JupyterLite's open-url extension saves
     // it under a stable basename across every dataset.
@@ -1328,7 +1328,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Show an inline error inside a hydrated tab when its fetch fails.
     // ``retryFn`` (optional): a zero-arg callback invoked when the user clicks
-    // Retry. If omitted, Retry falls back to a full-page reload — the previous
+    // Retry. If omitted, Retry falls back to a full-page reload, the previous
     // behaviour. This matters because reloading the whole page throws away
     // scroll position, expanded sections, and the user's tab activation.
     window.antShowTabError = function (tabName, message, retryFn) {
@@ -1346,7 +1346,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         var safeMsg = String(message || 'network error')
             .replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; });
-        box.innerHTML = '⚠ Failed to load — ' + safeMsg
+        box.innerHTML = '⚠ Failed to load, ' + safeMsg
             + '. <a href="#" data-action="retry" style="color:#991b1b;text-decoration:underline">Retry?</a>';
         var retry = box.querySelector('[data-action="retry"]');
         if (retry) retry.addEventListener('click', function (ev) {
@@ -1644,7 +1644,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return { min: mn, max: mx };
         }
         // Hydrate stats from /obs_summary (REST 2.22). Fields not returned by
-        // the API stay blank — non-blocking.
+        // the API stay blank, non-blocking.
         // Threshold: categorical columns with more distinct values than this
         // get a terse "too many categories to plot" note instead of a top-N
         // breakdown + plot links. Tunable via CATEGORICAL_PLOT_MAX_DISTINCT
@@ -1704,7 +1704,7 @@ document.addEventListener('DOMContentLoaded', function() {
                             if (plotsCell) plotsCell.innerHTML = '';
                         } else {
                             if (topCell && tops.length) {
-                                // Show top-3 categories with % text (no dot scale — visual overload).
+                                // Show top-3 categories with % text (no dot scale, visual overload).
                                 topCell.innerHTML = '<span class="cat-top">' + tops.slice(0, 3).map(function (t) {
                                     var val = (t.value != null ? t.value : t.name);
                                     var cnt = t.count, pct = t.pct;
@@ -1728,7 +1728,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     }
                 });
-                // (Module IQR column removed 2026-08 — replaced by
+                // (Module IQR column removed 2026-08, replaced by
                 //  per-tag variability cells populated below.)
 
                 // Tooltip the Explore-tab favourite chips with their stats too.
@@ -1765,7 +1765,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // ── Genes tab: server-side search + dot scales + gene_stats + top-var ──
         // Runs whenever the Genes tab is present (n_genes > 0), even when there
-        // are no curated rows — top-var is always fetched genome-wide.
+        // are no curated rows, top-var is always fetched genome-wide.
         (function () {
             var tabGenes = document.getElementById('tab-genes');
             if (!tabGenes) return;  // no Genes tab on this page
@@ -1936,7 +1936,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     + '<td class="obs-plots">' + plotHtml + '</td>'
                     + '</tr>';
                 // Immediately position dot scales for cells we already know.
-                // (The DOM element doesn't exist yet — caller must call setGeneDots
+                // (The DOM element doesn't exist yet, caller must call setGeneDots
                 // after inserting the row. stdRankFrac stored on the row via data attr.)
                 return row;
             }
@@ -2090,7 +2090,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
             // Elapsed-timer helper for the Genes tab spinner. Reveals the
             // seconds counter next to "loading gene stats…" so the user knows
-            // the page isn't wedged — the /gene_stats endpoint can take 8–15s
+            // the page isn't wedged, the /gene_stats endpoint can take 8–15s
             // on a cold dataset (see doc/QA_PUNCH_LIST_2026_08_23.md P0.2).
             function _genesSpinnerElapsed(sec) {
                 var spinner = document.querySelector('[data-tab-loading="genes"]');
@@ -2154,7 +2154,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
             function fetchAndHydrateCurated() {
                 if (!genes.length) {
-                    // No curated panel — go straight to genome-wide top-var.
+                    // No curated panel, go straight to genome-wide top-var.
                     fetchTopVarGenomeWide();
                     return;
                 }
@@ -2184,7 +2184,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         // Always also fetch genome-wide top-variable genes and
                         // merge them into the SAME table (dedup against curated).
                         // The merged rows sort together with curated by whatever
-                        // column is active — see renderTopVar + applySortToTable.
+                        // column is active, see renderTopVar + applySortToTable.
                         fetchTopVarGenomeWide();
                     })
                     .catch(function (err) {
@@ -2238,7 +2238,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     else if (col === 'var')  { av = numVal(a, 'var');  bv = numVal(b, 'var');  }
                     else if (col === 'gene') { return mul * (a.dataset.gene || '').localeCompare(b.dataset.gene || ''); }
                     else if (col === 'star') {
-                        // Sort by "how many flags this row carries" — personal
+                        // Sort by "how many flags this row carries", personal
                         // favourite + dataset favourite each count as 1.
                         // Descending puts double-flagged rows first, then
                         // singly-flagged, then unmarked.

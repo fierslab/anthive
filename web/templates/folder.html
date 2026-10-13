@@ -4,7 +4,7 @@
 
 {% block content %}
 <style>
-  /* Uniform neutral pill on folder pages — per-type colours dropped
+  /* Uniform neutral pill on folder pages, per-type colours dropped
      because a pill's colour didn't disambiguate anything (each pill
      already sits under its own column heading). */
   .grp-pill {
@@ -12,23 +12,23 @@
     line-height: 1.5; border-radius: 10px; white-space: nowrap;
     background: #f3f4f6; color: #374151; border: 1px solid #e5e7eb;
   }
-  /* Organism letter-chips (Hs / Mm / …) — mirrors index.html's .org-chip. */
+  /* Organism letter-chips (Hs / Mm / …), mirrors index.html's .org-chip. */
   .org-chips { display:inline-flex; gap:2px; flex-wrap:nowrap; vertical-align:middle; }
   .org-chip {
     display:inline-block; padding:0 4px; border-radius:2px;
     font-family:var(--font-mono); font-size:9.5px; letter-spacing:.2px;
     background:#f5f5f5; color:#555; border:1px solid #e5e5e5;
   }
-  /* Per-organism colours dropped — the abbrev (Hs/Mm/…) already identifies
+  /* Per-organism colours dropped, the abbrev (Hs/Mm/…) already identifies
      the organism and colour didn't add info. */
-  /* Tech-class pill — mirrors index.html's .tech-class. */
+  /* Tech-class pill, mirrors index.html's .tech-class. */
   .tech-class {
     display:inline-block; padding:1px 6px; border-radius:2px;
     font-size:10px; letter-spacing:.1px;
     background:#f5f5f5; color:#555; border:1px solid #e5e5e5;
     white-space:nowrap;
   }
-  /* Per-tech-class colours dropped — column label already says "Tech";
+  /* Per-tech-class colours dropped, column label already says "Tech";
      the .mixed italic hint is preserved for the aggregated case. */
   .tech-class.mixed      { font-style:italic; }
   /* Collection-level constant metadata: shown once as inert pills under the
@@ -36,14 +36,14 @@
   .coll-meta { display:flex; flex-wrap:wrap; gap:4px; margin:4px 0 8px; }
   /* Acc / Src icons: small, desaturated (B&W), just BEFORE the dataset name
      (they used to be their own columns). External-resource links (.ext-lnk)
-     sit AFTER the name — also small + inconspicuous. */
+     sit AFTER the name, also small + inconspicuous. */
   .acc-src { font-size:10px; margin-right:3px; vertical-align:baseline; cursor:default;
              filter:grayscale(1); opacity:.55; }
   .ds-ver { font-size:10px; color:var(--text-muted); margin-left:6px; font-weight:normal; }
   .ext-lnk { font-size:10px; margin-left:4px; text-decoration:none;
              filter:grayscale(1); opacity:.5; }
   .ext-lnk:hover { opacity:1; filter:none; text-decoration:none; }
-  /* ⚠ caveats marker — small badge AFTER the external-link icons; colour
+  /* ⚠ caveats marker, small badge AFTER the external-link icons; colour
      mirrors the severity accent from dataset.html (subdued to match the
      monochrome list view). Hover reveals count + highest level. */
   .cv-mark { display:inline-block; margin-left:5px; font-size:11px;
@@ -64,7 +64,7 @@
   .grp-top-main { flex: 1; min-width: 0; }
   .grp-actions { flex-shrink: 0; display: flex; gap: 6px; align-items: center; }
 
-  /* Row above the dataset table — filter (top-left) + stats (top-right). */
+  /* Row above the dataset table, filter (top-left) + stats (top-right). */
   .grp-toolbar {
     display: flex; align-items: center; gap: 12px;
     margin: 6px 0 8px; flex-wrap: wrap;
@@ -90,12 +90,12 @@
 
   /* Non-sortable header with a value filter (Org/Tech/Cell/Tissue/Disease)
      also gets a pointer cursor so the click affordance matches the popover
-     hint. Layers/Embed have data-help but no filter — they still open a
+     hint. Layers/Embed have data-help but no filter, they still open a
      help popover, so cursor:pointer there too. */
   #datasets-table th[data-col] { cursor: pointer; user-select: none; position: relative; }
   #datasets-table th[data-col]:hover { background: var(--hover); }
 
-  /* Column-header popover — mirrors index.html's .col-popover styling. */
+  /* Column-header popover, mirrors index.html's .col-popover styling. */
   .col-popover {
     position:fixed; min-width:200px; max-width:280px;
     background:#fff; border:1px solid var(--border); box-shadow:0 4px 12px rgba(0,0,0,.12);
@@ -163,8 +163,8 @@
             {% if 'celltype' in var_fields %}<th data-col="celltype" data-help="Cell type represented in the dataset. Hover the pill for the full ontology term." data-filter-field="celltype">Cell <span class="info" title="Click to filter by cell type">ⓘ</span></th>{% endif %}
             {% if 'tissue' in var_fields %}<th data-col="tissue" data-help="Tissue / brain region. Hover the pill for the full term." data-filter-field="tissue">Tissue <span class="info" title="Click to filter by tissue">ⓘ</span></th>{% endif %}
             {% if 'disease' in var_fields %}<th data-col="disease" data-help="Disease / condition state. Hover the pill for the full term." data-filter-field="disease">Disease <span class="info" title="Click to filter by disease">ⓘ</span></th>{% endif %}
-            <th data-col="layers" data-help="Number of expression layers stored in the .h5ad (raw / lognorm / …). Hover to list them.">Layers <span class="info" title="Layer count — hover to list">ⓘ</span></th>
-            <th data-col="embed" data-help="Number of dimensionality-reduction embeddings (X_umap / X_pca / …). Hover to list them.">Embed <span class="info" title="Embedding count — hover to list">ⓘ</span></th>
+            <th data-col="layers" data-help="Number of expression layers stored in the .h5ad (raw / lognorm / …). Hover to list them.">Layers <span class="info" title="Layer count, hover to list">ⓘ</span></th>
+            <th data-col="embed" data-help="Number of dimensionality-reduction embeddings (X_umap / X_pca / …). Hover to list them.">Embed <span class="info" title="Embedding count, hover to list">ⓘ</span></th>
         </tr>
     </thead>
     <tbody>
@@ -198,7 +198,7 @@
                 {{ format_count(dataset.n_obs) }} × {{ format_count(dataset.n_vars) }}
                 {% endif %}
             </td>
-            <td data-label="Date" data-sort-ts="{{ _date.sort_ts or 0 }}" style="color:#666;font-size:11px;font-family:var(--font-mono);white-space:nowrap">{{ _date.iso or '—' }}</td>
+            <td data-label="Date" data-sort-ts="{{ _date.sort_ts or 0 }}" style="color:#666;font-size:11px;font-family:var(--font-mono);white-space:nowrap">{{ _date.iso or '' }}</td>
             {% if 'organism' in var_fields %}<td data-label="Org">{% set _oc = dataset.organism_chips or [] %}{% if _oc %}<span class="org-chips">{% for chip in _oc %}<span class="org-chip {{ chip.cls }}" title="organism: {{ chip.full }}">{{ chip.abbrev }}</span>{% endfor %}</span>{% endif %}</td>{% endif %}
             {% if 'technology' in var_fields %}{% set _tcl = dataset.tech_class or '' %}{% set _tcls_slug = _tcl.replace('sc/sn RNA','sc-sn').replace('bulk RNA','bulk').replace(' ','-')|lower %}{% set _prep_raw = _sus.full or _sus.abbrev or '' %}{% set _prep = _prep_raw if (_prep_raw and _prep_raw|lower not in ['na','none','unknown','']) else '' %}<td data-label="Tech">{% if _tcl %}<span class="tech-class {{ _tcls_slug }}" title="tech class: {{ _tcl }}{% if _tech.full %} · {{ _tech.full }}{% endif %}{% if _prep %} · prep: {{ _prep }}{% endif %}">{{ _tcl }}{% if _prep %} · {{ _prep }}{% endif %}</span>{% endif %}</td>{% endif %}
             {% if 'celltype' in var_fields %}<td data-label="Cell">{% if _cell.abbrev %}<span class="grp-pill cell"     title="cell type: {{ _cell.full }}">{{ _cell.abbrev }}</span>{% endif %}</td>{% endif %}
@@ -234,7 +234,7 @@
 
 {% if static_files %}
 <h2 class="section-head">Downloads
-  <span class="info" title="Files placed under data/h5adstore/{{ group_id }}/static/ — supplementary tables, PDFs, etc. Raw .h5ad and .duckdb are on the dataset pages.">ⓘ</span></h2>
+  <span class="info" title="Files placed under data/h5adstore/{{ group_id }}/static/, supplementary tables, PDFs, etc. Raw .h5ad and .duckdb are on the dataset pages.">ⓘ</span></h2>
 <div class="static-files">
   {% for f in static_files %}
     <div class="static-file">
@@ -247,7 +247,7 @@
 
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-    // Small sort + filter — replaces the shared initTable pagination for this
+    // Small sort + filter, replaces the shared initTable pagination for this
     // table so the Date column can sort by data-sort-ts (epoch seconds) while
     // still rendering the ISO string. Default sort: date DESC, then name ASC.
     var tbl = document.getElementById('datasets-table');

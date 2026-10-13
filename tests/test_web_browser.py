@@ -7406,7 +7406,7 @@ def test_fx_assets_show_replication_v2_wording():
     forest = str(module.fx_forest_assets())
     for phrase in ("replicated (r = ", "not replicated (r = ", "individually at q &lt; 0.05", "Anchors: the unit that counted",
                    "data-pool", "donor overlap not checked", "with no counted row", "About the full rule",
-                   "Simes", "fxf-row-model", "q (\u226510% change)", "About replication", "About this forest",
+                   "Simes", "fxf-row-model", "q (10 percent change)", "About replication", "About this forest",
                    "fxf-caveat", "effect_gate_passed", "replicated_effect", "m includes "):
         assert phrase in forest, phrase
     assert "table.fxf .fxf-donors-col { display: none; }" in forest

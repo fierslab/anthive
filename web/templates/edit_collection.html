@@ -30,7 +30,7 @@
     ("edit", None)
 ], ids=[("collection", group_id)]) }}
 <h1 class="page-title">Edit collection <span class="mono">{{ group_id }}</span>
-  <span class="info" title="Admin only. Writes index.md directly to disk on the server. The data store is a git repo — commit/push the change yourself afterwards.">ⓘ</span></h1>
+  <span class="info" title="Admin only. Writes index.md directly to disk on the server. The data store is a git repo, commit/push the change yourself afterwards.">ⓘ</span></h1>
 
 <div id="ed-loading" class="muted" style="font-size:12px">loading index.md…</div>
 
@@ -38,7 +38,7 @@
   <h2>Metadata</h2>
   <div id="ef-fields" class="ef-grid"></div>
 
-  <h2 style="margin-top:14px">Markdown <span class="ed-note">— the collection's index.md body</span>
+  <h2 style="margin-top:14px">Markdown <span class="ed-note">the collection's index.md body</span>
     <button id="md-toggle" type="button" class="chip" style="font-size:11px;font-weight:normal;vertical-align:middle">👁 preview</button></h2>
   <textarea id="md-body" spellcheck="true" placeholder="# Collection notes…"></textarea>
   <div id="md-preview" style="display:none"></div>
@@ -47,7 +47,7 @@
     <button id="ed-save" type="button">Save to disk</button>
     <span id="ed-status"></span>
   </div>
-  <div class="ed-note">Saved directly to <code>{{ group_id }}/index.md</code> in the data repo. It's git — review &amp; commit the change yourself.</div>
+  <div class="ed-note">Saved directly to <code>{{ group_id }}/index.md</code> in the data repo. It's git, review &amp; commit the change yourself.</div>
 </div>
 
 <div id="ed-error" class="plot-status"></div>
@@ -57,7 +57,7 @@
   const GROUP = {{ group_id|tojson }};
   const SRC = '/api/collections/' + encodeURIComponent(GROUP) + '/source';
   const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  let original = {};   // full loaded frontmatter — preserves complex keys we don't render
+  let original = {};   // full loaded frontmatter, preserves complex keys we don't render
 
   const loading = document.getElementById('ed-loading'),
         formBox = document.getElementById('ed-form'),
@@ -83,7 +83,7 @@
       return '<p>' + inline(blk).replace(/\n/g, '<br>') + '</p>';
     }).join('');
   }
-  // Preview is behind a button (no live split) — just a plain markdown textarea.
+  // Preview is behind a button (no live split), just a plain markdown textarea.
   const mdToggle = document.getElementById('md-toggle');
   let previewing = false;
   mdToggle.addEventListener('click', () => {
@@ -123,15 +123,15 @@
       const lab = document.createElement('label'); lab.textContent = k + ' 🔒'; row.appendChild(lab);
       const val = document.createElement('div'); val.className = 'ef-static';
       val.textContent = fm[k] == null ? '' : String(fm[k]);
-      val.title = 'fixed identifier — not editable'; row.appendChild(val); fields.appendChild(row);
+      val.title = 'fixed identifier, not editable'; row.appendChild(val); fields.appendChild(row);
     });
-    // title — display-only override for the collection name. Blank falls
+    // title, display-only override for the collection name. Blank falls
     // back to the folder name (group). Never affects group_id, URL paths,
     // or any programmatic id. Always editable, even when absent.
     addField('title', fm.title == null ? '' : String(fm.title), 'scalar', 'title (display name, blank = use group)');
-    // description — always editable, even when absent from the file
+    // description, always editable, even when absent from the file
     addField('description', fm.description == null ? '' : String(fm.description), 'scalar', 'description (one line)');
-    // Paper metadata — always shown so unpublished collections can be filled
+    // Paper metadata, always shown so unpublished collections can be filled
     // in later without having to hand-edit the .md.
     addField('paper_title', fm.paper_title == null ? '' : String(fm.paper_title), 'scalar', 'paper_title');
     addField('first_author', fm.first_author == null ? '' : String(fm.first_author), 'scalar', 'first_author');
@@ -147,11 +147,11 @@
                isScalarList(v) ? 'list' : (typeof v === 'number' ? 'number' : 'scalar'),
                k + (isScalarList(v) ? ' (comma-separated)' : ''));
     });
-    // default_dataset — dropdown of the datasets in this collection
+    // default_dataset, dropdown of the datasets in this collection
     const row = document.createElement('div'); row.className = 'ef-row';
     const lab = document.createElement('label'); lab.textContent = 'default_dataset'; row.appendChild(lab);
     const sel = document.createElement('select'); sel.dataset.key = 'default_dataset'; sel.dataset.kind = 'nullable'; sel.className = 'ef-select';
-    const none = document.createElement('option'); none.value = ''; none.textContent = '— none —'; sel.appendChild(none);
+    const none = document.createElement('option'); none.value = ''; none.textContent = 'none'; sel.appendChild(none);
     const cur = fm.default_dataset == null ? '' : String(fm.default_dataset);
     DATASETS.forEach(d => { const o = document.createElement('option'); o.value = d.value; o.textContent = d.label; if (d.value === cur) o.selected = true; sel.appendChild(o); });
     if (cur && !DATASETS.some(d => d.value === cur)) {   // stale value not in the folder → keep it, don't silently drop
@@ -178,9 +178,9 @@
       original = d.frontmatter || {};
       renderFields(original);
       body.value = d.body || '';
-      if (!d.exists) statusEl.innerHTML = '<span class="muted">no index.md yet — saving will create it</span>';
+      if (!d.exists) statusEl.innerHTML = '<span class="muted">no index.md yet, saving will create it</span>';
     })
-    .catch(e => { loading.style.display = 'none'; errBox.innerHTML = '<span class="err">could not load index.md — ' + esc(e.message) + '</span>'; });
+    .catch(e => { loading.style.display = 'none'; errBox.innerHTML = '<span class="err">could not load index.md, ' + esc(e.message) + '</span>'; });
 
   saveBtn.addEventListener('click', () => {
     saveBtn.disabled = true; statusEl.innerHTML = '<span class="muted">saving…</span>';
@@ -190,7 +190,7 @@
     })
       .then(r => r.ok ? r.json() : r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t.slice(0, 180)); }))
       .then(() => { saveBtn.disabled = false; statusEl.innerHTML = '<span style="color:#16a34a">✓ saved to disk</span>'; })
-      .catch(e => { saveBtn.disabled = false; statusEl.innerHTML = '<span class="err">save failed — ' + esc(e.message) + '</span>'; });
+      .catch(e => { saveBtn.disabled = false; statusEl.innerHTML = '<span class="err">save failed, ' + esc(e.message) + '</span>'; });
   });
 })();
 </script>

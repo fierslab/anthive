@@ -82,7 +82,7 @@
             <td class="card-title"><a href="/genesets/{{ study }}/{{ experiment }}/{{ g.name }}">{{ g.display_name }}</a></td>
             <td data-label="Format" class="muted">{{ g.format }}</td>
             <td data-label="n genes" class="muted">{{ g.n_genes }}</td>
-            <td data-label="Direction" class="muted">{% if g.direction %}{{ g.direction }}{% else %}—{% endif %}</td>
+            <td data-label="Direction" class="muted">{% if g.direction %}{{ g.direction }}{% else %}-{% endif %}</td>
             <td data-label="Description" class="muted">{% if g.description %}{{ g.description }}{% endif %}</td>
         </tr>
         {% endfor %}

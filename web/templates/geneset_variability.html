@@ -31,11 +31,11 @@
   .mv-wrap { overflow: auto; max-height: 78vh; border: 1px solid var(--border); border-radius: 6px; }
   table.mv { border-collapse: separate; border-spacing: 0; font-size: 11px; }
   table.mv th, table.mv td { border-right: 1px solid #eef2f7; border-bottom: 1px solid #eef2f7; }
-  /* module row labels — sticky left */
+  /* module row labels, sticky left */
   table.mv th.mv-row { position: sticky; left: 0; z-index: 2; background: #fff; text-align: left; padding: 2px 8px; white-space: nowrap; max-width: 240px; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
   table.mv th.mv-row a { color: var(--link); }
   table.mv th.mv-row .mv-src { color: #94a3b8; font-size: 9px; text-transform: uppercase; letter-spacing: .3px; margin-left: 4px; }
-  /* dataset column headers — sticky top, vertical text */
+  /* dataset column headers, sticky top, vertical text */
   table.mv thead th { position: sticky; top: 0; z-index: 3; background: #fff; }
   table.mv thead th.mv-col { height: 92px; padding: 0; vertical-align: bottom; }
   table.mv thead th.mv-col span { display: inline-block; writing-mode: vertical-rl; transform: rotate(180deg); padding: 4px 0; font-weight: 500; font-family: var(--font-mono); font-size: 10px; }
@@ -165,7 +165,7 @@
   var _numTagList = {{ numerical_tags | tojson }};
   var NUMERIC_TAGS = {};
   _numTagList.forEach(function (t) { NUMERIC_TAGS[t] = 1; });
-  // Fleet-wide dataset annotations — used to flag secondary datasets in the
+  // Fleet-wide dataset annotations, used to flag secondary datasets in the
   // column headers with a `(2)` badge. Same shape as the module view uses.
   var DS_ANNOT = {{ dataset_annotations | tojson }};
   var BOUNDED01 = { eta2: 1, omega2: 1, R2: 1 };   // already [0,1]
@@ -273,7 +273,7 @@
       summary.textContent = ''; warnEl.style.display = 'none'; return;
     }
 
-    // colour domain — data-driven, clipped to a percentile so one saturating
+    // colour domain, data-driven, clipped to a percentile so one saturating
     // module (e.g. the Y-linked set on sex) doesn't wash out the rest. NOT the
     // fixed [0,1] frame: real values are often ≪1, so pinning at 1 left the map
     // near-white. Cells above the clip get the top colour.
@@ -319,7 +319,7 @@
         var v = c.value;
         // Note: a variability value does NOT imply a persisted module-score obs
         // column on that dataset (the parquet is computed on the fly), so cells
-        // are not deep-linked to a UMAP — that would 422 for on-the-fly rows.
+        // are not deep-linked to a UMAP, that would 422 for on-the-fly rows.
         // Navigation is via the row (geneset) and column (dataset) headers.
         var title = mod.module + ' × ' + d.ds + '\n' + stat + ' = ' + v.toFixed(3) + '  (' + tag + ')' + (c.n_cells ? '\n' + c.n_cells + ' cells' : '');
         body += '<td class="mv-cell" style="background:' + colorFor(v) + '" title="' + esc(title) + '"></td>';
@@ -335,7 +335,7 @@
     if (dsList.length <= 3) {
       warnEl.style.display = '';
       warnEl.textContent = '⚠ Only ' + dsList.length + ' dataset' + (dsList.length === 1 ? '' : 's')
-        + ' carry the \u2018' + tag + '\u2019 tag — this is not a fleet-wide comparison, treat it as anecdotal.';
+        + ' carry the \u2018' + tag + '\u2019 tag, this is not a fleet-wide comparison, treat it as anecdotal.';
     } else { warnEl.style.display = 'none'; }
     stateEl.style.display = 'none'; wrap.style.display = '';
   }
@@ -345,7 +345,7 @@
     stateEl.style.display = ''; stateEl.className = 'mv-state'; stateEl.textContent = 'loading…';
     wrap.style.display = 'none';
     // min_abs=0 drops NaN rows server-side (a NaN value means the stat could
-    // not be computed for that dataset — e.g. no braak variance). This is also
+    // not be computed for that dataset, e.g. no braak variance). This is also
     // a workaround for a serialization 500 on NaN rows at higher limits; it
     // preserves negative values so signed stats (spearman) stay correct.
     var qs = 'tag=' + encodeURIComponent(tag) + '&statistic=' + encodeURIComponent(stat)
@@ -357,13 +357,13 @@
         return r.json();
       })
       .then(function (d) {
-        // starCAT temporarily hidden from the interface — drop its rows even
+        // starCAT temporarily hidden from the interface, drop its rows even
         // when "all sources" is selected. Toggle in browser.py's
         // STARCAT_UI_ENABLED to re-expose.
         var rows = (d.rows || []).filter(function (r) { return r.source !== 'starcat'; });
         render(rows, tag, stat);
       })
-      .catch(function (e) { stateEl.className = 'mv-state err'; stateEl.textContent = 'could not load — ' + e.message; });
+      .catch(function (e) { stateEl.className = 'mv-state err'; stateEl.textContent = 'could not load, ' + e.message; });
   }
 
   tagSel.addEventListener('change', function () {
