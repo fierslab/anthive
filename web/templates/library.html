@@ -57,6 +57,7 @@
   </tbody>
 </table>
 </div>
+<button type="button" class="vw-more-units lib-more" id="lib-more" hidden>show more</button>
 
 <script>
 (function () {
@@ -65,6 +66,8 @@
                 cohort: document.getElementById('lib-cohort'), cell: document.getElementById('lib-cell') };
     var rows = Array.prototype.slice.call(document.querySelectorAll('#lib-table tbody tr'));
     var count = document.getElementById('lib-count');
+    var more = document.getElementById('lib-more');
+    var PAGE = 50, limit = PAGE;   // long libraries: 50 matching papers at a time, "show more" adds 50
     function fold(s) { return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''); }
     function val(el) { return el ? el.value : ''; }
     function apply() {
@@ -78,13 +81,17 @@
                 && (!year || tr.getAttribute('data-year') === year)
                 && (!cohort || (tr.getAttribute('data-cohorts') || '').split('|').indexOf(cohort) !== -1)
                 && (!cell || (tr.getAttribute('data-cells') || '').split('|').indexOf(cell) !== -1);
-            tr.hidden = !ok;
+            tr.hidden = !ok || shown >= limit;
             if (ok) shown++;
         });
         count.textContent = shown === rows.length ? rows.length + ' papers' : shown + ' of ' + rows.length + ' papers';
+        more.hidden = shown <= limit;
+        more.textContent = 'show more (' + Math.min(PAGE, shown - limit) + ' of ' + (shown - limit) + ' left)';
     }
-    q.addEventListener('input', apply);
-    Object.keys(sel).forEach(function (k) { if (sel[k]) sel[k].addEventListener('change', apply); });
+    function reset() { limit = PAGE; apply(); }
+    more.addEventListener('click', function () { limit += PAGE; apply(); });
+    q.addEventListener('input', reset);
+    Object.keys(sel).forEach(function (k) { if (sel[k]) sel[k].addEventListener('change', reset); });
     var params = new URLSearchParams(location.search);
     if (params.get('q')) { q.value = params.get('q'); }
     apply();

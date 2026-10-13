@@ -167,16 +167,19 @@
       });
     });
   }
-  function loadScores() {
+  function loadScores(progress) {
     var ids = PAYLOAD.scored_in || [];
     var column = PAYLOAD.column_name;
+    var done = 0;
+    function tick() { done += 1; if (progress) progress(done, ids.length); }
+    if (progress) progress(0, ids.length);
     return Promise.all(ids.map(function (dbId) {
       var db = DBS[dbId] || {};
       return V.cached(V.API + '/databases/' + dbId.split('/').map(enc).join('/') + '/module_scores').then(function (data) {
         var hit = (data.scored_genesets || []).filter(function (item) { return item.column_name === column; })[0];
         if (!hit || !hit.stats || db.secondary) return null;
         return { db_id: dbId, title: db.title || dbId, scope: db.scope || '', group: db.group || '', modality: db.modality || '', n_cells: hit.stats.n, mean: hit.stats.mean, sd: hit.stats.std, median: hit.stats.median, rank: 'pending' };
-      }).catch(function () { return null; });
+      }).catch(function () { return null; }).then(function (row) { tick(); return row; });
     })).then(function (list) { return list.filter(Boolean); });
   }
   // The rank of the set among all sets of a dataset: the API reads the whole score sidecar the first time, so rows
@@ -466,7 +469,10 @@
   function startScores() {
     if (scoresStarted) return;
     scoresStarted = true;
-    loadScores().then(function (rows) {
+    // a progress line while the score summaries load (one call per dataset; the first can take a while)
+    loadScores(function (done, total) {
+      p1.innerHTML = '<p class="vw-loading">Loading the module scores: ' + done + ' of ' + total + ' datasets...</p>';
+    }).then(function (rows) {
       var redraw = function () { renderP1(p1, rows); };
       redraw();
       loadRanks(rows, redraw);
