@@ -532,7 +532,7 @@
      div, so the bar markup stays one flat <div>. #}
   <span class="tab-group" id="tab-group-facet">
     <button type="button" class="tab-btn tab-group-label{% if not show_facets_tab %} tab-empty{% endif %}" data-tab="facets" role="tab" id="tab-btn-facets" title="{{ 'The facets of this dataset and how its columns map onto them' if show_facets_tab else 'This dataset has no facet columns' }}">Facet{% if show_facets_tab %}<span class="tab-count">{{ facet_groups.n_listed }}</span>{% endif %}</button>
-    {% if show_facets_tab %}<button type="button" class="tab-btn tab-sub {{ view_class('dataset-facet-gene') }}" data-tab="facet-gene" role="tab" id="tab-btn-facet-gene" title="{{ view_tip('dataset-facet-gene', 'Effects by facet: genes that differ between donors, per facet and cell type.') }}">Gene</button>{% endif %}
+    {% if show_facets_tab %}<button type="button" class="tab-btn tab-sub {{ view_class('dataset-facet-gene') }}" data-tab="facet-gene" role="tab" id="tab-btn-facet-gene" title="{{ view_tip('dataset-facet-gene', 'Facet DE: genes that differ between donors, per facet and cell type.') }}">Gene</button>{% endif %}
     {% if n_module_scores %}<button type="button" class="tab-btn tab-sub {{ view_class('dataset-facet-gs') }}" data-tab="facet-gs" role="tab" id="tab-btn-facet-gs" title="{{ view_tip('dataset-facet-gs', 'Gene set scores compared with the cell annotation columns, per cell and descriptive.') }}">GS</button>{% endif %}
   </span>
   {% endif %}
@@ -904,7 +904,7 @@
 <section class="tab-panel" id="tab-facet-gs" role="tabpanel">
   {{ _review_banner('dataset-facet-gs') }}
   {% set _mods = facet_tests.module_matrices if facet_tests else None %}
-  <h2 class="section-head" id="facet-gs-head">Gene sets by facet{{ doc_toggle('fxs-about', 'About the gene set results') }}<button type="button" class="doc-toggle fxg-full-toggle" data-help-for="fxs-percell" aria-controls="fxs-percell" aria-expanded="false" title="The per-cell association explorer: show or hide">per-cell associations (descriptive)</button></h2>
+  <h2 class="section-head" id="facet-gs-head">Facet DE, gene sets per cell type{{ doc_toggle('fxs-about', 'About the gene set results') }}<button type="button" class="doc-toggle fxg-full-toggle" data-help-for="fxs-percell" aria-controls="fxs-percell" aria-expanded="false" title="The per-cell association explorer: show or hide">per-cell associations (descriptive)</button></h2>
   {% call doc_block('About the gene set results', id='fxs-about') %}
     <p>Each gene set is scored per donor in each cell type and tested like a gene: the facet is compared between donors, adjusting for the same covariates. Three variants exist: the pseudobulk score (the gene set's mean expression in the donor's summed counts, where counts exist), and the mean over the donor's cells of the per-cell scanpy score or UCell score. Which variant is the main one is not decided yet, so you can switch.</p>
     <p>A gene set counts as significant when its q is below 0.05, using the model q when the test has at least 30 residual degrees of freedom and the permutation q otherwise (the rule replication across cohorts uses). Up and down follow the sign of the standardised effect (the change in standard deviations of the donor score). The number of significant gene sets grows with the number of donors, so compare cells within this dataset, not colours across datasets (<a href="/help#module-scores">gene set scores</a>).</p>
@@ -1026,7 +1026,7 @@
   {{ _review_banner('dataset-facet-gene') }}
   <div id="ds-facet-effects">
     {% if facet_tests and facet_tests.n_units_tested %}
-    <h2 class="section-head" id="facets-effects-head">Effects by facet{{ doc_toggle('fx-about', 'About these effects and the flags') }}<button type="button" class="doc-toggle fxg-full-toggle" data-help-for="fxg-full" aria-controls="fxg-full" aria-expanded="false" title="The earlier tables, one per facet and cell type: show or hide">full effects table</button></h2>
+    <h2 class="section-head" id="facets-effects-head">Facet DE, genes per cell type{{ doc_toggle('fx-about', 'About these effects and the flags') }}<button type="button" class="doc-toggle fxg-full-toggle" data-help-for="fxg-full" aria-controls="fxg-full" aria-expanded="false" title="The earlier tables, one per facet and cell type: show or hide">full effects table</button></h2>
     {{ fx_intro('dataset', facet_tests.n_permutations) }}
     {% if facet_tests.matrix %}
     {{ fxg_styles() }}
@@ -1054,7 +1054,7 @@
       <p>The facet analysis needs single cells (or nuclei) that can be grouped by cell type and by donor, so that each donor gives one profile per cell type. Spatial data, proteomics, metacell sets (each row an aggregate of cells) and pure mouse datasets do not fit, and a few sets are set aside on purpose by the curators. Such a dataset keeps its facet columns for browsing and plotting, but it is never tested and never counted towards replication ({% if facet_tests.reason %}recorded reason: <code>{{ facet_tests.reason }}</code>; {% endif %}<a href="/help#glossary-facet-exclusion">glossary</a>).</p>
     {% endcall %}
     {% else %}
-    <h2 class="section-head" id="facets-effects-head">Effects by facet{{ doc_toggle('fx-not-tested-about', 'About when facets are tested') }}</h2>
+    <h2 class="section-head" id="facets-effects-head">Facet DE, genes per cell type{{ doc_toggle('fx-not-tested-about', 'About when facets are tested') }}</h2>
     <p class="fx-none" id="fx-not-tested">{% if facet_tests %}No facet tests for this dataset: {{ facet_tests.reason_text }}.{% else %}Facet test results could not be loaded.{% endif %}
       </p>
     {% call doc_block('About when facets are tested', id='fx-not-tested-about') %}

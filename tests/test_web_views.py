@@ -278,7 +278,7 @@ def test_section_help_and_col_info_macros_render_the_shared_pattern():
 
 def test_gene_page_uses_unnumbered_help_headers_and_drops_old_labels(client):
     text = client.get("/genes/PTPRG").text
-    for header in ("Where is it expressed", "Facet DE by cell type", "Donor variability"):
+    for header in ("Where is it expressed", "Facet DE, cohorts per cell type", "Donor variability"):
         assert header in text, header
     assert "1. Where is it expressed" not in text and "3. Donor variability" not in text
     for panel in ("vwg-p1-help", "vwg-p2-help", "vwg-p3-help"):
@@ -581,7 +581,7 @@ def test_facet_de_tab_rename_alias_and_two_sections(client):
         button = _tab_button(text, "shifts")
         assert ">Facet DE<" in text and 'data-hash="facet-de"' in button and 'data-alias="shifts"' in button
         assert "What shifts it" not in text
-        for header in ("Facet DE by cell type", "Facet DE in other datasets"):
+        for header in ("Facet DE, cohorts per cell type", "Facet DE in other datasets"):
             assert header in text
         assert text.count('class="section-head">Facet DE') == 2
     assert 'id="vwg-p2o-help" hidden' in client.get("/genes/PTPRG").text

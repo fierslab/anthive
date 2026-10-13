@@ -6825,8 +6825,8 @@ def test_dataset_facets_card_shows_effects_per_facet(client):
     text = client.get("/browse/GroupA/ds1").text
     card = text.split('id="ds-facets"')[1].split('<script>')[0]
     # the effects live in the Facets tab, below the mapping table
-    assert 'data-tab="facets"' in text and 'Effects by facet' in card
-    assert card.index('class="ds-facets"') < card.index('Effects by facet') < card.index('class="ds-facet-fx"')
+    assert 'data-tab="facets"' in text and 'Facet DE, genes per cell type' in card
+    assert card.index('class="ds-facets"') < card.index('Facet DE, genes per cell type') < card.index('class="ds-facet-fx"')
     assert 'id="fx-intro"' in card and "Exploratory" in card and "per donor" in card
     assert "provisional" in card and "datasets that share donors do not count twice" in card
     assert 'id="fx-about"' in card and 'id="fx-about" open' not in card

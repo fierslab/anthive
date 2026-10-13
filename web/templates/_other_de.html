@@ -79,7 +79,7 @@
   var current = null, rows = [], shown = 25, query = '';
   function esc(text) { return String(text == null ? '' : text).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
   function enc(text) { return encodeURIComponent(text); }
-  function pText(p) { return p == null ? 'n/a' : p === 0 ? '&lt; 1e-300' : (p < 0.001 ? Number(p).toExponential(1) : Number(p).toFixed(3)); }
+  function pText(p) { return p == null ? 'n/a' : p === 0 ? '<span title="Smaller than the smallest adjusted p the study reports (below 1e-300); read the effect.">at floor</span>' : (p < 0.001 ? Number(p).toExponential(1) : Number(p).toFixed(3)); }
   function link(href, title, svg) { return '<a class="obs-plot-icon" href="' + esc(href) + '" title="' + esc(title) + '" target="_blank" rel="noopener">' + svg + '</a>'; }
   var SVG_VIOLIN = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1.5c1.6 2.5 1.6 4 .4 6.5 1.4 2.5 1.4 4-.4 6.5-1.8-2.5-1.8-4-.4-6.5C2.4 5.5 2.4 4 4 1.5zM12 1.5c1.2 3 1.2 5 .3 7 1 2 1 4-.3 5.5-1.3-1.5-1.3-3.5-.3-5.5-.9-2-.9-4 .3-7z"/></svg>';
   // effect: effsize; the CI is shown when it is on the same scale (estimate equal to the log2 fold change)

@@ -162,7 +162,8 @@
   var current = null, rows = [], shown = 25, query = '';
   function esc(text) { return String(text == null ? '' : text).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
   function enc(text) { return encodeURIComponent(text); }
-  function qText(q) { return q == null ? 'n/a' : q === 0 ? '&lt; 1e-300' : (q < 0.001 ? Number(q).toExponential(1) : Number(q).toFixed(3)); }
+  // q of 0 means below the smallest number the test can report: say so instead of printing '< 1e-300'
+  function qText(q) { return q == null ? 'n/a' : q === 0 ? '<span title="Smaller than the smallest q the test reports (below 1e-300); read the effect.">at floor</span>' : (q < 0.001 ? Number(q).toExponential(1) : Number(q).toFixed(3)); }
   function usedQ(row) {   // gene sets: the replication rule, model q at >= 30 residual df, else permutation q
     if (KIND !== 'modules') return row.q_value;
     return (row.df != null && row.df >= 30) ? row.q_param : row.q_perm;

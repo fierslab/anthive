@@ -35,7 +35,7 @@
 
 {% macro view_gene_shifts(gene) -%}
 <div id="vwg-shifts" data-gene="{{ gene }}">
-  {% call section_help('Facet DE by cell type', 'vwg-p2-help') %}
+  {% call section_help('Facet DE, cohorts per cell type', 'vwg-p2-help') %}
     <p><strong>Exploratory.</strong> A <a href="/help#glossary-facet">facet</a> is a donor-level property such as sex, Braak stage or age, defined the same way in every dataset. A facet effect is a difference between donors (between host mice in the xenograft block), never between single cells, and it is tested within one cell type.</p>
     <h4>How to read the matrix</h4>
     <p>Each cell is one facet in one cell type. It shows <strong>k/m</strong>: k cohorts that are significant on their own (q below 0.05, same direction) out of m cohorts tested. Grey means not replicated. A coloured cell is <strong>replicated</strong>: the same direction in at least 2 cohorts according to a <a href="/help#glossary-partial-conjunction">partial conjunction test</a> at 5 percent FDR (<a href="/help#glossary-r-value">r-value</a> below 0.05). The darker colour means the <a href="/help#glossary-treat-tier">strict test</a> also passes: the effect is shown to exceed a minimum size, not only to differ from zero. The arrow gives the direction. A dash means not tested, because too few cohorts have the facet or the cohorts have too few replicates. A single cohort can never replicate, so it shows 0/1 or 1/1.</p>

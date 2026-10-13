@@ -29,7 +29,7 @@
 
 {% macro view_geneset_shifts(name) -%}
 <div id="vws-shifts">
-  {% call section_help('Facet DE by cell type', 'vws-p2-help') %}
+  {% call section_help('Facet DE, cohorts per cell type', 'vws-p2-help') %}
     <p><strong>Exploratory.</strong> The module result tests the <strong>mean score of the whole gene set</strong> per donor (per host mouse in the xenograft block) against each <a href="/help#glossary-facet">facet</a>, separately in every cohort, and combines the cohorts with the same partial conjunction test as for single genes (<a href="/help#glossary-r-value">r-value</a> below 0.05, Benjamini-Hochberg over the modules of one family).</p>
     <h4>Ranked shifts</h4>
     <p>One line per facet and cell type with a module result, best first, within one system (post-mortem and xenograft are never mixed). The order is the partial-conjunction p value before adjustment: the r-value saturates at 1 for most pairs and would tie. Each line gives the median effect over the counted cohorts with the smallest to largest cohort effect as a whisker, the direction in words, how many cohorts point the same way and how many are significant on their own, the r-value, and the rank of this gene set among all gene sets tested for the same facet and cell type. The first five are shown, the rest are folded.</p>
