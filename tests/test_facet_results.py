@@ -26,6 +26,7 @@ from collections import OrderedDict
 from urllib.parse import urlencode
 
 import config
+import dataset_access
 import donor_variability
 import facet_donor_values as donor_values
 import plotting
@@ -654,6 +655,8 @@ _SERVE_WANTED = {
     # 2.45: donor variability
     '_donor_variability_instance', '_DV_HELP_TOPICS', '_donor_variability', '_dv_call', 'get_dataset_donor_variability',
     'get_gene_donor_variability', 'get_geneset_donor_variability', 'get_donor_variability_top',
+    # 2.45: one 404 for an unknown dataset, access=internal datasets hidden from anonymous callers
+    'UnknownDatabaseError', 'unknown_database_detail', '_HIDDEN_DB_IDS', '_hidden_db_ids', '_visible_db_ids',
 }
 
 
@@ -743,7 +746,7 @@ def build_serve(results: Path, geneset_registry: Any = None, stats_rows: Optiona
         'canonical_facet': canonical_facet, 'Response': Response, 'HTTPException': HTTPException, 'Query': Query,
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,
         'donor_values_lib': donor_values, 'donor_variability_lib': donor_variability, 'plotting': plotting, 'OrderedDict': OrderedDict, 'urlencode': urlencode,
-        'duckdb': duckdb
+        'duckdb': duckdb, 'dataset_access': dataset_access,
     }
     namespace['_pooled_db'] = pooled_db if pooled_db is not None else _no_pooled_db
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)

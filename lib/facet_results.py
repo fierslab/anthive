@@ -43,6 +43,7 @@ import numpy as np
 import pandas as pd
 from pandas.api.types import union_categoricals
 
+import dataset_access
 import facet_rules
 import facet_scopes
 import gene_classes
@@ -735,11 +736,14 @@ class FacetResults:
         known = {d['db_id'] for d in datasets}
         basis_of = {d['db_id']: d.get('disease_basis') for d in datasets}
         cohorts = self.cohorts()
+        hidden = dataset_access.current_hidden()
         pools = []
         for pool in self.pooled_datasets():
             if pool['db_id'] in known:
                 continue
             members = (cohorts.get(pool['db_id']) or {}).get('pool_members') or []
+            if any(member in hidden for member in members):
+                continue    # a pool of an internal dataset is as hidden as the dataset (lib/dataset_access.py)
             bases = {basis_of.get(member) for member in members}
             pools.append({**pool, 'disease_basis': bases.pop() if len(bases) == 1 else None})
         return list(datasets) + pools

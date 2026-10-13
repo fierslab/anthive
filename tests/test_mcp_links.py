@@ -279,6 +279,7 @@ def _serve_app(tmp_path, monkeypatch, mcp_cfg: Optional[dict] = None):
         'hmac': hmac, 'Lock': Lock, 'Optional': Optional, 'Dict': Dict, 'List': List, 'Any': Any,
         'log': logging.getLogger('test-mcp-links'),
         'get_auth_settings': lambda cfg_arg=None: config.get_auth_settings(cfg),
+        'dataset_access': __import__('dataset_access'),
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     app.add_middleware(namespace['_InternalSecretGuard'])

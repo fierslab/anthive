@@ -170,6 +170,8 @@ request_header Remote-User {http.auth.user.id}
 request_header Remote-Groups admins
 request_header -Remote-Email
 request_header -Remote-Name
+request_header -X-Remote-User
+request_header -X-Remote-Groups
 CADDY_EOF
     _log "basic auth ENABLED for user '$BASIC_AUTH_USER'"
 elif [[ -n "$BASIC_AUTH_USER$BASIC_AUTH_PASS" ]]; then

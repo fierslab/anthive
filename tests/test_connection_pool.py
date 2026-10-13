@@ -34,6 +34,7 @@ _WANTED = {
     '_cells_json_chunks', '_cells_csv_chunks', '_CELLS_STREAM_CHUNK_ROWS',
     '_plot_cache_key', '_plot_db_fingerprint', 'restore_database', 'DatabaseRegistry',
     '_METADATA_CACHE_VERSION', '_METADATA_CACHE_TTL_S3', '_json_serial',
+    'UnknownDatabaseError', 'unknown_database_detail', '_HIDDEN_DB_IDS',
 }
 
 
@@ -55,6 +56,7 @@ def _load_serve_parts(**extra_globals) -> types.SimpleNamespace:
         'OrderedDict': OrderedDict, 'Path': Path, 'Dict': Dict, 'List': List,
         'Optional': Optional, 'Any': Any, 'log': logging.getLogger('test-ant-serve'),
         '_plot_os': os, '_plot_hashlib': __import__('hashlib'),
+        'dataset_access': __import__('dataset_access'),
     }
     namespace.update(extra_globals)
     exec(compile(module, str(SERVE_PATH), 'exec'), namespace)

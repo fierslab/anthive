@@ -82,6 +82,9 @@ server {
         proxy_set_header Remote-User       $auth_user;
         proxy_set_header Remote-Groups     $auth_groups;
         proxy_set_header Remote-Email      $auth_email;
+        proxy_set_header Remote-Name       "";
+        proxy_set_header X-Remote-User     "";
+        proxy_set_header X-Remote-Groups   "";
         proxy_buffering    off;
         proxy_read_timeout 300s;
     }
@@ -99,5 +102,8 @@ server {
         proxy_set_header Remote-User       $auth_user;
         proxy_set_header Remote-Groups     $auth_groups;
         proxy_set_header Remote-Email      $auth_email;
+        proxy_set_header Remote-Name       "";
+        proxy_set_header X-Remote-User     "";
+        proxy_set_header X-Remote-Groups   "";
     }
 }

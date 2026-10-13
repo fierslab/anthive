@@ -394,6 +394,8 @@ def serve(tmp_path):
         'facet_scopes_lib': facet_scopes,
         '_facets_visible': lambda: [],
         'facet_hidden_by_config': lambda facet, visible=None: bool(visible) and facet not in visible,
+        'unknown_database_detail': lambda db_id: f"Database '{db_id}' not found",
+        '_hidden_db_ids': lambda: frozenset(), '_visible_db_ids': list,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec',
                  dont_inherit=True), namespace)

@@ -628,7 +628,10 @@ def main() -> None:
     def _identity_headers() -> dict:
         identity = _current_identity.get()
         if not identity:
-            return {}
+            # No verified link owner (mcp.require_token: false): tell ant-serve
+            # this call acts for an anonymous client, so a loopback ant-mcp is
+            # never taken for a local tool (lib/dataset_access.py).
+            return {'X-Anthive-Anonymous': '1'}
         return {
             'Remote-User': identity.get('user', ''),
             'Remote-Groups': ','.join(identity.get('groups', [])),

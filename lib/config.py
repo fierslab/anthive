@@ -629,6 +629,18 @@ def get_auth_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {'mode': mode, 'admins': admins}
 
 
+def get_internal_requires_auth(cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether access=internal datasets need an authenticated caller.
+
+    env ANTHIVE_INTERNAL_REQUIRES_AUTH > ``internal_requires_auth`` > True.
+    Anything but an explicit false value keeps the protection on.
+    """
+    value = _setting(cfg, 'internal_requires_auth', 'ANTHIVE_INTERNAL_REQUIRES_AUTH', True)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ('false', '0', 'no', 'off')
+
+
 def get_catalog_scan_mode(cfg: Optional[Dict[str, Any]] = None) -> str:
     """local | s3 | auto. auto (default) consults S3 only when a bucket is set."""
     mode = str(_setting(cfg, 'catalog_scan', 'ANTHIVE_CATALOG_SCAN', 'auto')).strip().lower()

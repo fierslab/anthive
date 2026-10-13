@@ -34,6 +34,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 import yaml
 
+import dataset_access
+
 from library import (LEGACY_IGNORED_FIELDS, LibraryIssues, Paper, export_bibtex, find_references,
                      load_library, normalize_doi, parse_front_matter, to_bibtex)
 
@@ -433,7 +435,7 @@ class LibraryService:
     def summary(self, paper: Paper) -> Dict[str, Any]:
         f = paper.fields
         authors = _as_list(f.get('author'))
-        links = self.state.dataset_links.get(paper.citekey, [])
+        links = self._visible_links(paper.citekey)
         return {
             'citekey': paper.citekey,
             'entrytype': f.get('entrytype'),
@@ -459,6 +461,13 @@ class LibraryService:
             'draft_fields': _as_list(f.get('anthive_draft')),
         }
 
+    def _visible_links(self, citekey: str) -> List[DatasetLink]:
+        """Dataset links of a paper without the datasets hidden from this request
+        (access=internal for an anonymous caller, lib/dataset_access.py)."""
+        hidden = dataset_access.current_hidden()
+        links = self.state.dataset_links.get(citekey, [])
+        return [link for link in links if link.db_id not in hidden] if hidden else links
+
     def record(self, paper: Paper) -> Dict[str, Any]:
         out = self.summary(paper)
         out['fields'] = {k: v for k, v in paper.fields.items()
@@ -467,7 +476,7 @@ class LibraryService:
         out['notes'] = paper.body
         out['datasets'] = [{'db_id': link.db_id, 'role': link.role, 'scope': link.scope,
                             'via': link.source}
-                           for link in sorted(self.state.dataset_links.get(paper.citekey, []),
+                           for link in sorted(self._visible_links(paper.citekey),
                                               key=lambda l: (l.role != 'source', l.db_id))]
         out['genesets'] = [{'id': scope, 'role': role}
                            for scope, role in sorted(self.state.geneset_links.get(paper.citekey, []))]

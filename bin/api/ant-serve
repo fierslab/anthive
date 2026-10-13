@@ -90,10 +90,11 @@ from canonical_columns import BACKCOMPAT_LEGACY_NAMES  # type: ignore
 from config import get_config, get_docs_base_url
 from config import facet_hidden_by_config, get_facet_results_dir, get_facets_visible
 from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
-                    get_duckdb_temp_dir, get_library_dir,
+                    get_duckdb_temp_dir, get_internal_requires_auth, get_library_dir,
                     get_library_index_dir, get_model_cache_dir, get_log_dir, get_state_dir, get_tmp_dir,
                     get_webapp_dir)
 from library_service import LIBRARY_S3_PREFIX, LibraryService
+import dataset_access
 from facet_aliases import canonical_facet, is_deprecated_facet_column
 import facet_results as facet_results_lib
 import facet_donor_values as donor_values_lib
@@ -724,6 +725,35 @@ def _caveats_or_empty(file_metadata: dict, md_path) -> list:
         return []
 
 
+class UnknownDatabaseError(KeyError):
+    """A db_id this server does not serve (or does not show to this caller).
+
+    A ``KeyError`` so the many ``except KeyError`` handlers keep mapping it
+    to 404; ``str()`` is the plain message (a bare KeyError would quote it),
+    and an app-level handler turns an uncaught one into the same 404.
+    """
+
+    def __init__(self, db_id: str) -> None:
+        super().__init__(db_id)
+        self.db_id = db_id
+
+    def __str__(self) -> str:
+        return unknown_database_detail(self.db_id)
+
+
+def unknown_database_detail(db_id: str) -> str:
+    """The one 404 detail for an unknown dataset, on every route."""
+    return f"Database '{db_id}' not found"
+
+
+# db_ids the current request must not see: lib/dataset_access.py keeps them in
+# a context variable set per request by _DatasetAccessGuard (empty outside a
+# request, so server-side caches are built from every dataset).
+_HIDDEN_DB_IDS = dataset_access.HIDDEN_DB_IDS
+_hidden_db_ids = dataset_access.current_hidden
+_visible_db_ids = dataset_access.visible
+
+
 class DatabaseRegistry:
     """Registry of available databases with enhanced caching (Phase 2)
 
@@ -737,9 +767,11 @@ class DatabaseRegistry:
         self.data_folder = data_folder.resolve()
         self.connection_pool = connection_pool
         self._s3_config = s3_config or {}
-        self.databases: Dict[str, str] = {}           # db_id → local path str or s3:// URL
+        # `databases` and `metadata_cache` are properties: they read the full
+        # maps below, minus the datasets hidden from the current request.
+        self._databases_all: Dict[str, str] = {}      # db_id → local path str or s3:// URL
         self._db_md_bases: Dict[str, Path] = {}       # db_id → local .md file path
-        self.metadata_cache: Dict[str, Dict[str, Any]] = {}
+        self._metadata_all: Dict[str, Dict[str, Any]] = {}
         self._databases_list_cache: Optional[List[Dict[str, Any]]] = None
         self._db_extra: Dict[str, Dict[str, str]] = {}  # db_id → {group_id, file_id, rel_path}
         self._startup_time = time.time()
@@ -1077,7 +1109,7 @@ class DatabaseRegistry:
     def _get_entry_fingerprint(self, db_id: str) -> Dict[str, float]:
         """Return mtime fingerprint for the files that back a single registry entry."""
         md_path = self._db_md_bases[db_id]
-        db_url  = self.databases[db_id]
+        db_url  = self._databases_all[db_id]
 
         md_mtime = md_path.stat().st_mtime if md_path.exists() else 0.0
 
@@ -1137,7 +1169,7 @@ class DatabaseRegistry:
         self, db_id: str, cached_entry: Dict[str, Any], fingerprint: Dict[str, float],
     ) -> bool:
         """Return True if the cached entry still matches the on-disk files."""
-        db_url = self.databases[db_id]
+        db_url = self._databases_all[db_id]
         if cached_entry.get('md_mtime')    != fingerprint['md_mtime']:    return False
         if cached_entry.get('index_mtime') != fingerprint['index_mtime']: return False
         if cached_entry.get('annotation_sig') != fingerprint['annotation_sig']: return False
@@ -1245,16 +1277,16 @@ class DatabaseRegistry:
 
         self._db_md_bases = md_bases
         self._db_extra = db_extra
-        self.databases = databases
+        self._databases_all = databases
 
-        print(f"Found {len(self.databases)} databases")
-        if len(self.databases) <= 10:
-            for db_id in sorted(self.databases.keys()):
+        print(f"Found {len(self._databases_all)} databases")
+        if len(self._databases_all) <= 10:
+            for db_id in sorted(self._databases_all.keys()):
                 print(f"  - {db_id}")
         else:
-            for db_id in sorted(self.databases.keys())[:10]:
+            for db_id in sorted(self._databases_all.keys())[:10]:
                 print(f"  - {db_id}")
-            print(f"  ... and {len(self.databases) - 10} more")
+            print(f"  ... and {len(self._databases_all) - 10} more")
 
     def _cache_all_metadata(self, force_reload: bool = False) -> None:
         """Load metadata for all databases, using the persisted cache where possible.
@@ -1274,7 +1306,7 @@ class DatabaseRegistry:
         """
         print("Loading metadata (checking cache)..." if not force_reload else "Loading metadata (forced reload)...")
         persisted = self._load_persisted_cache()
-        previous = self.metadata_cache
+        previous = self._metadata_all
 
         new_cache: Dict[str, Dict[str, Any]] = {}
         gone: List[str] = []
@@ -1283,7 +1315,7 @@ class DatabaseRegistry:
         cache_hits = 0
         reloaded = 0
 
-        for db_id, db_url in self.databases.items():
+        for db_id, db_url in self._databases_all.items():
             fingerprint = self._get_entry_fingerprint(db_id)
             cached_entry = persisted.get(db_id, {})
 
@@ -1327,13 +1359,13 @@ class DatabaseRegistry:
         dropped = set(gone) | set(unloadable)
         if dropped:
             self._db_md_bases = {k: v for k, v in self._db_md_bases.items() if k not in dropped}
-            self.databases = {k: v for k, v in self.databases.items() if k not in dropped}
-        self.metadata_cache = new_cache
+            self._databases_all = {k: v for k, v in self._databases_all.items() if k not in dropped}
+        self._metadata_all = new_cache
         self._databases_list_cache = None
 
-        self._save_persisted_cache({k: v for k, v in persisted.items() if k in self.databases})
+        self._save_persisted_cache({k: v for k, v in persisted.items() if k in self._databases_all})
 
-        status = f"{len(self.metadata_cache)} databases"
+        status = f"{len(self._metadata_all)} databases"
         if cache_hits:
             status += f" ({cache_hits} from cache, {reloaded} reloaded)"
         if kept_stale:
@@ -1362,7 +1394,7 @@ class DatabaseRegistry:
     def _load_database_metadata(self, db_id: str, extra: Dict[str, str]) -> Dict[str, Any]:
         """Load metadata from .md files and database"""
         md_path = self._db_md_bases[db_id]
-        db_url = self.databases[db_id]
+        db_url = self._databases_all[db_id]
 
         # Load per-file metadata
         file_metadata, md_body = parse_md_file(md_path)
@@ -1679,8 +1711,43 @@ class DatabaseRegistry:
 
         return metadata
 
+    # ── access-aware views (lib/dataset_access.py) ────────────────────────────
+
+    @property
+    def databases(self) -> Dict[str, str]:
+        """db_id → path or URL of every dataset the current request may see."""
+        hidden = _HIDDEN_DB_IDS.get()
+        if not hidden:
+            return self._databases_all
+        return {db_id: url for db_id, url in self._databases_all.items() if db_id not in hidden}
+
+    @databases.setter
+    def databases(self, value: Dict[str, str]) -> None:
+        self._databases_all = value
+
+    @property
+    def metadata_cache(self) -> Dict[str, Dict[str, Any]]:
+        """db_id → metadata of every dataset the current request may see.
+
+        Writes (rescan, the admin editors) run for authenticated callers and
+        so reach the full map."""
+        hidden = _HIDDEN_DB_IDS.get()
+        if not hidden:
+            return self._metadata_all
+        return {db_id: meta for db_id, meta in self._metadata_all.items() if db_id not in hidden}
+
+    @metadata_cache.setter
+    def metadata_cache(self, value: Dict[str, Dict[str, Any]]) -> None:
+        self._metadata_all = value
+
+    def internal_db_ids(self) -> frozenset:
+        """Every served db_id that is not ``access: public`` (hidden from anonymous callers)."""
+        return dataset_access.hidden_db_ids(list(self._databases_all), self._metadata_all)
+
     def get_gene_list(self, db_id: str) -> List[str]:
         """Get cached gene list for a database (Phase 2 enhancement)"""
+        if db_id in _HIDDEN_DB_IDS.get():
+            raise UnknownDatabaseError(db_id)
         if db_id not in self.gene_list_cache:
             db_url = self.get_database_path(db_id)
             conn = self.connection_pool.get_connection(db_url)
@@ -1695,13 +1762,13 @@ class DatabaseRegistry:
     def get_database_path(self, db_id: str) -> str:
         """Get path or URL for a database ID"""
         if db_id not in self.databases:
-            raise KeyError(f"Database '{db_id}' not found")
+            raise UnknownDatabaseError(db_id)
         return self.databases[db_id]
 
     def get_database_metadata(self, db_id: str) -> Dict[str, Any]:
         """Get cached metadata for a database"""
         if db_id not in self.metadata_cache:
-            raise KeyError(f"Database '{db_id}' not found")
+            raise UnknownDatabaseError(db_id)
         return self.metadata_cache[db_id]
 
     def list_databases(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
@@ -1714,15 +1781,19 @@ class DatabaseRegistry:
         Returns:
             List of database information dictionaries
         """
+        hidden = _HIDDEN_DB_IDS.get()
         if not force_refresh and self._databases_list_cache is not None:
-            return self._databases_list_cache
+            return self._visible_list(self._databases_list_cache, hidden)
 
         result = []
         errors = []
 
-        for db_id, db_path in sorted(self.databases.items()):
+        # Built from the full maps whoever asks first, filtered on the way out.
+        for db_id, db_path in sorted(self._databases_all.items()):
             try:
-                metadata = self.get_database_metadata(db_id)
+                if db_id not in self._metadata_all:
+                    raise UnknownDatabaseError(db_id)
+                metadata = self._metadata_all[db_id]
 
                 db_info = {
                     'id': db_id,
@@ -1748,12 +1819,18 @@ class DatabaseRegistry:
             print()
 
         self._databases_list_cache = result
-        return result
+        return self._visible_list(result, hidden)
+
+    @staticmethod
+    def _visible_list(rows: List[Dict[str, Any]], hidden: frozenset) -> List[Dict[str, Any]]:
+        if not hidden:
+            return rows
+        return [row for row in rows if row.get('id') not in hidden]
 
     def rescan(self) -> Dict[str, Any]:
         """Force rescan of data folder and reload all metadata"""
-        old_count = len(self.databases)
-        old_db_ids = set(self.databases.keys())
+        old_count = len(self._databases_all)
+        old_db_ids = set(self._databases_all.keys())
 
         print("\nRescanning data folder...")
         # The registry maps are rebuilt and swapped by _scan_databases /
@@ -1787,20 +1864,20 @@ class DatabaseRegistry:
         except Exception as exc:  # noqa: BLE001
             print(f"  (gene_variance_index.load failed: {exc})")
 
-        new_db_ids = set(self.databases.keys())
+        new_db_ids = set(self._databases_all.keys())
         added = new_db_ids - old_db_ids
         removed = old_db_ids - new_db_ids
 
         result = {
             'status': 'success',
             'previous_count': old_count,
-            'current_count': len(self.databases),
+            'current_count': len(self._databases_all),
             'added': sorted(list(added)),
             'removed': sorted(list(removed)),
             'databases': sorted(list(new_db_ids))
         }
 
-        print(f"Rescan complete: {old_count} -> {len(self.databases)} databases")
+        print(f"Rescan complete: {old_count} -> {len(self._databases_all)} databases")
         if added:
             print(f"  Added: {', '.join(added)}")
         if removed:
@@ -2014,6 +2091,11 @@ async def _http_exception_scrubber(request: Request, exc: _StarletteHTTPExceptio
     if exc.status_code == 500:
         return _scrubbed_500(request, exc.detail)
     return await _default_http_exception_handler(request, exc)
+
+
+@app.exception_handler(UnknownDatabaseError)
+async def _unknown_database_handler(request: Request, exc: UnknownDatabaseError):
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
 
 
 @app.exception_handler(Exception)
@@ -2258,9 +2340,7 @@ def _chat_user_from_request(request: Request) -> str:
     """
     # Caddy / nginx upstream both forward the header lowercased through
     # FastAPI's case-insensitive ``request.headers`` view.
-    user = (request.headers.get('Remote-User')
-            or request.headers.get('X-Remote-User')
-            or '').strip()
+    user = (request.headers.get('Remote-User') or '').strip()
     if not user:
         raise HTTPException(
             status_code=401,
@@ -2536,18 +2616,15 @@ def chat_usage(
 def _require_admin(request: Request) -> str:
     """Refuse anyone not in the Authelia 'admins' group. Returns the user.
 
-    Reads ``Remote-Groups`` (preferred) or ``X-Remote-Groups`` (legacy /
-    Caddy alternative) and accepts comma-separated values. ant-browse's
-    UI also gates the link client-side, but the write itself MUST be
-    enforced here — per pika #256: 'don't trust the client'.
+    Reads ``Remote-Groups`` (comma-separated) and ``Remote-User``, which
+    only the proxy sets (it strips client-sent copies). ``X-Remote-*`` is
+    never read: no proxy config strips it everywhere, so a client could
+    forge it. ant-browse's UI also gates the link client-side, but the
+    write itself MUST be enforced here (pika #256: 'don't trust the client').
     """
-    raw_groups = (request.headers.get('Remote-Groups')
-                  or request.headers.get('X-Remote-Groups')
-                  or '')
+    raw_groups = request.headers.get('Remote-Groups') or ''
     groups = {g.strip().lower() for g in raw_groups.split(',') if g.strip()}
-    user = (request.headers.get('Remote-User')
-            or request.headers.get('X-Remote-User')
-            or '')
+    user = request.headers.get('Remote-User') or ''
     auth = get_auth_settings()
     if auth['mode'] == 'none':
         is_admin = False    # no login means no identity to trust
@@ -2616,11 +2693,11 @@ app.add_middleware(_InternalSecretGuard)
 
 def _is_local_tool_request(request: Request) -> bool:
     """A direct call from a tool on this host: loopback peer, no proxy
-    forwarding header (Caddy always adds X-Forwarded-For), no Remote-User."""
+    forwarding header (Caddy always adds X-Forwarded-For), no Remote-User,
+    and not marked X-Anthive-Anonymous (ant-browse / ant-mcp acting for a
+    visitor who is not signed in)."""
     peer = request.client.host if request.client else ''
-    return (peer in ('127.0.0.1', '::1', 'localhost')
-            and 'x-forwarded-for' not in request.headers
-            and not request.headers.get('Remote-User'))
+    return dataset_access.is_local_tool(request.headers, peer)
 
 
 def _require_admin_or_local(request: Request) -> str:
@@ -2632,6 +2709,78 @@ def _require_admin_or_local(request: Request) -> str:
     if _has_valid_internal_secret(request) and not request.headers.get('Remote-User'):
         return 'internal'
     return _require_admin(request)
+
+
+# ── access=internal datasets for anonymous callers (lib/dataset_access.py) ──
+#
+# Site setting internal_requires_auth (default true). A caller without an
+# authenticated identity does not see datasets that are not access: public:
+# _DatasetAccessGuard answers 404 for /databases/{hidden}/... and for a
+# dataset query parameter naming one, and sets _HIDDEN_DB_IDS so the registry
+# views, listings and cross-dataset routes leave them out.
+
+_ACCESS_SETTINGS: Dict[str, Any] = {}
+
+
+def _access_settings() -> Dict[str, Any]:
+    """{'requires_auth', 'auth_mode'}, read once (a config change needs a restart)."""
+    if not _ACCESS_SETTINGS:
+        try:
+            auth_mode = get_auth_settings()['mode']
+        except Exception:  # noqa: BLE001 - an invalid auth block must not open the data
+            auth_mode = 'none'
+        _ACCESS_SETTINGS.update(requires_auth=get_internal_requires_auth(), auth_mode=auth_mode)
+    return _ACCESS_SETTINGS
+
+
+def _caller_sees_internal(request: Request) -> bool:
+    settings = _access_settings()
+    peer = request.client.host if request.client else ''
+    return dataset_access.caller_sees_internal(
+        request.headers, peer, requires_auth=settings['requires_auth'],
+        auth_mode=settings['auth_mode'], has_internal_secret=_has_valid_internal_secret(request))
+
+
+def _request_path(scope) -> str:
+    path = scope.get('path') or '/'
+    root = scope.get('root_path') or ''
+    if root and path.startswith(root):
+        path = path[len(root):] or '/'
+    return path
+
+
+class _DatasetAccessGuard:
+    """Pure-ASGI: an anonymous caller never reaches an access=internal dataset."""
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope['type'] != 'http' or registry is None:
+            await self._app(scope, receive, send)
+            return
+        request = Request(scope)
+        hidden: frozenset = frozenset()
+        if not _caller_sees_internal(request):
+            hidden = registry.internal_db_ids()
+        if hidden:
+            query = {}
+            for key, value in request.query_params.multi_items():
+                query.setdefault(key, []).append(value)
+            named = (dataset_access.path_names_hidden(_request_path(scope), hidden)
+                     or dataset_access.query_names_hidden(query, hidden))
+            if named:
+                response = JSONResponse({'detail': unknown_database_detail(named)}, status_code=404)
+                await response(scope, receive, send)
+                return
+        token = _HIDDEN_DB_IDS.set(hidden)
+        try:
+            await self._app(scope, receive, send)
+        finally:
+            _HIDDEN_DB_IDS.reset(token)
+
+
+app.add_middleware(_DatasetAccessGuard)
 
 
 # ── Personal MCP links (/me/mcp, /admin/mcp-links, /internal/mcp/verify) ──
@@ -2664,7 +2813,7 @@ def _get_mcp_link_store():
 
 
 def _request_groups(request: Request) -> List[str]:
-    raw = request.headers.get('Remote-Groups') or request.headers.get('X-Remote-Groups') or ''
+    raw = request.headers.get('Remote-Groups') or ''
     return [g.strip() for g in raw.split(',') if g.strip()]
 
 
@@ -3678,7 +3827,10 @@ def get_group_info(group_id: str):
     # description body returned below.
     matching: List[Dict] = []
     index_path: Optional[Path] = None
+    hidden = _hidden_db_ids()
     for db_id, md_path in registry._db_md_bases.items():
+        if db_id in hidden:
+            continue
         file_meta, _body = parse_md_file(md_path)
         gid: Optional[str] = file_meta.get('group_id')
         # Resolve the collection-root index.md for this dataset.
@@ -4143,7 +4295,7 @@ def _start_facet_warmup() -> None:
 def _facet_results_location(db_id: str) -> Tuple[str, str]:
     """(collection folder, file stem) of a served dataset; 404 when unknown."""
     if registry is None or db_id not in registry.databases:
-        raise HTTPException(status_code=404, detail=f"Database '{db_id}' not found")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     md_path = registry._db_md_bases.get(db_id)
     if md_path is not None:
         try:
@@ -7343,11 +7495,11 @@ def _handle_de_quadrant(req: 'PlotRequest', ctx: 'PlotContext') -> Tuple[bytes, 
     try:
         meta_x = registry.get_database_metadata(db_x)
     except KeyError:
-        raise HTTPException(404, detail=f"Dataset '{db_x}' not found")
+        raise HTTPException(404, detail=unknown_database_detail(db_x))
     try:
         meta_y = registry.get_database_metadata(db_y)
     except KeyError:
-        raise HTTPException(404, detail=f"Dataset '{db_y}' not found")
+        raise HTTPException(404, detail=unknown_database_detail(db_y))
 
     def _organism_token(meta) -> Optional[str]:
         org = meta.get('organism')
@@ -8369,7 +8521,7 @@ async def _render_plot(plot_req: PlotRequest, request: Request) -> Response:
     try:
         db_fingerprint = _plot_db_fingerprint(registry.get_database_path(plot_req.db_id))
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"Dataset '{plot_req.db_id}' not found")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(plot_req.db_id))
 
     query_string = request.url.query if request is not None else ''
     cache_key = _plot_cache_key(
@@ -10878,6 +11030,8 @@ def _decode_b64_notebook_params(b64params: str) -> Tuple[str, str, Dict[str, Any
             400,
             detail="Encoded params dict must include 'db_id' and 'geom'.",
         )
+    if str(db_id) in _hidden_db_ids():
+        raise HTTPException(404, detail=unknown_database_detail(str(db_id)))
     return str(db_id), str(geom), params
 
 
@@ -10970,6 +11124,8 @@ def _decode_b64_dataset_params(b64params: str) -> Tuple[str, Dict[str, Any]]:
         raise HTTPException(
             400, detail="Encoded params dict must include 'db_id'.",
         )
+    if str(db_id) in _hidden_db_ids():
+        raise HTTPException(404, detail=unknown_database_detail(str(db_id)))
     return str(db_id), params
 
 
@@ -11224,7 +11380,7 @@ async def analytics_schema(db_id: str):
     try:
         db_url = registry.get_database_path(db_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"Dataset '{db_id}' not found.")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     def _sync_schema():
         conn = connection_pool.get_connection(db_url)
         try:
@@ -11264,7 +11420,7 @@ async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
     try:
         db_url = registry.get_database_path(db_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"Dataset '{db_id}' not found.")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     # analytics.run_query opens and closes its own dedicated connection so that
     # closing it on timeout actually cancels the in-flight DuckDB query.
     try:
@@ -12025,8 +12181,10 @@ async def get_pseudobulk(
         )
     except HTTPException:
         raise
+    except UnknownDatabaseError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=f"db_id {db_id!r} not found: {exc}")
+        raise HTTPException(status_code=404, detail=f"{unknown_database_detail(db_id)}: {exc}")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -12181,7 +12339,7 @@ def release_database(
     try:
         db_url = registry.get_database_path(db_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"db_id {db_id!r} not found")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     result = connection_pool.release(
         db_url,
         duration_seconds=duration_seconds,
@@ -12204,7 +12362,7 @@ def restore_database(db_id: str):
     try:
         db_url = registry.get_database_path(db_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"db_id {db_id!r} not found")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     result = connection_pool.restore(db_url)
     registry.gene_list_cache.pop(db_id, None)
     try:
@@ -12239,7 +12397,7 @@ def refresh_views(db_id: str):
     try:
         duckdb_url = registry.get_database_path(db_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"db_id {db_id!r} not found")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
 
     md_path = registry._db_md_bases.get(db_id)
     if md_path is None or not md_path.exists():
@@ -12356,7 +12514,7 @@ def refresh_views(db_id: str):
     }
 
 
-@app.post("/admin/api-config/{db_id:path}", tags=["admin"])
+@app.post("/admin/api-config/{db_id:path}", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 async def set_api_config(db_id: str, request: Request):
     """Update the ``api:`` section in this dataset's .md and rebuild views.
 
@@ -12453,7 +12611,7 @@ def rescan_databases():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/admin/plot-cache/stats", tags=["admin"])
+@app.get("/admin/plot-cache/stats", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def plot_cache_stats():
     """Return the plot response cache stats (hits / misses / evictions / size)."""
     with _plot_cache_lock:
@@ -12472,33 +12630,33 @@ def plot_cache_stats():
     }
 
 
-@app.post("/admin/plot-cache/clear", tags=["admin"])
+@app.post("/admin/plot-cache/clear", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def plot_cache_clear():
     """Drop all cached plot responses."""
     n = _plot_cache_clear()
     return {'cleared': n}
 
 
-@app.get("/admin/gene-stats-cache/stats", tags=["admin"])
+@app.get("/admin/gene-stats-cache/stats", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def gene_stats_cache_stats():
     """Return the on-disk gene_stats cache stats (rows / distinct dbs / size)."""
     return registry.gene_stats_cache.stats()
 
 
-@app.post("/admin/gene-stats-cache/clear", tags=["admin"])
+@app.post("/admin/gene-stats-cache/clear", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def gene_stats_cache_clear():
     """Wipe every gene_stats cache entry. Returns the row count that was dropped."""
     n = registry.gene_stats_cache.clear()
     return {'cleared': n}
 
 
-@app.get("/admin/gene-stats-index/stats", tags=["admin"])
+@app.get("/admin/gene-stats-index/stats", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def gene_stats_index_stats():
     """Return the precomputed gene-stats index status (row/dataset/gene counts)."""
     return registry.gene_stats_index.stats()
 
 
-@app.post("/admin/gene-stats-index/reload", tags=["admin"])
+@app.post("/admin/gene-stats-index/reload", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def gene_stats_index_reload():
     """Reload ``<h5adstore>/gene_stats_index.parquet`` from disk.
 
@@ -12510,7 +12668,7 @@ def gene_stats_index_reload():
     return registry.gene_stats_index.stats()
 
 
-@app.post("/admin/gene-stats-index/rebuild", tags=["admin"])
+@app.post("/admin/gene-stats-index/rebuild", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def gene_stats_index_rebuild(
     only: Optional[str] = Query(None, description='Comma-separated db_ids to (re)compute; default: all'),
     top_n: int = Query(100, description='Per-dataset top-N variable genes for the hot set'),
@@ -12558,13 +12716,13 @@ def gene_stats_index_rebuild(
     }
 
 
-@app.get("/admin/gene-variance-index/stats", tags=["admin"])
+@app.get("/admin/gene-variance-index/stats", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def gene_variance_index_stats():
     """Return the precomputed gene-variance index status (row/dataset/gene/facet counts)."""
     return registry.gene_variance_index.stats()
 
 
-@app.post("/admin/gene-variance-index/reload", tags=["admin"])
+@app.post("/admin/gene-variance-index/reload", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def gene_variance_index_reload():
     """Reload ``<h5adstore>/gene_variance_index.parquet`` from disk.
 
@@ -12575,7 +12733,7 @@ def gene_variance_index_reload():
     return registry.gene_variance_index.stats()
 
 
-@app.post("/admin/gene-variance-index/rebuild", tags=["admin"])
+@app.post("/admin/gene-variance-index/rebuild", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def gene_variance_index_rebuild(
     only: Optional[str] = Query(None, description='Comma-separated db_ids to (re)compute; default: all'),
     force: bool = Query(False, description='Ignore per-dataset cache; recompute everything'),
@@ -12622,7 +12780,7 @@ def gene_variance_index_rebuild(
     }
 
 
-@app.post("/admin/gene-stats-cache/gc", tags=["admin"])
+@app.post("/admin/gene-stats-cache/gc", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def gene_stats_cache_gc():
     """Drop cache rows whose fingerprint no longer matches the current dataset state.
 
@@ -12852,7 +13010,7 @@ def _build_by_gene_index() -> None:
 
 def _annotate_with_scored_in(summary: Dict[str, Any]) -> Dict[str, Any]:
     """Mutate a geneset summary dict to include scored_in (list of db_ids)."""
-    summary['scored_in'] = list(_score_index_by_geneset.get(summary['geneset_id'], []))
+    summary['scored_in'] = _visible_db_ids(_score_index_by_geneset.get(summary['geneset_id'], []))
     return summary
 
 
@@ -13055,7 +13213,7 @@ def get_geneset(study: str, experiment: str, name: str):
     if geneset is None:
         raise HTTPException(status_code=404, detail=f"Geneset {geneset_id} not found")
     detail = geneset.to_detail()
-    detail['scored_in'] = list(_score_index_by_geneset.get(geneset_id, []))
+    detail['scored_in'] = _visible_db_ids(_score_index_by_geneset.get(geneset_id, []))
     detail['column_name'] = SCORE_COLUMN_TEMPLATE.format(
         study=geneset.experiment.study,
         experiment=geneset.experiment.name,
@@ -13129,7 +13287,7 @@ def get_geneset_rank(
     geneset_id = f"{study}/{experiment}/{name}"
     if gene_registry.get(geneset_id) is None:
         raise HTTPException(status_code=404, detail=f"Geneset {geneset_id} not found")
-    scored_in = list(_score_index_by_geneset.get(geneset_id, []))
+    scored_in = _visible_db_ids(_score_index_by_geneset.get(geneset_id, []))
     if db_id is not None:
         if db_id not in scored_in:
             raise HTTPException(status_code=404, detail=f"Geneset {geneset_id} is not scored in {db_id}")
@@ -13151,7 +13309,7 @@ def get_geneset_rank(
                        'datasets': datasets, 'not_available': not_available}, *_MODULE_RANK_HELP_TOPICS)
 
 
-@app.post("/genesets/rescan", tags=["genesets"])
+@app.post("/genesets/rescan", tags=["genesets"], dependencies=[Depends(_require_admin_or_local)])
 def rescan_genesets():
     """Re-scan the geneset store from disk and rebuild the score index."""
     geneset_reg = _require_geneset_registry()
@@ -13286,6 +13444,9 @@ def get_module_variability(
 
     # Filter
     working = df
+    hidden = _hidden_db_ids()
+    if hidden:
+        working = working[~working['dataset'].isin(hidden)]
     n_excluded_secondary = 0
     if exclude_secondary and not dataset:
         secondary = _secondary_db_ids()
@@ -13363,7 +13524,7 @@ def get_module_variability(
         "skipped_datasets": {
             skipped_id: reason
             for skipped_id, reason in _cell_level_skips(_module_variability_path()).items()
-            if not dataset or skipped_id == dataset
+            if (not dataset or skipped_id == dataset) and skipped_id not in hidden
         },
         # cells are not replicates: these numbers are descriptive (rows carry replicate_unit per dataset)
         "basis": "per-cell (descriptive)",
@@ -13374,7 +13535,7 @@ def get_module_variability(
     return payload
 
 
-@app.post("/module-variability/rescan", tags=["genesets"])
+@app.post("/module-variability/rescan", tags=["genesets"], dependencies=[Depends(_require_admin_or_local)])
 def rescan_module_variability():
     """Force a reload of module_variability.parquet from disk."""
     df = _load_module_variability(force=True)
@@ -13513,7 +13674,7 @@ def _facet_signal_strength_by_name() -> Dict[str, float]:
     keep_stats = {'eta2', 'omega2', 'R2', 'spearman'}
     keep_sources = {'geneset', 'ucell'}
     working = df[df['tag_column'].str.startswith('ant_', na=False)]
-    secondary = _secondary_db_ids()
+    secondary = _secondary_db_ids() | set(_hidden_db_ids())
     if secondary:
         working = working[~working['dataset'].isin(secondary)]
     working = working[working['statistic'].isin(keep_stats)]
@@ -13685,15 +13846,20 @@ def _detection_tables() -> Dict[Tuple[str, str], "pd.DataFrame"]:
     candidates = gene_detection_lib.candidate_datasets(registry.metadata_cache)
     signature = (id(frame), tuple(sorted((db_id, info['scope'], str(info['group']), info['n_cells'])
                                          for db_id, info in candidates.items())))
-    cached = _DETECTION_STATE.get('value')
+    # One slot per visibility (all datasets, or without the internal ones for an
+    # anonymous caller), so the two kinds of caller do not evict each other.
+    slot = ('value', _hidden_db_ids())
+    cached = _DETECTION_STATE.get(slot)
     if cached is not None and cached[0] == signature:
         return cached[1]
     with _DETECTION_BUILD_LOCK:
-        cached = _DETECTION_STATE.get('value')
+        cached = _DETECTION_STATE.get(slot)
         if cached is not None and cached[0] == signature:
             return cached[1]
         tables = gene_detection_lib.detection_table(frame, candidates, index.is_fresh)
-        _DETECTION_STATE['value'] = (signature, tables)
+        if slot not in _DETECTION_STATE and len(_DETECTION_STATE) >= 2:
+            _DETECTION_STATE.clear()
+        _DETECTION_STATE[slot] = (signature, tables)
         return tables
 
 
@@ -14681,7 +14847,9 @@ def get_facet_cohorts():
     one row per dataset with ``cohort``, ``cohort_label``, ``role``,
     ``cell_class``, ``counted`` and ``note``. Empty when the table is
     missing. Registered before ``/facets/{name}``."""
-    table = _facet_results().cohorts()
+    hidden = _hidden_db_ids()
+    table = {db_id: record for db_id, record in _facet_results().cohorts().items()
+             if db_id not in hidden and not any(member in hidden for member in record.get('pool_members') or [])}
     return {'status': 'DRAFT', 'n_datasets': len(table),
             'datasets': [{'db_id': db_id, **{k: v for k, v in record.items() if k != 'role_internal'}}
                          for db_id, record in sorted(table.items())]}
@@ -15330,7 +15498,7 @@ def get_dataset_facets(
     try:
         registry.get_database_path(db_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail=f"Database '{db_id}' not found")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     show_hidden = _caller_is_admin(request)
     visible = _facets_visible()
     entries = _dataset_facet_projection(db_id, with_counts=counts)
@@ -15720,7 +15888,7 @@ async def gene_variance_by_facet(
     return result
 
 
-@app.get("/admin/gene-variance-cache/stats", tags=["admin"])
+@app.get("/admin/gene-variance-cache/stats", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
 def gene_variance_cache_stats():
     """Return the gene-variance-by-facet cache stats (size / hits / misses)."""
     with _gene_variance_cache_lock:
@@ -15871,7 +16039,7 @@ def get_catalog_score_recipe(source: str, catalog_id: str,
     return score.to_dict()
 
 
-@app.post("/catalogs/rescan", tags=["genesets"])
+@app.post("/catalogs/rescan", tags=["genesets"], dependencies=[Depends(_require_admin_or_local)])
 def rescan_catalogs():
     """Invalidate the starCAT + geneset catalog cache — reloads from disk."""
     import catalogs as _catalogs_mod
@@ -15920,7 +16088,7 @@ def get_database_module_ranks(db_id: str):
     ``available`` is false with a ``reason`` when the dataset has no per-cell scores.
     """
     if registry is None or db_id not in registry.databases:
-        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     means, reason = _module_rank_means(db_id)
     if means is None:
         return {'db_id': db_id, 'available': False, 'reason': reason, 'modules': []}
@@ -15960,7 +16128,7 @@ def get_database_module_scores(db_id: str):
         FROM   obsnum
     """
     if registry is None or db_id not in registry.databases:
-        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
 
     db_url = registry.get_database_path(db_id)
     conn = connection_pool.get_connection(db_url)
@@ -16042,7 +16210,7 @@ def list_database_files(db_id: str):
     ``{kind, filename, size_bytes, source}`` where source is ``s3`` | ``local``.
     """
     if registry is None or db_id not in registry.databases:
-        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     return {"db_id": db_id, "files": registry.list_artifacts(db_id)}
 
 
@@ -16060,7 +16228,7 @@ def download_database_file(db_id: str, kind: str):
     visibility: any dataset the caller can see is downloadable.
     """
     if registry is None or db_id not in registry.databases:
-        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     resolved = registry.artifact_download(db_id, kind)
     if resolved is None:
         raise HTTPException(status_code=404,
@@ -16082,7 +16250,7 @@ def download_database_static_file(db_id: str, filename: str):
     ``<data_folder>/<group>/static/``. Gate == catalog visibility.
     """
     if registry is None or db_id not in registry.databases:
-        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     target = registry.static_file_download(db_id, filename)
     if target is None:
         raise HTTPException(status_code=404,
@@ -16199,9 +16367,9 @@ def _require_uploader(request: Request) -> Tuple[Optional[str], Optional[JSONRes
     JSONResponse). Upload features are only shown to people who may upload."""
     from config import get_library_upload_settings  # noqa: PLC0415
     allowed = set(get_library_upload_settings(get_config())['upload_groups'])
-    raw_groups = request.headers.get('Remote-Groups') or request.headers.get('X-Remote-Groups') or ''
+    raw_groups = request.headers.get('Remote-Groups') or ''
     groups = {g.strip().lower() for g in raw_groups.split(',') if g.strip()}
-    user = request.headers.get('Remote-User') or request.headers.get('X-Remote-User') or ''
+    user = request.headers.get('Remote-User') or ''
     if get_auth_settings()['mode'] != 'none' and user:
         if groups & allowed:
             return user, None
@@ -16487,7 +16655,7 @@ def search_literature(request: Request, q: str = Query(..., min_length=2),
 def database_papers(request: Request, db_id: str):
     """Papers linked to a dataset (its own and its collection's `papers:`), source first."""
     if registry is None or db_id not in registry.databases:
-        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     papers = _library().papers_for_dataset(db_id)
     return {'db_id': db_id, 'papers': papers}
 
@@ -16500,7 +16668,7 @@ def database_context(request: Request, db_id: str,
     obs columns, module scores, source papers with methods passages, related
     papers; trimmed to ``budget_tokens`` (approximate)."""
     if registry is None or db_id not in registry.databases:
-        raise HTTPException(status_code=404, detail=f"Database not found: {db_id}")
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
     try:
         info = registry.get_database_metadata(db_id)
     except KeyError as exc:

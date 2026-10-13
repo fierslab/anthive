@@ -237,6 +237,7 @@ def build_route(tmp_path: Path, paths: Dict[str, str], scored_in: Dict[str, List
         '_with_help': lambda payload, *topics: {**payload, 'help_topics': list(topics)},
         'SCORE_COLUMN_TEMPLATE': '{study}::{experiment}::{name}',
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple, 'Path': Path, 'GenesetRegistry': object,
+        'unknown_database_detail': lambda db_id: f"Database '{db_id}' not found", '_visible_db_ids': list,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     return TestClient(app)

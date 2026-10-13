@@ -179,6 +179,8 @@ def validate_site(site: dict, path: Path) -> dict:
         raise SiteError("auth.mode authelia requires an https public_url (Authelia refuses http cookies)")
     if auth_mode == 'basic' and not site['auth'].get('users'):
         raise SiteError("auth.mode basic needs at least one entry in auth.users")
+    if not isinstance(site['auth'].get('internal_requires_auth', True), bool):
+        raise SiteError("auth.internal_requires_auth must be true or false")
     facets_visible = site['site'].get('facets_visible')
     if facets_visible is not None and (
             not isinstance(facets_visible, list)
@@ -413,6 +415,7 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
             'mode': site['auth']['mode'],
             'admins': [str(a) for a in site['auth'].get('admins') or []],
         },
+        'internal_requires_auth': bool(site['auth'].get('internal_requires_auth', True)),
         'mcp': {
             'enabled': bool(site['services'].get('mcp')),   # personal links on/off
             'host': '0.0.0.0', 'port': 8090,
@@ -1186,10 +1189,61 @@ def check(site: dict, running: bool = False) -> list[str]:
         if not str(site['site'].get('public_url') or '').startswith('https://'):
             problems.append("auth.mode authelia needs an https:// public_url (Authelia refuses plain-HTTP cookies)")
     if site['auth']['mode'] == 'none':
-        _warn("auth.mode none: NO LOGIN. Every dataset is public and admin features are off.")
+        _warn("auth.mode none: NO LOGIN. Admin features are off and only access: public datasets are "
+              "served (unless auth.internal_requires_auth is false).")
+    _check_internal_access(site)
     if site['auth']['mode'] == 'trusted-proxy' and site['ports']['bind'] not in ('127.0.0.1', '::1'):
         problems.append("auth.mode trusted-proxy trusts identity headers: ports.bind must be 127.0.0.1")
     return problems
+
+
+def _internal_dataset_count(store: Path) -> tuple[int, int]:
+    """(datasets whose resolved annotation is not access: public, all datasets) of an h5adstore."""
+    if str(REPO / 'lib') not in sys.path:
+        sys.path.insert(0, str(REPO / 'lib'))
+    import mus  # noqa: PLC0415  (lib/mus.py: pure python, yaml only)
+    total = internal = 0
+    for md in store.rglob('*.md'):
+        rel = md.relative_to(store)
+        if md.name == 'index.md' or any(part.startswith(('_', '.')) for part in rel.parts):
+            continue
+        if md.with_suffix('.inactive').exists():
+            continue
+        total += 1
+        try:
+            access = mus.resolve_annotation(md.with_suffix('.h5ad'), root=store).get('access')
+        except Exception:  # noqa: BLE001 - an unreadable sidecar counts as not public, like ant-serve
+            access = None
+        if str(access or '').strip().lower() != 'public':
+            internal += 1
+    return internal, total
+
+
+def _check_internal_access(site: dict) -> None:
+    """Warn when access=internal datasets could reach people without a login (lib/dataset_access.py)."""
+    store = site['_h5adstore']
+    if not store or not store.is_dir():
+        return
+    internal, total = _internal_dataset_count(store)
+    if not internal:
+        return
+    mode = site['auth']['mode']
+    requires_auth = bool(site['auth'].get('internal_requires_auth', True))
+    if not requires_auth:
+        if mode == 'none':
+            _warn(f"auth.internal_requires_auth is false on a site WITHOUT login: {internal} of {total} datasets "
+                  f"are not access: public and are served to anyone. Set it to true, or keep only public "
+                  f"datasets in data.h5adstore.")
+        else:
+            _warn(f"auth.internal_requires_auth is false: {internal} internal datasets are also served to callers "
+                  f"without an identity (an MCP without personal links, a direct call to the api container).")
+        return
+    if mode == 'none':
+        _say(f"{internal} of {total} datasets are not access: public: hidden on this site (no login).")
+    elif mode == 'trusted-proxy':
+        _warn(f"auth.mode trusted-proxy: {internal} internal datasets are served whenever the upstream proxy "
+              f"sends Remote-User. A public vhost must drop Remote-User/Remote-Groups "
+              f"(config/examples/nginx-vhost.public.conf.example).")
 
 
 def print_plan(site: dict) -> None:
