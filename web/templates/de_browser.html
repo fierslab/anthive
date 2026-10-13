@@ -77,7 +77,7 @@
     (dataset_name, "/browse/" ~ folder_browse_id ~ "/" ~ file_id),
     ("DE", None)
 ], ids=[("collection", group_id), ("dataset", file_id)]) }}
-<h1 class="page-title{% if is_secondary %} secondary-dataset{% endif %}">🔬 {{ study.name or study_id }}{{ secondary_badge(is_secondary) }}</h1>
+<h1 class="page-title{% if is_secondary %} secondary-dataset{% endif %}">{{ study.name or study_id }}{{ secondary_badge(is_secondary) }}</h1>
 
 <div class="stats-row">
   {% if study.method %}<div>method: <span class="val">{{ study.method }}</span></div>{% endif %}
@@ -308,8 +308,8 @@
       `<td class="num">${fmtF(r.estimate)}</td>` +
       `<td class="num muted-2">${ci}</td>` +
       `<td class="de-actions">` +
-        `<a href="${volcano}" title="volcano for this contrast">🌋</a>` +
-        `<a href="${scatter}" title="${g} on the embedding">🗺</a>` +
+        `<a href="${volcano}" title="volcano for this contrast">volcano</a> ` +
+        `<a href="${scatter}" title="${g} on the embedding">embedding</a>` +
         `<a href="${forest}" title="${g} across contrasts">🌲</a>` +
       `</td>`;
     return tr;

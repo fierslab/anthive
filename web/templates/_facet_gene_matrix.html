@@ -209,19 +209,19 @@
       display = name = row.gene;
       donorUrl += '&gene=' + enc(row.gene);
     }
-    var html = link(donorUrl, 'per donor: ' + display + ' by ' + label + ' in ' + cell.dataset.cellType + ', one value per donor, the values the test used', SVG_DONOR, 'donor');
-    if (!name) return html;
     var I = window.antPlotIcons ? window.antPlotIcons.SVG : {};
+    var html = link(donorUrl, 'per donor: ' + display + ' by ' + label + ' in ' + cell.dataset.cellType + ', one value per donor, the values the test used', I.donor || SVG_DONOR, 'donor');
+    if (!name) return html;
     var s = split(facet), n = enc(name);
     var per = ' (per cell, descriptive; ' + where.text + ')' + note;
     if (s && s.categorical) {
-      html += link(BASE + '/plot/violin?x=' + enc(s.column) + '&y=' + n + where.query, 'violin of ' + display + ' by ' + label + s.note + per, SVG_VIOLIN);
-      html += link(BASE + '/plot/ecdf?x=' + n + '&color=' + enc(s.column) + where.query, 'ECDF of ' + display + ' by ' + label + s.note + per, I.line || '');
+      html += link(BASE + '/plot/violin?x=' + enc(s.column) + '&y=' + n + where.query, 'violin of ' + display + ' by ' + label + s.note + per, I.violin || SVG_VIOLIN);
       html += link(BASE + '/plot/histogram?x=' + n + '&color=' + enc(s.column) + where.query, 'histogram of ' + display + ' by ' + label + s.note + per, I.bar || '');
+      html += link(BASE + '/plot/ecdf?x=' + n + '&color=' + enc(s.column) + where.query, 'ECDF of ' + display + ' by ' + label + s.note + per, I.line || '');
     } else if (s) {
-      html += link(BASE + '/plot/rolling?x=' + enc(s.column) + '&y=' + n + where.query, 'trend of ' + display + ' along ' + label + per, SVG_VIOLIN);
-      html += link(BASE + '/plot/ecdf?x=' + n + where.query, 'ECDF of ' + display + ', not split: ' + label + ' is numeric' + per, I.line || '');
+      html += link(BASE + '/plot/rolling?x=' + enc(s.column) + '&y=' + n + where.query, 'trend of ' + display + ' along ' + label + per, I.violin || SVG_VIOLIN);
       html += link(BASE + '/plot/histogram?x=' + n + where.query, 'histogram of ' + display + ', not split: ' + label + ' is numeric' + per, I.bar || '');
+      html += link(BASE + '/plot/ecdf?x=' + n + where.query, 'ECDF of ' + display + ', not split: ' + label + ' is numeric' + per, I.line || '');
     } else {
       html += link(BASE + '/plot/ecdf?x=' + n + where.query, 'ECDF of ' + display + ', not split: the facet column is not in this dataset' + per, I.line || '');
     }

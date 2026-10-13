@@ -323,6 +323,10 @@
     <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1.5" y="8" width="3" height="6"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11.5" y="2" width="3" height="12"/></svg>
   {%- elif kind == 'line' -%}
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true"><path d="M1.5 13 L5.5 8.5 L9 10.5 L14.5 3"/></svg>
+  {%- elif kind == 'violin' -%}
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1.5c1.6 2.5 1.6 4 .4 6.5 1.4 2.5 1.4 4-.4 6.5-1.8-2.5-1.8-4-.4-6.5C2.4 5.5 2.4 4 4 1.5zM12 1.5c1.2 3 1.2 5 .3 7 1 2 1 4-.3 5.5-1.3-1.5-1.3-3.5-.3-5.5-.9-2-.9-4 .3-7z"/></svg>
+  {%- elif kind == 'donor' -%}
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="11" r="1.6"/><circle cx="4.5" cy="7.5" r="1.6"/><circle cx="3" cy="4.5" r="1.6"/><circle cx="11.5" cy="5" r="1.6"/><circle cx="12.5" cy="9" r="1.6"/><circle cx="11" cy="12" r="1.6"/><rect x="1" y="7" width="5" height="1.2"/><rect x="9.5" y="8" width="5" height="1.2"/></svg>
   {%- elif kind == 'umap' -%}
     <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.4" cy="4.2" r="1.5"/><circle cx="6.2" cy="2.6" r="1.5"/><circle cx="5.6" cy="7" r="1.5"/><circle cx="10.6" cy="9.6" r="1.5"/><circle cx="13.2" cy="7.6" r="1.5"/><circle cx="12.4" cy="12.6" r="1.5"/><circle cx="8.6" cy="13" r="1.5"/></svg>
   {%- endif -%}
@@ -334,7 +338,8 @@
 {% macro plot_icons_js() -%}
 <script>
 window.antPlotIcons = (function () {
-  var SVG = { bar: {{ chart_icon('bar')|trim|tojson }}, line: {{ chart_icon('line')|trim|tojson }}, umap: {{ chart_icon('umap')|trim|tojson }} };
+  var SVG = { bar: {{ chart_icon('bar')|trim|tojson }}, line: {{ chart_icon('line')|trim|tojson }}, umap: {{ chart_icon('umap')|trim|tojson }},
+              violin: {{ chart_icon('violin')|trim|tojson }}, donor: {{ chart_icon('donor')|trim|tojson }} };
   function attr(text) { return String(text).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); }
   function link(href, title, svg) { return '<a class="obs-plot-icon" href="' + attr(href) + '" title="' + attr(title) + '">' + svg + '</a>'; }
   function kind(embedding) { return /umap/i.test(embedding) ? 'UMAP' : /t-?sne/i.test(embedding) ? 't-SNE' : /pca/i.test(embedding) ? 'PCA' : embedding; }

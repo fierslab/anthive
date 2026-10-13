@@ -238,7 +238,7 @@
            the current geom is always listed so a direct link still selects. #}
         {% for g, info in all_geoms.items() %}
         {% if info.group != 'de' or has_de or g == geom %}
-        <option value="{{ g }}" {% if g == geom %}selected{% endif %}>{{ info.icon }} {{ info.label }}</option>
+        <option value="{{ g }}" {% if g == geom %}selected{% endif %}>{{ info.label }}</option>
         {% endif %}
         {% endfor %}
       </select>

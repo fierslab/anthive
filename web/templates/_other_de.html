@@ -111,9 +111,9 @@
     var I = window.antPlotIcons ? window.antPlotIcons.SVG : {};
     var html = '';
     if (column) {
-      html += link(BASE + '/plot/violin?x=' + enc(column) + '&y=' + n + where, 'violin of ' + name + ' by ' + column + per, SVG_VIOLIN);
-      html += link(BASE + '/plot/ecdf?x=' + n + '&color=' + enc(column) + where, 'ECDF of ' + name + ' by ' + column + per, I.line || '');
+      html += link(BASE + '/plot/violin?x=' + enc(column) + '&y=' + n + where, 'violin of ' + name + ' by ' + column + per, I.violin || SVG_VIOLIN);
       html += link(BASE + '/plot/histogram?x=' + n + '&color=' + enc(column) + where, 'histogram of ' + name + ' by ' + column + per, I.bar || '');
+      html += link(BASE + '/plot/ecdf?x=' + n + '&color=' + enc(column) + where, 'ECDF of ' + name + ' by ' + column + per, I.line || '');
     } else {
       html += link(BASE + '/plot/ecdf?x=' + n + where, 'ECDF of ' + name + ', not split: the term ' + cell.dataset.term + ' is not a cell annotation column' + per, I.line || '');
     }
