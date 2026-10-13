@@ -682,7 +682,8 @@ class ModuleResults:
         return json_safe({
             'catalog': key.rsplit('/', 1)[0] if '/' in key else catalog, 'module': key.rsplit('/', 1)[-1],
             'module_key': key, 'facet': facet, 'scope': scope, 'cell_type': cell_type,
-            'directionless': bool(self.directionless(key)), 'effect_gate': facet_rules.module_gate(facet),
+            'directionless': bool(self.directionless(key)),
+            'effect_gate_rule': {'std_effect': facet_rules.module_gate(facet), 'wording': facet_rules.module_gate_words(facet)},
             'replication': replication_entries, 'n_units': len(unit_cards), 'units': unit_cards})
 
     def scored_in(self, catalog: str, module: str, datasets: "Sequence[Dict[str, Any]] | PreparedDatasets"
@@ -789,7 +790,7 @@ class ModuleResults:
             'n_replicated': chosen_counts.get('n_replicated', 0), 'n_effect_gate': chosen_counts.get('n_effect_gate', 0),
             'offset': offset, 'n_matching': n_matching, 'n_returned': len(out_rows),
             'has_more': offset + len(out_rows) < n_matching, 'cell_types': option_list, 'rows': out_rows,
-            'effect_gate': {'std_effect': facet_rules.module_gate(facet), 'wording': facet_rules.module_gate_words(facet)},
+            'effect_gate_rule': {'std_effect': facet_rules.module_gate(facet), 'wording': facet_rules.module_gate_words(facet)},
             'exclude_secondary': exclude_secondary})
 
     def scopes_with_module_results(self, facet: str, datasets: "Sequence[Dict[str, Any]] | PreparedDatasets"

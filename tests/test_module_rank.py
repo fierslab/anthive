@@ -295,11 +295,11 @@ def test_store_rebuilds_a_cache_written_without_std(tmp_path):
 def test_dataset_route_lists_every_scored_gene_set_with_rank_and_std(tmp_path):
     duckdb_path, _ = make_dataset(tmp_path)
     client = build_route(tmp_path, {'G/ds': str(duckdb_path), 'G/remote': 's3://bucket/x.duckdb'}, {'Study/Exp/MINE': ['G/ds']})
-    body = client.get('/databases/G/ds/module_ranks').json()
+    body = client.get('/databases/G/ds/module-ranks').json()
     assert body['available'] and body['help_topics'] == ['geneset-view', 'module-scores']
     mine = [row for row in body['modules'] if row['geneset_id'] == 'Study/Exp/MINE'][0]
     assert mine['rank'] == pytest.approx(0.5) and mine['display_name'] == 'Mine set' and mine['column_name'] == 'Study::Exp::MINE'
     assert mine['std'] is not None and mine['n_cells'] > 0 and len(body['modules']) == 13
-    assert client.get('/databases/G/remote/module_ranks').json() == {'db_id': 'G/remote', 'available': False,
+    assert client.get('/databases/G/remote/module-ranks').json() == {'db_id': 'G/remote', 'available': False,
                                                                     'reason': 'the dataset is not stored on this server', 'modules': []}
-    assert client.get('/databases/G/none/module_ranks').status_code == 404
+    assert client.get('/databases/G/none/module-ranks').status_code == 404

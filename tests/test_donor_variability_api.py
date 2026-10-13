@@ -229,7 +229,7 @@ def test_second_unit_of_a_cohort_is_not_the_anchor(variability):
 
 def test_top_genes_partial_conjunction_and_modules(reader):
     top = reader.top(DATASETS_ALL, 'human_postmortem', 'microglia', 'gene', 'D1', limit=5)
-    assert top['m_cohorts'] == 2 and not top['not_enough_cohorts'] and top['cell_type_group'] == 'microglia'
+    assert top['m_cohorts'] == 2 and not top['not_enough_cohorts'] and top['celltype_group'] == 'microglia'
     first = top['rows'][0]
     assert first['gene'] == 'HLA-DRB5' and first['k'] == 2 and first['m'] == 2
     expected_p = float(chi2.sf(-2 * (np.log(0.001) + np.log(0.002)), 4))               # Fisher over the two cohorts
@@ -241,7 +241,7 @@ def test_top_genes_partial_conjunction_and_modules(reader):
     assert top['cohorts'][0]['replicate_unit'] == 'donor' and top['high_tail'] == 0.05
     assert 'not a test' in top['note']
     by_label = reader.top(DATASETS_ALL, 'human_postmortem', CELL_TYPE, 'gene', 'D1', limit=1)
-    assert by_label['cell_type_group'] == 'microglia'                                # a raw label resolves to its group
+    assert by_label['celltype_group'] == 'microglia'                                # a raw label resolves to its group
     raw = reader.top(DATASETS_ALL, 'human_postmortem', 'microglia', 'gene', 'raw', limit=1)
     assert raw['rung'] == 'raw' and raw['rows'][0]['gene'] in ('HLA-DRB5', 'GSTM1')
     modules = reader.top(DATASETS_ALL, 'human_postmortem', 'microglia', 'module', 'D1', min_cohorts=1)
@@ -393,7 +393,7 @@ def test_geneset_and_top_routes(serve):
     top = serve.get('/donor-variability/top', params={'cell_type': 'microglia', 'limit': 3}).json()
     assert top['rows'][0]['gene'] == 'HLA-DRB5' and top['m_cohorts'] == 2 and len(top['rows']) == 3
     default = serve.get('/donor-variability/top').json()
-    assert default['cell_type_group'] == 'microglia' and default['scope'] == 'human_postmortem'
+    assert default['celltype_group'] == 'microglia' and default['scope'] == 'human_postmortem'
     modules = serve.get('/donor-variability/top', params={'feature_type': 'module', 'min_cohorts': 1}).json()
     assert modules['rows'][0]['module'] == 'Study/Exp/modA'
     assert serve.get('/donor-variability/top', params={'feature_type': 'x'}).status_code == 400

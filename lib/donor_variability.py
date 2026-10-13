@@ -566,7 +566,7 @@ class DonorVariability:
             min_cohorts: Features need a result in at least this many cohorts (genes: also the partial conjunction ``u``).
 
         Returns:
-            ``{scope, cell_type_group, feature_type, rung, rung_label, cohorts: [...], m_cohorts, concordance, rows,
+            ``{scope, celltype_group, feature_type, rung, rung_label, cohorts: [...], m_cohorts, concordance, rows,
             note}``; ``concordance`` is the mean Spearman correlation of ``excess_z`` between the anchors over their shared
             genes (``mean_spearman``, ``n_pairs``; genes only); gene rows ``{gene, k, m, p_rank_product, r_value,
             median_excess_z, median_reliability, median_sd, fold_range}`` sorted by ``r_value`` then ``median_excess_z``.
@@ -581,7 +581,7 @@ class DonorVariability:
                     'celltype_source': a['celltype_source'], 'n_replicates': a['n_replicates'],
                     'replicate_unit': a['replicate_unit'], 'rung_deepest': a['rung_deepest']} for a in anchors]
         out: Dict[str, Any] = {
-            'scope': scope, 'cell_type_group': group, 'feature_type': feature_type, 'rung': rung,
+            'scope': scope, 'celltype_group': group, 'feature_type': feature_type, 'rung': rung,
             'rung_label': RUNG_LABELS[rung], 'cohorts': cohorts, 'm_cohorts': len(anchors), 'concordance': None,
             'min_replicates_per_cohort': MIN_COHORT_REPLICATES, 'high_tail': HIGH_TAIL,
             'not_enough_cohorts': len(anchors) < max(min_cohorts, 1), 'rows': [],

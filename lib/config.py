@@ -13,11 +13,6 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-try:
-    from facet_aliases import DEPRECATED_FACET_COLUMNS
-except ImportError:  # imported as lib.config
-    from lib.facet_aliases import DEPRECATED_FACET_COLUMNS  # type: ignore[no-redef]
-
 
 class ConfigError(Exception):
     """Configuration-related errors"""
@@ -571,11 +566,11 @@ def get_facets_visible(cfg: Optional[Dict[str, Any]] = None) -> List[str]:
 
 
 def _current_facet_names(names: List[Any]) -> List[str]:
-    """Strip names, drop empties, and map deprecated facet names (the
-    one-release aliases) to their current name without duplicates."""
+    """Strip names, drop empties and duplicates. The retired name
+    ``ant_apoe_carrier`` is no longer mapped (API 2.45.0); it matches no facet."""
     current: List[str] = []
     for name in names:
-        text = DEPRECATED_FACET_COLUMNS.get(str(name).strip(), str(name).strip())
+        text = str(name).strip()
         if text and text not in current:
             current.append(text)
     return current

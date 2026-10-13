@@ -1850,7 +1850,7 @@ def main() -> None:
         except httpx.HTTPStatusError as exc:
             return f'error {exc.response.status_code}: {exc.response.text[:300]}'
         if 'rows' in data:
-            lines = [f"EXPLORATORY. {data['feature_type']}s varying between replicates, {data['cell_type_group']} [{data['scope']}], "
+            lines = [f"EXPLORATORY. {data['feature_type']}s varying between replicates, {data['celltype_group']} [{data['scope']}], "
                      f"rung {data['rung']}: {data['rung_label']}. {data['m_cohorts']} counted cohorts "
                      f"(at least {data['min_replicates_per_cohort']} replicates).", data['note']]
             if data['not_enough_cohorts']:

@@ -1,4 +1,4 @@
-"""Deprecated facet name aliases (apoe_carrier -> apoe4_carrier)."""
+"""The retired facet name apoe_carrier (alias removed in API 2.45.0; renamed apoe4_carrier)."""
 import duckdb
 import pytest
 
@@ -10,8 +10,8 @@ from obscol_tags import facet_registry
 
 
 @pytest.mark.parametrize('name, expected', [
-    ('ant_apoe_carrier', 'ant_apoe4_carrier'),
-    ('apoe_carrier', 'apoe4_carrier'),
+    ('ant_apoe_carrier', 'ant_apoe_carrier'),        # alias retired: no mapping any more
+    ('apoe_carrier', 'apoe_carrier'),
     ('ant_apoe4_carrier', 'ant_apoe4_carrier'),
     ('ant_sex', 'ant_sex'),
     ('', ''),
@@ -47,10 +47,12 @@ def _view_connection(api):
     return connection
 
 
-def test_view_computes_the_new_name_and_keeps_the_old_as_alias():
+def test_view_computes_the_new_name_without_the_retired_alias():
     connection = _view_connection({'obs_rename': {'apoe': 'ant_apoe'}})
-    rows = connection.execute('SELECT ant_apoe4_carrier, ant_apoe_carrier FROM obscat ORDER BY cell_name').fetchall()
-    assert rows == [('E4+', 'E4+'), ('E4-', 'E4-')]
+    rows = connection.execute('SELECT ant_apoe4_carrier FROM obscat ORDER BY cell_name').fetchall()
+    assert rows == [('E4+',), ('E4-',)]
+    columns = [row[0] for row in connection.execute('DESCRIBE obscat').fetchall()]
+    assert 'ant_apoe_carrier' not in columns
 
 
 def test_view_has_no_alias_without_the_new_column():
@@ -59,10 +61,10 @@ def test_view_has_no_alias_without_the_new_column():
     assert 'ant_apoe_carrier' not in columns and 'ant_apoe4_carrier' not in columns
 
 
-def test_facets_visible_accepts_the_old_name(monkeypatch):
+def test_facets_visible_no_longer_maps_the_old_name(monkeypatch):
     monkeypatch.delenv('ANTHIVE_FACETS_VISIBLE', raising=False)
     assert config.get_facets_visible({'facets_visible': ['ant_sex', 'ant_apoe_carrier']}) == [
-        'ant_sex', 'ant_apoe4_carrier']
-    monkeypatch.setenv('ANTHIVE_FACETS_VISIBLE', 'ant_apoe_carrier, ant_apoe4_carrier')
+        'ant_sex', 'ant_apoe_carrier']
+    monkeypatch.setenv('ANTHIVE_FACETS_VISIBLE', 'ant_apoe4_carrier, ant_apoe4_carrier')
     assert config.get_facets_visible() == ['ant_apoe4_carrier']
     assert 'ant_apoe4_carrier' in config.DEFAULT_FACETS_VISIBLE

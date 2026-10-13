@@ -867,7 +867,7 @@
       if (started) return;
       started = true;
       statusEl.textContent = 'computing ranks (the first view of a dataset can take up to a minute, later views are cached)...';
-      fetch(apiBase + '/module_ranks', { credentials: 'same-origin' }).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); }).then(function (data) {
+      fetch(apiBase + '/module-ranks', { credentials: 'same-origin' }).then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); }).then(function (data) {
         rows = data.modules || [];
         statusEl.textContent = data.available ? '' : (data.reason || 'no per-cell scores for this dataset');
         draw();

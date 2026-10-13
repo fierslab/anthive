@@ -654,7 +654,7 @@ _SERVE_WANTED = {
     '_donor_caption', 'get_facet_donor_plot', '_with_module_links', '_PLOT_MIME_TYPES',
     # 2.45: donor variability
     '_donor_variability_instance', '_DV_HELP_TOPICS', '_donor_variability', '_dv_call', 'get_dataset_donor_variability',
-    'get_gene_donor_variability', 'get_geneset_donor_variability', 'get_donor_variability_top',
+    'get_gene_donor_variability', 'get_geneset_donor_variability', 'get_donor_variability_top', '_dv_resolve_unit',
     # 2.45: one 404 for an unknown dataset, access=internal datasets hidden from anonymous callers
     'UnknownDatabaseError', 'unknown_database_detail', '_HIDDEN_DB_IDS', '_hidden_db_ids', '_visible_db_ids',
 }
@@ -897,7 +897,7 @@ def _legacy_apoe_store(tmp_path: Path) -> Path:
     return root
 
 
-@pytest.mark.parametrize('requested', ['apoe4_carrier', 'apoe_carrier'])
+@pytest.mark.parametrize('requested', ['apoe4_carrier'])
 def test_results_written_under_the_old_facet_name_are_served_under_the_new_one(tmp_path, requested):
     reader = fr.FacetResults(_legacy_apoe_store(tmp_path))
     summary = reader.summary('G1/ds1', 'G1', 'ds1')
@@ -912,10 +912,15 @@ DATASETS_FOR_G1 = [{'db_id': 'G1/ds1', 'group_folder': 'G1', 'stem': 'ds1', 'tit
                     'sha256': None}]
 
 
-@pytest.mark.parametrize('name', ['ant_apoe_carrier', 'apoe_carrier', 'ant_apoe4_carrier', 'apoe4_carrier'])
-def test_endpoints_accept_the_deprecated_facet_name(serve, name):
+@pytest.mark.parametrize('name', ['ant_apoe4_carrier', 'apoe4_carrier'])
+def test_endpoints_take_the_current_facet_name(serve, name):
     body = serve.get(f'/facets/{name}/tests').json()
     assert body['facet'] == 'apoe4_carrier' and body['facet_column'] == 'ant_apoe4_carrier'
+
+
+@pytest.mark.parametrize('name', ['ant_apoe_carrier', 'apoe_carrier'])
+def test_the_retired_facet_alias_is_gone(serve, name):
+    assert serve.get(f'/facets/{name}/tests').status_code == 404
 
 
 # ── facet scopes (v3): human, mouse and xenograft are never mixed ───────────────

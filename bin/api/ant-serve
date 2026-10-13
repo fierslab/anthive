@@ -4579,11 +4579,27 @@ def _dv_call(function, *args, **kwargs):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+def _dv_resolve_unit(units: List[Dict[str, Any]], cell_type: str,
+                     celltype_source: Optional[str]) -> Tuple[str, Optional[str]]:
+    """(stratum label, stratifier) of the unit ``cell_type`` names: the exact label first, else the unit of that cell
+    type group (case insensitive) with the most replicates; unchanged when neither matches (the caller answers 404)."""
+    def source_ok(unit: Dict[str, Any]) -> bool:
+        return not celltype_source or unit.get('celltype_source') == celltype_source
+    if any(unit.get('cell_type') == cell_type and source_ok(unit) for unit in units):
+        return cell_type, celltype_source
+    wanted = cell_type.strip().lower()
+    in_group = [unit for unit in units if str(unit.get('celltype_group') or '').lower() == wanted and source_ok(unit)]
+    if not in_group:
+        return cell_type, celltype_source
+    best = max(in_group, key=lambda unit: int(unit.get('n_replicates') or 0))
+    return str(best['cell_type']), best.get('celltype_source')
+
+
 @app.get("/databases/{db_id:path}/donor-variability", tags=["donor-variability"])
 def get_dataset_donor_variability(
     db_id: str,
     feature_type: Optional[str] = Query(None, description="gene | module: add the rows of one unit (needs cell_type)"),
-    cell_type: Optional[str] = Query(None, description="Stratum label of the unit, as in `units[].cell_type`"),
+    cell_type: Optional[str] = Query(None, description="Stratum label of the unit, as in `units[].cell_type`, or its cell type group (`microglia`): the exact label wins, else the unit of that group with the most replicates"),
     celltype_source: Optional[str] = Query(None, description="Stratifier of the unit (default: the first unit with the label)"),
     feature: Optional[str] = Query(None, description="One gene symbol, or Study/Experiment/name for a module"),
     method: Optional[str] = Query(None, description="Modules: pseudobulk (primary) | cell_mean (secondary)"),
@@ -4612,7 +4628,16 @@ def get_dataset_donor_variability(
     are the variance and SD (log2 units) left unexplained at that rung, ``fold_range`` the typical 2 SD fold range,
     ``share_design`` the share of the donor variance the rung's design explains, ``excess_z`` / ``p_excess`` a within-unit
     ranking (not a test). Module rows add ``module``, ``method``, ``source``, ``n_genes_found``.
+
+    ``cell_type`` takes the stratum label or, like the other donor and facet routes, a cell type group. Errors: 400 for
+    a bad ``rung``, ``sort`` or ``feature_type`` (also without ``feature_type``), or ``feature_type`` without
+    ``cell_type``; 404 for an unknown dataset or unit.
     """
+    _dv_call(donor_variability_lib.check_rung, rung)
+    if sort not in donor_variability_lib.SORTS:
+        raise HTTPException(status_code=400, detail=f'sort must be one of {", ".join(donor_variability_lib.SORTS)}')
+    if feature_type is not None:
+        feature_type = _dv_call(donor_variability_lib.check_feature_type, feature_type)
     group_folder, stem = _facet_results_location(db_id)
     meta = registry.metadata_cache.get(db_id) or {}
     reason = meta.get('facet_exclude_reason') or _no_scope_reason(db_id, meta)
@@ -4621,6 +4646,7 @@ def get_dataset_donor_variability(
     if feature_type:
         if not cell_type:
             raise HTTPException(status_code=400, detail='cell_type is required with feature_type')
+        cell_type, celltype_source = _dv_resolve_unit(summary.get('units') or [], cell_type, celltype_source)
         result = _dv_call(reader.dataset_rows, group_folder, stem, feature_type, cell_type, celltype_source, feature,
                           method, sort, rung, limit, min_reliability)
         if result['unit'] is None:
@@ -13411,7 +13437,7 @@ def get_module_variability(
       - `total_var`      — Var(module score) on this dataset (denominator).
       - `mean_score`     — mean of the module on this dataset.
 
-    ``skipped_datasets`` (JSON; unreleased) maps db_id to the reason a dataset
+    ``skipped_datasets`` (JSON; 2.44.0) maps db_id to the reason a dataset
     has no rows because it is out of scope for per-cell statistics (bulk data,
     or about one observation per donor). Limited to ``dataset`` when given.
 
@@ -13733,7 +13759,7 @@ def _build_facet_inventory() -> List[Dict[str, Any]]:
             'n_datasets': len(entry['datasets']),
             'scopes': sorted({_facet_scope_of(d) or 'none' for d in entry['datasets']}),
             'signal_strength': float(signal.get(facet_name, 0.0)),
-            # Added (unreleased): the published definition, one line for lists.
+            # Added in 2.43.0: the published definition, one line for lists.
             'label': definition['label'],
             'summary': definition['summary'],
             'defined': definition['defined'],
@@ -13783,7 +13809,7 @@ def get_facet_tests_across_datasets(
     braak, age, app_nlgf). ``graft_sex`` (alias ``ant_graft_sex``; the test of ``ant_sex`` in xenografts, sex of the grafted cells' donor line) and ``host_sex`` (``ant_host_sex``) are the xenograft sex facets; ``sex`` is human post-mortem only. Other names return 404. ``scope`` selects the facet scope
     (``scope`` and ``scopes`` in the response; ``all`` returns every scope).
     """
-    facet_name = canonical_facet(facet_name)  # deprecated alias, one release
+    facet_name = canonical_facet(facet_name)
     test_facet = _tested_facet(facet_name)
     overview = _facet_results().facet_overview(test_facet, _facet_test_datasets(), top_genes=top_genes,
                                                exclude_secondary=exclude_secondary,
@@ -14145,8 +14171,8 @@ def get_geneset_facet_effects(
         'directionless_note': info['directionless_note'] if info else None,
         'member_match': 'gene symbols, case-insensitive, within one facet scope',
         'scored_in': scored, 'scope': scope, 'facets': facets,
-        'effect_gate': {'std_effect': facet_rules_lib.MODULE_STD_EFFECT_GATE,
-                        'per_facet': {name: facet_rules_lib.module_gate(name) for name in wanted}}}
+        'effect_gate_rule': {'std_effect': facet_rules_lib.MODULE_STD_EFFECT_GATE,
+                             'per_facet': {name: facet_rules_lib.module_gate(name) for name in wanted}}}
     if scope is None:
         result['by_scope'] = by_scope
     return _with_help(result, *_FACET_HELP_TOPICS, 'module-replication')
@@ -14268,7 +14294,7 @@ def get_facet_gene_effects(
     percent of cells expressing the gene in this cell type and scope; low below 5). Unit cards add ``anchor_counted``,
     ``cohort_display`` (``unassigned`` for a dataset outside the cohort table) and ``modality``.
     """
-    facet_name = canonical_facet(facet_name)  # deprecated alias, one release
+    facet_name = canonical_facet(facet_name)
     test_facet = _tested_facet(facet_name)
     card = _facet_results().gene_effects(
         test_facet, gene, _facet_test_datasets(), cell_type=cell_type,
@@ -14716,7 +14742,7 @@ def get_facet_donor_plot(
     existed need `ant-facet-test run --samples-only`).
     """
     if fmt not in _DONOR_PLOT_FORMATS:
-        raise HTTPException(status_code=404, detail=f'format must be one of {", ".join(_DONOR_PLOT_FORMATS)}')
+        raise HTTPException(status_code=400, detail=f'format must be one of {", ".join(_DONOR_PLOT_FORMATS)}')
     prepared = _facet_results().prepare(_facet_test_datasets())
     cache_key = (facet_name, cell_type, gene, module, method, source, scope, adjusted, include_uncounted,
                  exclude_secondary, db_id, width, height, dpi, fmt, prepared.signature)
@@ -14875,7 +14901,7 @@ async def list_facets():
           ]
         }
 
-    ``hidden_by_config`` (unreleased) is true for facets outside the site's
+    ``hidden_by_config`` (2.43.0) is true for facets outside the site's
     ``facets_visible`` list; the web UI does not show those for now, but they
     stay in the data and in every API listing. ``facets_visible`` is the list
     itself (empty means all are shown).
@@ -15049,7 +15075,7 @@ async def get_facet_detail(
     rows filtered on ``tag_column == facet_name``. See the ``/facets``
     inventory for the list of names.
 
-    Added (unreleased): ``definition`` and ``definitions_status`` (from
+    Added in 2.43.0: ``definition`` and ``definitions_status`` (from
     ``lib/obscol_tags_vocab.yaml``); with ``mapping=true`` (default) each
     ``datasets[]`` row also carries the fields of
     ``GET /databases/{id}/facets`` for this facet (``mapping_kind``,
@@ -15061,7 +15087,7 @@ async def get_facet_detail(
 
     404 when the facet name is not present in the catalog.
     """
-    facet_name = canonical_facet(facet_name)  # deprecated alias, one release
+    facet_name = canonical_facet(facet_name)
     if not _is_facet_column(facet_name):
         raise HTTPException(
             status_code=400,
@@ -15227,7 +15253,7 @@ async def get_facet_detail(
 
 # ── facet mapping: how author columns project onto facets ───────────
 #
-# Added (unreleased). The projection itself (rename / derive / constant /
+# Added in 2.43.0. The projection itself (rename / derive / constant /
 # native, value translation, redaction of obs_hidden sources, gap hints)
 # lives in lib/facet_mapping.py; the definitions in
 # lib/obscol_tags_vocab.yaml. These helpers only read the .md api config,
@@ -15586,7 +15612,7 @@ async def gene_variance_by_facet(
     non-null cells are still returned in group sizes but a gene is only
     included when it has non-zero expression in at least 2 groups.
 
-    ``precompute_skipped`` (unreleased) is present when the dataset was left
+    ``precompute_skipped`` (2.44.0) is present when the dataset was left
     out of the precomputed index on purpose (bulk data, or about one
     observation per donor); its value is the reason. The live result is
     still returned.
@@ -15919,16 +15945,6 @@ def gene_variance_cache_stats():
 # held in RAM.
 
 
-def _catalog_source_from_score_column_source(source: str) -> str:
-    """Map score-parquet 'source' field to the /catalogs 'source' key.
-
-    Currently 1:1 — 'geneset' → 'geneset', 'starcat' → 'starcat'.
-    Kept as an indirection so future score sources plug in without
-    refactoring callers.
-    """
-    return source
-
-
 def _build_catalog_registry():
     """Return {(source, catalog_id): Catalog}. Rebuilt on rescan."""
     import catalogs as _catalogs_mod   # lazy — keeps startup light
@@ -16075,7 +16091,7 @@ def get_catalog(source: str, catalog_id: str):
     }
 
 
-@app.get("/databases/{db_id:path}/module_ranks", tags=["databases"])
+@app.get("/databases/{db_id:path}/module-ranks", tags=["databases"])
 def get_database_module_ranks(db_id: str):
     """Rank and spread of every gene set scored in one dataset (the dataset view of ``/genesets/.../rank``).
 
