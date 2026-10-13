@@ -150,6 +150,8 @@ def display_value(value: Any) -> str:
 
 
 templates.env.filters['display_value'] = display_value
+# names from the data stores may carry em-dashes; the UI shows a colon instead (UI rule 2)
+templates.env.filters['no_dash'] = lambda text: str(text if text is not None else '').replace(' \u2014 ', ': ').replace('\u2014', ', ')
 templates.env.globals['view_approved'] = view_approved
 # MA plots need a mean expression, which only the pseudobulk-style DE methods store
 templates.env.globals['de_has_mean'] = lambda method: _de_method_level(method).startswith('donor')
