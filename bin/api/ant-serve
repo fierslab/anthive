@@ -3946,6 +3946,7 @@ def get_dataset_curation(db_id: str, request: Request):
 # Endpoints:
 #   GET /de                                           list studies
 #   GET /de/{study_id}                                study metadata + per-term row counts
+#   GET /de/{study_id}/summary                        study metadata + up/down counts per (term, contrast)
 #   GET /de/{study_id}/terms/{term}                   contrasts in this (study, term)
 #   GET /de/{study_id}/terms/{term}/contrasts/{c}     gene rows for one contrast
 #   GET /de/by-gene/{gene_name}                       all rows for one gene (forest plot data)
@@ -3969,6 +3970,19 @@ def get_de_by_gene(db_id: str, gene_name: str):
     """
     with _pooled_db(db_id) as db:
         return {"gene": gene_name, "rows": lib_de_storage.get_gene_rows(db.conn, gene_name)}
+
+
+@app.get("/databases/{db_id:path}/de/{study_id}/summary", tags=["de"])
+def get_de_study_summary(db_id: str, study_id: str,
+                         padj_max: float = Query(0.05, gt=0, le=1, description="Significance cut on padj")):
+    """One DE study with per (term, contrast) counts: genes, significant at padj < ``padj_max`` and split up / down
+    by the sign of ``effsize``, the effect type, plus ``subset_filter`` and ``cluster_obs_column``. One call per study
+    (the dataset page matrices)."""
+    with _pooled_db(db_id) as db:
+        summary = lib_de_storage.study_summary(db.conn, study_id, padj_max=padj_max)
+    if summary is None:
+        raise HTTPException(404, detail=f"unknown DE study '{study_id}' on '{db_id}'")
+    return summary
 
 
 @app.get("/databases/{db_id:path}/de/{study_id}", tags=["de"])

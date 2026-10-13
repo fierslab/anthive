@@ -182,6 +182,13 @@ Changed (additive):
 - `GET /facets/{facet}/donor-values` and `/facets/{facet}/donor-plot.{fmt}` take `db_id`: only the units of that dataset,
   counted or not, and only the exact `cell_type` stratum when one matches (404 when the dataset has no unit). The dataset
   page uses it for the per donor plot of one gene or gene set in one cell type.
+
+New endpoint:
+
+- `GET /databases/{id}/de/{study_id}/summary` (`padj_max`, default 0.05): the study metadata of `/de/{study_id}` plus
+  `subset_filter`, `cluster_obs_column` (null on schema v1 duckdbs), `padj_max` and `contrasts: [{term, contrast,
+  n_genes, n_sig, n_up, n_down, efftype}]`: significant at padj < padj_max, split by the sign of `effsize`. One query
+  per study; used by the dataset page "Other DE" matrices.
 - Every gene card replication entry (`/facets/{facet}/effects`, `/genes/{gene}/facet-effects`) and every module card
   replication entry and variant (`/genesets/{study}/{experiment}/{name}/facet-effects`) adds `links`: `{donor_plot,
   donor_plot_svg, donor_plot_adjusted, donor_values, donor_values_available (all counted anchors have stored values),

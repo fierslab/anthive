@@ -527,3 +527,19 @@ def test_write_sidecar_from_schema_v1_duckdb(tmp_path):
     assert de_storage.write_sidecar(sidecar, source) == len(GENES)
     meta = de_storage.read_sidecar_study_meta(sidecar)['s1']
     assert meta['cluster_obs_column'] is None and meta['covariates'] == '["age", "sex"]'
+
+
+def test_study_summary_counts_up_and_down_per_contrast(tmp_path):
+    path = make_duckdb(tmp_path / 'sum.duckdb', studies=(STUDY_ONE,))
+    connection = duckdb.connect(str(path))
+    connection.execute("UPDATE __de SET effsize = CASE WHEN gene_id % 2 = 0 THEN 1.0 ELSE -1.0 END, efftype = 'log2fc'")
+    connection.execute("UPDATE __de SET padj = 0.5 WHERE gene_id = 0")
+    summary = de_storage.study_summary(connection, STUDY_ONE['study_id'])
+    connection.close()
+    row = summary['contrasts'][0]
+    n = len(GENES)
+    expected_up = sum(1 for g in range(n) if g % 2 == 0 and g != 0)
+    assert (row['term'], row['contrast'], row['n_genes']) == ('t', 'c', n)
+    assert row['n_sig'] == n - 1 and row['n_up'] == expected_up and row['n_down'] == n - 1 - expected_up
+    assert row['efftype'] == 'log2fc' and summary['padj_max'] == 0.05 and 'subset_filter' in summary
+    assert de_storage.study_summary(duckdb.connect(str(path), read_only=True), 'nope') is None

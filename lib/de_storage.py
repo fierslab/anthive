@@ -1147,6 +1147,48 @@ def get_contrast_rows(
     return out
 
 
+def study_summary(conn: duckdb.DuckDBPyConnection, study_id: str,
+                  padj_max: float = 0.05) -> Optional[Dict[str, Any]]:
+    """One study's metadata (with ``subset_filter`` and, from schema v2, ``cluster_obs_column``) and per
+    (term, contrast) counts in one query: ``n_genes``, ``n_sig`` (padj < ``padj_max``), ``n_up`` / ``n_down``
+    (those split by the sign of ``effsize``) and the ``efftype`` of the contrast.
+
+    Used by GET /de/{study}/summary (the dataset page matrices). None if no such study.
+    """
+    if not has_de_data(conn):
+        return None
+    study = get_study(conn, study_id)
+    if study is None:
+        return None
+    columns = {row[0] for row in conn.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = '__de_study'").fetchall()}
+    wanted = [c for c in ('subset_filter', 'cluster_obs_column') if c in columns]
+    if wanted:
+        values = conn.execute(f"SELECT {', '.join(wanted)} FROM __de_study WHERE study_id = ?", [study_id]).fetchone()
+        for name, value in zip(wanted, values or ()):
+            if name == 'subset_filter' and value:
+                try:
+                    value = json.loads(value)
+                except (TypeError, json.JSONDecodeError):
+                    pass
+            study[name] = value
+    for name in ('subset_filter', 'cluster_obs_column'):
+        study.setdefault(name, None)
+    rows = conn.execute("""
+        SELECT term, contrast, count(*) AS n_genes,
+               count(*) FILTER (WHERE padj < ?) AS n_sig,
+               count(*) FILTER (WHERE padj < ? AND effsize > 0) AS n_up,
+               count(*) FILTER (WHERE padj < ? AND effsize < 0) AS n_down,
+               min(efftype) AS efftype
+        FROM __de WHERE study_id = ?
+        GROUP BY term, contrast ORDER BY term, contrast
+    """, [padj_max, padj_max, padj_max, study_id]).fetchall()
+    study['padj_max'] = padj_max
+    study['contrasts'] = [{'term': r[0], 'contrast': r[1], 'n_genes': r[2], 'n_sig': r[3], 'n_up': r[4],
+                           'n_down': r[5], 'efftype': r[6]} for r in rows]
+    return study
+
+
 def get_gene_rows(
     conn: duckdb.DuckDBPyConnection,
     gene_name: str,
