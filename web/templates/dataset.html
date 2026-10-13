@@ -203,9 +203,11 @@
   .data-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; margin-top: 8px; }
   /* Facet tab group (2026-10-13): one bordered tab holding the label and the Gene / GS sub-tab pills.
      The buttons are plain .tab-btn for the tab wiring; the group draws the tab outline. */
-  .tab-group { display: inline-flex; align-items: center; flex: none; gap: 3px; padding: 0 6px 0 0;
+  .tab-group { display: inline-flex; align-items: center; flex: none; gap: 3px; padding: 0 6px 0 0; background: var(--tab-group-tint);
                border: 1px solid var(--border-light, #e5e7eb); border-bottom: none; border-radius: 6px 6px 0 0; }
-  .tab-group:has(.tab-btn.active) { background: #fff; border-color: var(--border); margin-bottom: -1px; padding-bottom: 1px; }
+  /* open: keeps the tint, gains the full border and joins the panel; the open label is bold and an open pill is filled */
+  .tab-group:has(.tab-btn.active) { border-color: var(--border); margin-bottom: -1px; padding-bottom: 1px; box-shadow: inset 0 2px 0 #335C67; }
+  .tab-group .tab-btn.tab-sub { background: #fff; }
   .tab-group .tab-btn, .tab-group .tab-btn.active { border-color: transparent; margin-bottom: 0; background: transparent; }
   .tab-group .tab-btn.tab-group-label.active { color: var(--text); font-weight: 600; }
   .tab-group .tab-btn.tab-sub { padding: 1px 9px; font-size: 11px; line-height: 1.6; border: 1px solid var(--border); border-radius: 10px; }
@@ -886,18 +888,44 @@
   </script>
 </section>
 
-{# ── Facet GS tab: the per-cell association explorer (_module_view.html), moved out of the Genesets tab. Not approved yet (VIEW_REGISTRY key dataset-facet-gs). Loads on first open of the tab (mv_ctx.lazy_tab). Old #modules&mv=... and #tab-modules-mv=... links open this tab. #}
-{% from "_macros.html" import review_banner as _review_banner, doc_toggle %}
+{# ── Facet group, GS sub-tab (2026-10-13): the facet x cell type matrix of the donor-level gene set (module) results, one
+   per variant (pseudobulk | cell mean scanpy | cell mean UCell, selector), same layout as the Gene sub-tab. The earlier
+   per-cell association explorer (_module_view.html) sits in the hidden box #fxs-percell ("per-cell associations
+   (descriptive)" toggle in the heading) and loads only when that box opens (mv_ctx.lazy_box); old #facet-gs&mv=...,
+   #modules&mv=... and #tab-modules-mv=... links open it. Not approved yet (VIEW_REGISTRY key dataset-facet-gs). #}
+{% from "_macros.html" import review_banner as _review_banner, doc_toggle, doc_block %}
+{% from "_facet_gene_matrix.html" import fxg_styles, fxg_matrix, fxg_help_boxes, fxg_list_script %}
 <section class="tab-panel" id="tab-facet-gs" role="tabpanel">
   {{ _review_banner('dataset-facet-gs') }}
-  <h2 class="section-head">Gene set scores by annotation column
-{{ doc_toggle('mv-modules-tab-about', 'About per-cell associations') }}
-  </h2>
-  <div class="tab-loading plot-loading" data-tab-loading="facet-gs" style="min-height:60px;display:none">
+  {% set _mods = facet_tests.module_matrices if facet_tests else None %}
+  <h2 class="section-head" id="facet-gs-head">Gene sets by facet{{ doc_toggle('fxs-about', 'About the gene set results') }}<button type="button" class="doc-toggle fxg-full-toggle" data-help-for="fxs-percell" aria-controls="fxs-percell" aria-expanded="false" title="The per-cell association explorer: show or hide">per-cell associations (descriptive)</button></h2>
+  {% call doc_block('About the gene set results', id='fxs-about') %}
+    <p>Each gene set is scored per donor in each cell type and tested like a gene: the facet is compared between donors, adjusting for the same covariates. Three variants exist: the pseudobulk score (the gene set's mean expression in the donor's summed counts, where counts exist), and the mean over the donor's cells of the per-cell scanpy score or UCell score. Which variant is the main one is not decided yet, so you can switch.</p>
+    <p>A gene set counts as significant when its q is below 0.05, using the model q when the test has at least 30 residual degrees of freedom and the permutation q otherwise (the rule replication across cohorts uses). Up and down follow the sign of the standardised effect (the change in standard deviations of the donor score). The number of significant gene sets grows with the number of donors, so compare cells within this dataset, not colours across datasets (<a href="/help#module-scores">gene set scores</a>).</p>
+  {% endcall %}
+  {% if _mods %}
+  {{ fxg_styles() }}
+  <div class="fxg-wrap" id="fxs">
+    <div class="fxg-variants" role="group" aria-label="Gene set score variant">{% for v in _mods.variants %}<button type="button" data-variant="{{ v.key }}" class="{{ 'on' if v.key == _mods.default }}" aria-pressed="{{ 'true' if v.key == _mods.default else 'false' }}">{{ v.label }}</button>{% endfor %}</div>
+    <span class="fxg-variant-label">showing: {% for v in _mods.variants if v.key == _mods.default %}{{ v.label }}{% endfor %}</span>
+    <p class="fxg-legend" id="fxs-legend">Each cell: gene sets significant for that facet in that cell type, split into <span style="color:#a8441f">&uarr; higher</span> and <span style="color:#235d94">&darr; lower</span> in the second group of the contrast (or with the trend). Darker means more gene sets. Click a cell for its gene sets.</p>
+    {% for v in _mods.variants %}{{ fxg_matrix(v.matrix, 'fxs-' ~ v.key, 'modules', hidden=(v.key != _mods.default)) }}{% endfor %}
+    {% set _seen = [] %}{% set _rows = [] %}{% for v in _mods.variants %}{% for row in v.matrix.rows %}{% if row.facet not in _seen %}{% set _ = _seen.append(row.facet) %}{% set _ = _rows.append(row) %}{% endif %}{% endfor %}{% endfor %}
+    {{ fxg_help_boxes(_rows, facet_tests.by_facet, 'modules') }}
+    <div class="fxg-genes" id="fxs-list" hidden aria-live="polite"></div>
+  </div>
+  {{ fxg_list_script('modules', 'fxs', 'fxs-list', db_id, '/browse/' ~ folder_browse_id ~ '/' ~ file_id, default_embedding, obs_columns, module_score_columns) }}
+  {% else %}
+  <p class="fx-none" id="fxs-none">No donor-level gene set results for this dataset{% if facet_tests and facet_tests.reason_text %}: {{ facet_tests.reason_text }}{% endif %}.</p>
+  {% endif %}
+  {% call doc_block('Per-cell associations (descriptive)', id='fxs-percell') %}
+  <h3 class="subsection-head">Gene set scores by annotation column{{ doc_toggle('mv-modules-tab-about', 'About per-cell associations') }}</h3>
+  <div class="tab-loading plot-loading" data-tab-loading="facet-gs" style="min-height:60px">
     <span class="spinner-lg"></span>
     <span>loading gene set scores…</span>
   </div>
   {% include "_module_view.html" with context %}
+  {% endcall %}
 </section>
 {% endif %}
 
@@ -972,7 +1000,7 @@
 {# ── Facet group, Gene sub-tab (2026-10-13): the facet x cell type matrix of gene results (_facet_gene_matrix.html,
    not approved yet: VIEW_REGISTRY key dataset-facet-gene). The earlier per facet and cell type tables are kept in the
    hidden box #fxg-full ("full effects table"); #fx-... links open it. #}
-{% from "_facet_gene_matrix.html" import fxg_matrix, fxg_script %}
+{% from "_facet_gene_matrix.html" import fxg_styles, fxg_matrix, fxg_help_boxes, fxg_list_script %}
 {% from "_macros.html" import review_banner as _review_banner %}
 <section class="tab-panel" id="tab-facet-gene" role="tabpanel">
   {{ _review_banner('dataset-facet-gene') }}
@@ -980,7 +1008,15 @@
     {% if facet_tests and facet_tests.n_units_tested %}
     <h2 class="section-head" id="facets-effects-head">Effects by facet{{ doc_toggle('fx-about', 'About these effects and the flags') }}<button type="button" class="doc-toggle fxg-full-toggle" data-help-for="fxg-full" aria-controls="fxg-full" aria-expanded="false" title="The earlier tables, one per facet and cell type: show or hide">full effects table</button></h2>
     {{ fx_intro('dataset', facet_tests.n_permutations) }}
-    {% if facet_tests.matrix %}{{ fxg_matrix(facet_tests.matrix, _fx) }}{% endif %}
+    {% if facet_tests.matrix %}
+    {{ fxg_styles() }}
+    <div class="fxg-wrap" id="fxg">
+      <p class="fxg-legend" id="fxg-legend">Each cell: genes at q &lt; 0.05 for that facet in that cell type{% if facet_tests.matrix.has_direction %}, split into <span style="color:#a8441f">&uarr; higher</span> and <span style="color:#235d94">&darr; lower</span> in the second group of the contrast (or with the trend){% endif %}. Darker means more genes. Click a cell for its genes.</p>
+      {{ fxg_matrix(facet_tests.matrix, 'fxg') }}
+      {{ fxg_help_boxes(facet_tests.matrix.rows, _fx, 'genes') }}
+      <div class="fxg-genes" id="fxg-genes" hidden aria-live="polite"></div>
+    </div>
+    {% endif %}
     {% call doc_block('Full effects table', id='fxg-full') %}
     <p class="fx-intro">The earlier view: one table per facet with a row per cell type, its model and flags, and the genes and gene sets behind each row.</p>
     {% for f in dataset_facets + dataset_facets_other %}{% if _fx.get(f.facet) %}{{ _fx_effects_block(f.facet, _fx[f.facet]) }}{% endif %}{% endfor %}
@@ -1007,7 +1043,7 @@
     {% endif %}
     {% endif %}
   </div>
-  {% if facet_tests and facet_tests.matrix %}{{ fxg_script(db_id, '/browse/' ~ folder_browse_id ~ '/' ~ file_id, default_embedding) }}{% endif %}
+  {% if facet_tests and facet_tests.matrix %}{{ fxg_list_script('genes', 'fxg', 'fxg-genes', db_id, '/browse/' ~ folder_browse_id ~ '/' ~ file_id, default_embedding, obs_columns) }}{% endif %}
   {{ fx_script() }}
 </section>
 {% elif n_module_scores %}
@@ -1463,6 +1499,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 var mvState = legacyMv ? legacyMv[1] + (ampIdx >= 0 ? h.slice(ampIdx) : '') : h.slice(h.indexOf('&mv=') + 4);
                 try { history.replaceState(null, '', '#facet-gs&mv=' + mvState); } catch (_) {}
                 tabPart = 'facet-gs';
+                h = 'facet-gs&mv=' + mvState;
             } else if (tabPart === 'tab-modules') {
                 tabPart = 'modules';
             } else if (tabPart === 'tab-facet-gs') {
@@ -1481,6 +1518,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             }
             activateTab(tabPart, false);
+            // explorer filter state (#facet-gs&mv=...): open the per-cell association box of the GS sub-tab
+            if (tabPart === 'facet-gs' && h.indexOf('&mv=') >= 0) {
+                var perCell = document.getElementById('fxs-percell');
+                if (perCell && perCell.hidden && window.antHelpOpen) window.antHelpOpen(perCell);
+            }
         }
         window.addEventListener('hashchange', function() { handleHash(location.hash); });
         var initHash = location.hash || '';

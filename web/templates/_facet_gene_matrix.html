@@ -1,16 +1,16 @@
-{# Dataset page, Facet > Gene sub-tab (2026-10-13): facet x cell type matrix of the donor-level gene results.
+{# Dataset page, Facet > Gene and Facet > GS sub-tabs (2026-10-13): facet x cell type matrices of the donor-level results.
 
-   fxg_matrix(matrix, by_facet)   markup; fxg_script(db_id, browse_base, default_embedding) the gene list script,
-   called once after it (kept apart so the matrix markup carries no script).
-     matrix:    browser._facet_gene_matrix(summary): {columns, rows, untested_rows, has_direction}
-     by_facet:  facet_tests.by_facet (unit views per facet column), for the per facet help boxes
-     db_id:     composite dataset id (API calls)
-     browse_base: /browse/<group>/<file> (plot icons)
+   fxg_styles()                                  styles, once per page
+   fxg_matrix(matrix, prefix, kind)              one matrix table; prefix 'fxg' (genes) or 'fxs-<variant>' (gene sets)
+   fxg_help_boxes(facets, by_facet, kind, prefix) the hidden per facet boxes opened by the (i) after a facet name
+   fxg_list_script(...)                          the click-to-open list of one sub-tab, once after its matrices
+     matrix:    browser._facet_gene_matrix(summary[, method, source]): {columns, rows, untested_rows, has_direction}
+     by_facet:  facet_tests.by_facet (unit views per facet column)
 
-   Rows are facets, columns cell type strata in the gene page order (microglia first). A cell is the number of genes at
-   q < 0.05 with the up and down split; colour steps by count. Clicking a cell opens the gene list of that facet and
-   cell type under the matrix (one at a time), from /databases/{id}/facet-tests/genes. The model, flags, sex control
-   and gene set counts of each facet sit in a hidden box opened by the (i) after the facet name. #}
+   Rows are facets, columns cell type strata in the gene page order (microglia first). A cell is the number of genes
+   (q < 0.05) or gene sets (significant by the replication rule) with the up and down split; colour steps by count.
+   Clicking a cell opens its list under the matrix (one at a time). Each list row carries plot links for that facet
+   and cell type: the per donor plot the test used first, then per cell plots of the cells of that cell type. #}
 {% from "_macros.html" import doc_block, doc_toggle %}
 {% from "_facet_effects.html" import fx_model, fx_sex_control, fx_unit_notes, fx_module_counts %}
 
@@ -56,6 +56,13 @@
   table.fxg-gene-table td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
   table.fxg-gene-table td.plots { white-space: nowrap; }
   .fxg-more { background: none; border: 0; color: var(--link); cursor: pointer; font: inherit; font-size: 12px; padding: 4px 0; }
+  .fxg-variants { display: inline-flex; flex-wrap: wrap; gap: 0; margin: 4px 0 6px; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+  .fxg-variants button { font: inherit; font-size: 11.5px; padding: 3px 10px; border: 0; border-right: 1px solid var(--border); background: #fff; color: var(--text-muted); cursor: pointer; }
+  .fxg-variants button:last-child { border-right: 0; }
+  .fxg-variants button.on { background: #2f4f5f; color: #fff; }
+  .fxg-variant-label { font-size: 11.5px; color: var(--text-muted); margin-left: 8px; }
+  .fxg-scale { font-weight: 400; text-transform: none; letter-spacing: 0; color: #94a3b8; margin-left: 4px; }
+  .obs-plot-icon.donor svg { color: #335C67; }
   @media (max-width: 640px) {
     .fxg-cell { min-width: 58px; }
     table.fxg-matrix th.fxg-rowhead { white-space: normal; min-width: 90px; }
@@ -64,11 +71,11 @@
 </style>
 {%- endmacro %}
 
-{% macro fxg_cell(cell, row) -%}
+{% macro fxg_cell(cell, row, matrix) -%}
 {%- if cell.state == 'tested' -%}
 <button type="button" class="fxg-cell l{{ cell.level }}" data-facet="{{ cell.facet }}" data-cell-type="{{ cell.cell_type }}" data-celltype-source="{{ cell.celltype_source }}"
-  data-label="{{ row.label }}" data-contrast="{{ cell.contrast }}" data-donors="{{ cell.donors }}" data-n="{{ cell.n }}"
-  title="{{ row.label }}, {{ cell.cell_type }}: {{ cell.n }} of {{ cell.n_tested or '?' }} genes at q &lt; 0.05{% if cell.n_up is not none %} ({{ cell.n_up }} up, {{ cell.n_down }} down){% endif %}. Click for the genes.">
+  data-label="{{ row.label }}" data-contrast="{{ cell.contrast }}" data-donors="{{ cell.donors }}" data-n="{{ cell.n }}"{% if matrix.method %} data-method="{{ matrix.method }}" data-source="{{ matrix.source }}"{% endif %}
+  title="{{ row.label }}, {{ cell.cell_type }}: {{ cell.n }} of {{ cell.n_tested or '?' }} {{ 'gene sets significant' if matrix.method else 'genes at q &lt; 0.05' }}{% if cell.n_up is not none %} ({{ cell.n_up }} up, {{ cell.n_down }} down){% endif %}. Click for the list.">
   <span class="n">{{ "{:,}".format(cell.n) }}</span>{% if cell.n and cell.n_up is not none %}<span class="ud"><span class="up">&uarr;{{ "{:,}".format(cell.n_up) }}</span> <span class="down">&darr;{{ "{:,}".format(cell.n_down) }}</span></span>{% endif %}</button>
 {%- elif cell.state == 'descriptive' -%}
 <span class="fxg-cell desc" title="{{ cell.title }}">descriptive<br>only</span>
@@ -79,118 +86,242 @@
 {%- endif -%}
 {%- endmacro %}
 
-{% macro fxg_matrix(matrix, by_facet) -%}
-{{ fxg_styles() }}
-<div class="fxg-wrap" id="fxg">
-  <p class="fxg-legend" id="fxg-legend">Each cell: genes at q &lt; 0.05 for that facet in that cell type{% if matrix.has_direction %}, split into <span style="color:#a8441f">&uarr; higher</span> and <span style="color:#235d94">&darr; lower</span> in the second group of the contrast (or with the trend){% endif %}. Darker means more genes. Click a cell for its genes.</p>
-  <div class="table-wrap"><table class="fxg-matrix" id="fxg-matrix">
+{% macro fxg_matrix(matrix, prefix, kind='genes', hidden=False) -%}
+<div class="fxg-matrix-wrap" id="{{ prefix }}-wrap"{% if matrix.method %} data-variant="{{ matrix.method }}-{{ matrix.source }}"{% endif %}{% if hidden %} hidden{% endif %}>
+  <div class="table-wrap"><table class="fxg-matrix" id="{{ prefix }}-matrix">
     <thead><tr><th></th>{% for col in matrix.columns %}<th scope="col" title="{{ col.cell_type }}{% if col.group != col.cell_type %} (group: {{ col.group }}){% endif %}">{{ col.cell_type }}{% if col.stratum %}<span class="fxg-stratum">{{ col.stratum }}</span>{% endif %}</th>{% endfor %}</tr></thead>
     <tbody>
     {% for row in matrix.rows %}
-      <tr data-facet="{{ row.facet }}"><th scope="row" class="fxg-rowhead">{{ row.label }}{{ doc_toggle('fxg-help-' ~ row.facet, 'About ' ~ row.label ~ ': model, flags and gene set counts') }}</th>
-        {% for cell in row.cells %}<td>{{ fxg_cell(cell, row) }}</td>{% endfor %}</tr>
+      <tr data-facet="{{ row.facet }}"><th scope="row" class="fxg-rowhead">{{ row.label }}{{ doc_toggle(('fxs' if kind == 'modules' else 'fxg') ~ '-help-' ~ row.facet, 'About ' ~ row.label ~ ': model, flags' ~ (' and gene set counts' if kind == 'modules' else '')) }}</th>
+        {% for cell in row.cells %}<td>{{ fxg_cell(cell, row, matrix) }}</td>{% endfor %}</tr>
     {% endfor %}
     </tbody>
   </table></div>
-  {% if matrix.untested_rows %}<p class="fxg-untested" id="fxg-untested">Not tested in any cell type: {% for item in matrix.untested_rows %}{{ item.label }} ({{ item.reason }}){{ '; ' if not loop.last else '.' }}{% endfor %}</p>{% endif %}
-  {% for row in matrix.rows %}
-  {% call doc_block('About ' ~ row.label, id='fxg-help-' ~ row.facet) %}
-  <div class="fxg-help">
-    {% if row.facet == 'age' %}<p>Not adjusted for pathology: age and AD pathology go together in every brain bank, so this partly re-detects pathology. Compare it with the adjusted row. Donors under 60 are left out (<a href="/help#glossary-age-twins">glossary</a>).</p>{% endif %}
-    {% if row.facet == 'age_adjusted' %}<p>Adjusted for pathology: Braak stage (else pathologic AD) is in the model, so what remains is age beyond pathology. Donors under 60 are left out (<a href="/help#glossary-age-twins">glossary</a>).</p>{% endif %}
-    {% if row.facet == 'app_nlgf' %}<p>Host animals are the replicates. Large effects only (a handful of animals per genotype); live-cell isolation makes dissociation-response genes suspect. Animals are compared within one grafted line and timepoint (<a href="/help#glossary-app-nlgf">glossary</a>).</p>{% endif %}
-    {% for column, slot in by_facet.items() %}{% for unit in slot.tested if unit.facet == row.facet %}
-    <h4>{{ unit.cell_type }}{% if unit.stratum %} <span class="muted">({{ unit.stratum }})</span>{% endif %}</h4>
-    <div class="fx-model">{{ unit.contrast_label }}; {{ unit.donors_text }}</div>
-    {{ fx_model(unit) }}{{ fx_sex_control(unit) }}
-    {% if unit.pills %}<div class="fx-flags">{% for pill in unit.pills %}<span class="fx-pill {{ pill[1] }}" title="{{ pill[2] }}"{% if pill|length > 3 and pill[3] %} data-glossary="{{ pill[3] }}"{% endif %}>{{ pill[0] }}</span>{% endfor %}</div>{% endif %}
-    {% if unit.get('lambda_gc') is not none %}<div class="fx-model">Genomic inflation lambda {{ '%.2f'|format(unit.get('lambda_gc')) }}{% if unit.get('inflated') %}: many genes shift together, so read the p values with care{% endif %}.</div>{% endif %}
-    {{ fx_unit_notes(unit) }}
-    {% if unit.modules_view %}<div class="fx-model">Gene sets at q &lt; 0.05 (model test | permutation test, of those tested):</div><div class="fx-mods">{{ fx_module_counts(unit) }}</div>{% endif %}
-    {% endfor %}{% endfor %}
-  </div>
-  {% endcall %}
-  {% endfor %}
-  <div class="fxg-genes" id="fxg-genes" hidden aria-live="polite"></div>
+  {% if matrix.untested_rows %}<p class="fxg-untested">Not tested in any cell type: {% for item in matrix.untested_rows %}{{ item.label }} ({{ item.reason }}){{ '; ' if not loop.last else '.' }}{% endfor %}</p>{% endif %}
 </div>
 {%- endmacro %}
 
-{# The click-to-open gene list script; call once after fxg_matrix (at the end of the panel). #}
-{% macro fxg_script(db_id, browse_base, default_embedding) -%}
+{% macro fxg_help_boxes(rows, by_facet, kind='genes') -%}
+{% set prefix = 'fxs' if kind == 'modules' else 'fxg' %}
+{% for row in rows %}
+{% call doc_block('About ' ~ row.label, id=prefix ~ '-help-' ~ row.facet) %}
+<div class="fxg-help">
+  <p>The number of significant {{ 'gene sets' if kind == 'modules' else 'genes' }} grows with the number of donors, so compare cells within this dataset, not colours across datasets.</p>
+  {% if kind == 'modules' %}<p>A gene set counts as significant when its q is below 0.05, using the model q when the test has at least 30 residual degrees of freedom and the permutation q otherwise (the rule replication across cohorts uses). Up and down follow the sign of the standardised effect.</p>{% endif %}
+  {% if row.facet == 'age' %}<p>Not adjusted for pathology: age and AD pathology go together in every brain bank, so this partly re-detects pathology. Compare it with the adjusted row. Donors under 60 are left out (<a href="/help#glossary-age-twins">glossary</a>).</p>{% endif %}
+  {% if row.facet == 'age_adjusted' %}<p>Adjusted for pathology: Braak stage (else pathologic AD) is in the model, so what remains is age beyond pathology. Donors under 60 are left out (<a href="/help#glossary-age-twins">glossary</a>).</p>{% endif %}
+  {% if row.facet == 'app_nlgf' %}<p>Host animals are the replicates. Large effects only (a handful of animals per genotype); live-cell isolation makes dissociation-response genes suspect. Animals are compared within one grafted line and timepoint (<a href="/help#glossary-app-nlgf">glossary</a>).</p>{% endif %}
+  {% for column, slot in by_facet.items() %}{% for unit in slot.tested if unit.facet == row.facet %}
+  <h4>{{ unit.cell_type }}{% if unit.stratum %} <span class="muted">({{ unit.stratum }})</span>{% endif %}</h4>
+  <div class="fx-model">{{ unit.contrast_label }}; {{ unit.donors_text }}</div>
+  {% if kind == 'modules' %}
+  {% set mm = ((unit.model or {}).get('modules') or {}) %}
+  {% if mm.get('formula') %}<div class="fx-model">Model: <code>{{ mm.get('formula') }}</code>{% if mm.get('n_permutations') %}; {{ "{:,}".format(mm.get('n_permutations')) }} permutations{% endif %}</div>{% endif %}
+  {% if mm.get('method') %}<div class="fx-model">{{ mm.get('method') }}</div>{% endif %}
+  {% else %}
+  {{ fx_model(unit) }}{{ fx_sex_control(unit) }}
+  {% endif %}
+  {% if unit.pills %}<div class="fx-flags">{% for pill in unit.pills %}<span class="fx-pill {{ pill[1] }}" title="{{ pill[2] }}"{% if pill|length > 3 and pill[3] %} data-glossary="{{ pill[3] }}"{% endif %}>{{ pill[0] }}</span>{% endfor %}</div>{% endif %}
+  {% if unit.get('lambda_gc') is not none %}<div class="fx-model">Genomic inflation lambda (genes) {{ '%.2f'|format(unit.get('lambda_gc')) }}{% if unit.get('inflated') %}: many genes shift together, so read the p values with care{% endif %}.</div>{% endif %}
+  {{ fx_unit_notes(unit) }}
+  {% if kind == 'modules' and unit.modules_view %}<div class="fx-model">Gene sets below q 0.05 (model test | permutation test, of those tested):</div><div class="fx-mods">{{ fx_module_counts(unit) }}</div>{% endif %}
+  {% endfor %}{% endfor %}
+</div>
+{% endcall %}
+{% endfor %}
+{%- endmacro %}
+
+{# The list of one sub-tab. kind 'genes' or 'modules'; root_id the element holding the matrices; list_id the list box. #}
+{% macro fxg_list_script(kind, root_id, list_id, db_id, browse_base, default_embedding, obs_columns, score_columns=None) -%}
 <script>
 (function () {
-  var root = document.getElementById('fxg');
-  if (!root) return;
+  var root = document.getElementById({{ root_id|tojson }});
+  var box = document.getElementById({{ list_id|tojson }});
+  if (!root || !box) return;
+  var KIND = {{ kind|tojson }};
   var DB = {{ db_id|tojson }}, BASE = {{ browse_base|tojson }}, EMBEDDING = {{ (default_embedding or '')|tojson }};
-  var API = '/api/databases/' + DB.split('/').map(encodeURIComponent).join('/') + '/facet-tests';
-  var box = document.getElementById('fxg-genes');
+  var CAT = {}, NUM = {};
+  {{ (obs_columns|selectattr('type', 'equalto', 'cat')|map(attribute='name')|list)|tojson }}.forEach(function (name) { CAT[name] = 1; });
+  {{ (obs_columns|selectattr('type', 'equalto', 'num')|map(attribute='name')|list)|tojson }}.forEach(function (name) { NUM[name] = 1; });
+  var SCORES = {{ (score_columns or {})|tojson }};   // "Study/Experiment/module" -> {scanpy, ucell, ...}
+  var DB_PATH = DB.split('/').map(encodeURIComponent).join('/');
+  var API = '/api/databases/' + DB_PATH + '/facet-tests';
+  var FACET_COLUMN = { sex: 'ant_sex', graft_sex: 'ant_sex', host_sex: 'ant_host_sex', disease: 'ant_disease', braak: 'ant_braak',
+    braak_threshold: 'ant_braak', age: 'ant_age', age_adjusted: 'ant_age', apoe4_carrier: 'ant_apoe4_carrier', apoe4_dose: 'ant_apoe4_carrier',
+    app_nlgf: 'ant_app_nlgf' };
+  var SVG_DONOR = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="11" r="1.6"/><circle cx="4.5" cy="7.5" r="1.6"/><circle cx="3" cy="4.5" r="1.6"/><circle cx="11.5" cy="5" r="1.6"/><circle cx="12.5" cy="9" r="1.6"/><circle cx="11" cy="12" r="1.6"/><rect x="1" y="7" width="5" height="1.2"/><rect x="9.5" y="8" width="5" height="1.2"/></svg>';
+  var SVG_VIOLIN = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 1.5c1.6 2.5 1.6 4 .4 6.5 1.4 2.5 1.4 4-.4 6.5-1.8-2.5-1.8-4-.4-6.5C2.4 5.5 2.4 4 4 1.5zM12 1.5c1.2 3 1.2 5 .3 7 1 2 1 4-.3 5.5-1.3-1.5-1.3-3.5-.3-5.5-.9-2-.9-4 .3-7z"/></svg>';
   var current = null, rows = [], shown = 25, query = '';
   function esc(text) { return String(text == null ? '' : text).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-  function unitQuery(cell) {
-    return 'facet=' + encodeURIComponent(cell.dataset.facet) + '&cell_type=' + encodeURIComponent(cell.dataset.cellType) +
-      (cell.dataset.celltypeSource ? '&celltype_source=' + encodeURIComponent(cell.dataset.celltypeSource) : '');
-  }
+  function enc(text) { return encodeURIComponent(text); }
   function qText(q) { return q == null ? 'n/a' : q === 0 ? '&lt; 1e-300' : (q < 0.001 ? Number(q).toExponential(1) : Number(q).toFixed(3)); }
+  function usedQ(row) {   // gene sets: the replication rule, model q at >= 30 residual df, else permutation q
+    if (KIND !== 'modules') return row.q_value;
+    return (row.df != null && row.df >= 30) ? row.q_param : row.q_perm;
+  }
   function donors(row) {
     if (row.n_donors_ref != null && row.n_donors_test != null && row.level_ref) return esc(row.level_ref) + ' ' + row.n_donors_ref + ' / ' + esc(row.level_test) + ' ' + row.n_donors_test;
     return row.n_donors != null ? String(row.n_donors) : '';
   }
-  function effect(row, facet) {
-    var EB = window.antEffectBar;
-    if (!EB) return row.logFC == null ? '' : Number(row.logFC).toFixed(2);
-    var scale = EB.scaleKey(facet, 'lfc');
-    return '<span class="eb-row">' + EB.barHtml({ scale: scale, est: row.logFC, lo: row.ci_low, hi: row.ci_high, sig: row.q_value != null && row.q_value < 0.05, counted: true, whisker: 'ci',
-      title: 'log2 fold change ' + (row.logFC == null ? 'n/a' : Number(row.logFC).toFixed(2)) }) + ' ' + EB.signed(row.logFC, scale) + '</span>';
+  // the split column of the per cell plots: the facet column when it is categorical; Braak falls back to the Braak group
+  function split(facet) {
+    var column = FACET_COLUMN[facet] || ('ant_' + facet);
+    if (CAT[column]) return { column: column, categorical: true, note: '' };
+    if (/^braak/.test(facet) && CAT.ant_braak_group) return { column: 'ant_braak_group', categorical: true, note: ' (split by Braak group)' };
+    if (NUM[column]) return { column: column, categorical: false, note: '' };
+    return null;
+  }
+  function cellFilter(cell) {
+    var source = String(cell.dataset.celltypeSource || '').split('@')[0];
+    if (!source || !CAT[source]) return { query: '', text: 'all cells of the dataset' };
+    return { query: '&subset=' + enc(source + ':' + cell.dataset.cellType), text: 'cells of ' + cell.dataset.cellType };
+  }
+  function link(href, title, svg, extra) {
+    return '<a class="obs-plot-icon' + (extra ? ' ' + extra : '') + '" href="' + esc(href) + '" title="' + esc(title) + '" target="_blank" rel="noopener">' + svg + '</a>';
+  }
+  // the per-cell score column behind a gene set row: UCell for the UCell variant, else the scanpy score
+  function scoreColumn(row) {
+    var columns = SCORES[row.catalog + '/' + row.module] || {};
+    if (row.source === 'ucell' && columns.ucell) return { name: columns.ucell, note: '' };
+    if (columns.scanpy) return { name: columns.scanpy, note: row.source === 'ucell' || row.method === 'pseudobulk' ? '; per-cell scanpy score' : '' };
+    if (columns.ucell) return { name: columns.ucell, note: '; per-cell UCell score' };
+    return null;
+  }
+  function plotIcons(row, cell) {
+    var facet = cell.dataset.facet, label = cell.dataset.label, where = cellFilter(cell);
+    var name, display, note = '';
+    var donorUrl = '/api/facets/' + enc(facet) + '/donor-plot.png?cell_type=' + enc(cell.dataset.cellType) + '&db_id=' + enc(DB);
+    if (KIND === 'modules') {
+      display = row.module;
+      donorUrl += '&module=' + enc(row.catalog + '/' + row.module) + '&method=' + enc(row.method) + '&source=' + enc(row.source);
+      var score = scoreColumn(row);
+      name = score ? score.name : null; note = score ? score.note : '';
+    } else {
+      display = name = row.gene;
+      donorUrl += '&gene=' + enc(row.gene);
+    }
+    var html = link(donorUrl, 'per donor: ' + display + ' by ' + label + ' in ' + cell.dataset.cellType + ', one value per donor, the values the test used', SVG_DONOR, 'donor');
+    if (!name) return html;
+    var I = window.antPlotIcons ? window.antPlotIcons.SVG : {};
+    var s = split(facet), n = enc(name);
+    var per = ' (per cell, descriptive; ' + where.text + ')' + note;
+    if (s && s.categorical) {
+      html += link(BASE + '/plot/violin?x=' + enc(s.column) + '&y=' + n + where.query, 'violin of ' + display + ' by ' + label + s.note + per, SVG_VIOLIN);
+      html += link(BASE + '/plot/ecdf?x=' + n + '&color=' + enc(s.column) + where.query, 'ECDF of ' + display + ' by ' + label + s.note + per, I.line || '');
+      html += link(BASE + '/plot/histogram?x=' + n + '&color=' + enc(s.column) + where.query, 'histogram of ' + display + ' by ' + label + s.note + per, I.bar || '');
+    } else if (s) {
+      html += link(BASE + '/plot/rolling?x=' + enc(s.column) + '&y=' + n + where.query, 'trend of ' + display + ' along ' + label + per, SVG_VIOLIN);
+      html += link(BASE + '/plot/ecdf?x=' + n + where.query, 'ECDF of ' + display + ', not split: ' + label + ' is numeric' + per, I.line || '');
+      html += link(BASE + '/plot/histogram?x=' + n + where.query, 'histogram of ' + display + ', not split: ' + label + ' is numeric' + per, I.bar || '');
+    } else {
+      html += link(BASE + '/plot/ecdf?x=' + n + where.query, 'ECDF of ' + display + ', not split: the facet column is not in this dataset' + per, I.line || '');
+    }
+    if (EMBEDDING) html += link(BASE + '/plot/scatter?embedding=' + enc(EMBEDDING) + '&color=' + n + where.query, EMBEDDING + ' coloured by ' + display + per, I.umap || '');
+    return html;
+  }
+  function effectOf(row) {   // genes: log2 fold change; gene sets: the standardised effect with the CI rescaled
+    if (KIND !== 'modules') return { est: row.logFC, lo: row.ci_low, hi: row.ci_high };
+    var ratio = (row.estimate && row.std_effect != null) ? row.std_effect / row.estimate : null;
+    return { est: row.std_effect, lo: ratio != null && row.ci_low != null ? row.ci_low * ratio : null, hi: ratio != null && row.ci_high != null ? row.ci_high * ratio : null };
+  }
+  // the bars are scaled to the values shown: the 95th percentile of |effect| and CI ends, rounded up; longer bars end in an arrowhead
+  function listScale(list) {
+    var values = [];
+    list.forEach(function (row) { var e = effectOf(row); [e.est, e.lo, e.hi].forEach(function (v) { if (v != null && !isNaN(v)) values.push(Math.abs(v)); }); });
+    if (!values.length) return { max: 1, unit: '' };
+    values.sort(function (a, b) { return a - b; });
+    var top = values[Math.min(values.length - 1, Math.floor(values.length * 0.95))] || values[values.length - 1];
+    var step = Math.pow(10, Math.floor(Math.log10(top || 1)));
+    var max = Math.ceil((top || 1) / step * 2) / 2 * step;
+    return { max: max > 0 ? max : 1, unit: KIND === 'modules' ? 'SD of the donor score' : 'log2 fold change' };
+  }
+  function effectHtml(row, scale) {
+    var EB = window.antEffectBar, e = effectOf(row), q = usedQ(row);
+    if (!EB) return e.est == null ? '' : Number(e.est).toFixed(2);
+    return '<span class="eb-row">' + EB.barHtml({ scale: scale, est: e.est, lo: e.lo, hi: e.hi, sig: q != null && q < 0.05, counted: true, whisker: 'ci',
+      title: (KIND === 'modules' ? 'standardised effect ' : 'log2 fold change ') + (e.est == null ? 'n/a' : Number(e.est).toFixed(2)) + (e.lo != null ? ', 95% CI ' + Number(e.lo).toFixed(2) + ' to ' + Number(e.hi).toFixed(2) : '') }) +
+      ' ' + (e.est == null ? 'n/a' : (e.est > 0 ? '+' : '') + Number(e.est).toFixed(2)) + '</span>';
+  }
+  function nameCell(row) {
+    if (KIND !== 'modules') return '<a href="/genes/' + enc(row.gene) + '">' + esc(row.gene) + '</a>';
+    var parts = String(row.catalog || '').split('/');
+    var href = '/genesets/' + parts.map(enc).join('/') + '/' + enc(row.module);
+    return '<a href="' + href + '">' + esc(row.module) + '</a> <span class="muted" style="font-size:11px">' + esc(row.catalog) + '</span>';
   }
   function draw() {
-    var facet = current.dataset.facet;
     var q = query.trim().toUpperCase();
-    var list = q ? rows.filter(function (row) { return String(row.gene || '').toUpperCase().indexOf(q) >= 0; }) : rows;
-    var body = list.slice(0, shown).map(function (row) {
-      var gene = String(row.gene || '');
-      return '<tr><td><a href="/genes/' + encodeURIComponent(gene) + '">' + esc(gene) + '</a></td><td class="num">' + effect(row, facet) + '</td><td class="num">' + qText(row.q_value) +
-        '</td><td class="num">' + donors(row) + '</td><td class="plots obs-plots">' + (window.antPlotIcons ? window.antPlotIcons.row(BASE, gene, EMBEDDING) : '') + '</td></tr>';
+    var list = q ? rows.filter(function (row) { return String((KIND === 'modules' ? row.module + ' ' + row.catalog : row.gene) || '').toUpperCase().indexOf(q) >= 0; }) : rows;
+    var visible = list.slice(0, shown);
+    var scale = listScale(visible);
+    var head = box.querySelector('.fxg-scale');
+    if (head) head.textContent = '(bar scale ±' + scale.max + ')';
+    var body = visible.map(function (row) {
+      return '<tr><td>' + nameCell(row) + '</td><td class="num">' + effectHtml(row, scale) + '</td><td class="num"' + (KIND === 'modules' ? ' title="' + ((row.df != null && row.df >= 30) ? 'model q (residual df ' + Math.round(row.df) + ')' : 'permutation q') + '"' : '') + '>' + qText(usedQ(row)) + '</td>' +
+        (KIND === 'modules' ? '<td class="num">' + (row.n_genes_found == null ? '' : row.n_genes_found + ' / ' + row.n_genes_requested) + '</td>' : '') +
+        '<td class="num">' + donors(row) + '</td><td class="plots obs-plots">' + plotIcons(row, current) + '</td></tr>';
     }).join('');
-    var table = box.querySelector('tbody');
-    table.innerHTML = body || '<tr><td colspan="5" class="muted">No gene matches.</td></tr>';
+    var cols = KIND === 'modules' ? 6 : 5;
+    box.querySelector('tbody').innerHTML = body || '<tr><td colspan="' + cols + '" class="muted">Nothing matches.</td></tr>';
     var more = box.querySelector('.fxg-more');
     more.hidden = list.length <= shown;
     more.textContent = 'show all ' + list.length.toLocaleString();
   }
+  function unitQuery(cell) {
+    return 'facet=' + enc(cell.dataset.facet) + '&cell_type=' + enc(cell.dataset.cellType) +
+      (cell.dataset.celltypeSource ? '&celltype_source=' + enc(cell.dataset.celltypeSource) : '') +
+      (cell.dataset.method ? '&method=' + enc(cell.dataset.method) + '&source=' + enc(cell.dataset.source) : '');
+  }
+  function close() { box.hidden = true; if (current) current.classList.remove('sel'); current = null; }
   function open(cell) {
+    if (current === cell && !box.hidden) { close(); return; }
     if (current) current.classList.remove('sel');
-    if (current === cell && !box.hidden) { box.hidden = true; current = null; return; }
     current = cell; cell.classList.add('sel'); shown = 25; query = ''; rows = [];
-    var label = cell.dataset.label + ' in ' + cell.dataset.cellType;
     var params = unitQuery(cell);
-    box.innerHTML = '<div class="fxg-genes-head"><span class="t">' + esc(label) + '</span><span class="m">' + esc(cell.dataset.contrast) + '; ' + esc(cell.dataset.donors) + '</span>' +
-      '<input type="search" class="fxg-search" placeholder="search genes" aria-label="search the genes of this cell">' +
-      '<a href="' + API + '/genes?' + params + '&q=0.05&limit=100000&format=csv" download>CSV</a>' +
-      '<a href="' + API + '/volcano.png?' + params + '" target="_blank" rel="noopener" title="Volcano plot of this facet and cell type">volcano</a>' +
+    var modules = KIND === 'modules';
+    var endpoint = API + (modules ? '/modules' : '/genes');
+    var csv = endpoint + '?' + params + '&q=0.05' + (modules ? '&q_by=either' : '') + '&limit=100000&format=csv';
+    var cols = modules ? 6 : 5;
+    box.innerHTML = '<div class="fxg-genes-head"><span class="t">' + esc(cell.dataset.label + ' in ' + cell.dataset.cellType) + '</span><span class="m">' + esc(cell.dataset.contrast) + '; ' + esc(cell.dataset.donors) + '</span>' +
+      '<input type="search" class="fxg-search" placeholder="search ' + (modules ? 'gene sets' : 'genes') + '" aria-label="search this list">' +
+      '<a href="' + csv + '" download' + (modules ? ' title="Gene sets with the model q or the permutation q below 0.05"' : '') + '>CSV</a>' +
+      (modules ? '' : '<a href="' + API + '/volcano.png?' + params + '" target="_blank" rel="noopener" title="Volcano plot of this facet and cell type">volcano</a>') +
       '<button type="button" class="fxg-close">close</button></div>' +
-      '<div class="table-wrap"><table class="fxg-gene-table"><thead><tr><th>Gene</th><th>log2 fold change</th><th>q</th><th>Donors</th><th class="plots">Plots</th></tr></thead>' +
-      '<tbody><tr><td colspan="5" class="muted">loading the genes&hellip;</td></tr></tbody></table></div><button type="button" class="fxg-more" hidden></button>';
+      '<div class="table-wrap"><table class="fxg-gene-table"><thead><tr><th>' + (modules ? 'Gene set' : 'Gene') + '</th><th>' + (modules ? 'Standardised effect' : 'log2 fold change') + '<span class="fxg-scale"></span></th><th>q</th>' +
+      (modules ? '<th>Genes found</th>' : '') + '<th>Donors</th><th class="plots">Plots</th></tr></thead>' +
+      '<tbody><tr><td colspan="' + cols + '" class="muted">loading&hellip;</td></tr></tbody></table></div><button type="button" class="fxg-more" hidden></button>';
     box.hidden = false;
-    box.querySelector('.fxg-close').addEventListener('click', function () { box.hidden = true; if (current) current.classList.remove('sel'); current = null; });
+    box.querySelector('.fxg-close').addEventListener('click', close);
     box.querySelector('.fxg-search').addEventListener('input', function (event) { query = event.target.value; shown = 25; draw(); });
     box.querySelector('.fxg-more').addEventListener('click', function () { shown = Infinity; draw(); });
     var requested = cell;
-    fetch(API + '/genes?' + params + '&q=0.05&sort=q&limit=2000', { credentials: 'same-origin' })
+    fetch(endpoint + '?' + params + '&q=0.05' + (modules ? '&q_by=either' : '') + '&sort=q&limit=2000', { credentials: 'same-origin' })
       .then(function (response) { if (!response.ok) throw new Error('HTTP ' + response.status); return response.json(); })
       .then(function (data) {
         if (current !== requested) return;
-        rows = data.rows || data.genes || [];
-        if (!rows.length) { box.querySelector('tbody').innerHTML = '<tr><td colspan="5" class="muted">No gene is below q 0.05 here.</td></tr>'; return; }
+        rows = (data.rows || []).filter(function (row) { var q = usedQ(row); return q != null && q < 0.05; });
+        rows.sort(function (a, b) { return usedQ(a) - usedQ(b); });
+        if (!rows.length) { box.querySelector('tbody').innerHTML = '<tr><td colspan="' + cols + '" class="muted">Nothing is significant here.</td></tr>'; return; }
         draw();
       })
       .catch(function (error) {
         if (current !== requested) return;
-        box.querySelector('tbody').innerHTML = '<tr><td colspan="5" class="muted">The genes could not be loaded (' + esc(error.message) + ').</td></tr>';
+        box.querySelector('tbody').innerHTML = '<tr><td colspan="' + cols + '" class="muted">The list could not be loaded (' + esc(error.message) + ').</td></tr>';
       });
   }
   root.addEventListener('click', function (event) {
     var cell = event.target.closest ? event.target.closest('button.fxg-cell') : null;
     if (cell) open(cell);
+  });
+  // gene set variant selector (pseudobulk | cell mean scanpy | cell mean UCell)
+  root.querySelectorAll('.fxg-variants button').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var key = button.dataset.variant;
+      root.querySelectorAll('.fxg-variants button').forEach(function (b) { var on = b === button; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+      root.querySelectorAll('.fxg-matrix-wrap[data-variant]').forEach(function (wrap) { wrap.hidden = wrap.dataset.variant !== key; });
+      var label = root.querySelector('.fxg-variant-label');
+      if (label) label.textContent = 'showing: ' + button.textContent;
+      close();
+    });
   });
 })();
 </script>

@@ -3054,6 +3054,9 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "module_scores": module_scores,
         "module_scores_by_catalog": module_scores_by_catalog,
         "n_module_scores": n_modules,
+        # per-cell score columns of each gene set ("Study/Experiment/module" -> {scanpy, ucell, ...}), for the plot
+        # links of the Facet > GS list
+        "module_score_columns": {m['key']: m['methods'] for m in module_scores},
         "score_method_counts": method_counts,
         "top_genes_fallback": top_genes_fallback,
         "has_duckdb": True,
@@ -3072,8 +3075,10 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
             "scope": "dataset",
             "dataset": db_id,
             "id": "mv-modules-tab",
-            # Lives in the Facet GS tab; fetch /module-variability only when that tab opens.
+            # Lives in the hidden box #fxs-percell of the Facet > GS sub-tab; fetch /module-variability only when
+            # that box opens. lazy_tab names the spinner.
             "lazy_tab": "facet-gs",
+            "lazy_box": "fxs-percell",
             # The GS panel header carries the (i) for the explorer's help box.
             "about_in_header": True,
             # For the empty-state branching in _module_view.html: does this
@@ -5250,12 +5255,16 @@ def _fxg_level(count: int) -> int:
     return 1 if count < 10 else 2 if count < 100 else 3 if count < 1000 else 4
 
 
-def _facet_gene_matrix(summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Facet x cell type matrix of one dataset's gene results, for the dataset Facet > Gene sub-tab.
+def _facet_gene_matrix(summary: Dict[str, Any], method: Optional[str] = None,
+                       source: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Facet x cell type matrix of one dataset's results, for the dataset Facet > Gene and Facet > GS sub-tabs.
 
-    Rows are the facets with at least one tested or descriptive unit; facets with no test in any cell type are
-    listed in ``untested_rows`` with a short reason. A cell carries the genes at q < 0.05 split by direction
-    (``n_up`` / ``n_down`` from the API, null on servers before 2.45), or the reason there is no test.
+    Without ``method`` the cells count genes at q < 0.05 (``genes``); with ``method`` / ``source`` they count the
+    gene sets of that variant that are significant by the replication rule (``modules[].n_q05``: q_param when the
+    residual df is at least 30, else q_perm). Rows are the facets with at least one tested or descriptive unit;
+    facets with no test in any cell type are listed in ``untested_rows`` with a short reason. A cell carries the
+    count split by direction (``n_up`` / ``n_down`` from the API, null on servers before 2.45), or the reason
+    there is no test.
     """
     units = [u for u in summary.get('units') or [] if isinstance(u, dict) and u.get('facet')]
     if not any(u.get('tested') for u in units):
@@ -5287,7 +5296,17 @@ def _facet_gene_matrix(summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 cells.append({'state': 'none'})
                 continue
             no_test = unit.get('analysis_level') in ('cell', 'below_floor') or bool((unit.get('flags') or {}).get('descriptive_only'))
-            genes = unit.get('genes') or {}
+            if method:
+                entry = next((m for m in unit.get('modules') or []
+                              if m.get('method') == method and m.get('source') == source), None)
+                genes = ({'n_q05': entry.get('n_q05') if entry.get('n_q05') is not None else entry.get('n_q05_perm'),
+                          'n_up': entry.get('n_up'), 'n_down': entry.get('n_down'), 'n_tested': entry.get('n_modules')}
+                         if entry else {})
+            else:
+                genes = unit.get('genes') or {}
+            if unit.get('tested') and not no_test and method and not genes:
+                cells.append({'state': 'nt', 'short': 'no gene sets', 'title': 'This variant was not run for this cell type.'})
+                continue
             if unit.get('tested') and not no_test and genes:
                 has_result = True
                 count = int(genes.get('n_q05') or 0)
@@ -5310,8 +5329,28 @@ def _facet_gene_matrix(summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         else:
             shorts = sorted({c['short'] for c in cells if c.get('short')})
             untested_rows.append({'facet': facet, 'label': label, 'reason': ', '.join(shorts) or 'not tested'})
-    return {'columns': ordered_columns, 'rows': rows, 'untested_rows': untested_rows,
+    return {'columns': ordered_columns, 'rows': rows, 'untested_rows': untested_rows, 'method': method, 'source': source,
             'has_direction': any(c.get('n_up') is not None for r in rows for c in r['cells'] if c['state'] == 'tested')}
+
+
+# Gene set variants of the Facet > GS matrix, in the order of the selector; the default is the first one the
+# dataset has (pseudobulk where counts exist, else the scanpy cell mean).
+_FXG_MODULE_VARIANTS = (('pseudobulk', 'gene_list', 'pseudobulk'), ('cell_mean', 'geneset', 'cell mean (scanpy score)'),
+                        ('cell_mean', 'ucell', 'cell mean (UCell)'))
+
+
+def _facet_module_matrices(summary: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """One gene set matrix per module variant the dataset has (``_FXG_MODULE_VARIANTS``), plus the default variant."""
+    present = {(m.get('method'), m.get('source')) for u in summary.get('units') or [] for m in u.get('modules') or []}
+    variants = []
+    for method, source, label in _FXG_MODULE_VARIANTS:
+        if (method, source) not in present:
+            continue
+        matrix = _facet_gene_matrix(summary, method, source)
+        if matrix and matrix['rows']:
+            variants.append({'method': method, 'source': source, 'label': label, 'key': f'{method}-{source}',
+                             'matrix': matrix})
+    return {'variants': variants, 'default': variants[0]['key']} if variants else None
 
 
 def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Optional[Dict[str, Any]]:
@@ -5345,6 +5384,7 @@ def _facet_tests_view(summary: Optional[Dict[str, Any]], db_id: str = '') -> Opt
         'dataset_changed': bool(summary.get('dataset_changed')),
         'by_facet': by_facet,
         'matrix': _facet_gene_matrix(summary),
+        'module_matrices': _facet_module_matrices(summary),
         'n_units_tested': summary.get('n_units_tested') or 0,
         'cohort': summary.get('cohort') or None,
         # the summary names the unit; older servers only carry it on the units

@@ -36,6 +36,8 @@ URL hash scheme (feature: back-button / shareable filter state):
 Optional mv_ctx keys:
     "lazy_tab": "facet-gs"   # dataset page: fetch only when this tab opens; also
                              # the name of the tab-loading spinner to dismiss.
+    "lazy_box": "fxs-percell" # dataset page: fetch only when this hidden box is first shown
+                             # (anthive:help-toggled from base.html); wins over lazy_tab.
 #}
 {% from "_macros.html" import mff_styles, mff_scripts, doc_block %}
 {% set _mv = mv_ctx %}
@@ -1301,7 +1303,16 @@ Optional mv_ctx keys:
   // With mv_ctx.lazy_tab (the dataset page's Facet GS tab) the fetch waits until
   // that tab is opened: on the anthive:tab-activated event, or at once when the
   // panel is already active (deep link). Other pages load straight away.
-  if (CTX.lazy_tab) {
+  if (CTX.lazy_box) {
+    // dataset page: the explorer sits in a hidden help box; load when that box is first shown
+    var _boxStarted = false;
+    var startBox = function () { if (_boxStarted) return; _boxStarted = true; load(); };
+    document.addEventListener('anthive:help-toggled', function (ev) {
+      if (ev && ev.detail && ev.detail.id === CTX.lazy_box && ev.detail.open) startBox();
+    });
+    var _box = document.getElementById(CTX.lazy_box);
+    if (_box && !_box.hidden) startBox();
+  } else if (CTX.lazy_tab) {
     var _lazyStarted = false;
     var startLazy = function () { if (_lazyStarted) return; _lazyStarted = true; load(); };
     document.addEventListener('anthive:tab-activated', function (ev) {

@@ -8050,6 +8050,69 @@ def test_dataset_gene_subtab_shows_the_matrix_and_keeps_the_full_table(client):
     full = panel.split('<div class="doc-box" id="fxg-full"')[1]
     assert 'id="fx-table-ant_sex"' in full and 'hidden' in panel.split('id="fxg-full"')[1][:120]
     # gene list script: genes endpoint, csv, volcano, plot icons, effect bar
-    for needle in ("/facet-tests", "/genes?", "&format=csv", "/volcano.png?", "antPlotIcons.row(", "antEffectBar", "show all "):
+    for needle in ("/facet-tests", "/genes", "&format=csv", "/volcano.png?", "/donor-plot.png?", "&db_id=", "/plot/violin?x=",
+                   "/plot/rolling?x=", "&subset=", "per donor", "per cell, descriptive", "antEffectBar", "listScale", "show all "):
         assert needle in panel, needle
     assert "dataset-facet-gene" in browser.VIEW_REGISTRY and "dataset-facet-gene" not in browser.APPROVED_VIEWS
+
+
+# ── Facet > GS matrix (2026-10-13) ──────────────────────────────────────────
+
+def _module_unit(facet, cell_type, entries):
+    unit = _matrix_unit(facet, cell_type, n=5, up=3, down=2)
+    unit["modules"] = [{"method": m, "source": src, "n_modules": 100, "n_q05_param": n, "n_q05_perm": n, "n_q05": n,
+                        "n_up": up, "n_down": down} for m, src, n, up, down in entries]
+    return unit
+
+
+def test_facet_module_matrices_one_per_variant_default_pseudobulk():
+    summary = {"status": "tested", "units": [
+        _module_unit("sex", "microglial cell", [("cell_mean", "geneset", 14, 7, 7), ("cell_mean", "ucell", 21, 5, 16),
+                                                ("pseudobulk", "gene_list", 3, 1, 2)]),
+        _module_unit("braak", "microglial cell", [("cell_mean", "geneset", 2, 2, 0)])]}
+    result = browser._facet_module_matrices(summary)
+    assert [v["key"] for v in result["variants"]] == ["pseudobulk-gene_list", "cell_mean-geneset", "cell_mean-ucell"]
+    assert result["default"] == "pseudobulk-gene_list"
+    pseudobulk = result["variants"][0]["matrix"]
+    sex = pseudobulk["rows"][0]["cells"][0]
+    assert (sex["n"], sex["n_up"], sex["n_down"]) == (3, 1, 2)
+    assert pseudobulk["untested_rows"] == [{"facet": "braak", "label": "Braak stage", "reason": "no gene sets"}]
+    no_counts = browser._facet_module_matrices({"status": "tested", "units": [
+        _module_unit("sex", "microglial cell", [("cell_mean", "geneset", 4, 2, 2)])]})
+    assert no_counts["default"] == "cell_mean-geneset"
+
+
+def test_dataset_gs_subtab_shows_variant_matrices_and_keeps_the_explorer(client, monkeypatch):
+    _dataset_with_module_scores(monkeypatch)
+    text = client.get("/browse/GroupA/ds1").text
+    panel = text.split('id="tab-facet-gs"')[1].split('<section class="tab-panel"')[0]
+    assert 'data-view="dataset-facet-gs"' in panel
+    head = panel.split("</h2>")[0]
+    assert 'data-help-for="fxs-about"' in head and 'data-help-for="fxs-percell"' in head and "per-cell associations (descriptive)" in head
+    # the per-cell explorer sits in the hidden box and loads only when it opens
+    percell = panel.split('<div class="doc-box" id="fxs-percell"')[1]
+    assert percell.split(">")[0].endswith("hidden") and 'id="mv-modules-tab"' in percell
+    assert '"lazy_box": "fxs-percell"' in text and "anthive:help-toggled" in text
+    assert "The number of significant gene sets grows with the number of donors" in panel
+    if 'id="fxs"' in panel:
+        assert 'class="fxg-variants"' in panel and "fxg_list" not in panel
+        assert "q_by=either" in panel and "/modules" in panel and "row.df >= 30" in panel
+
+
+def test_gene_help_boxes_no_longer_carry_module_counts(client):
+    text = client.get("/browse/GroupA/ds1").text
+    help_box = text.split('id="fxg-help-sex"')[1].split('<div class="doc-box"')[0]
+    assert "Gene sets below q 0.05" not in help_box and "fx-mods" not in help_box
+    assert "grows with the number of donors" in help_box
+
+
+def test_explorer_links_open_the_per_cell_box(client):
+    text = client.get("/browse/GroupA/ds1").text
+    handle = text.split("function handleHash(hash)")[1].split("window.addEventListener('hashchange'")[0]
+    assert "getElementById('fxs-percell')" in handle and "antHelpOpen(perCell)" in handle
+
+
+def test_facet_tab_group_has_a_tint_token_with_a_dark_value(client):
+    text = client.get("/browse/GroupA/ds1").text
+    assert "--tab-group-tint: #eef4f5" in text and ':root:not([data-theme="light"]) { --tab-group-tint:' in text
+    assert "background: var(--tab-group-tint)" in text

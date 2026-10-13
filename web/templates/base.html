@@ -17,6 +17,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         :root {
+            --tab-group-tint: #eef4f5;   /* faint teal behind the dataset Facet tab group (Facet / Gene / GS) */
             /* Palette refresh - dark teal is the new primary, cream for warn
                backgrounds, amber medium, red high, dark red high accent. */
             --bar-bg: #335C67;
@@ -44,6 +45,11 @@
             --font: "Roboto", -apple-system, system-ui, "Helvetica Neue", Helvetica, Arial, sans-serif;
             --font-mono: "Roboto Mono", 'SF Mono', 'Fira Code', Consolas, monospace;
         }
+        /* Dark-mode values of the tokens that have one (the site has no dark theme yet; this keeps new tokens ready). */
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) { --tab-group-tint: #1d2a2e; }
+        }
+        :root[data-theme="dark"] { --tab-group-tint: #1d2a2e; }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html { font-size: 15px; }
         body { font-family: var(--font); font-size: 1rem; color: var(--text); background: var(--bg); line-height: 1.5; font-weight: 400; }
@@ -1985,6 +1991,7 @@
     (function () {
       function setHelp(panel, open) {
         panel.hidden = !open;
+        try { document.dispatchEvent(new CustomEvent('anthive:help-toggled', { detail: { id: panel.id, open: open } })); } catch (_) {}
         document.querySelectorAll('[data-help-for="' + panel.id + '"]').forEach(function (button) {
           button.setAttribute('aria-expanded', open ? 'true' : 'false');
           button.classList.toggle('on', open);

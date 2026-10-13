@@ -893,3 +893,32 @@ starCAT modules/scores (`.description` on `/catalogs`). Wire each up when shippe
   gene set results move to GS).
 - The earlier tables (`_fx_effects_block`, `#fx-table-ant_*`, `#fx-untested-extra`) sit in the hidden box `#fxg-full`, opened by the
   "full effects table" toggle in the heading; `#fx-...` links open the Gene sub-tab (anchor fallback in `handleHash`) and the box (`openTarget`).
+
+## Facet > GS matrix, plot links, list scale (2026-10-13)
+
+- The GS sub-tab (`#tab-facet-gs`, still `dataset-facet-gs`, preview) now shows the donor-level gene set results in the Gene layout:
+  `browser._facet_module_matrices(summary)` (in `facet_tests.module_matrices`) builds one `_facet_gene_matrix(summary, method, source)` per
+  variant in `_FXG_MODULE_VARIANTS` order (pseudobulk | cell mean scanpy | cell mean UCell); the default is the first the dataset has. Cells
+  count `modules[].n_q05` / `n_up` / `n_down` (API 2.45: q_param at >= 30 residual df, else q_perm, the `select_p` rule of
+  `facet_module_results`). A segmented control (`.fxg-variants`) swaps the `.fxg-matrix-wrap[data-variant]` tables; "showing: ..." stays.
+  Per facet boxes `fxs-help-<facet>` carry the module model, permutations, flags, lambda, notes and the per method counts (removed from the
+  Gene boxes `fxg-help-<facet>`). Both kinds add the "grows with the number of donors" sentence.
+- `_facet_gene_matrix.html` now has `fxg_styles()`, `fxg_matrix(matrix, prefix, kind, hidden)`, `fxg_help_boxes(rows, by_facet, kind)` and
+  one list script `fxg_list_script(kind, root_id, list_id, db_id, browse_base, default_embedding, obs_columns, score_columns)` for both
+  sub-tabs. The GS list reads `/facet-tests/modules?...&method&source&q=0.05&q_by=either&limit=2000` and keeps rows whose used q < 0.05;
+  columns Gene set (link, muted catalog) | standardised effect (CI rescaled by std_effect / estimate) | q (title says model or permutation)
+  | genes found / requested | donors | plots. `module_score_columns` (dataset_view) maps "Study/Experiment/module" to its per-cell score
+  columns for the plot links.
+- Plot links per row, for the row's facet and cell type: per donor first (`/api/facets/{facet}/donor-plot.png?...&db_id=` with `gene` or
+  `module`+`method`+`source`, API 2.45 `db_id` filter), then per cell (descriptive) plots of the cells of that stratum (`subset=<celltype
+  source column>:<cell type>`, none for `constant_all_cells`): violin (`x` facet column, `y` gene or score), ECDF and histogram coloured by the
+  facet column, embedding coloured by the gene. Numeric facets: Braak uses `ant_braak_group` when present, otherwise a `rolling` trend and
+  unsplit ECDF / histogram (the tooltip says so). Facet columns: `FACET_COLUMN` in the script.
+- List bars are scaled to the rows shown (`listScale`: 95th percentile of |effect| and CI ends, rounded; longer bars end in the arrowhead):
+  `antEffectBar` accepts a `{max, unit}` scale object for this. The header shows "(bar scale ±x)".
+- The per-cell association explorer moved into the hidden box `#fxs-percell` ("per-cell associations (descriptive)" toggle in the GS
+  heading): `mv_ctx.lazy_box` makes `_module_view.html` load on `anthive:help-toggled` (dispatched by base.html `setHelp`) for that box;
+  `#facet-gs&mv=...` and the older aliases open the box in `handleHash`.
+- The Facet tab group has a faint tint, token `--tab-group-tint` on `:root` in base.html (`#eef4f5`, dark value `#1d2a2e` under
+  `prefers-color-scheme: dark` guarded by `:root:not([data-theme="light"])` and under `:root[data-theme="dark"]`); pills are white on it,
+  the open group gains the full border and a 2px teal top line, the open pill stays filled.

@@ -11,7 +11,8 @@
    descriptive.  Filled means the cohort's own q is below 0.05, open means it is not.  The thin whisker is the 95
    percent CI in a forest and the min to max over the counted cohorts in a summary table.
 
-   API:  antEffectBar.scaleKey(facet, measure)   measure 'lfc' or 'sd'
+   API:  antEffectBar.scaleKey(facet, measure)   measure 'lfc' or 'sd'; any `scale` argument may also be an object
+         {max, unit} for a list scaled to its own values (the dataset Facet > Gene and GS lists)
          antEffectBar.barHtml({scale, est, lo, hi, sig, counted, descriptive, whisker: 'ci' | 'range', title})
          antEffectBar.axisHtml(scale)           header cell content: unit, then -max, 0, +max once
          antEffectBar.numberHtml(est, scale, q) signed number with q beside it
@@ -71,6 +72,8 @@ window.antEffectBar = window.antEffectBar || (function () {
   // 'lfc_braak', 'sd_two', ...; unknown facets are two-group
   function scaleKey(facet, measure) { return (measure === 'sd' ? 'sd' : 'lfc') + '_' + shapeOf(facet); }
   function scaleOf(key) {
+    // an explicit scale {max, unit} (data-scaled lists such as the dataset Facet > Gene and GS gene lists)
+    if (key && typeof key === 'object') return { max: key.max > 0 ? key.max : 1, unit: key.unit || '', faint: null };
     var parts = String(key || 'lfc_two').split('_');
     var base = (SHAPES[parts[1]] || SHAPES.two)[parts[0] === 'sd' ? 'sd' : 'lfc'];
     return { max: base.max, unit: base.unit, faint: parts[0] === 'lfc' && parts[1] === 'two' ? TWO_GROUP_TICK : null };
