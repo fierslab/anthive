@@ -1157,16 +1157,15 @@
       {% for s in de_studies %}
       <tr>
           <td><a href="/browse/{{ folder_browse_id }}/{{ file_id }}/de/{{ s.study_id | urlencode }}"><strong>{{ s.name or s.study_id }}</strong></a></td>
-          <td style="color:#555">{{ s.method or '—' }}</td>
-          <td style="color:#555">{{ s.target or '—' }}</td>
-          <td style="color:#555">{{ s.n_terms if s.n_terms is not none else '—' }}</td>
-          <td style="color:#555">{{ s.n_contrasts if s.n_contrasts is not none else '—' }}</td>
-          <td style="color:#555;font-family:var(--font-mono);font-size:11px">{{ "{:,}".format(s.n_rows) if s.n_rows else '—' }}</td>
+          <td style="color:#555">{{ s.method or 'none' }}</td>
+          <td style="color:#555">{{ s.target or 'none' }}</td>
+          <td style="color:#555">{{ s.n_terms if s.n_terms is not none else '' }}</td>
+          <td style="color:#555">{{ s.n_contrasts if s.n_contrasts is not none else '' }}</td>
+          <td style="color:#555;font-family:var(--font-mono);font-size:11px">{{ "{:,}".format(s.n_rows) if s.n_rows else '' }}</td>
           <td style="white-space:nowrap">
-              <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/volcano?study={{ s.study_id | urlencode }}" class="chip" title="volcano plot — log2FC vs −log10(padj) for a contrast">🌋 volcano</a>
-              <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/ma?study={{ s.study_id | urlencode }}" class="chip" title="MA plot — effect size vs mean expression">📊 MA</a>
-              <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/de_heatmap?study={{ s.study_id | urlencode }}" class="chip" title="DE heatmap — contrasts × genes/modules">🔥 heatmap</a>
-              <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/de/{{ s.study_id | urlencode }}" class="chip" title="browse terms, contrasts, gene tables">🔬 browse</a>
+              <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/volcano?study={{ s.study_id | urlencode }}" class="chip" title="Volcano plot of one contrast: effect against adjusted p">volcano</a>
+              {% if de_has_mean(s.method) %}<a href="/browse/{{ folder_browse_id }}/{{ file_id }}/plot/ma?study={{ s.study_id | urlencode }}" class="chip" title="MA plot: effect against mean expression">MA plot</a>{% endif %}
+              <a href="/browse/{{ folder_browse_id }}/{{ file_id }}/de/{{ s.study_id | urlencode }}" class="chip" title="Browse the terms, contrasts and gene tables">browse</a>
           </td>
       </tr>
       {% endfor %}

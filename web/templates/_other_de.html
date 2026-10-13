@@ -12,6 +12,29 @@
    tests. Styles come from _facet_gene_matrix.html (fxg_styles). #}
 {% from "_macros.html" import doc_block, doc_toggle, review_banner %}
 
+{% macro ode_cell(row, study, noun) -%}
+<button type="button" class="fxg-cell {{ 'lcell' if row.level == 'cell' else 'l' ~ row.level }}" data-study="{{ study.study_id }}" data-term="{{ row.term }}" data-contrast="{{ row.contrast }}"
+  data-efftype="{{ row.efftype or '' }}" data-obs-column="{{ row.obs_column or '' }}" data-subset="{{ study.subset.query }}" data-label="{{ row.label }}" data-study-name="{{ study.name }}"
+  data-cell-level="{{ 'true' if study.cell_level else 'false' }}" data-ma="{{ 'true' if study.has_mean else 'false' }}"
+  title="{{ row.label }} (term {{ row.term }}): {{ row.n }} of {{ row.n_tested or '?' }} {{ noun }} at adj. p &lt; 0.05{% if row.n_up is not none %} ({{ row.n_up }} up, {{ row.n_down }} down){% endif %}{% if study.cell_level %}; cell-level p values, not comparable with the donor-level results{% endif %}. Click for the list.">
+  <span class="n">{{ "{:,}".format(row.n) }}</span>{% if row.n and row.n_up is not none %}<span class="ud"><span class="up">&uarr;{{ "{:,}".format(row.n_up) }}</span> <span class="down">&darr;{{ "{:,}".format(row.n_down) }}</span></span>{% endif %}</button>
+{%- endmacro %}
+
+{# One study table: a header row per term with more than one contrast (collapsed when it has more than 5), then its rows. #}
+{% macro ode_table(study, groups, noun) -%}
+<div class="table-wrap"><table class="fxg-matrix ode-matrix">
+  <thead><tr><th class="fxg-corner">{{ noun }}</th><th scope="col" title="The cells this study covers">{{ study.subset.label }}</th></tr></thead>
+  {% for group in groups %}
+  <tbody class="ode-group" data-term="{{ group.term }}">
+    {% if group.rows|length > 1 %}<tr class="ode-term-head"><th colspan="2"><button type="button" class="ode-term-toggle" aria-expanded="{{ 'false' if group.collapsed else 'true' }}" title="term {{ group.term }}">{{ group.label }} <span class="muted">({{ group.rows|length }} contrasts)</span></button></th></tr>{% endif %}
+    {% for row in group.rows %}
+    <tr class="ode-row"{% if group.collapsed %} hidden{% endif %}><th scope="row" class="fxg-rowhead" title="term {{ row.term }}, contrast {{ row.contrast }}">{{ row.label }}</th><td>{{ ode_cell(row, study, noun) }}</td></tr>
+    {% endfor %}
+  </tbody>
+  {% endfor %}
+</table></div>
+{%- endmacro %}
+
 {% macro other_de_section(studies, kind, db_id, browse_base, default_embedding) -%}
 {% set noun = 'gene sets' if kind == 'module' else 'genes' %}
 <div class="ode-wrap" id="ode-{{ kind }}">
@@ -24,28 +47,23 @@
   {% endcall %}
   {% for study in studies %}
   <div class="ode-study" id="ode-study-{{ study.key }}">
-    <h3 class="subsection-head">{{ study.name }} <span class="muted" style="font-weight:normal">{{ study.method }}{% if study.level %}, {{ study.level }} level{% endif %}{% if study.n_cells %}, {{ "{:,}".format(study.n_cells|int) }} cells{% endif %}</span>{{ doc_toggle('ode-help-' ~ study.key, 'About this study') }}</h3>
+    <h3 class="subsection-head">{{ study.name }} <span class="muted" style="font-weight:normal">{{ study.method }}{% if study.level %}, {{ study.level }} level{% endif %}{% if study.n_cells %}, {{ "{:,}".format(study.n_cells|int) }} cells{% endif %}</span>{% if study.cell_level %} <span class="fx-pill warn ode-cell-pill" title="A cell-level model treats every cell as independent, so its p values are far too small; read the effects, not the counts.">cell level, descriptive</span>{% endif %}{{ doc_toggle('ode-help-' ~ study.key, 'About this study') }}</h3>
     {% call doc_block('About ' ~ study.name, id='ode-help-' ~ study.key) %}
       {% if study.description %}<p>{{ study.description }}</p>{% endif %}
-      <p>Method: {{ study.method or 'not recorded' }}{% if study.level %} ({{ study.level }} level){% endif %}. Reference: {{ {'vsgrandmean': 'each level against the average of all levels', 'vsreference': 'each level against a reference level'}.get(study.reference_type, study.reference_type or 'not recorded') }}.</p>
-      <p>Covariates: {{ study.covariates or 'not recorded' }}. Subset: {{ study.subset_filter or 'none (all cells)' }}{% if study.subset.note %}; {{ study.subset.note }}{% endif %}.</p>
-      {% if study.source %}<p>Source: <code>{{ study.source }}</code></p>{% endif %}
-      {% if study.notes %}<p>Notes: {{ study.notes }}</p>{% endif %}
+      <p>The study used {{ study.method or 'a method that was not recorded' }}{% if study.level %}, at {{ study.level }} level{% endif %}, and compares {{ {'vsgrandmean': 'each level with the average of all levels', 'vsreference': 'each level with a reference level'}.get(study.reference_type, 'groups in a way that was not recorded') }}. {% if study.covariates %}It adjusts for {{ study.covariates }}.{% else %}Its covariates were not recorded.{% endif %} {% if study.subset_filter %}It covers the cells where {{ study.subset_filter }}{% if study.subset.note %}; {{ study.subset.note }}{% endif %}.{% else %}It covers all cells.{% endif %}</p>
+      {% if study.cell_level %}<p>Cell-level p values are not comparable with the donor-level results: with thousands of cells nearly everything is "significant", so the cells of this matrix have one flat colour, the list is sorted by effect size and the adjusted p comes last.</p>{% endif %}
+      {% if study.source %}<p>It was imported from <code>{{ study.source }}</code>.</p>{% endif %}
+      {% if study.notes %}<p>{{ study.notes }}</p>{% endif %}
       <p>There is no per donor plot here: these results are not the donor-level facet tests{% if 'pseudobulk' in (study.level or '') %}, and even for this pseudobulk study the per donor values were not stored{% endif %}. The per cell plots in the list are descriptive.</p>
     {% endcall %}
-    <div class="table-wrap"><table class="fxg-matrix ode-matrix">
-      <thead><tr><th></th><th scope="col" title="The cells this study covers">{{ study.subset.label }}</th></tr></thead>
-      <tbody>
-      {% for row in study.rows %}
-        <tr{% if loop.index > 20 %} class="ode-more-row" hidden{% endif %}><th scope="row" class="fxg-rowhead">{{ row.label }}</th><td>
-          <button type="button" class="fxg-cell l{{ row.level }}" data-study="{{ study.study_id }}" data-term="{{ row.term }}" data-contrast="{{ row.contrast }}"
-            data-efftype="{{ row.efftype or '' }}" data-obs-column="{{ row.obs_column or '' }}" data-subset="{{ study.subset.query }}" data-label="{{ row.label }}" data-study-name="{{ study.name }}"
-            title="{{ row.label }}: {{ row.n }} of {{ row.n_tested or '?' }} {{ noun }} at padj &lt; 0.05{% if row.n_up is not none %} ({{ row.n_up }} up, {{ row.n_down }} down){% endif %}. Click for the list.">
-            <span class="n">{{ "{:,}".format(row.n) }}</span>{% if row.n and row.n_up is not none %}<span class="ud"><span class="up">&uarr;{{ "{:,}".format(row.n_up) }}</span> <span class="down">&darr;{{ "{:,}".format(row.n_down) }}</span></span>{% endif %}</button></td></tr>
-      {% endfor %}
-      </tbody>
-    </table></div>
-    {% if study.rows|length > 20 %}<button type="button" class="fxg-more ode-show-all">show all {{ study.rows|length }} contrasts</button>{% endif %}
+    {% if study.groups %}{{ ode_table(study, study.groups, noun) }}{% else %}<p class="fxg-untested">Only technical terms in this study.</p>{% endif %}
+    {% if study.technical_groups %}
+    <button type="button" class="doc-toggle fxg-full-toggle" data-help-for="ode-tech-{{ study.key }}" aria-controls="ode-tech-{{ study.key }}" aria-expanded="false" title="Batches, interactions and per line or per sample terms of the model: show or hide">technical terms ({{ study.technical_groups|length }})</button>
+    {% call doc_block('Technical terms of ' ~ study.name, id='ode-tech-' ~ study.key) %}
+      <p>Model terms that are not a biological comparison a reader can use directly: batches, interaction terms and terms per cell line or sample. They are kept for completeness.</p>
+      {{ ode_table(study, study.technical_groups, noun) }}
+    {% endcall %}
+    {% endif %}
   </div>
   {% endfor %}
   <div class="fxg-genes" id="ode-{{ kind }}-list" hidden aria-live="polite"></div>
@@ -111,7 +129,7 @@
     box.querySelector('tbody').innerHTML = visible.map(function (row) {
       var gene = String(row.gene_name || '');
       var nameCell = KIND === 'module' ? esc(gene) : '<a href="/genes/' + enc(gene) + '">' + esc(gene) + '</a>';
-      return '<tr><td>' + nameCell + '</td><td class="num">' + effectHtml(row, scale) + '</td><td class="num">' + pText(row.padj) + '</td><td class="plots obs-plots">' + plots(row, current) + '</td></tr>';
+      return '<tr><td>' + nameCell + '</td><td class="num">' + effectHtml(row, scale) + '</td><td class="plots obs-plots">' + plots(row, current) + '</td><td class="num">' + pText(row.padj) + '</td></tr>';
     }).join('') || '<tr><td colspan="4" class="muted">Nothing matches.</td></tr>';
     var more = box.querySelector('.fxg-more');
     more.hidden = list.length <= shown;
@@ -126,12 +144,14 @@
     var path = API + enc(d.study) + '/terms/' + enc(d.term) + '/contrasts/' + enc(d.contrast);
     var plotQuery = 'study=' + enc(d.study) + '&term=' + enc(d.term) + '&contrast=' + enc(d.contrast);
     var effectLabel = d.efftype === 'zeff' ? 'Effect (z)' : 'log2 fold change';
+    var cellLevel = d.cellLevel === 'true';
     box.innerHTML = '<div class="fxg-genes-head"><span class="t">' + esc(d.label) + '</span><span class="m">' + esc(d.studyName) + '</span>' +
       '<input type="search" class="fxg-search" placeholder="search" aria-label="search this list">' +
       '<a href="' + BASE + '/plot/volcano?' + plotQuery + '" target="_blank" rel="noopener" title="Full volcano plot of this contrast">volcano</a>' +
-      '<a href="' + BASE + '/plot/ma?' + plotQuery + '" target="_blank" rel="noopener" title="MA plot of this contrast (needs a mean expression; some methods do not store one)">MA plot</a>' +
+      (d.ma === 'true' ? '<a href="' + BASE + '/plot/ma?' + plotQuery + '" target="_blank" rel="noopener" title="MA plot of this contrast">MA plot</a>' : '') +
+      '<a href="' + BASE + '/plot/de_heatmap?study=' + enc(d.study) + '&term=' + enc(d.term) + '" target="_blank" rel="noopener" title="Heatmap of the contrasts of this term">heatmap</a>' +
       '<button type="button" class="fxg-close">close</button></div>' +
-      '<div class="table-wrap"><table class="fxg-gene-table"><thead><tr><th>' + (KIND === 'module' ? 'Module' : 'Gene') + '</th><th>' + effectLabel + '<span class="fxg-scale"></span></th><th>adj. p</th><th class="plots">Plots</th></tr></thead>' +
+      '<div class="table-wrap"><table class="fxg-gene-table"><thead><tr><th>' + (KIND === 'module' ? 'Module' : 'Gene') + '</th><th>' + effectLabel + '<span class="fxg-scale"></span></th><th class="plots">Plots</th><th>adj. p' + (cellLevel ? ' <span class="fx-pill warn" title="cell-level p values are not comparable">descriptive</span>' : '') + '</th></tr></thead>' +
       '<tbody><tr><td colspan="4" class="muted">loading&hellip;</td></tr></tbody></table></div><button type="button" class="fxg-more" hidden></button>';
     box.hidden = false;
     // keep the list under the study it belongs to
@@ -141,11 +161,13 @@
     box.querySelector('.fxg-search').addEventListener('input', function (event) { query = event.target.value; shown = 25; draw(); });
     box.querySelector('.fxg-more').addEventListener('click', function () { shown = Infinity; draw(); });
     var requested = cell;
-    fetch(path + '?padj_max=0.05&sort=padj&limit=2000', { credentials: 'same-origin' })
+    // cell-level studies: effect first (largest effect size), since their adjusted p values do not rank evidence
+    fetch(path + '?padj_max=0.05&sort=' + (cellLevel ? 'effsize' : 'padj') + '&limit=2000', { credentials: 'same-origin' })
       .then(function (response) { if (!response.ok) throw new Error('HTTP ' + response.status); return response.json(); })
       .then(function (data) {
         if (current !== requested) return;
         rows = (data.rows || []).filter(function (row) { return row.padj != null && row.padj < 0.05; });
+        if (cellLevel) rows.sort(function (a, b) { return Math.abs(b.effsize || 0) - Math.abs(a.effsize || 0); });
         if (!rows.length) { box.querySelector('tbody').innerHTML = '<tr><td colspan="4" class="muted">Nothing is below adjusted p 0.05 here.</td></tr>'; return; }
         draw();
       })
@@ -157,10 +179,11 @@
   root.addEventListener('click', function (event) {
     var cell = event.target.closest ? event.target.closest('button.fxg-cell') : null;
     if (cell) { open(cell); return; }
-    var all = event.target.closest ? event.target.closest('.ode-show-all') : null;
-    if (all) {
-      all.parentNode.querySelectorAll('.ode-more-row').forEach(function (row) { row.hidden = false; });
-      all.hidden = true;
+    var toggle = event.target.closest ? event.target.closest('.ode-term-toggle') : null;
+    if (toggle) {
+      var open = toggle.getAttribute('aria-expanded') !== 'true';
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+      toggle.closest('tbody').querySelectorAll('tr.ode-row').forEach(function (row) { row.hidden = !open; });
     }
   });
 })();

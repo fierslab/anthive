@@ -36,6 +36,14 @@
   .fxg-cell.l4 .up { color: #7a2c10; } .fxg-cell.l4 .down { color: #123f6b; }
   .fxg-cell:hover { border-color: #335C67; }
   .fxg-cell.sel { outline: 2px solid #E09F3E; outline-offset: 1px; }
+  /* cell-level (descriptive) DE: one flat colour, never a count scale */
+  .fxg-cell.lcell { background: #eef0f2; color: #6b7280; border: 1px solid #dde1e5; }
+  .fxg-cell.lcell .up, .fxg-cell.lcell .down { color: #6b7280; }
+  table.fxg-matrix th.fxg-corner { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: #94a3b8; vertical-align: bottom; }
+  .ode-term-toggle { background: none; border: 0; padding: 4px 0 0; font: inherit; font-size: 12px; font-weight: 600; color: var(--text); cursor: pointer; text-align: left; }
+  .ode-term-toggle::before { content: "\25B8  "; font-size: 9px; color: var(--text-muted); }
+  .ode-term-toggle[aria-expanded="true"]::before { content: "\25BE  "; }
+  .ode-cell-pill { font-size: 10.5px; vertical-align: 1px; }
   .fxg-cell.nt, .fxg-cell.desc { cursor: default; background: #fafbfc; color: #9aa1a9; border: 1px dashed #dde1e5; font-size: 10.5px; }
   .fxg-cell.desc { color: #8a6d2c; border-color: #ead9b0; }
   .fxg-cell.none { cursor: default; background: none; color: #c9ced4; }
@@ -89,7 +97,7 @@
 {% macro fxg_matrix(matrix, prefix, kind='genes', hidden=False) -%}
 <div class="fxg-matrix-wrap" id="{{ prefix }}-wrap"{% if matrix.method %} data-variant="{{ matrix.method }}-{{ matrix.source }}"{% endif %}{% if hidden %} hidden{% endif %}>
   <div class="table-wrap"><table class="fxg-matrix" id="{{ prefix }}-matrix">
-    <thead><tr><th></th>{% for col in matrix.columns %}<th scope="col" title="{{ col.cell_type }}{% if col.group != col.cell_type %} (group: {{ col.group }}){% endif %}">{{ col.cell_type }}{% if col.stratum %}<span class="fxg-stratum">{{ col.stratum }}</span>{% endif %}</th>{% endfor %}</tr></thead>
+    <thead><tr><th class="fxg-corner" title="Each cell counts {{ 'gene sets' if kind == 'modules' else 'genes' }}">{{ 'gene sets' if kind == 'modules' else 'genes' }}</th>{% for col in matrix.columns %}<th scope="col" title="{{ col.cell_type }}{% if col.group != col.cell_type %} (group: {{ col.group }}){% endif %}">{{ col.cell_type }}{% if col.stratum %}<span class="fxg-stratum">{{ col.stratum }}</span>{% endif %}</th>{% endfor %}</tr></thead>
     <tbody>
     {% for row in matrix.rows %}
       <tr data-facet="{{ row.facet }}"><th scope="row" class="fxg-rowhead">{{ row.label }}{{ doc_toggle(('fxs' if kind == 'modules' else 'fxg') ~ '-help-' ~ row.facet, 'About ' ~ row.label ~ ': model, flags' ~ (' and gene set counts' if kind == 'modules' else '')) }}</th>

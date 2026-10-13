@@ -107,6 +107,8 @@ def view_tip(key: str, text: str = '') -> str:
 
 
 templates.env.globals['view_approved'] = view_approved
+# MA plots need a mean expression, which only the pseudobulk-style DE methods store
+templates.env.globals['de_has_mean'] = lambda method: _de_method_level(method).startswith('donor')
 templates.env.globals['view_class'] = view_class
 templates.env.globals['view_tip'] = view_tip
 templates.env.globals['VIEW_PREVIEW_TIP'] = VIEW_PREVIEW_TIP
@@ -4163,9 +4165,23 @@ def _de_method_level(method: Any) -> str:
     return ''
 
 
+# Plain labels for common DE model terms (the raw term stays in the tooltip).
+_DE_TERM_LABELS = {'sex': 'sex', 'sex_donor': 'sex of the donor', 'sex_mouse': 'sex of the host mouse', 'strain': 'host strain',
+                   'genotype': 'genotype', 'treatment': 'treatment', 'cluster': 'cluster', 'condition': 'condition'}
+# Model terms a biologist cannot use directly (batches, interactions, per line or per sample terms): shown behind
+# a "technical terms" toggle.
+_DE_TECHNICAL_TERM = re.compile(r'(batch|interaction|intplus|patient|relevel|sample|mouse_id|donor_id|(^|_)line(_|$)|:)', re.I)
+
+
+def _de_term_label(term: Any) -> str:
+    """Display label of a DE model term ('Sex_donor' -> 'sex of the donor'; unknown terms with spaces for underscores)."""
+    raw = str(term or '').strip()
+    return _DE_TERM_LABELS.get(raw.lower(), raw.replace('_', ' '))
+
+
 def _de_row_label(term: str, contrast: str, reference: Any) -> str:
     """A plain row label for one (term, contrast) of a stored DE study ('3 vs all (cluster)', 'K vs W (genotype)')."""
-    term_text = str(term or '').replace('_', ' ').strip()
+    term_text = _de_term_label(term)
     contrast = str(contrast or '').strip()
     if ' - ' in contrast:
         left, right = contrast.split(' - ', 1)
@@ -4208,6 +4224,8 @@ def _other_de_view(api_url: str, db_id: str, studies: List[Dict[str, Any]], obs:
         if not isinstance(summary, dict) or 'contrasts' not in summary:
             continue
         subset = _de_subset(summary.get('subset_filter'), categorical)
+        level = _de_method_level(summary.get('method'))
+        cell_level = level == 'cell'
         rows = []
         for item in summary['contrasts']:
             if str(item.get('term')) == 'intercept':
@@ -4219,12 +4237,24 @@ def _other_de_view(api_url: str, db_id: str, studies: List[Dict[str, Any]], obs:
             rows.append({'term': item.get('term'), 'contrast': item.get('contrast'),
                          'label': _de_row_label(item.get('term'), item.get('contrast'), summary.get('reference_type')),
                          'n': count, 'n_up': item.get('n_up'), 'n_down': item.get('n_down'), 'n_tested': item.get('n_genes'),
-                         'level': _fxg_level(count), 'efftype': item.get('efftype'), 'obs_column': column})
+                         # cell-level models: one flat colour, never a count scale (their p values are not comparable)
+                         'level': 'cell' if cell_level else _fxg_level(count), 'efftype': item.get('efftype'),
+                         'obs_column': column})
+        # group the rows by term; technical terms (batches, interactions, per line terms) go behind a toggle
+        groups: List[Dict[str, Any]] = []
+        for row in rows:
+            if not groups or groups[-1]['term'] != row['term']:
+                groups.append({'term': row['term'], 'label': _de_term_label(row['term']), 'rows': [],
+                               'technical': bool(_DE_TECHNICAL_TERM.search(str(row['term'] or '')))})
+            groups[-1]['rows'].append(row)
+        for group in groups:
+            group['collapsed'] = len(group['rows']) > 5
         target = 'module' if str(summary.get('target') or '').lower() == 'module' else 'gene'
         covariates = summary.get('covariates')
         out[target].append({
             'study_id': study_id, 'name': summary.get('name') or study_id, 'method': summary.get('method') or '',
-            'level': _de_method_level(summary.get('method')), 'n_cells': summary.get('n_cells_total'),
+            'level': level, 'cell_level': cell_level, 'has_mean': level.startswith('donor'), 'n_cells': summary.get('n_cells_total'),
+            'groups': [g for g in groups if not g['technical']], 'technical_groups': [g for g in groups if g['technical']],
             'description': summary.get('description'), 'reference_type': summary.get('reference_type'),
             'covariates': ', '.join(covariates) if isinstance(covariates, list) else covariates,
             'subset_filter': summary.get('subset_filter'), 'source': summary.get('source'), 'notes': summary.get('notes'),

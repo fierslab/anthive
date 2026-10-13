@@ -8123,7 +8123,8 @@ def test_facet_tab_group_has_a_tint_token_with_a_dark_value(client):
 @pytest.mark.parametrize("term,contrast,reference,expected", [
     ("cluster", "3", "vsgrandmean", "3 vs all (cluster)"),
     ("genotype", "K_vs_W", "vsreference", "K vs W (genotype)"),
-    ("Strain", "AppNLGF - AppHuHu", "vsgrandmean", "AppNLGF vs AppHuHu (Strain)"),
+    ("Strain", "AppNLGF - AppHuHu", "vsgrandmean", "AppNLGF vs AppHuHu (host strain)"),
+    ("Sex_donor", "F", "vsgrandmean", "F vs all (sex of the donor)"),
 ])
 def test_de_row_label(term, contrast, reference, expected):
     assert browser._de_row_label(term, contrast, reference) == expected
@@ -8161,7 +8162,7 @@ def test_other_de_view_splits_gene_and_module_studies(monkeypatch):
     monkeypatch.setattr(browser, "_api_get", _other_de_fake)
     view = browser._other_de_view("http://x", "GroupA/ds1", _OTHER_DE_STUDIES, {"categorical": ["sex", "leiden"]})
     gene = view["gene"][0]
-    assert [r["label"] for r in gene["rows"]] == ["M vs F (Sex)"]            # intercept dropped
+    assert [r["label"] for r in gene["rows"]] == ["M vs F (sex)"]            # intercept dropped
     row = gene["rows"][0]
     assert (row["n"], row["n_up"], row["n_down"], row["obs_column"]) == (12, 5, 7, "sex")
     assert gene["level"].startswith("donor") and gene["subset"]["label"] == "all cells" and gene["covariates"] == "batch"
@@ -8206,3 +8207,34 @@ def test_donor_plot_page_for_a_gene_set_and_without_parameters(client):
 def test_plot_pages_share_the_caveat_partial(client):
     text = client.get("/browse/GroupA/ds1/plot/violin").text
     assert 'id="cv-toggle"' in text and 'id="cv-panel"' in text
+
+
+def test_other_de_cell_level_studies_are_flat_and_technical_terms_hidden(monkeypatch):
+    def fake(api_url, path, **kwargs):
+        if path.endswith("/de/glmm/summary"):
+            contrasts = [{"term": "Sex_donor", "contrast": "F", "n_genes": 100, "n_sig": 60, "n_up": 20, "n_down": 40, "efftype": "log2fc"},
+                         {"term": "batch_group", "contrast": "B1", "n_genes": 100, "n_sig": 3, "n_up": 1, "n_down": 2, "efftype": "log2fc"}]
+            contrasts += [{"term": "cluster", "contrast": str(i), "n_genes": 100, "n_sig": i, "n_up": i, "n_down": 0, "efftype": "log2fc"}
+                          for i in range(7)]
+            return {"study_id": "glmm", "name": "GLMM", "method": "glmm", "target": "gene", "reference_type": "vsgrandmean",
+                    "subset_filter": None, "contrasts": contrasts}
+        return _fake_api_get(api_url, path)
+    monkeypatch.setattr(browser, "_api_get", fake)
+    view = browser._other_de_view("http://x", "GroupA/ds1", [{"study_id": "glmm"}], {"categorical": []})
+    study = view["gene"][0]
+    assert study["cell_level"] is True and study["has_mean"] is False
+    assert all(row["level"] == "cell" for row in study["rows"])                     # no count scale
+    assert [g["term"] for g in study["groups"]] == ["Sex_donor", "cluster"]
+    assert [g["term"] for g in study["technical_groups"]] == ["batch_group"]
+    assert next(g for g in study["groups"] if g["term"] == "cluster")["collapsed"] is True
+    template = (Path(browser.__file__).parent / "templates" / "_other_de.html").read_text(encoding="utf-8")
+    assert "cell level, descriptive" in template and "technical terms (" in template and "sort=' + (cellLevel ? 'effsize'" in template
+    assert "d.ma === 'true'" in template
+
+
+def test_de_tab_offers_the_ma_plot_only_for_pseudobulk_methods():
+    assert browser.templates.env.globals["de_has_mean"]("deseq2_pseudobulk") is True
+    assert browser.templates.env.globals["de_has_mean"]("glmm") is False
+    template = (Path(browser.__file__).parent / "templates" / "dataset.html").read_text(encoding="utf-8")
+    de_tab = template.split('id="tab-de"')[1].split("</section>")[0]
+    assert "{% if de_has_mean(s.method) %}" in de_tab and "🌋" not in de_tab and "🔥" not in de_tab

@@ -432,6 +432,9 @@
   function renderOtherDe(rows) {
     if (!odeBox) return;
     var geneRows = rows.filter(function (row) { return (row.target || 'gene') !== 'module'; });
+    // best effect first: cell-level adjusted p values do not rank evidence
+    geneRows.sort(function (a, b) { return Math.abs((b.effsize != null ? b.effsize : b.log2fc) || 0) - Math.abs((a.effsize != null ? a.effsize : a.log2fc) || 0); });
+    function cellLevel(method) { return !/pseudobulk|deseq2|edger|limma|dream/i.test(String(method || '')); }
     if (!geneRows.length) return;
     odeBox.hidden = false;
     var html = '<div class="vw-box"><table class="vw-table"><thead><tr><th>Dataset</th><th>Study</th><th>Contrast</th><th class="num">Effect</th><th class="num">adj. p</th></tr></thead><tbody>';
@@ -439,11 +442,11 @@
       var effect = row.effsize != null ? row.effsize : row.log2fc;
       var kind = row.efftype === 'zeff' ? 'z' : 'log2FC';
       html += '<tr' + (index >= 20 ? ' class="ode-more" hidden' : '') + '><td><a href="/browse/' + V.esc(row.db_id) + '#ode-gene-head">' + V.esc(row.title) + '</a> <span class="muted">' + V.esc(row.db_id) + '</span></td>' +
-        '<td>' + V.esc(row.study) + '<br><span class="muted" style="font-size:10.5px">' + V.esc(row.method) + '</span></td>' +
+        '<td>' + V.esc(row.study) + '<br><span class="muted" style="font-size:10.5px">' + V.esc(row.method) + '</span>' + (cellLevel(row.method) ? ' ' + V.pill('cell level, descriptive', 'warn', 'A cell-level model treats every cell as independent, so its adjusted p values are far too small; read the effect.', '') : '') + '</td>' +
         '<td>' + V.esc(row.label) + '</td><td class="num">' + V.signed(effect, 2) + ' <span class="muted" style="font-size:10.5px">' + kind + '</span></td><td class="num">' + (row.padj == null ? 'n/a' : V.pfmt(row.padj)) + '</td></tr>';
     });
     var body = document.getElementById('vwg-ode-body');
-    body.innerHTML = html + '</tbody></table></div>' + (geneRows.length > 20 ? '<button type="button" class="vw-more-units" id="vwg-ode-more">show all ' + geneRows.length + ' rows (best adjusted p first)</button>' : '');
+    body.innerHTML = html + '</tbody></table></div>' + (geneRows.length > 20 ? '<button type="button" class="vw-more-units" id="vwg-ode-more">show all ' + geneRows.length + ' rows (largest effect first)</button>' : '');
     var more = document.getElementById('vwg-ode-more');
     if (more) more.addEventListener('click', function () { body.querySelectorAll('tr.ode-more').forEach(function (tr) { tr.hidden = false; }); more.remove(); });
   }
