@@ -223,8 +223,10 @@ def test_summary_units_flags_and_counts(results):
     assert sex['genes'] == {'n_tested': len(GENES), 'n_q05': 4, 'n_up': 3, 'n_down': 1}
     assert {k: by_facet['braak']['genes'][k] for k in ('n_q05', 'n_up', 'n_down')} == {'n_q05': 2, 'n_up': 1, 'n_down': 1}
     methods = {(m['method'], m['source']): m for m in sex['modules']}
+    # n_q05 follows the replication rule (facet_module_results.select_p): df 15 < 30, so the permutation q decides
+    # (modB only); n_up / n_down split those by the sign of std_effect
     assert methods[('cell_mean', 'geneset')] == {'method': 'cell_mean', 'source': 'geneset', 'n_modules': 3,
-                                                 'n_q05_param': 1, 'n_q05_perm': 1}
+                                                 'n_q05_param': 1, 'n_q05_perm': 1, 'n_q05': 1, 'n_up': 1, 'n_down': 0}
     assert methods[('pseudobulk', 'gene_list')]['n_q05_perm'] == 1
     assert by_facet['braak']['flags']['composition_flag'] is True
     assert by_facet['braak']['level_counts']['braak_max'] == 6
@@ -1398,3 +1400,18 @@ def test_xenograft_sex_facets_are_registered_with_their_columns_and_info():
     assert FACET_ORDER[:3] == ('sex', 'graft_sex', 'host_sex')
     assert FACET_COLUMN == {'graft_sex': 'ant_sex'} and HUMAN_CELL_SEX_FACETS == ('sex', 'graft_sex')
     assert 'donor line' in FACET_INFO['graft_sex']['contrast'] and 'host mouse' in FACET_INFO['host_sex']['contrast']
+
+
+def test_module_counts_use_the_parametric_q_when_residual_df_is_large(tmp_path):
+    rows = _module_rows('G9/big', 'sex', 'microglial cell')
+    for row in rows:
+        row['df'] = 40.0                       # parametric basis: q_param decides (modA only)
+        if row['module'] == 'modA':
+            row['std_effect'] = -0.7
+    frame = pd.DataFrame(rows)
+    group = tmp_path / 'G9'
+    group.mkdir()
+    frame.to_parquet(group / 'big.facet_module_tests.parquet')
+    summary = fr.FacetResults(tmp_path).summary('G9/big', 'G9', 'big')
+    methods = {(m['method'], m['source']): m for m in summary['units'][0]['modules']}
+    assert {k: methods[('pseudobulk', 'gene_list')][k] for k in ('n_q05', 'n_up', 'n_down')} == {'n_q05': 1, 'n_up': 0, 'n_down': 1}

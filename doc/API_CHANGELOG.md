@@ -175,6 +175,13 @@ Changed (additive):
 - `GET /databases/{id}/facet-tests`: each unit's `genes` adds `n_up` and `n_down`, the genes at q < 0.05 with a
   positive or negative logFC (up or down in the test level, or with the trend). Counted from the gene results file;
   null when only the run manifest has the counts. Used by the dataset page Facet > Gene matrix.
+- `GET /databases/{id}/facet-tests`: each entry of a unit's `modules` adds `n_q05`, `n_up` and `n_down`: the gene sets
+  significant by the rule the module replication uses (q_param when the residual df is at least 30, else q_perm, below
+  0.05), split by the sign of `std_effect`. Null when only the run manifest has the counts. Used by the dataset page
+  Facet > GS matrix.
+- `GET /facets/{facet}/donor-values` and `/facets/{facet}/donor-plot.{fmt}` take `db_id`: only the units of that dataset,
+  counted or not, and only the exact `cell_type` stratum when one matches (404 when the dataset has no unit). The dataset
+  page uses it for the per donor plot of one gene or gene set in one cell type.
 - Every gene card replication entry (`/facets/{facet}/effects`, `/genes/{gene}/facet-effects`) and every module card
   replication entry and variant (`/genesets/{study}/{experiment}/{name}/facet-effects`) adds `links`: `{donor_plot,
   donor_plot_svg, donor_plot_adjusted, donor_values, donor_values_available (all counted anchors have stored values),

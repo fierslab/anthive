@@ -833,7 +833,8 @@ class FacetResults:
                                'q_param', 'q_perm', 'contrast', 'level_ref', 'level_test',
                                'n_donors', 'n_donors_ref', 'n_donors_test', 'covariates',
                                'descriptive_only', 'n_lt5', 'provisional', 'composition_p',
-                               'composition_flag', 'batch_used', 'batch_confounded', 'no_counts'))
+                               'composition_flag', 'batch_used', 'batch_confounded', 'no_counts',
+                               'df', 'std_effect', 'estimate'))
 
         units: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
         records_by_unit: Dict[Tuple[str, str, str], Dict[str, Dict[str, Any]]] = {}
@@ -926,6 +927,7 @@ class FacetResults:
                                 'n_modules': _as_int(record.get(f'n_modules_{tag}')),
                                 'n_q05_param': _as_int(record.get(f'n_sig_q05_param_{tag}')),
                                 'n_q05_perm': _as_int(record.get(f'n_sig_q05_perm_{tag}')),
+                                'n_q05': None, 'n_up': None, 'n_down': None,
                             })
                 if kind == 'genes' and record.get('status') == 'ok':
                     unit['genes'] = {'n_tested': _as_int(record.get('n_genes_tested')),
@@ -983,11 +985,28 @@ class FacetResults:
                         for (method, source), sub in group.groupby(['method', 'source'], sort=False):
                             q_param = pd.to_numeric(sub.get('q_param'), errors='coerce')
                             q_perm = pd.to_numeric(sub.get('q_perm'), errors='coerce')
+                            # the q a module contributes to replication (facet_module_results.select_p): parametric
+                            # when the residual df is at least MODULE_PARAMETRIC_MIN_DF, else permutation
+                            degrees = pd.to_numeric(sub['df'], errors='coerce') if 'df' in sub.columns \
+                                else pd.Series(np.nan, index=sub.index)
+                            parametric = degrees.fillna(-1.0) >= facet_rules.MODULE_PARAMETRIC_MIN_DF
+                            q_used = q_param.where(parametric, q_perm) if q_param is not None and q_perm is not None \
+                                else pd.Series(np.nan, index=sub.index)
+                            significant = q_used < Q_THRESHOLD
+                            effect_column = 'std_effect' if 'std_effect' in sub.columns else (
+                                'estimate' if 'estimate' in sub.columns else None)
+                            if effect_column:
+                                effect = pd.to_numeric(sub[effect_column], errors='coerce')
+                                n_up = int((significant & (effect > 0)).sum())
+                                n_down = int((significant & (effect < 0)).sum())
+                            else:
+                                n_up = n_down = None
                             method_rows.append({
                                 'method': str(method), 'source': str(source),
                                 'n_modules': int(len(sub)),
                                 'n_q05_param': int((q_param < Q_THRESHOLD).sum()),
                                 'n_q05_perm': int((q_perm < Q_THRESHOLD).sum()),
+                                'n_q05': int(significant.sum()), 'n_up': n_up, 'n_down': n_down,
                             })
                     order = {pair: i for i, pair in enumerate(METHOD_ORDER)}
                     method_rows.sort(key=lambda r: order.get((r['method'], r['source']), 99))

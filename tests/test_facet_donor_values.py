@@ -378,6 +378,16 @@ def test_include_uncounted_lists_the_other_units_with_their_reason(results):
     assert all(u['counted'] or u['not_counted_reason'] for u in body['units'])
 
 
+def test_donor_values_of_one_dataset_keep_only_its_units(results):
+    serve, *_ = _braak_serve(results)
+    params = {'gene': PLANTED_GENE, 'cell_type': 'microglia', 'db_id': 'G2/ds2'}
+    body = serve.get('/facets/braak/donor-values', params=params).json()
+    assert [u['db_id'] for u in body['units']] == ['G2/ds2'] and body['units'][0]['n_donors'] == 30
+    assert serve.get('/facets/braak/donor-values', params={**params, 'db_id': 'G9/none'}).status_code == 404
+    plot = serve.get('/facets/braak/donor-plot.png', params=params)
+    assert plot.status_code == 200 and plot.headers['content-type'] == 'image/png'
+
+
 def test_donor_values_errors(results):
     serve, *_ = _braak_serve(results)
     assert serve.get('/facets/braak/donor-values', params={'cell_type': 'microglia'}).status_code == 400

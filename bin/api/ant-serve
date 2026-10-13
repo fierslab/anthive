@@ -4234,7 +4234,7 @@ def get_facet_tests(db_id: str):
                       "batch_used": false, "batch_confounded": false},
             "genes": {"n_tested": 16290, "n_q05": 89, "n_up": 51, "n_down": 38},
             "modules": [{"method": "cell_mean", "source": "geneset", "n_modules": 128,
-                         "n_q05_param": 4, "n_q05_perm": 3}, ...],
+                         "n_q05_param": 4, "n_q05_perm": 3, "n_q05": 3, "n_up": 2, "n_down": 1}, ...],
             "model": {
               "stratum": {"cell_type", "source", "description"},
               "facet_term": "m vs f: coefficient = m minus f (f is the reference)",
@@ -14328,8 +14328,13 @@ def _gene_count_fetcher(db_id: str, layer: str):
 
 def _donor_units_payload(facet_name: str, gene: Optional[str], module: Optional[str], cell_type: str,
                          scope: Optional[str], include_uncounted: bool, adjusted: bool,
-                         method: Optional[str], source: Optional[str], exclude_secondary: bool) -> Dict[str, Any]:
-    """The answer of ``/facets/{facet}/donor-values`` (the plot reads the same dict)."""
+                         method: Optional[str], source: Optional[str], exclude_secondary: bool,
+                         db_id: Optional[str] = None) -> Dict[str, Any]:
+    """The answer of ``/facets/{facet}/donor-values`` (the plot reads the same dict).
+
+    ``db_id`` keeps the units of that one dataset, counted or not (and, when one of them has exactly the
+    ``cell_type`` stratum label, only those): the per donor plot of a dataset page row.
+    """
     if bool(gene) == bool(module):
         raise HTTPException(status_code=400, detail='give exactly one of gene or module')
     test_facet = _tested_facet(facet_name)
@@ -14364,6 +14369,12 @@ def _donor_units_payload(facet_name: str, gene: Optional[str], module: Optional[
     resolved_scope = card.get('scope') or scope
     counted_rows = [u for u in unit_rows if u.get('counted')]
     selected = unit_rows if include_uncounted else counted_rows
+    if db_id:
+        selected = [u for u in unit_rows if u.get('db_id') == db_id]
+        exact = [u for u in selected if u.get('cell_type') == cell_type]
+        selected = exact or selected
+        if not selected:
+            raise HTTPException(status_code=404, detail=f'no tested unit of {db_id} for this facet, scope and cell type')
     fetchers: Dict[str, Any] = {}
     layers: Dict[str, str] = {}
     out_units: List[Dict[str, Any]] = []
@@ -14454,6 +14465,7 @@ def get_facet_donor_values(
     adjusted: bool = Query(False, description="true: values with the covariate part of an ordinary least squares fit removed"),
     include_uncounted: bool = Query(False, description="true: also the units that do not carry a cohort's vote (`counted` false, with the reason)"),
     exclude_secondary: bool = Query(True, description="Secondary datasets (reanalyses) are listed, flagged, but not counted"),
+    db_id: Optional[str] = Query(None, description="One dataset: only its units, counted or not (exact stratum label first)"),
 ):
     """The replicate-level values a facet test used, per counted cohort: what the dots of the donor plot are.
 
@@ -14472,7 +14484,7 @@ def get_facet_donor_values(
     test is rerun or `ant-facet-test run --samples-only` backfills it. Exploratory.
     """
     payload = _donor_units_payload(facet_name, gene, module, cell_type, scope, include_uncounted, adjusted,
-                                   method, source, exclude_secondary)
+                                   method, source, exclude_secondary, db_id=db_id)
     return _with_help(payload, 'donor-plots', 'facet-replicate-unit', 'facet-effects')
 
 
@@ -14509,6 +14521,7 @@ def get_facet_donor_plot(
     adjusted: bool = Query(False, description="true: covariate-adjusted values (least squares), same scale"),
     include_uncounted: bool = Query(False, description="true: also panels for units that do not carry a cohort's vote"),
     exclude_secondary: bool = Query(True),
+    db_id: Optional[str] = Query(None, description="One dataset: only its units, counted or not (exact stratum label first)"),
     width: float = Query(2.6, gt=1.0, le=8.0, description="Width of one panel in inches"),
     height: float = Query(3.0, gt=1.0, le=8.0, description="Height of a panel row in inches"),
     dpi: int = Query(150, ge=72, le=400),
@@ -14526,14 +14539,14 @@ def get_facet_donor_plot(
         raise HTTPException(status_code=404, detail=f'format must be one of {", ".join(_DONOR_PLOT_FORMATS)}')
     prepared = _facet_results().prepare(_facet_test_datasets())
     cache_key = (facet_name, cell_type, gene, module, method, source, scope, adjusted, include_uncounted,
-                 exclude_secondary, width, height, dpi, fmt, prepared.signature)
+                 exclude_secondary, db_id, width, height, dpi, fmt, prepared.signature)
     with _DONOR_PLOT_CACHE_LOCK:
         cached = _DONOR_PLOT_CACHE.get(cache_key)
         if cached is not None:
             _DONOR_PLOT_CACHE.move_to_end(cache_key)
     if cached is None:
         payload = _donor_units_payload(facet_name, gene, module, cell_type, scope, include_uncounted, adjusted,
-                                       method, source, exclude_secondary)
+                                       method, source, exclude_secondary, db_id=db_id)
         panels = [u for u in payload['units'] if u.get('available') and u['donors']][:plotting.MAX_DONOR_PANELS]
         if not panels:
             reasons = sorted({str(u.get('reason')) for u in payload['units'] if u.get('reason')})
