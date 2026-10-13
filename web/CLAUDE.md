@@ -117,7 +117,7 @@ whenever the dataset has any `ant_*` facet) holds `#ds-facets` from
 `GET /databases/{id}/facets`: unit line (`#fx-unit-line`: designation, donor
 group, cohort; the spot where a "Replicate unit" entry goes), mapping tables
 for ALL facets (analysed ones first, the rest under "Not analysed yet",
-`#facets-not-analysed`; nothing is dropped), then "Effects by facet" or the
+`#facets-not-analysed`; nothing is dropped), then "Facet DE, genes per cell type" (the Gene sub-tab) or the
 explicit reason there are no tests (`_fx_reason_text` in browser.py turns the
 facet-tool eligibility reason into a sentence). The Data tab keeps one pointer
 line (`#ds-facets-pointer`). `#ds-facets` as a hash still works (mapped to
@@ -147,7 +147,7 @@ collapsed `details.fxs-rest`. Reanalyses (`is_secondary`) get the
 `table.ds-facets td.num` (nowrap, right) out-specifies plain `.fx-table`
 rules inside the dataset card, so fx rules that must win there are written as
 `table.ds-facets table.fx-table td.x, table.fx-table td.x`.
-Places: the "Effects by facet" section of the dataset Facets tab
+Places: the "Facet DE, genes per cell type" section of the dataset Facet > Gene sub-tab
 (`_facet_tests_view` groups units by facet column), "Effects across
 datasets" on `/facets/{name}` (`#facet-effects`, replaces the per-cell "Top
 variable genesets/genes" cards; `#fx-recurring` lists recurring genes per cell
@@ -476,7 +476,7 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   JS-built `docBlock()` boxes in `_facet_effects.html` and `_views.html` (call `window.antDocRestore(root)`
   after rendering). The effects box `fx-about` (from `fx_intro`) now also holds the flag legend
   (`#fx-flag-legend` is an `<h4>` inside it); its (i) sits on the header above `fx_intro`
-  ("Effects by facet" on the dataset Gene sub-tab, "Effects across datasets" on the facet page). `/help`
+  ("Facet DE, genes per cell type" on the dataset Gene sub-tab, "Effects across datasets" on the facet page). `/help`
   sections stay `<details class="help-section">`.
 - **Facet label panel tags.** `#fx-unit-line` is a `table.fx-keys` (wrapped in `.table-wrap`): one row per
   key (`#fx-scope`, `#fx-replicate`, `#fx-control-basis`, `#fx-disease-basis`, `#fx-donor-group`,
@@ -954,3 +954,54 @@ starCAT modules/scores (`.description` on `/catalogs`). Wire each up when shippe
   plot.html), an (i) box `dp-about`, a summary line from `/donor-values` (donors, cohort, estimate, q, counted), an "adjusted for
   covariates" checkbox (`adjusted=true`), PNG / SVG / PDF downloads and a link back to `#facet-gene` (`#facet-gs` for gene sets). The image
   is fetched as a blob so an API error shows as a sentence. The first plot icon of the Facet > Gene and GS lists points here.
+
+## UI rules (binding, 2026-10-13 consistency sweep)
+
+These rules come from the site audit (Fable, 2026-10-13) with Mark's overrides. Every change follows them.
+
+1. One display label per entity in nav, h1, breadcrumb and tab: datasets, the collection name, the gene, gene sets, facets,
+   library. Sentence case in h1 and tabs, lower case in nav. No raw vocabulary tokens (`10x_chromium`, `ant_sex`,
+   `braak_threshold`) outside tooltips and the id strip: values go through `display_value` (Jinja filter, `_VALUE_LABELS`), facets
+   through `_FACET_TEST_LABELS` / `facet_test_label`.
+2. Page title format "<page> · anthive" in every `{% block title %}` (a test checks it). No em-dash anywhere; placeholders are
+   "none" or an empty cell, never a dash.
+3. One help device: a hidden `doc_block` opened by the (i) `doc_toggle` after the header, one visible essential line next to it.
+   The (?) `section_help` panels render the same (i) glyph and box style. Column header (i) is a one-line tooltip. No numbered
+   headers, no yellow notice boxes, no open-by-default details except the help quick start.
+4. Preview state is the `review_banner` as the first element under the h1 (page) or at the top of the panel (tab), plus
+   `vw-preview` on the tab; nothing else says "experimental". Empty tabs are `tab-empty` with a one-sentence panel. Earlier designs
+   live in the "Older views" menu (`.vw-older`, key `older-views`), never in the primary tab set.
+5. Tables: Name | Cells (or Samples for bulk) | Cells expressing (%) | Rank (%) | Std. dev. | Plots for expression; facet lists
+   Name | Effect (bar, CI) | q | Donors | Plots. Unsigned metrics use teal #4f9a96, slate #6277a8 and sand #c2a05a; signed
+   effects keep warm (up) and cool (down), always through the tokens `--effect-up` / `--effect-down` (bars) and
+   `--effect-up-ink` / `--effect-down-ink` (text) on `:root` in base.html. Plot icons are the SVG `chart_icon` set
+   (`antPlotIcons.SVG`: bar, line, umap, violin, donor) in one order: per donor, violin, histogram, ECDF, embedding. No emoji in
+   links, menus or headings.
+6. Matrices: rows are facets or contrasts in fixed order, columns are cell types in the fixed group order (microglia first); the
+   corner cell and the section title name the unit ("genes", "gene sets", "cohorts"); a click opens one list under the matrix;
+   colour by count only for donor-level results, one flat colour (`.fxg-cell.lcell`) and a "cell level, descriptive" pill for
+   cell-level results, whose lists sort by effect with adj. p last.
+7. Statistics wording: "q" for BH-adjusted p within one donor-level test, "adj. p" for author DE as supplied, "r" for replication
+   across cohorts; never "padj", "q_param" or "q_perm" in visible text. A q of 0 reads "at floor". "donors" and "cells" are written
+   out; "n=25" after a cell type means datasets and the tooltip says so. Per-cell results are always labelled "descriptive".
+8. Counts in tab badges come from the same list the panel renders (the Facet badge is `facet_groups.n_listed`). One `.tab-count`
+   style site-wide (base.html); overrides change colour only.
+9. Every table is inside `.table-wrap`; the shared table renders at 390 px without overlap (names wrap, std column dropped below
+   560 px). A page never scrolls horizontally.
+10. Errors: one `error.html` (`_error_page`, and `install_error_pages(app)` for exceptions of page routes; JSON for /api and JSON
+    clients); in-page failures use the `.plot-error` card pattern.
+11. Prose: plain sentences, no "Label: value" constructions; stat strips as "6 facets · 88 datasets" (number first).
+
+## Consistency sweep, what changed (2026-10-13)
+
+- Other DE: cell-level studies (`_de_method_level` == 'cell') are flat and descriptive, lists sort by effect, adj. p last; rows are
+  grouped per term (`study.groups`, collapsed above 5 contrasts, `.ode-term-toggle`), technical terms (`_DE_TECHNICAL_TERM`: batch,
+  interaction, per line or sample) sit in a hidden box per study; term labels through `_DE_TERM_LABELS`; the MA link only where the
+  method stores a mean (`de_has_mean`), the heatmap link moved from the DE tab into the Other DE list header.
+- Facet label panel: `_facet_groups` gives Tested, Present not tested (with `not_tested_reason`; `ant_pmi` is a covariate) and
+  Structural columns (`_STRUCTURAL_FACETS`, author clusters) in the hidden box `#facets-structural`.
+- Dataset page: Data card values wrap, gene search count only while searching, caveat chips without raw tokens ("note", "object"),
+  bulk datasets (`is_bulk`) say samples and hide "cells expressing".
+- Per donor plot page sized to the frame with a cleaned caption; plot pages "<kind> in <dataset>" without emoji.
+- `/datasets` redirects to `/`; the collection breadcrumb ends in the collection name; the library shows 50 papers at a time; the
+  gene set Module score tab has a progress line.
