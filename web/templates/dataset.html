@@ -482,7 +482,7 @@
 {% set _cat_cols = obs_columns | selectattr('type', 'equalto', 'cat') | list %}
 
 <div class="tab-bar" id="ds-tab-bar" role="tablist">
-  {# Button order (2026-10-13): Overview, Data, Numerical, Categorical, Genes, Genesets, Facet GS, Facets,
+  {# Button order (2026-10-13): Overview, Data, Numerical, Categorical, Genes, Genesets, Facets, Facet GS,
      Differential expression, Papers, Downloads, Caveats. Panel DOM order is independent of this. #}
   {% if markdown_content %}<button type="button" class="tab-btn active" data-tab="overview" role="tab">Overview</button>{% endif %}
   <button type="button" class="tab-btn{% if not markdown_content %} active{% endif %}" data-tab="data" role="tab">Data</button>
@@ -493,10 +493,12 @@
   {% endif %}
   {% if n_module_scores %}
   <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Genesets<span class="tab-count">{{ n_module_scores }}</span></button>
-  <button type="button" class="tab-btn {{ view_class('dataset-facet-gs') }}" data-tab="facet-gs" role="tab" id="tab-btn-facet-gs" title="{{ view_tip('dataset-facet-gs', 'Gene set scores compared with the cell annotation columns, per cell and descriptive.') }}">Facet GS</button>
   {% endif %}
   {% if show_facets_tab %}
   <button type="button" class="tab-btn"        data-tab="facets"   role="tab" id="tab-btn-facets">Facets<span class="tab-count">{{ n_facets_total }}</span></button>
+  {% endif %}
+  {% if n_module_scores %}
+  <button type="button" class="tab-btn {{ view_class('dataset-facet-gs') }}" data-tab="facet-gs" role="tab" id="tab-btn-facet-gs" title="{{ view_tip('dataset-facet-gs', 'Gene set scores compared with the cell annotation columns, per cell and descriptive.') }}">Facet GS</button>
   {% endif %}
   {% if de_studies %}
   <button type="button" class="tab-btn"        data-tab="de"       role="tab">Differential expression<span class="tab-count">{{ de_studies|length }}</span></button>

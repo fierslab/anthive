@@ -7811,12 +7811,14 @@ def _dataset_with_module_scores(monkeypatch):
     monkeypatch.setattr(browser, "_api_get", with_scores)
 
 
-def test_dataset_facet_gs_tab_follows_genesets_and_is_greyed(client, monkeypatch):
+def test_dataset_facet_gs_tab_follows_genesets_and_facets_and_is_greyed(client, monkeypatch):
     _dataset_with_module_scores(monkeypatch)
     html = client.get("/browse/GroupA/ds1").text
     bar = html.split('id="ds-tab-bar"')[1].split("</div>")[0]
     tabs = re.findall(r'data-tab="([^"]+)"', bar)
-    assert tabs[tabs.index("modules") + 1] == "facet-gs"
+    # Facets (when present) sits between Genesets and Facet GS
+    following = ["facets", "facet-gs"] if "facets" in tabs else ["facet-gs"]
+    assert tabs[tabs.index("modules") + 1:tabs.index("modules") + 1 + len(following)] == following
     button = re.search(r'<button[^>]*data-tab="facet-gs"[^>]*>[^<]*', bar).group(0)
     assert "vw-preview" in button and button.endswith(">Facet GS")
     assert browser.VIEW_PREVIEW_TIP in button
@@ -7885,7 +7887,7 @@ def test_dataset_tab_order_follows_the_agreed_sequence(client, monkeypatch):
         return result
     monkeypatch.setattr(browser, "_api_get", everything)
     tabs, bar = _tab_order(client.get("/browse/GroupA/ds1").text)
-    expected = ["overview", "data", "num", "cat", "genes", "modules", "facet-gs", "facets", "de", "papers", "downloads", "caveats"]
+    expected = ["overview", "data", "num", "cat", "genes", "modules", "facets", "facet-gs", "de", "papers", "downloads", "caveats"]
     present = [name for name in expected if name in tabs]
     assert tabs == present, tabs
     for name in ("data", "num", "cat", "modules", "facet-gs", "downloads", "caveats"):

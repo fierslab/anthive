@@ -111,7 +111,7 @@ template (`t.values` resolves to the dict method).
 definition on top (`#facet-definition`) and a Datasets card
 (`#facet-datasets`): carriers with author column, mapping kind and value
 translation, and the non-carriers folded in `#non-carriers` with name hints.
-The dataset **Facets tab** (`#facets`, after Genesets and Facet GS, count badge; shown
+The dataset **Facets tab** (`#facets`, after Genesets and before Facet GS, count badge; shown
 whenever the dataset has any `ant_*` facet) holds `#ds-facets` from
 `GET /databases/{id}/facets`: unit line (`#fx-unit-line`: designation, donor
 group, cohort; the spot where a "Replicate unit" entry goes), mapping tables
@@ -568,8 +568,9 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   `.ds-prov` row. Each datum appears once; sections hide when empty.
 - **Tab bar order (2026-10-13):** `Overview` (only when markdown) · `Data` ·
   `Numerical` · `Categorical` · `Genes` (only when n_genes > 0) ·
-  `Genesets` (only when module scores) · `Facet GS` (same condition; preview) ·
+  `Genesets` (only when module scores) ·
   `Facets` (only when the dataset has any facet) ·
+  `Facet GS` (same condition as Genesets; preview) ·
   `Differential expression` (only when DE data) · `Papers` (only when linked
   library papers) · `Downloads` (always; `loadFiles` adds `.tab-empty` and the
   panel says "Nothing to download for this dataset" when `/files` lists nothing
@@ -852,7 +853,7 @@ starCAT modules/scores (`.description` on `/catalogs`). Wire each up when shippe
 
 ## Dataset Facet GS tab (2026-10-13)
 
-- The dataset page's Genesets tab (`data-tab="modules"`, `#modules`) holds only the rank table (`#obs-tbl-modrank`, `/module_ranks`). The per-cell association explorer (`_module_view.html`, `mv_ctx.id` `mv-modules-tab`) moved to its own tab right after it: **Facet GS** (`data-tab="facet-gs"`, panel `#tab-facet-gs`, hash `#facet-gs`, filter state `#facet-gs&mv=...`), shown under the same `n_module_scores` condition. Heading "Gene set scores by annotation column" with the (i), no count.
+- The dataset page's Genesets tab (`data-tab="modules"`, `#modules`) holds only the rank table (`#obs-tbl-modrank`, `/module_ranks`). The per-cell association explorer (`_module_view.html`, `mv_ctx.id` `mv-modules-tab`) moved to its own tab: **Facet GS** (after Genesets and Facets) (`data-tab="facet-gs"`, panel `#tab-facet-gs`, hash `#facet-gs`, filter state `#facet-gs&mv=...`), shown under the same `n_module_scores` condition. Heading "Gene set scores by annotation column" with the (i), no count.
 - Not approved: registry key `dataset-facet-gs` (tab `vw-preview`, panel starts with `review_banner`).
 - Lazy: `mv_ctx.lazy_tab = 'facet-gs'` makes `_module_view.html` wait for `anthive:tab-activated` with that name (or an already active panel) before fetching `/module-variability`; the spinner is `data-tab-loading="facet-gs"` and is dismissed with the same name. Pages without `lazy_tab` load at once.
 - Aliases in `handleHash`: `#modules&mv=...` and the legacy `#tab-modules-mv=...` open Facet GS and are rewritten to `#facet-gs&mv=...`; `#tab-facet-gs` opens Facet GS, `#tab-modules` opens Genesets; bare `#modules` stays on Genesets. `datasetUrl()` in the explorer (gene set pages) links `#facet-gs&mv=...`.

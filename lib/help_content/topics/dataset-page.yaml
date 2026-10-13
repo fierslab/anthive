@@ -1,6 +1,6 @@
 id: dataset-page
 title: Dataset page
-summary: The dataset page has the id strip with the database id you need in the API, provenance, and tabs (Overview, Data, Numerical, Categorical, Genes, Genesets, Facet GS, Facets, Differential expression, Papers, Downloads, Caveats). Most appear only when the dataset has that data; Downloads and Caveats are always there and greyed when empty.
+summary: The dataset page has the id strip with the database id you need in the API, provenance, and tabs (Overview, Data, Numerical, Categorical, Genes, Genesets, Facets, Facet GS, Differential expression, Papers, Downloads, Caveats). Most appear only when the dataset has that data; Downloads and Caveats are always there and greyed when empty.
 aliases:
 - dataset tabs
 body_html: |
@@ -14,8 +14,8 @@ body_html: |
     <tr><td>Categorical</td><td>Categorical annotations (cell type, donor, disease, sex) with value counts and quick plots.</td></tr>
     <tr><td>Genes</td><td>Expression statistics per gene (mean, standard deviation, coefficient of variation, fraction of cells expressing it); search, sort and star favourites.</td></tr>
     <tr><td>Genesets</td><td>Module scores already computed for curated gene sets: one row per gene set with its rank among the other gene sets of the dataset, the spread of the score over the cells and plot icons.</td></tr>
-    <tr><td>Facet GS</td><td>The same gene set scores compared with the cell annotation columns (how strongly each score varies across them), as a filterable list. These are per-cell associations, descriptive only. Marked <em>preview</em>: still being reviewed.</td></tr>
     <tr><td>Facets</td><td>The harmonised annotation columns (facets) of this dataset, how its own columns map onto them, and the donor-level facet effects when they were tested.</td></tr>
+    <tr><td>Facet GS</td><td>The same gene set scores compared with the cell annotation columns (how strongly each score varies across them), as a filterable list. These are per-cell associations, descriptive only. Marked <em>preview</em>: still being reviewed.</td></tr>
     <tr><td>Differential expression</td><td>Precomputed differential expression results, when the dataset has them: studies, terms, contrasts and genes, with volcano and MA plots.</td></tr>
     <tr><td>Papers</td><td>The papers linked to this dataset, with the reason (for example <em>Source of this dataset</em>), a short summary, PDF, DOI, PubMed and BibTeX.</td></tr>
     <tr><td>Downloads</td><td>The original <code>.h5ad</code> file, the papers' PDFs and any other files that belong to the study. Greyed when there is nothing to download.</td></tr>
