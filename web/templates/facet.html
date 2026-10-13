@@ -3,7 +3,7 @@
 {% block title %}{{ facet_name }} · facets · anthive{% endblock %}
 
 {% block content %}
-{% from "_macros.html" import review_banner as _review_banner %}{{ _review_banner('facets') }}
+{% from "_macros.html" import review_banner as _review_banner %}
 <style>
   .facet-header { margin: 4px 0 12px; }
   .facet-header .strip { color: var(--text-muted); font-family: var(--font-mono); font-size: 13px; margin-left: 8px; }
@@ -78,9 +78,8 @@
 {% from "_facet_mapping.html" import facet_mapping_styles, mapping_kind, source_columns, translation, coverage %}
 {{ facet_mapping_styles() }}
 
-{% from "_macros.html" import breadcrumb, experimental_notice, doc_block %}
-{{ breadcrumb([("facets", "/facets"), (facet_name, None)]) }}
-{{ experimental_notice("facets") }}
+{% from "_macros.html" import breadcrumb, experimental_notice, doc_block, doc_toggle %}
+{{ breadcrumb([("facets", "/facets"), (facet_label_display or facet_name, None)]) }}
 
 {% if error %}<p style="color:#dc2626">{{ error }}</p>{% endif %}
 
@@ -94,7 +93,7 @@
 {% if facet %}
 {% set fd = facet %}
 <div class="facet-header">
-  <h1 class="page-title" style="display: inline-block;">{{ facet_name[4:] if facet_name.startswith('ant_') else facet_name }}</h1>
+  <h1 class="page-title" style="display: inline-block;">{{ facet_label_display or (facet_name[4:] if facet_name.startswith('ant_') else facet_name) }}</h1>
   <span class="strip">{{ facet_name }}</span>
   &nbsp;
   {% if fd.type_mixed %}
@@ -103,6 +102,7 @@
     <span class="type-pill {{ fd.type }}">{{ fd.type }}</span>
   {% endif %}
 </div>
+{{ _review_banner('facets') }}
 
 <section class="facet-def" id="facet-definition">
   {% if definition and definition.defined %}
@@ -117,7 +117,8 @@
   <div class="def-none">No definition has been written for this facet yet.</div>
   {% endif %}
   {% if definitions_status and definitions_status.note %}
-  <div class="audit-note"><strong>Definitions under audit.</strong> {{ definitions_status.note }}</div>
+  <div class="def-audit muted">The facet definitions are under audit.{{ doc_toggle('facet-def-audit', 'About the facet audit') }}</div>
+  {% call doc_block('About the facet audit', id='facet-def-audit') %}<p>{{ definitions_status.note }}</p>{% endcall %}
   {% endif %}
 </section>
 
@@ -139,10 +140,10 @@
 {% endif %}
 
 <div class="stats-row">
-  <div>datasets: <span class="val">{{ fd.n_datasets }}</span></div>
-  <div>total cells: <span class="val">{{ '{:,}'.format(fd.total_n_cells) }}</span></div>
+  <div><span class="val">{{ fd.n_datasets }}</span> datasets</div>
+  <div><span class="val">{{ '{:,}'.format(fd.total_n_cells) }}</span> cells</div>
   {% if fd.value_distribution and fd.value_distribution.kind == 'categorical' %}
-  <div>distinct values: <span class="val">{{ fd.value_distribution['values']|length }}</span></div>
+  <div><span class="val">{{ fd.value_distribution['values']|length }}</span> distinct values</div>
   {% endif %}
 </div>
 
@@ -157,7 +158,9 @@
 {{ views_core() }}
 <div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
   <button type="button" class="tab-btn" data-vtab="overview" data-hash="overview" role="tab">Overview</button>
+  <span class="vw-older"><button type="button" class="tab-btn vw-older-btn {{ view_class('older-views') }}" aria-haspopup="true" aria-expanded="false" title="{{ view_tip('older-views', 'Earlier designs of this page, kept reachable') }}">Older views &#9662;</button><span class="vw-older-menu" hidden>
   <button type="button" class="tab-btn vw-old" data-vtab="detail" data-hash="detail" role="tab" title="The earlier facet page: effects per dataset and cell type, value distribution, datasets">Detail (old)</button>
+  </span></span>
 </div>
 <div class="tab-panel vw-panel" id="vt-overview">{{ view_facet_panel(facet_name[4:] if facet_name.startswith('ant_') else facet_name) }}</div>
 <div class="tab-panel" id="vt-detail">

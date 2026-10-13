@@ -20,6 +20,12 @@
   .vw-error { color: #9E2A2B; font-size: 12.5px; padding: 8px 0; }
   .vw-placeholder { border: 1px dashed #c9ced4; border-radius: 5px; padding: 10px 14px; color: #7b838c; font-size: 12.5px; background: #fbfcfd; max-width: 900px; }
   .vw-tabs-bar .tab-btn.vw-old { color: #8a9199; }
+  .vw-older { position: relative; display: inline-flex; flex: none; }
+  .vw-older-menu { position: fixed; z-index: 40; display: flex; flex-direction: column; min-width: 180px; padding: 4px;
+                   background: #fff; border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,.08); }
+  .vw-older-menu[hidden] { display: none; }
+  .vw-older-menu .tab-btn { text-align: left; border-radius: 4px; margin: 0; }
+  .vw-older-menu .tab-btn.active { background: var(--hover); border-color: transparent; }
   .vw-panel > h2.section-head:first-child { margin-top: 4px; }
   #vwf-root .section-head { margin-top: 22px; }
   #vwf-root > .section-head:first-of-type { margin-top: 12px; }
@@ -343,7 +349,7 @@ window.antViews = window.antViews || (function () {
     return '<span class="info" title="' + esc(text) + '"' + (slug ? ' data-glossary="' + slug + '"' : '') + ' tabindex="0" role="button">&#9432;</span>';
   }
   function helpBtn(panelId) {
-    return '<button type="button" class="help-btn inline" data-help-for="' + panelId + '" aria-expanded="false" aria-controls="' + panelId + '" title="Show or hide the explanation">?</button>';
+    return '<button type="button" class="help-btn inline" data-help-for="' + panelId + '" aria-expanded="false" aria-controls="' + panelId + '" title="Show or hide the explanation">&#9432;</button>';
   }
   // 34060 -> "34k", 1200000 -> "1.2M"
   function compact(count) {
@@ -811,11 +817,29 @@ window.antViews = window.antViews || (function () {
         var panel = document.getElementById('vt-' + b.dataset.vtab);
         if (panel) panel.classList.toggle('active', b.dataset.vtab === name);
       });
+      bar.querySelectorAll('.vw-older').forEach(function (wrap) {
+        wrap.querySelector('.vw-older-btn').classList.toggle('active', !!wrap.querySelector('.vw-older-menu .tab-btn.active'));
+      });
       var shown = buttons.filter(function (b) { return b.dataset.vtab === name; })[0];
       if (push && shown && shown.dataset.hash && history.replaceState) history.replaceState(null, '', '#' + shown.dataset.hash + hashParts().rest);
       if (onShow) onShow(name);
     }
     buttons.forEach(function (button) { button.addEventListener('click', function () { show(button.dataset.vtab, true); }); });
+    // "Older views": earlier designs sit in a small menu; the menu button is marked open while one of them is shown
+    bar.querySelectorAll('.vw-older').forEach(function (wrap) {
+      var toggle = wrap.querySelector('.vw-older-btn'), menu = wrap.querySelector('.vw-older-menu');
+      toggle.addEventListener('click', function (event) {
+        event.stopPropagation(); menu.hidden = !menu.hidden; toggle.setAttribute('aria-expanded', menu.hidden ? 'false' : 'true');
+        if (!menu.hidden) {   // fixed position: the tab bar scrolls sideways on phones and would clip an absolute menu
+          var box = toggle.getBoundingClientRect();
+          menu.style.top = Math.round(box.bottom + 2) + 'px';
+          menu.style.left = Math.round(Math.max(8, Math.min(box.left, window.innerWidth - menu.offsetWidth - 8))) + 'px';
+        }
+      });
+      window.addEventListener('scroll', function () { menu.hidden = true; toggle.setAttribute('aria-expanded', 'false'); }, { passive: true });
+      menu.addEventListener('click', function () { menu.hidden = true; toggle.setAttribute('aria-expanded', 'false'); });
+      document.addEventListener('click', function (event) { if (!wrap.contains(event.target)) { menu.hidden = true; toggle.setAttribute('aria-expanded', 'false'); } });
+    });
     var wanted = hashParts().prefix;
     var initial = defaultTab;
     function panelOfTarget(id) {

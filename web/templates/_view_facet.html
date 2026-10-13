@@ -9,7 +9,7 @@
   <div id="vwf-variants"></div>
   <div id="vwf-answer"><p class="vw-loading">Loading the replicated genes per cell type...</p></div>
   <div id="vwf-caveat"></div>
-  {% call section_help('1. Cell types', 'vwf-p1-help') %}
+  {% call section_help('Cell types', 'vwf-p1-help') %}
     <p>This page answers one question: which genes and gene sets change with {{ facet_label }}, and where is that finding repeated? A <a href="/help#glossary-facet">facet</a> is a donor-level property defined the same way in every dataset, so an effect is a difference between donors (between host mice in the xenograft scope), not between cells.</p>
     <p>A gene counts when the same direction appears in at least 2 cohorts according to a <a href="/help#glossary-partial-conjunction">partial conjunction test</a> at 5 percent FDR (<a href="/help#glossary-r-value">r-value</a>) and the change is at least 10 percent in 2 cohorts (<a href="/help#glossary-effect-filter">effect filter</a>, a condition on size, not error control). The strict subset also passes the minimum-effect test (<a href="/help#glossary-treat-tier">strict tier</a>). Cohorts can share a brain bank or protocol, so the count of cohorts is not a count of independent confirmations. A cell type without a hit is not shown as a negative result: with 2 cohorts the test has little power (<a href="/help#glossary-p-value-floor">p-value floor</a>).</p>
     <h4>Genes and strict</h4>
@@ -17,7 +17,7 @@
   {% endcall %}
   <div id="vwf-cards"></div>
   <div id="vwf-genes-sec" hidden>
-    {% call section_help('2. Replicated genes', 'vwf-p2-help') %}
+    {% call section_help('Replicated genes', 'vwf-p2-help') %}
       <p>The genes of the main cell type that replicate and meet the effect filter, best r-value first. <strong>Direction</strong> and <strong>effect</strong> are the median over the cohorts that carry the result (log2 fold change; per Braak stage or per decade for the trend facets). <strong>Cohorts significant</strong> counts the cohorts with q below 0.05 on their own in the same direction, of those tested. <strong>Carried by</strong> names the two cohorts that give the r-value. The star marks the strict tier. Flags mark gene classes that move for technical reasons (long genes, lncRNAs, sex chromosome, ribosomal and mitochondrial genes, the APOE locus).</p>
       <p>The list holds the first 500 replicated genes by r-value; the counts above are not capped. Click a gene to open its page with the cohorts behind the result.</p>
     {% endcall %}
@@ -25,14 +25,14 @@
     <div id="vwf-genes"></div>
   </div>
   <div id="vwf-modules-sec" hidden>
-    {% call section_help('3. Gene sets', 'vwf-p3-help') %}
+    {% call section_help('Gene sets', 'vwf-p3-help') %}
       <p>Gene sets whose mean score per donor follows {{ facet_label }}: the same partial conjunction rule as for genes, on permutation p values of the mean module score, Benjamini-Hochberg over the modules of one family. Pseudobulk of the member genes is used where counts exist, else the mean of per-cell scores. The effect filter for sets is a standardised effect of at least 0.2 standard deviations in 2 cohorts; there is no strict tier.</p>
     {% endcall %}
     <p class="vw-essential" id="vwf-modules-sub"></p>
     <div id="vwf-modules"></div>
   </div>
   <div id="vwf-cohorts-sec" hidden>
-    {% call section_help('4. Cohorts', 'vwf-p4-help') %}
+    {% call section_help('Cohorts', 'vwf-p4-help') %}
       <p>The cohorts behind the main cell type: its donors (mice in the xenograft scope) and the covariates of its model. A cohort without age in its model is not adjusted for age. A cohort named "unassigned" is not in the cohort table yet.</p>
     {% endcall %}
     <div id="vwf-cohorts"></div>

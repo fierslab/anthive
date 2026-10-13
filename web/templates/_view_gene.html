@@ -14,7 +14,7 @@
 
 {% macro view_gene_expression(gene) -%}
 <div id="vwg-expression" data-gene="{{ gene }}">
-  {% call section_help('1. Where is it expressed', 'vwg-p1-help') %}
+  {% call section_help('Where is it expressed', 'vwg-p1-help') %}
     <p>This panel is descriptive: for each cell type it shows how much of it expresses {{ gene }}, not whether anything changes. Click a row to list its datasets.</p>
     <h4>% expressing</h4>
     <p>The percent of cells of that cell type with at least one count of the gene, averaged over the datasets of the row (the range over datasets is in brackets). Bars run from 0 to 100 percent. In an opened row the dotted line marks the mean over all datasets of that cell type, so you see which datasets sit above or below it.</p>
@@ -78,7 +78,7 @@
 
 {% macro view_gene_variability(gene) -%}
 <div id="vwg-variability" data-gene="{{ gene }}">
-  {% call section_help('3. Donor variability', 'vwg-p3-help') %}
+  {% call section_help('Donor variability', 'vwg-p3-help') %}
     <p>This panel will show how much donors differ within a group.</p>
   {% endcall %}
   <div class="vw-placeholder">Coming later.</div>

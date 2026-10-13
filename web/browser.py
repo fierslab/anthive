@@ -59,7 +59,7 @@ VIEW_REGISTRY: Dict[str, str] = {
     'gene-detection': 'Gene page, Detection tab (the earlier expression table)',
     'gene-shifts': 'Gene page, Facet DE tab',
     'gene-variability': 'Gene page, Donor variability tab',
-    'gene-author-de': 'Gene page, Author DE tab',
+    'gene-author-de': 'Gene page, Other DE (author and custom) tab',
     'gene-atlas': 'Gene page, Atlas tab (old)',
     'geneset-score': 'Gene set page, Module score tab (the earlier expression table)',
     'geneset-shifts': 'Gene set page, Facet DE tab',
@@ -69,6 +69,7 @@ VIEW_REGISTRY: Dict[str, str] = {
     'dataset-facet-gene': 'Dataset page, Facet > Gene sub-tab (facet x cell type matrix of gene results)',
     'dataset-other-de': 'Dataset page, Other DE (author and custom) under the Facet > Gene and GS matrices',
     'gene-other-de': 'Gene page, Other DE (author and custom) on the Facet DE tab',
+    'older-views': 'The Older views menu of the gene, gene set and facet pages (earlier designs)',
     'dataset-facet-gs': 'Dataset page, Facet GS tab (gene set scores by annotation column, per cell)',
 }
 APPROVED_VIEWS = frozenset({
@@ -3857,6 +3858,9 @@ async def facet_detail_view(request: Request, facet_name: str):
         "hidden_by_config": bool(facet_data.get("hidden_by_config")
                                  or (visible and facet_name not in visible)),
         "facet_name": facet_name,
+        # one display label per facet (S9): the definition label, else the test label
+        "facet_label_display": (facet_data.get('definition') or {}).get('label')
+                               or _FACET_TEST_LABELS.get(facet_name[4:] if facet_name.startswith('ant_') else facet_name),
         "facet": facet_data,
         "definition": facet_data.get("definition") or {},
         "definitions_status": facet_data.get("definitions_status") or {},
@@ -3896,6 +3900,7 @@ def _facet_hidden_page(request: Request, facet_name: str, visible: List[str]) ->
         "facet_name": facet_name,
         "facet": {},
         "hidden_notice": True,
+        "facet_label_display": _FACET_TEST_LABELS.get(facet_name[4:] if facet_name.startswith('ant_') else facet_name),
         "visible_facets": visible,
         "definition": {},
         "definitions_status": {},

@@ -45,7 +45,9 @@
   <button type="button" class="tab-btn {{ view_class('geneset-shifts') }}" title="{{ view_tip('geneset-shifts', 'Facet DE: donor-level facet effects on the mean score of the set') }}" data-vtab="shifts" data-hash="facet-de" data-alias="shifts" role="tab">Facet DE</button>
   <button type="button" class="tab-btn {{ view_class('geneset-variability') }}" title="{{ view_tip('geneset-variability') }}" data-vtab="variability" data-hash="variability" role="tab" hidden>Donor variability</button>
   <button type="button" class="tab-btn {{ view_class('geneset-genes') }}" title="{{ view_tip('geneset-genes', 'Member genes and their own facet calls') }}" data-vtab="genes" data-hash="genes" role="tab">Genes</button>
-  <button type="button" class="tab-btn vw-old {{ view_class('geneset-page') }}" title="{{ view_tip('geneset-page', 'The earlier geneset page: members, where the score varies most') }}" data-vtab="page" data-hash="page" role="tab">Geneset page (old)</button>
+  <span class="vw-older"><button type="button" class="tab-btn vw-older-btn {{ view_class('older-views') }}" aria-haspopup="true" aria-expanded="false" title="{{ view_tip('older-views', 'Earlier designs of this page, kept reachable') }}">Older views &#9662;</button><span class="vw-older-menu" hidden>
+  <button type="button" class="tab-btn vw-old {{ view_class('geneset-page') }}" title="{{ view_tip('geneset-page', 'The earlier geneset page: members, where the score varies most') }}" data-vtab="page" data-hash="page" role="tab">Gene set page (old)</button>
+  </span></span>
 </div>
 <div class="tab-panel vw-panel" id="vt-expression">{{ expression_panel('geneset', payload.display_name) }}</div>
 <div class="tab-panel vw-panel" id="vt-score">{{ _review_banner('geneset-score') }}{{ view_geneset_score(name) }}</div>

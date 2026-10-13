@@ -139,7 +139,7 @@ def test_gene_page_has_the_three_tabs_and_the_dataset_map(client):
     for marker in ('data-vtab="expression"', 'data-vtab="shifts"', 'data-vtab="variability"', 'data-vtab="atlas"', 'data-vtab="de"',
                    'id="vt-expression"', 'id="vt-shifts"', 'id="vt-variability"', 'id="vt-atlas"', 'id="vwg-p1"', 'id="vwg-p2"', 'id="vwg-headline"'):
         assert marker in text, marker
-    for label in ("Expression", "Facet DE", "Donor variability", "Author DE (as published)", "Atlas (old)"):
+    for label in ("Expression", "Facet DE", "Donor variability", "Other DE (author and custom)", "Atlas (old)"):
         assert label in text, label
     for hash_name in ("expression", "facet-de", "variability", "author-de", "atlas"):
         assert f'data-hash="{hash_name}"' in text, hash_name
@@ -194,7 +194,7 @@ def test_geneset_page_has_the_view_tab(client):
     for marker in ('data-vtab="score"', 'data-vtab="shifts"', 'data-vtab="variability"', 'data-vtab="page"', 'id="vt-score"', 'id="vt-shifts"',
                    'id="vt-variability"', 'id="vt-page"', 'id="vws-p1"', 'id="vws-p2"', 'id="vws-headline"', 'id="vws-p1-help" hidden', 'id="vws-p2-help" hidden'):
         assert marker in text, marker
-    for label in ("Expression", "Module score", "Facet DE", "Donor variability", "Geneset page (old)"):
+    for label in ("Expression", "Module score", "Facet DE", "Donor variability", "Gene set page (old)"):
         assert label in text, label
     assert text.index('id="vws-headline"') > text.index('id="vt-shifts"')
     assert "doc-block" not in text.split('id="vt-page"')[0].split('id="vw-tabs"')[1]       # no doc_block clutter in the view tabs
@@ -213,8 +213,9 @@ def test_facet_page_has_overview_and_detail_tabs(client):
         assert marker in text, marker
     assert "Details for experts" in text or "vwf-expert" in text
     assert "Detail (old)" in text and "Detail (current)" not in text
-    for header in ("1. Cell types", "2. Replicated genes", "3. Gene sets", "4. Cohorts"):
+    for header in ("Cell types", "Replicated genes", "Gene sets", "Cohorts"):
         assert header in text, header
+    assert "1. Cell types" not in text and 'class="vw-older"' in text
     for panel in ("vwf-p1-help", "vwf-p2-help", "vwf-p3-help", "vwf-p4-help"):
         assert f'id="{panel}" hidden' in text, panel
 
@@ -275,10 +276,11 @@ def test_section_help_and_col_info_macros_render_the_shared_pattern():
     assert '<span class="info" title="tip" data-glossary="r-value"' in html
 
 
-def test_gene_page_uses_numbered_help_headers_and_drops_old_labels(client):
+def test_gene_page_uses_unnumbered_help_headers_and_drops_old_labels(client):
     text = client.get("/genes/PTPRG").text
-    for header in ("1. Where is it expressed", "Facet DE by cell type", "3. Donor variability"):
+    for header in ("Where is it expressed", "Facet DE by cell type", "Donor variability"):
         assert header in text, header
+    assert "1. Where is it expressed" not in text and "3. Donor variability" not in text
     for panel in ("vwg-p1-help", "vwg-p2-help", "vwg-p3-help"):
         assert f'id="{panel}" hidden' in text
     for gone in ("panel 1, descriptive", "tested per donor or mouse", "Mean, log-normalised", "low det."):
@@ -375,7 +377,7 @@ def test_geneset_page_has_ranked_shifts_genes_tab_and_hides_donor_variability(cl
                    "after adjusting over", "just above the 0.05 line", "ranks low by construction", "vws-provenance"):
         assert needle in text or needle in (_WEB_DIR / "templates" / "geneset.html").read_text(encoding="utf-8"), needle
     assert 'class="gn"' not in text and "replicated, strict test passed" in text      # the strict swatch is dropped only for modules in the script
-    assert "Geneset page (old)" in text
+    assert "Gene set page (old)" in text
 
 
 def test_gene_page_hides_donor_variability_tab(client):

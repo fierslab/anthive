@@ -1692,24 +1692,13 @@ def test_facet_detail_accepts_bare_tested_facet_name(client):
     assert client.get("/facets/ant_disease", follow_redirects=False).status_code == 200
 
 
-def test_facets_pages_carry_experimental_notice(client, monkeypatch):
+def test_facets_pages_carry_the_preview_banner_not_the_experimental_box(client, monkeypatch):
     monkeypatch.setenv("ANTHIVE_ISSUE_TRACKER_URL", "https://tracker.example/issues")
     for path in ("/facets", "/facets/ant_disease"):
         text = client.get(path).text
-        assert 'class="exp-notice"' in text
-        assert "Experimental." in text
-        notice = text.split('class="exp-notice"')[1].split("</div>")[0]
-        assert 'href="https://tracker.example/issues"' in notice
-        assert "Report an issue" in notice
-        assert "—" not in notice
-
-
-def test_facets_notice_without_issue_link_when_unconfigured(client, monkeypatch):
-    monkeypatch.setenv("ANTHIVE_ISSUE_TRACKER_URL", "")
-    text = client.get("/facets").text
-    notice = text.split('class="exp-notice"')[1].split("</div>")[0]
-    assert "Experimental." in notice
-    assert "<a " not in notice
+        assert 'class="exp-notice"' not in text                    # one preview device: the review banner
+        assert 'class="review-banner"' in text
+        assert text.index('class="page-title') < text.index('class="review-banner"')   # under the h1
 
 
 def test_facets_nav_entry_has_experimental_badge(client):
@@ -1724,7 +1713,7 @@ def test_facets_nav_entry_has_experimental_badge(client):
 def test_facets_index_shows_definitions_and_audit_note(client):
     text = client.get("/facets").text
     assert 'id="facet-audit-note"' in text
-    assert "Definitions under audit." in text
+    assert "The facet definitions are under audit." in text and 'data-help-for="facet-audit-box"' in text
     assert "An audit of the facets is running." in text
     assert "Diagnosis of the donor as a short code." in text
     # a facet without a written definition says so
@@ -1739,7 +1728,7 @@ def test_facet_detail_definition_at_top(client):
     assert "Clinical or neuropathological diagnosis of the donor." in definition
     assert "AD, control, MCI, PD" in definition
     assert "Empty (NULL) when not recorded." in definition
-    assert "Definitions under audit." in definition
+    assert "The facet definitions are under audit." in definition
     # the definition comes before the datasets and value sections
     assert text.index('id="facet-definition"') < text.index("Value distribution")
 

@@ -3,7 +3,7 @@
 {% block title %}Facets · anthive{% endblock %}
 
 {% block content %}
-{% from "_macros.html" import review_banner as _review_banner %}{{ _review_banner('facets') }}
+{% from "_macros.html" import review_banner as _review_banner %}
 <style>
   .facet-desc { font-size: 12px; color: var(--text-muted); max-width: 780px; margin: 4px 0 12px; }
   table.facet-table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -43,7 +43,7 @@
 {{ breadcrumb([("facets", None)]) }}
 
 <h1 class="page-title">Facets{{ doc_toggle('facets-about', 'About facets') }}</h1>
-{{ experimental_notice("facets") }}
+{{ _review_banner('facets') }}
 
 <p class="facet-desc" id="facets-short">A facet is a donor-level (or animal-level) variable that anthive has standardised across datasets, such as sex, pathologic AD or Braak stage. Click a facet to see its definition and how expression differs with it across datasets.</p>
 {% call doc_block('About facets', id='facets-about') %}
@@ -53,7 +53,8 @@
   <p id="facets-scope-about"><strong>Scopes.</strong> Results are kept apart by scope: human post-mortem tissue, and human cells grafted into mouse hosts (xenograft). The two are never counted together, because a host animal is not a donor and the biology differs. Each facet lists the scopes it has; open it to switch between them. In vitro cultures are listed but not tested, and pure mouse datasets are not part of the facet analysis (<a href="/help#glossary-scope">glossary</a>).</p>
 {% endcall %}
 {% if definitions_status and definitions_status.note %}
-<p class="audit-note" id="facet-audit-note"><strong>Definitions under audit.</strong> {{ definitions_status.note }}</p>
+<p class="facet-desc" id="facet-audit-note">The facet definitions are under audit.{{ doc_toggle('facet-audit-box', 'About the facet audit') }}</p>
+{% call doc_block('About the facet audit', id='facet-audit-box') %}<p>{{ definitions_status.note }}</p>{% endcall %}
 {% endif %}
 
 {% if hidden_facets %}
@@ -68,7 +69,7 @@
 {% if error %}<p style="color:#dc2626">{{ error }}</p>{% endif %}
 
 <div class="stats-row">
-  <div>facets in catalog: <span class="val">{{ n_facets }}</span></div>
+  <div><span class="val">{{ n_facets }}</span> facets</div>
 </div>
 
 {% if facets %}

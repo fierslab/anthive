@@ -11,7 +11,7 @@
 
 {% macro view_geneset_score(name) -%}
 <div id="vws-score">
-  {% call section_help('1. Module score', 'vws-p1-help') %}
+  {% call section_help('Module score', 'vws-p1-help') %}
     <p>This panel is descriptive: for each cell type it shows how high {{ name }} ranks among the gene sets of the same dataset, not whether anything changes. Click a row to list its datasets.</p>
     <h4>Rank among gene sets</h4>
     <p>A mean module score cannot be compared between datasets, because every dataset has its own scale, depth and background. So the bar shows where the mean score of {{ name }} falls among ALL gene sets scored on the same cells of the same dataset, as "top x%" (a longer bar means a higher mean score than more of the other sets; "of N" is the number of other sets compared). In a cell type row the value is the mean over its datasets, in an opened row the dotted line marks that mean. Where gene sets are scored only on the cells of their own cell type, a set is compared with the sets scored on those cells (sets that apply to every cell are included), and a set that covers several cell types gets the cell-weighted mean of its ranks per cell type.</p>
@@ -73,7 +73,7 @@
 
 {% macro view_geneset_variability() -%}
 <div id="vws-variability">
-  {% call section_help('3. Donor variability', 'vws-p3-help') %}
+  {% call section_help('Donor variability', 'vws-p3-help') %}
     <p>This panel will show how much donors differ within a group.</p>
   {% endcall %}
   <div class="vw-placeholder">Coming later.</div>

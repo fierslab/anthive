@@ -499,13 +499,15 @@
                explanation panel (.help-panel) directly below it, closed by default.
            (i) .info: a plain circled i on a column header or label with a short
                hover or tap tooltip. Macros section_help and col_info in _macros.html. */
-        .help-btn { display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; padding: 0; margin-left: 6px;
-                    border-radius: 50%; border: 0; background: #335C67; color: #fff; font: 700 11px/1 var(--font); cursor: pointer; vertical-align: 1px; }
-        .help-btn:hover, .help-btn.on { background: var(--link); }
+        /* one help device site-wide (S1): the (?) panels look like the (i) doc toggles */
+        .help-btn { display: inline; padding: 0 2px; margin-left: 4px; border: 0; background: none; color: var(--text-muted);
+                    font: inherit; font-size: 12px; font-weight: normal; line-height: 1; cursor: pointer; vertical-align: baseline; border-radius: 3px; }
+        .help-btn:hover, .help-btn.on { color: var(--link); background: none; }
+        .help-btn.on { font-weight: 700; }
         .help-btn:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
         .help-btn.inline { width: 15px; height: 15px; font-size: 10px; margin-left: 4px; vertical-align: -1px; }
-        .help-panel { max-width: 900px; margin: 4px 0 12px; padding: 6px 14px 8px; border: 1px solid #c4d8db; border-left: 4px solid #335C67;
-                      border-radius: 4px; background: #f4f8f9; font-size: 12.5px; line-height: 1.55; font-weight: normal; color: var(--text); }
+        .help-panel { max-width: 900px; margin: 6px 0 12px; padding: 6px 12px 8px; border: 1px solid var(--border-light); border-left: 3px solid var(--border);
+                      border-radius: 4px; background: #fafbfc; font-size: 12.5px; line-height: 1.5; font-weight: normal; color: var(--text); }
         .help-panel[hidden] { display: none; }
         .help-panel p { margin: 5px 0 6px; }
         .help-panel ul { margin: 4px 0 6px 18px; padding: 0; }

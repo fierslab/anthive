@@ -207,9 +207,11 @@
   <button type="button" class="tab-btn {{ view_class('gene-expression') }}" title="{{ view_tip('gene-expression', 'Where the gene ranks among all genes, per cell type') }}" data-vtab="expression" data-hash="expression" role="tab">Expression</button>
   <button type="button" class="tab-btn {{ view_class('gene-shifts') }}" title="{{ view_tip('gene-shifts', 'Facet DE: donor-level facet effects on the gene') }}" data-vtab="shifts" data-hash="facet-de" data-alias="shifts" role="tab">Facet DE</button>
   <button type="button" class="tab-btn {{ view_class('gene-variability') }}" title="{{ view_tip('gene-variability') }}" data-vtab="variability" data-hash="variability" role="tab" hidden>Donor variability</button>
-  <button type="button" class="tab-btn {{ view_class('gene-author-de') }}" title="{{ view_tip('gene-author-de') }}" data-vtab="de" data-hash="author-de" role="tab" hidden>Author DE (as published)<span class="tab-count"></span></button>
+  <button type="button" class="tab-btn {{ view_class('gene-author-de') }}" title="{{ view_tip('gene-author-de', 'Differential expression stored with the datasets: the authors analysis or one added by the lab') }}" data-vtab="de" data-hash="author-de" role="tab" hidden>Other DE (author and custom)<span class="tab-count"></span></button>
+  <span class="vw-older"><button type="button" class="tab-btn vw-older-btn {{ view_class('older-views') }}" aria-haspopup="true" aria-expanded="false" title="{{ view_tip('older-views', 'Earlier designs of this page, kept reachable') }}">Older views &#9662;</button><span class="vw-older-menu" hidden>
   <button type="button" class="tab-btn {{ view_class('gene-detection') }}" title="{{ view_tip('gene-detection', 'The earlier expression table: percent of cells expressing and rank in dataset') }}" data-vtab="detection" data-hash="detection" data-alias="gene-view" role="tab">Detection</button>
   <button type="button" class="tab-btn vw-old {{ view_class('gene-atlas') }}" title="{{ view_tip('gene-atlas', 'The earlier atlas page: one row per dataset') }}" data-vtab="atlas" data-hash="atlas" role="tab">Atlas (old)</button>
+  </span></span>
 </div>
 <div class="tab-panel vw-panel" id="vt-expression">{{ expression_panel('gene', gene) }}</div>
 <div class="tab-panel vw-panel" id="vt-shifts">{{ _review_banner('gene-shifts') }}{{ view_gene_headline() }}{{ view_gene_shifts(gene) }}</div>
