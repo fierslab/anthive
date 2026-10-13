@@ -2,7 +2,7 @@
 {# Per donor plot page (2026-10-13): one gene or gene set, one facet, one cell type of one dataset; the values the
    donor-level facet test used. Image from /api/facets/{facet}/donor-plot.{png,svg,pdf}?...&db_id=; numbers from the
    matching /donor-values. Reached from the plot icons of the dataset Facet > Gene and GS lists. #}
-{% block title %}Per donor: {{ subject }} by {{ facet_label }}, {{ dataset_name }}{% endblock %}
+{% block title %}Per donor plot of {{ subject }} · anthive{% endblock %}
 {% block content %}
 {% from "_macros.html" import breadcrumb, secondary_badge, doc_block, doc_toggle %}
 {% from "_plot_caveats.html" import plot_caveats_button, plot_caveats_panel %}
@@ -13,18 +13,18 @@
   .dp-bar { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; font-size: 12px; margin: 6px 0 10px; }
   .dp-bar a, .dp-bar label { white-space: nowrap; }
   .dp-img { border: 1px solid var(--border); border-radius: 6px; background: #fff; padding: 8px; min-height: 120px; max-width: 100%; overflow-x: auto; }
-  .dp-img img { max-width: 100%; height: auto; display: block; }
+  .dp-img img { width: 100%; max-width: 900px; height: auto; display: block; }
   .dp-caption { font-size: 11.5px; color: #475569; margin: 6px 0; max-width: 900px; line-height: 1.5; border-left: 3px solid #335C67; padding-left: 10px; }
   .dp-status { font-size: 12px; color: var(--text-muted); padding: 8px; }
 </style>
 {{ breadcrumb([
     (folder_name, "/browse/" ~ folder_browse_id),
     (dataset_name, "/browse/" ~ folder_browse_id ~ "/" ~ file_id),
-    ("per donor", None)
+    ("per donor plot", None)
 ], ids=[("collection", group_id), ("dataset", file_id)]) }}
 
 <div class="plot-title-row">
-<h1 class="page-title{% if is_secondary %} secondary-dataset{% endif %}" id="dp-title">Per donor: {{ subject }} by {{ facet_label }}, {{ cell_type }}, {{ db_id }}{{ doc_toggle('dp-about', 'About this plot') }}{{ secondary_badge(is_secondary) }}</h1>
+<h1 class="page-title{% if is_secondary %} secondary-dataset{% endif %}" id="dp-title">Per donor plot of {{ subject }} by {{ facet_label }} in {{ cell_type }}, {{ dataset_name }}{{ doc_toggle('dp-about', 'About this plot') }}{{ secondary_badge(is_secondary) }}</h1>
 {{ plot_caveats_button(caveats, caveats_summary) }}
 </div>
 {{ plot_caveats_panel(caveats, caveats_summary) }}
@@ -51,14 +51,21 @@
   var adjusted = document.getElementById('dp-adjusted');
   var current = null;
   function esc(text) { return String(text == null ? '' : text).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  // the API caption, readable: no code spans, every sentence starts with a capital
+  function cleanCaption(text) {
+    return String(text).replace(/`adjusted=true`/g, 'the adjusted option').replace(/`([^`]*)`/g, '$1')
+      .replace(/(^|[.;]\s+)([a-z])/g, function (match, lead, letter) { return lead + letter.toUpperCase(); });
+  }
   function query() { return QUERY + (adjusted.checked ? '&adjusted=true' : ''); }
   function load() {
     box.innerHTML = '<p class="dp-status">Loading the plot&hellip; (the first plot after a restart can take a minute)</p>';
-    fetch(base + '/donor-plot.png?' + query() + '&width=4&height=3.6', { credentials: 'same-origin' })
+    // size the figure from the frame (inches at 150 dpi; the API allows up to 8 inches per panel)
+    var inches = Math.max(2.6, Math.min(8, Math.min(box.clientWidth - 16, 900) / 150));
+    fetch(base + '/donor-plot.png?' + query() + '&width=' + inches.toFixed(1) + '&height=' + Math.max(2.2, Math.min(8, inches * 0.6)).toFixed(1) + '&dpi=150', { credentials: 'same-origin' })
       .then(function (response) {
         if (!response.ok) return response.json().then(function (body) { throw new Error(body.detail || ('HTTP ' + response.status)); }, function () { throw new Error('HTTP ' + response.status); });
         var text = response.headers.get('X-Plot-Caption');
-        if (text) { caption.textContent = text; caption.hidden = false; }
+        if (text) { caption.textContent = cleanCaption(text); caption.hidden = false; }
         return response.blob();
       })
       .then(function (blob) {

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% from "_macros.html" import col_label, dot_scale, chart_icon, bar_scale %}
 
-{% block title %}{{ dataset_name }} — anthive{% endblock %}
+{% block title %}{{ dataset_name }} · anthive{% endblock %}
 
 {% macro _fx_effects_block(column, slot) -%}
 {%- from "_facet_effects.html" import fx_table, fx_untested -%}

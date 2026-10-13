@@ -8191,7 +8191,7 @@ def test_dataset_page_shows_other_de_under_the_gene_matrix_and_points_from_the_d
 
 def test_donor_plot_page_draws_the_api_image_with_db_id(client):
     text = client.get("/browse/GroupA/ds1/plot/donor?facet=braak&cell_type=microglial%20cell&gene=PTPRG").text
-    assert "Per donor: PTPRG by Braak stage, microglial cell, GroupA/ds1" in text
+    assert "Per donor plot of PTPRG by Braak stage in microglial cell, " in text and "Per donor plot of PTPRG · anthive" in text
     assert "/donor-plot.png?" in text and "/donor-values?" in text
     assert "cell_type=microglial+cell&amp;db_id=GroupA%2Fds1&amp;gene=PTPRG" in text or "db_id=GroupA%2Fds1" in text
     assert 'data-fmt="svg"' in text and 'data-fmt="pdf"' in text and 'id="dp-adjusted"' in text
@@ -8202,7 +8202,7 @@ def test_donor_plot_page_draws_the_api_image_with_db_id(client):
 
 def test_donor_plot_page_for_a_gene_set_and_without_parameters(client):
     text = client.get("/browse/GroupA/ds1/plot/donor?facet=sex&cell_type=astrocyte&module=S/E/Mod1&method=pseudobulk&source=gene_list").text
-    assert "Per donor: Mod1 by Sex" in text and "module=S%2FE%2FMod1" in text and "#facet-gs" in text
+    assert "Per donor plot of Mod1 by Sex in astrocyte" in text and "module=S%2FE%2FMod1" in text and "#facet-gs" in text
     assert 'id="dp-invalid"' in client.get("/browse/GroupA/ds1/plot/donor").text
 
 
@@ -8272,3 +8272,13 @@ def test_facet_groups_split_tested_untested_structural_and_count_what_is_listed(
     assert reasons["ant_braak_group"].startswith("not analysed yet")
     assert [f["facet"] for f in groups["structural"]] == ["ant_cell_type", "ant_donor", "ant_mg_author_cluster"]
     assert groups["n_listed"] == 1 + 1 + 3
+
+
+def test_page_titles_use_one_format_without_em_dashes():
+    import re
+    for path in sorted((Path(browser.__file__).parent / "templates").glob("*.html")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"\{% block title %\}(.*?)\{% endblock %\}", text)
+        if match and path.name != "base.html":
+            assert "\u2014" not in match.group(1) and "anthive" in match.group(1), path.name
+            assert " · anthive" in match.group(1), path.name

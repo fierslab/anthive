@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}{{ geom_label }} — {{ dataset_name }} — anthive{% endblock %}
+{% block title %}{{ geom_label }} · {{ dataset_name }} · anthive{% endblock %}
 
 {# Per-axis transform picker (REST API 2.4). Reused for scatter/hexbin XY mode
    and kde2d. signed_log1p / signed_sqrt / asinh suit data that straddles zero
@@ -212,11 +212,11 @@
 {{ breadcrumb([
     (folder_name, "/browse/" ~ folder_browse_id),
     (dataset_name, "/browse/" ~ folder_browse_id ~ "/" ~ file_id),
-    (geom_icon ~ " " ~ geom_label, None)
+    (geom_label|lower, None)
 ], ids=[("collection", group_id), ("dataset", file_id)]) }}
 
 <div class="plot-title-row">
-<h1 class="page-title{% if is_secondary %} secondary-dataset{% endif %}">{{ geom_icon }} {{ geom_label }} — {{ dataset_name }}{{ secondary_badge(is_secondary) }}</h1>
+<h1 class="page-title{% if is_secondary %} secondary-dataset{% endif %}">{{ geom_label }} in {{ dataset_name }}{{ secondary_badge(is_secondary) }}</h1>
 {{ plot_caveats_button(caveats, caveats_summary) }}
 </div>
 {# ── Known caveats banner (task #254) ──────────────────────────────────
