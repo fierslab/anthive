@@ -35,17 +35,20 @@ See doc/MCP_LINKS.md.
 """
 
 import argparse
+import asyncio
 import base64
 import binascii
 import collections
 import contextvars
 import json
+import re
 import sys
 import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, urlencode
 
 import httpx
 import uvicorn
@@ -348,6 +351,40 @@ papers have citekeys like `lee2026plasticity`.
    `analytics_query` for numbers, `module_score` for gene programmes.
 4. Literature: `search_literature` for passages, `get_paper` for a paper and
    the datasets it is the source of, `related_papers` for context.
+5. Donor-level questions across cohorts ("what changes with Braak, sex, age,
+   disease, APOE e4?"): `facet_overview(facet)` first, then
+   `facet_top_genes` / `facet_top_modules` for one cell type group,
+   `facet_effects` / `module_facet_effects` for one gene or gene set,
+   `facet_donor_values` for the values per donor behind one result, and
+   `get_facet_tests` / `facet_units` for one dataset.
+6. Donor-to-donor variability: `donor_variability` (one gene or gene set
+   across cohorts, the cross-cohort top list, or `db_id=` for one dataset).
+7. Differential expression stored with a dataset by its authors or the lab:
+   `list_de_studies`, `de_study`, `gene_de`.
+
+## Which numbers mean what (call explain() before explaining them)
+
+- q value (`q_value`, `q_param`, `q_perm`): Benjamini-Hochberg within one
+  dataset x cell type x facet of anthive's own donor-level tests
+  (`explain("fdr")`).
+- r-value: replication across cohorts (partial conjunction, at least 2
+  cohorts in the same direction), BH-adjusted over the genes or gene sets of
+  one scope x facet x cell type group (`explain("r-value")`,
+  `explain("facet-replication")`, `explain("k-of-m")`).
+- padj of a stored DE study: that study's own adjusted p under the authors'
+  model. Not comparable with q or r, never counted as replication
+  (`explain("differential-expression")`).
+- Per cell vs per donor: per-cell statistics (plots, `analytics_query`,
+  cell-level DE studies such as glmm, wilcoxon or MAST) treat cells of one
+  donor as independent and are descriptive; the facet tools work on one value
+  per donor or animal (`explain("per-cell-per-donor")`,
+  `explain("facet-replicate-unit")`).
+- Rank among gene sets: where a gene set's mean score falls among all sets
+  scored in the same dataset; within one dataset only
+  (`explain("rank-among-gene-sets")`).
+- Facets, scopes, donor variability, donor plots: `explain("facet-effects")`,
+  `explain("facet-scopes")`, `explain("donor-variability")`,
+  `explain("donor-plots")`.
 
 ## Rules
 
@@ -395,6 +432,74 @@ def _internal_secret() -> str:
     cfg = _get_anthive_config()
     return get_or_create_secret('internal_secret', cfg.get('internal_secret'),
                                 'ANTHIVE_INTERNAL_SECRET', cfg)
+
+
+# ── plot routes ────────────────────────────────────────────────────────────────
+#
+# The plot tool calls the per-geom routes /databases/{id}/plot/{geom} (the
+# unified /plot?geom= route is deprecated). Each route declares only its own
+# parameters, so the tool sends the common ones plus the ones listed here; the
+# parameters a route does not declare were ignored by the unified route too,
+# and the defaults of the undeclared per-geom extras equal the ones the
+# unified route used (_build_plot_request), so the figures are the same.
+
+PLOT_COMMON_PARAMS = frozenset({
+    'format', 'layer', 'width', 'height', 'dpi', 'palette_categorical', 'palette_continuous',
+    'palette_divergent', 'subset', 'sample',
+})
+PLOT_GEOM_PARAMS = {
+    'scatter': frozenset({'x', 'y', 'color', 'point_size', 'alpha', 'log_x', 'log_y', 'vmin', 'vmax'}),
+    'hexbin': frozenset({'x', 'y', 'color', 'alpha', 'gridsize', 'mincnt', 'log_x', 'log_y', 'vmin', 'vmax'}),
+    'violin': frozenset({'x', 'y', 'color'}),
+    'box': frozenset({'x', 'y', 'color'}),
+    'bar': frozenset({'x', 'y', 'color', 'ci'}),
+    'histogram': frozenset({'x', 'color', 'bins'}),
+    'ecdf': frozenset({'x', 'color'}),
+    'kde': frozenset({'x', 'color'}),
+    'heatmap': frozenset({'x', 'y', 'n_genes'}),
+    'rolling': frozenset({'x', 'y', 'color', 'window', 'show_band'}),
+}
+
+
+# ── differential expression stored with a dataset ──────────────────────────────
+
+def de_method_level(method: Any) -> str:
+    """Analysis level of a stored DE study from its method name (same rule as the web UI's ``_de_method_level``).
+
+    Returns 'donor or sample (pseudobulk)', 'cell' for a cell-level model, or '' when the name does not tell.
+    """
+    text = str(method or '').lower()
+    if 'pseudobulk' in text or text.startswith(('deseq2', 'edger', 'limma', 'dream')):
+        return 'donor or sample (pseudobulk)'
+    if text in ('glmm', 'lmem', 'wilcoxon', 'mast', 't-test', 'ttest', 'logreg', 'seurat', 'scanpy'):
+        return 'cell'
+    return ''
+
+
+def de_level_note(method: Any) -> str:
+    """Plain words on how far the p values of a stored DE study can be trusted."""
+    level = de_method_level(method)
+    if level == 'cell':
+        return ('cell level, DESCRIPTIVE: the model is fitted on cells, so the cells of one donor or animal enter as '
+                'replicates and the p values are pseudoreplicated (far too small) unless the model fully accounts for '
+                'the replicate; read the effects, not the significance counts')
+    if level:
+        return 'pseudobulk per donor or sample: p values are at the replicate level of the study design'
+    return 'analysis level not recorded: check the method before quoting a p value'
+
+
+# Model terms a biologist cannot use directly (batches, interactions, per line or per sample terms); the same
+# pattern as the web UI's _DE_TECHNICAL_TERM.
+DE_TECHNICAL_TERM = re.compile(r'(batch|interaction|intplus|patient|relevel|sample|mouse_id|donor_id|(^|_)line(_|$)|:)', re.I)
+
+
+DE_RULES = (
+    'AUTHOR OR CUSTOM DE: these are differential expression results stored with the dataset (the authors\' own '
+    'analysis as published, or one the lab added), with their own model, covariates and group definitions. They are '
+    'NOT anthive\'s donor-level facet tests and never count towards replication across cohorts. padj is the study\'s '
+    'own adjusted p (usually Benjamini-Hochberg within one contrast), not a q value or r-value of the facet tests. '
+    'Call explain("differential-expression") and explain("per-cell-per-donor") before interpreting.'
+)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -468,6 +573,9 @@ def main() -> None:
     api_base_url = args.api_url.rstrip('/')
     plots_dir = Path(args.plots_dir) if args.plots_dir else None
     public_url = args.public_url.rstrip('/')
+    # ant-serve as the users' browsers reach it: Caddy serves it under /api
+    # (config/Caddyfile, handle_path /api/*). Links printed by tools use this.
+    public_api_url = f'{public_url}/api'
     mcp_public_url = (args.mcp_url or f'http://{args.host}:{args.port}/mcp').rstrip('/')
 
     require_token = bool(_anthive_cfg.get('require_token', True))
@@ -501,7 +609,11 @@ def main() -> None:
             '  versions, module scores, differential expression, donor groups or any glossary\n'
             '  term (pseudobulk, FDR, r-value, k of m, ...) to a user, call explain() and quote\n'
             '  or closely paraphrase it. Do not improvise definitions or thresholds. Tool and\n'
-            '  API results that carry help_topics name the topics worth reading.\n'
+            '  API results that carry help_topics name the topics worth reading. Three numbers\n'
+            '  are easily confused: q (BH within one dataset x cell type x facet, explain("fdr")),\n'
+            '  the r-value (replication across cohorts, explain("r-value")) and padj of a stored\n'
+            '  author DE study (that study\'s own model); per cell vs per donor:\n'
+            '  explain("per-cell-per-donor").\n'
             '  Always keep "the literature says" (cite [Author Year, p.N]) separate from "our data\n'
             '  shows", and remember per-cell statistics are pseudoreplicated (aggregate per donor).\n'
             '  Use search_literature throughout, not only when asked: before interpreting a finding,\n'
@@ -520,29 +632,44 @@ def main() -> None:
             '  get_dataset_context  background pack for one dataset (load before analysing it)\n'
             '\n'
             'DISCOVERING DATA\n'
-            '  search_datasets  — find datasets by organism, cell type, tissue, disease, or free text;\n'
+            '  search_datasets  find datasets by organism, cell type, tissue, disease, or free text;\n'
             '                     returns db_id values used in every other tool\n'
-            '  get_dataset_info — full metadata for one dataset: all categorical and numerical\n'
+            '  get_dataset_info  full metadata for one dataset: all categorical and numerical\n'
             '                     observation fields (use these exact names in queries/plots),\n'
             '                     available expression layers, and embedding names\n'
-            '  search_genes     — confirm exact gene identifiers before using them in queries or plots\n'
+            '  search_genes     confirm exact gene identifiers before using them in queries or plots\n'
             '\n'
             'REPLICATE-LEVEL FACET EFFECTS  (sex, disease [provisional], APOE e4 carrier, Braak, age, App NL-G-F; exploratory)\n'
+            '  facet_overview   one facet in one call: per cell type group, how many genes replicate and the top ones\n'
             '  facet_effects    one gene: every dataset x cell type, grouped by cohort, replication badge\n'
             '  facet_top_genes  genes changing in the most independent cohorts, per cell type (pages with offset=)\n'
             '  module_facet_effects  one gene set: does its score change with a facet, and which members do\n'
             '  facet_top_modules  gene sets whose score changes in the most cohorts, per cell type\n'
             '  facet_units      which units were tested, donors, model, flags; why others were not\n'
-            '  facet_donor_values  the donor-level values behind one result cell (one value per donor, per cohort) + plot link\n'
+            '  facet_donor_values  the donor-level values behind one result cell (one value per donor, per cohort; db_id=\n'
+            '                   for one dataset) + plot link\n'
             '  get_facet_tests  gene or module rows of one dataset (limma-voom / OLS + permutations)\n'
             '  donor_variability  how much replicates (donors; animals in xenografts) differ for one gene or gene set, or the genes\n'
-            '                   that vary most between replicates in several cohorts (exploratory; explain("donor-variability") first)\n'
+            '                   that vary most between replicates in several cohorts, or (db_id=) one dataset\'s units and most\n'
+            '                   variable genes (exploratory; explain("donor-variability") first)\n'
             '  All of them take scope= (human_postmortem | xenograft_human_in_mouse): facets are\n'
             '  tested and counted per scope, human and mouse genes are never merged.\n'
             '  Prefer these over per-cell plots for donor-level facets, and state the model when reporting.\n'
             '\n'
+            'AUTHOR OR CUSTOM DIFFERENTIAL EXPRESSION  (stored with datasets; NOT anthive\'s facet tests)\n'
+            '  list_de_studies  DE studies of one dataset or of all, with method and analysis level\n'
+            '  de_study         one study: contrasts with significant counts (up, down), or one contrast\'s top genes\n'
+            '  gene_de          one gene in every stored DE study\n'
+            '  Each study keeps its authors\' model; cell-level studies (glmm, wilcoxon, MAST, ...) are pseudoreplicated\n'
+            '  and DESCRIPTIVE. Never count them as replication; explain("differential-expression") first.\n'
+            '\n'
+            'GENE SETS AND MODULE SCORES\n'
+            '  list_genesets, get_geneset (db_id= adds its rank among all gene sets scored in that dataset),\n'
+            '  list_module_scores (with_ranks=true ranks every scored set in a dataset), module_score (on the fly).\n'
+            '  A rank is within one dataset only; explain("rank-among-gene-sets").\n'
+            '\n'
             'PLOTTING\n'
-            '  plot(db_id, geom, ...)  — generate a publication-quality figure server-side\n'
+            '  plot(db_id, geom, ...)  generate a publication-quality figure server-side\n'
             '  Supported geom values:\n'
             '    scatter   UMAP / embedding scatter; x/y default to the first embedding\n'
             '    violin    per-category expression or metadata distribution\n'
@@ -556,20 +683,20 @@ def main() -> None:
             '  as x / y / color and the server resolves it.\n'
             '  Color encoding:\n'
             '    categorical fields → palette="tab20"  (always specify this for obs columns!)\n'
-            '    gene expression / numerical → palette="viridis" (default) — adds a colorbar\n'
+            '    gene expression / numerical → palette="viridis" (default); adds a colorbar\n'
             '  All figures are saved server-side.  Every call returns:\n'
-            '    1. A URL to an HTML page (PNG/SVG) or PDF — always share this with the user.\n'
+            '    1. A URL to an HTML page (PNG/SVG) or PDF; always share this with the user.\n'
             '    2. If the client sends the header X-Image-Output: inline, the image is ALSO\n'
             '       embedded directly in this response so it renders without opening a browser.\n'
             '\n'
             'SQL ANALYTICS  (for custom questions the plot tool cannot answer)\n'
-            '  analytics_schema — inspect DuckDB tables, column names/types, and 3-row samples;\n'
-            '                     ALWAYS call this first — column names differ per dataset\n'
-            '  analytics_query  — run any SELECT / WITH … SELECT query (writes are blocked);\n'
+            '  analytics_schema  inspect DuckDB tables, column names/types, and 3-row samples;\n'
+            '                     ALWAYS call this first; column names differ per dataset\n'
+            '  analytics_query   run any SELECT / WITH … SELECT query (writes are blocked);\n'
             '                     do ALL aggregation, filtering, pivoting, and joins HERE;\n'
             '                     returns a markdown table when ≤ 500 rows, otherwise a 10-row\n'
             '                     preview plus a session_id for analytics_viz\n'
-            '  analytics_viz    — run a sandboxed Python script against the query result;\n'
+            '  analytics_viz     run a sandboxed Python script against the query result;\n'
             '                     df is pre-loaded; save figure to OUTPUT_PATH;\n'
             '                     available: pandas, matplotlib, seaborn, numpy, scipy, sklearn;\n'
             '                     blocked: os, sys, subprocess, socket, requests, file I/O;\n'
@@ -577,7 +704,7 @@ def main() -> None:
             '\n'
             'CELL SUBSETTING\n'
             '  Every plot call accepts an optional subset parameter to restrict which cells\n'
-            '  are used — the rest of the dataset is ignored for that request.\n'
+            '  are used; the rest of the dataset is ignored for that request.\n'
             '  Pass a list of filter strings to the subset argument:\n'
             "    'field:value'      exact categorical match  e.g. 'sex:female'\n"
             "    'field:v1,v2'      IN list (OR within field)  e.g. 'celltype:Microglia,Astrocyte'\n"
@@ -590,16 +717,16 @@ def main() -> None:
             '\n'
             'RANDOM SUBSAMPLING\n'
             '  Every plot call accepts sample=N to draw at most N cells at random\n'
-            '  (DuckDB reservoir sampling — exact row count, applied after subset filters).\n'
+            '  (DuckDB reservoir sampling; exact row count, applied after subset filters).\n'
             '  If N ≥ cell count the full dataset is used.  Use this to:\n'
             '    • Speed up scatter/UMAP plots on large datasets (sample=50000 is usually enough)\n'
             '    • Get a quick sense of expression patterns before running the full query\n'
             '    • Estimate per-group averages: sample=10000 is sufficient for common cell types\n'
-            '      (rare populations < 1 % may be underrepresented — use subset or more cells)\n'
+            '      (rare populations < 1 % may be underrepresented; use subset or more cells)\n'
             '  Rule of thumb by geom:\n'
-            '    scatter/UMAP          sample=50000  — visual quality indistinguishable\n'
-            '    violin / kde / ecdf   sample=20000  — distribution shape well preserved\n'
-            '    bar / heatmap means   sample=10000  — sufficient for common cell types\n'
+            '    scatter/UMAP          sample=50000   visual quality indistinguishable\n'
+            '    violin / kde / ecdf   sample=20000   distribution shape well preserved\n'
+            '    bar / heatmap means   sample=10000   sufficient for common cell types\n'
             '  SQL analytics: use DuckDB\'s own USING SAMPLE clause in analytics_query, e.g.:\n'
             '    SELECT celltype, AVG(TREM2) FROM __cells USING SAMPLE 10000 ROWS (reservoir)\n'
             '    GROUP BY celltype\n'
@@ -607,7 +734,7 @@ def main() -> None:
             'IMAGE EMBEDDING (Open WebUI, compatible clients)\n'
             '  Add the custom HTTP header  X-Image-Output: inline  in your MCP client settings.\n'
             '  When this header is present, plot and analytics_viz embed the image as a base64\n'
-            '  content block so it renders inline — the URL is always included as well.\n'
+            '  content block so it renders inline; the URL is always included as well.\n'
             '\n'
             f'This MCP server is reachable at: {mcp_public_url}'
         ),
@@ -999,6 +1126,11 @@ def main() -> None:
         SAMPLING — speed up plots:
           sample=50000 (scatter), 20000 (violin/kde/ecdf), 10000 (bar/heatmap)
 
+        Per-cell plots are DESCRIPTIVE: cells of one donor are not independent,
+        so a difference between groups of cells is not a donor-level result
+        (call explain('per-cell-per-donor'); for donor-level effects use the
+        facet tools or aggregate per ant_donor).
+
         Returns:
           A URL to an HTML page (PNG/SVG) or PDF.  When the client sends
           X-Image-Output: inline, an embedded image block is also returned.
@@ -1025,10 +1157,10 @@ def main() -> None:
             subset:        See SUBSETTING above.
             sample:        See SAMPLING above.
         """
-        subset_params = subset or []
-        image_bytes, headers = await _get_plot(
-            f'/databases/{db_id}/plot',
-            geom=geom, x=x, y=y, color=color,
+        if geom not in PLOT_GEOM_PARAMS:
+            return f"Unknown geom '{geom}'. Valid: {sorted(PLOT_GEOM_PARAMS)}"
+        candidate_params = dict(
+            x=x, y=y, color=color,
             format=output_format, layer=layer,
             width=width, height=height, dpi=dpi,
             bins=bins, point_size=point_size, alpha=alpha,
@@ -1040,7 +1172,12 @@ def main() -> None:
             log_x=log_x, log_y=log_y,
             vmin=vmin, vmax=vmax,
             window=window, show_band=show_band,
-            subset=subset_params, sample=sample,
+            subset=subset or [], sample=sample,
+        )
+        allowed = PLOT_COMMON_PARAMS | PLOT_GEOM_PARAMS[geom]
+        image_bytes, headers = await _get_plot(
+            f'/databases/{db_id}/plot/{geom}',
+            **{name: value for name, value in candidate_params.items() if name in allowed},
         )
         caption = headers.get('x-plot-caption', '')
         return _make_plot_response(image_bytes, output_format, caption)
@@ -1271,8 +1408,38 @@ def main() -> None:
             )
         return '\n'.join(lines)
 
+    def _rank_phrase(rank: Optional[float], n_compared: Any) -> str:
+        """'0.83, a higher mean score than 83% of 159 other gene sets' for a rank in [0, 1]."""
+        if rank is None:
+            return 'no rank'
+        return f"{float(rank):.2f}, a higher mean score than {float(rank) * 100:.0f}% of {n_compared} other gene sets"
+
+    async def _geneset_rank_lines(geneset_id: str, db_id: str) -> List[str]:
+        """Lines for ``get_geneset`` from ``/genesets/{id}/rank?db_id=``."""
+        try:
+            rank = await _get(f'/genesets/{geneset_id.strip("/")}/rank', db_id=db_id)
+        except httpx.HTTPStatusError as exc:
+            return [f"  Rank in {db_id}: error {exc.response.status_code}: {exc.response.text[:200]}"]
+        lines = [f"  Rank among gene sets in {db_id} (fraction of the other sets with a lower mean score; "
+                 f"within this dataset only; at least {rank.get('min_peers')} peers and {rank.get('min_cells')} cells):"]
+        for entry in rank.get('datasets') or []:
+            for source, label in (('geneset', 'scanpy score_genes, primary'), ('ucell', 'UCell, secondary')):
+                result = entry.get(source) or {}
+                if not result.get('available') or result.get('rank') is None:
+                    lines.append(f"    {label}: not available ({result.get('reason') or 'no rank'})")
+                    continue
+                lines.append(f"    {label}: rank {_rank_phrase(result['rank'], result.get('n_modules_compared'))} "
+                             f"({result.get('n_cells')} cells; mean {_fmt_number(result.get('mean'))}, SD over cells "
+                             f"{_fmt_number(result.get('std'))})")
+                for group in result.get('cell_types') or []:
+                    lines.append(f"      {group.get('cell_type') or 'all cells'}: rank "
+                                 f"{_rank_phrase(group.get('rank'), group.get('n_modules_compared'))} ({group.get('n_cells')} cells)")
+        for missing in rank.get('not_available') or []:
+            lines.append(f"    {missing.get('db_id')}: not available ({missing.get('reason')})")
+        return lines
+
     @mcp.tool()
-    async def get_geneset(geneset_id: str) -> str:
+    async def get_geneset(geneset_id: str, db_id: Optional[str] = None) -> str:
         """Fetch a single geneset by ID and return its metadata + gene list.
 
         The geneset_id format is '<Study>/<Experiment>/<name>', e.g.
@@ -1281,8 +1448,19 @@ def main() -> None:
         Returns merged metadata (experiment + per-geneset), the full gene list,
         and (for .rnk format) the rank values.
 
+        With db_id (one of the datasets it is pre-scored in) it also gives the
+        set's RANK AMONG GENE SETS in that dataset: the fraction of the other
+        gene sets scored on the same cells with a lower mean score (0 lowest,
+        1 highest), overall and per cell type group, from the scanpy score
+        (primary) and UCell (secondary; depends on set size). A mean module
+        score is not comparable between datasets; the rank is a within-dataset
+        number only, never compare ranks across datasets. The first request
+        per dataset can take up to a minute. Call explain('rank-among-gene-sets')
+        and explain('module-scores') before explaining it to a user.
+
         Args:
             geneset_id: Full ID '<Study>/<Experiment>/<name>'.
+            db_id: Optional dataset id for the rank among gene sets (e.g. 'G24/MMG').
         """
         try:
             data = await _get(f'/genesets/{geneset_id}')
@@ -1314,12 +1492,18 @@ def main() -> None:
         if scored_in:
             lines.append(f"  Pre-scored in: {', '.join(scored_in)}")
             lines.append(
-                f"  → Use analytics_query to read pre-computed scores instead of "
-                f"recomputing with module_score, e.g.:")
+                f"  → Use the pre-computed scores instead of recomputing with module_score: plot them by "
+                f"column name, or where the column is in the obsnum table (list_module_scores(db_id) says so), "
+                f"analytics_query, e.g.:")
             lines.append(
                 f"      SELECT cell_name, \"{column}\" FROM obsnum")
+            lines.append(
+                f"    In datasets that keep the score only in their scores sidecar, obsnum has no such column.")
         else:
             lines.append(f"  Pre-scored in: (none — use module_score to compute on-the-fly)")
+
+        if db_id:
+            lines += await _geneset_rank_lines(geneset_id, db_id)
 
         genes = data.get('genes') or []
         if data['format'] == 'rnk' and data.get('ranks'):
@@ -1332,11 +1516,11 @@ def main() -> None:
         return '\n'.join(lines)
 
     @mcp.tool()
-    async def list_module_scores(db_id: str) -> str:
+    async def list_module_scores(db_id: str, with_ranks: bool = False) -> str:
         """List geneset module scores already computed and stored on a dataset.
 
         Use this BEFORE module_score to check whether a geneset is already
-        pre-computed as an obs column — if it is, prefer reading it via
+        pre-computed as an obs column; if it is, prefer reading it via
         analytics_query rather than recomputing.
 
         Returns the column names, geneset references, and per-column stats.
@@ -1345,8 +1529,16 @@ def main() -> None:
             SELECT cell_name, "Sierksma2025::WGCNA::Brown_Lysosome"
             FROM   obsnum
 
+        with_ranks=true adds each set's RANK AMONG GENE SETS in this dataset
+        (fraction of the other scored sets with a lower mean scanpy score, 0 to
+        1, and the SD of the score over cells, not donors) and sorts by it. Use
+        it for "which programmes are high in this dataset"; ranks are within
+        one dataset only. The first request per dataset can take up to a
+        minute. Call explain('rank-among-gene-sets') before explaining it.
+
         Args:
             db_id: Dataset id, e.g. 'P26/HMI'.
+            with_ranks: Add the rank among gene sets (default false).
         """
         try:
             data = await _get(f'/databases/{db_id}/module_scores')
@@ -1354,21 +1546,54 @@ def main() -> None:
             if exc.response.status_code == 404:
                 return f"Dataset {db_id!r} not found."
             return f"Error {exc.response.status_code}: {exc.response.text}"
+        ranks: Dict[str, dict] = {}
+        rank_note = ''
+        if with_ranks:
+            try:
+                rank_data = await _get(f'/databases/{db_id}/module-ranks')
+                if rank_data.get('available'):
+                    ranks = {row['column_name']: row for row in rank_data.get('modules') or []}
+                else:
+                    rank_note = f"Ranks not available: {rank_data.get('reason')}"
+            except httpx.HTTPStatusError as exc:
+                rank_note = f"Ranks: error {exc.response.status_code}: {exc.response.text[:200]}"
 
         items = data.get('scored_genesets', [])
+        sidecar_only = False
+        if not items and ranks:
+            # Scores kept only in the dataset's .scores.parquet sidecar are not obs columns, so
+            # /module_scores misses them; /module-ranks reads the sidecar.
+            sidecar_only = True
+            items = [{'geneset_id': row['geneset_id'], 'column_name': row['column_name'], 'geneset_known': True}
+                     for row in ranks.values()]
         if not items:
             return (
-                f"{db_id}: no pre-computed module scores. "
-                f"Use module_score to compute one on-the-fly."
+                f"{db_id}: no pre-computed module scores as obs columns. "
+                + (rank_note + ' ' if rank_note else '')
+                + ("Scores kept only in the dataset's scores sidecar are not listed here; with_ranks=true lists "
+                   "them. " if not with_ranks else '')
+                + "Use module_score to compute one on-the-fly."
             )
 
-        lines = [f"{db_id}: {data['count']} pre-computed module score(s):"]
+        lines = [f"{db_id}: {len(items)} pre-computed module score(s)"
+                 + (' (from the scores sidecar; none is an obs column):' if sidecar_only else ':')]
+        if rank_note:
+            lines.append(rank_note)
+        if ranks:
+            lines.append('Sorted by rank among gene sets (scanpy score, this dataset only; highest first).')
+            items = sorted(items, key=lambda item: -((ranks.get(item['column_name']) or {}).get('rank') or -1))
         for item in items:
             stats = item.get('stats') or {}
             line = (
                 f"  {item['geneset_id']}\n"
                 f"      column: {item['column_name']!r}"
             )
+            ranked = ranks.get(item['column_name'])
+            if ranked:
+                line += (f"\n      rank among gene sets: {_rank_phrase(ranked.get('rank'), ranked.get('n_modules_compared'))} "
+                         f"(SD over cells {_fmt_number(ranked.get('std'))})"
+                         if ranked.get('available') and ranked.get('rank') is not None
+                         else f"\n      rank among gene sets: not available ({ranked.get('reason')})")
             if item.get('method'):
                 line += f"  method={item['method']}"
             if item.get('description'):
@@ -1384,6 +1609,11 @@ def main() -> None:
             lines.append(line)
 
         lines.append("")
+        if sidecar_only:
+            lines.append("These scores are in the dataset's scores sidecar, not in the obsnum table: plot them by "
+                         "column name (e.g. plot(geom='violin', x=<cell type column>, y=<column>)); analytics_query "
+                         "on obsnum does not see them.")
+            return '\n'.join(lines)
         lines.append("To read pre-computed scores, use analytics_query, e.g.:")
         if items:
             lines.append(
@@ -1467,12 +1697,20 @@ def main() -> None:
         Say that the result is exploratory. Fields the run did not record
         read "not recorded"; do not fill them in.
 
+        Definitions: call explain('facet-effects') for facets, explain('fdr')
+        for q values (BH within one dataset x cell type x facet; not the
+        r-value of replication across cohorts, explain('r-value')), and
+        explain('facet-replicate-unit') for donor versus cell before you
+        explain these results to a user.
+
         Args:
             db_id: Dataset id, e.g. 'G24/MMG'.
             facet: Restrict to one facet: sex, graft_sex, host_sex, disease, apoe4_carrier, braak, age or app_nlgf.
             cell_type: Restrict to one cell type stratum (as listed in the summary).
             level: 'summary' (one line per facet x cell type: donors per level,
-                covariates, flags, genes and modules at q < 0.05), 'genes'
+                covariates, flags, genes at q < 0.05 split up and down, modules
+                at q_param|q_perm < 0.05 and by the replication rule (q_param
+                with at least 30 residual df, else q_perm) split up and down), 'genes'
                 (gene rows: logFC with 95% CI, q, mean log2 CPM) or 'modules'
                 (module rows: estimate with CI, std_effect, q_param, q_perm).
             q: q threshold for 'genes' and 'modules' (default 0.05; 1 returns
@@ -1533,8 +1771,12 @@ def main() -> None:
                     ('batch_used', flags.get('batch_used')),
                     ('batch_confounded', flags.get('batch_confounded'))) if on]
                 genes = unit.get('genes') or {}
+                gene_split = (f" ({genes['n_up']} up, {genes['n_down']} down)"
+                              if genes.get('n_up') is not None and genes.get('n_down') is not None else '')
                 modules = '; '.join(
                     f"{m['method']}/{m['source']} {m.get('n_q05_param')}|{m.get('n_q05_perm')} of {m.get('n_modules')}"
+                    + (f", {m['n_q05']} by the replication rule ({m.get('n_up')} up, {m.get('n_down')} down)"
+                       if m.get('n_q05') is not None else '')
                     for m in unit.get('modules') or [])
                 model = unit.get('model') or {}
                 model_lines = [f"    stratum: {(model.get('stratum') or {}).get('description', 'not recorded')}"]
@@ -1555,7 +1797,7 @@ def main() -> None:
                     f"- {name}: {unit.get('contrast')}, donors {donors} (analysed {unit.get('n_donors')}){level_text}, "
                     f"covariates {', '.join(unit.get('covariates') or []) or 'none'}"
                     f"{', flags ' + ', '.join(flag_words) if flag_words else ''}; "
-                    f"genes q<0.05: {genes.get('n_q05', 'NA')} of {genes.get('n_tested', 'NA')}"
+                    f"genes q<0.05: {genes.get('n_q05', 'NA')} of {genes.get('n_tested', 'NA')}{gene_split}"
                     f"{'; modules q_param|q_perm<0.05: ' + modules if modules else ''}")
                 lines.extend(model_lines)
                 control = unit.get('sex_control')
@@ -1665,6 +1907,9 @@ def main() -> None:
 
         When you report a result, repeat its model line (formula, n donors,
         covariates left out), the replication badge and that it is exploratory.
+        Before explaining to a user, call explain('facet-replication'),
+        explain('r-value') (replication across cohorts) versus explain('fdr')
+        (q value within one dataset) and explain('facet-replicate-unit').
 
         Args:
             gene: Gene symbol, e.g. 'PTPRG'.
@@ -1749,7 +1994,7 @@ def main() -> None:
     async def facet_donor_values(facet: str, cell_type: str, gene: Optional[str] = None, geneset: Optional[str] = None,
                                  scope: Optional[str] = None, adjusted: bool = False,
                                  include_uncounted: bool = False, method: Optional[str] = None,
-                                 source: Optional[str] = None) -> str:
+                                 source: Optional[str] = None, db_id: Optional[str] = None) -> str:
         """The values behind one facet result: one number per donor (or host animal), per counted cohort.
 
         Use it to check what a replicated gene or gene set really looks like (outliers, a few donors carrying the
@@ -1759,7 +2004,10 @@ def main() -> None:
         with TMM normalised library size, the scale the limma-voom test works on. For a gene set it is the donor's
         score. Values are unadjusted unless adjusted=true (covariate part removed by ordinary least squares); the
         test also weights donors, so a trend can differ a little from the reported estimate. A plot link is given
-        (relative to the API root: png or svg); open it for the small-multiples figure. Exploratory.
+        (an absolute URL on this site, png; svg and pdf by changing the extension; it opens for a user signed in
+        to the site); share it with the user for the small-multiples figure. Give db_id to see only the units of
+        one dataset (counted or not) in the exact cell type stratum. Exploratory. Call explain('donor-plots') and
+        explain('per-cell-per-donor') before explaining the values to a user.
 
         Args:
             facet: sex, graft_sex, host_sex, disease, apoe4_carrier, braak, age or app_nlgf (also apoe4_dose, braak_threshold, age_adjusted).
@@ -1771,9 +2019,11 @@ def main() -> None:
             include_uncounted: also list units that do not carry a cohort's vote (with the reason).
             method: Gene sets only: cell_mean or pseudobulk (default: the variant the card shows).
             source: Gene sets only: geneset, ucell or gene_list (with method).
+            db_id: Only the units of this dataset, e.g. 'G24/MMG' (404 when it has no unit for the cell).
         """
         params: dict = {'cell_type': cell_type, 'scope': scope, 'adjusted': str(bool(adjusted)).lower(),
-                        'include_uncounted': str(bool(include_uncounted)).lower(), 'method': method, 'source': source}
+                        'include_uncounted': str(bool(include_uncounted)).lower(), 'method': method, 'source': source,
+                        'db_id': db_id}
         if gene:
             params['gene'] = gene
         if geneset:
@@ -1787,9 +2037,10 @@ def main() -> None:
         lines = [f"{name} / {data['facet']} [{data['scope']}] in {data['cell_type']}: one value per replicate, "
                  f"scale: {data.get('scale') or 'n/a'}; {'adjusted' if data['adjusted'] else 'unadjusted'}.",
                  data['note'] + '.', 'EXPLORATORY, descriptive. ' + data['anonymisation'] + '.']
-        query = '&'.join(f'{key}={value}' for key, value in params.items() if value is not None and key not in
-                         ('include_uncounted',))
-        lines.append(f"plot: /facets/{data['facet']}/donor-plot.png?{query} (svg and pdf also)")
+        query = urlencode({key: value for key, value in params.items() if value is not None and key not in
+                           ('include_uncounted',)})
+        lines.append(f"plot: {public_api_url}/facets/{quote(data['facet'], safe='')}/donor-plot.png?{query} "
+                     '(svg and pdf also)')
         for unit in data['units']:
             model = unit['model']
             header = (f"\n## {unit['cohort_display']}{'' if unit['counted'] else ' (not counted: ' + str(unit.get('not_counted_reason')) + ')'}"
@@ -1810,11 +2061,65 @@ def main() -> None:
                 lines.append(f"  {donor['label']} | {shown} | {_fmt_number(donor['value'])} | {donor['n_cells']}")
         return '\n'.join(lines)
 
+    async def _dataset_donor_variability(db_id: str, *, gene: Optional[str], geneset: Optional[str], cell_type: str,
+                                         rung: str, feature_type: str, n: int) -> str:
+        """donor_variability for one dataset: ``/databases/{db_id}/donor-variability`` summary plus rows."""
+        try:
+            summary = await _get(f'/databases/{db_id}/donor-variability')
+        except httpx.HTTPStatusError as exc:
+            return f'error {exc.response.status_code}: {exc.response.text[:300]}'
+        lines = [f"EXPLORATORY. Donor variability in {db_id} [{summary.get('facet_scope')}]: {summary.get('status')}"
+                 + (f" ({summary['reason']})" if summary.get('reason') else '')
+                 + f"; replicate = {summary.get('replicate_unit') or 'not recorded'}"
+                 + (f" ({summary['replicate_column']})" if summary.get('replicate_column') else '') + '.']
+        run = summary.get('run') or {}
+        if run:
+            lines.append(f"run: {run.get('tool')} at {run.get('timestamp_utc')}, seed {run.get('seed')}, "
+                         f"counts layer {run.get('counts_layer')}, {run.get('n_replicates_all')} replicates in the dataset")
+        for unit in summary.get('units') or []:
+            reached = ', '.join(r['name'] for r in unit.get('rungs') or [] if r.get('computed'))
+            omitted = '; '.join(f"{term}: {why}" for term, why in (unit.get('terms_omitted') or {}).items())
+            lines.append(f"unit {unit.get('cell_type')} [{unit.get('celltype_group')}]: {unit.get('status')}, "
+                         f"{unit.get('n_replicates')} replicates, median {_fmt_number(unit.get('median_cells_per_replicate'))} "
+                         f"cells each, rungs {reached or 'none'} (deepest {unit.get('rung_deepest')}), "
+                         f"{unit.get('n_genes')} genes, {unit.get('n_modules')} gene sets, median reliability "
+                         f"{_fmt_number(unit.get('median_reliability'), 2)}"
+                         + ('' if unit.get('counted_in_cross_cohort') else ', not counted across cohorts')
+                         + (f"; left out of the design: {omitted}" if omitted else ''))
+        if summary.get('status') != 'analysed':
+            return '\n'.join(lines)
+        kind = 'module' if (geneset or (not gene and feature_type == 'module')) else 'gene'
+        try:
+            data = await _get(f'/databases/{db_id}/donor-variability', feature_type=kind, cell_type=cell_type, rung=rung,
+                              feature=gene or geneset, sort='excess' if kind == 'gene' else 'sd',
+                              limit=max(1, min(int(n), 2000)))
+        except httpx.HTTPStatusError as exc:
+            lines.append(f'rows: error {exc.response.status_code}: {exc.response.text[:300]}')
+            return '\n'.join(lines)
+        unit = data.get('unit') or {}
+        lines.append(f"\n{kind}s in {unit.get('cell_type')} ({unit.get('n_replicates')} replicates), rung {data.get('rung')}: "
+                     f"{data.get('n_returned')} of {data.get('n_matching')}"
+                     + (', most variable first (excess over the mean-variance trend; a rank within this unit, not a test)'
+                        if kind == 'gene' and not gene else ''))
+        if not data.get('rows') and (gene or geneset):
+            lines.append(f"{gene or geneset} is not among the analysed {kind}s of this unit (absent from the dataset, "
+                         'below the expression gate, or not scored here).')
+        for row in data.get('rows') or []:
+            at_rung = (row.get('rungs') or {}).get(data.get('rung')) or {}
+            name = row.get('gene') or f"{row.get('module')} ({row.get('method')}/{row.get('source')})"
+            line = (f"{name} | reliability {_fmt_number(row.get('reliability'), 2)} | donor SD {_fmt_number(row.get('sd_donor'))} "
+                    f"log2 (x{_fmt_number(row.get('fold_range_donor'), 2)} at 2 SD) | at {data.get('rung')}: SD "
+                    f"{_fmt_number(at_rung.get('sd'))}, design explains {_fmt_number(at_rung.get('share_design'), 2)}")
+            if kind == 'gene':
+                line += f", excess z {_fmt_number(at_rung.get('excess_z'), 2)}"
+            lines.append(line)
+        return '\n'.join(lines)
+
     @mcp.tool()
     async def donor_variability(gene: Optional[str] = None, geneset: Optional[str] = None,
                                 cell_type: str = 'microglia', scope: Optional[str] = None, rung: str = 'D1',
                                 feature_type: str = 'gene', n: int = 30, min_cohorts: int = 2,
-                                exclude_secondary: bool = True) -> str:
+                                exclude_secondary: bool = True, db_id: Optional[str] = None) -> str:
         """How much donors (animals in xenograft studies) differ from each other in one cell type, per gene or gene set.
 
         EXPLORATORY. Call explain('donor-variability') before interpreting. Replicate differences are measured on
@@ -1826,10 +2131,14 @@ def main() -> None:
         Rankings compare genes inside a cohort; they are not hypothesis tests.
 
         Give gene or geneset for one feature in every analysed unit; give neither for the cross-cohort top list.
+        Give db_id for ONE dataset: its analysed units (replicates, rungs reached, run record) and its most
+        variable genes (by the excess over the mean-variance trend) or gene sets (by donor SD) in one cell type,
+        or, with gene or geneset, that feature's full row in this dataset.
 
         Args:
             gene: Gene symbol, e.g. 'GSTM1'.
             geneset: Gene set id 'Study/Experiment/name' (as in module_facet_effects).
+            db_id: One dataset, e.g. 'G24/MMG' (see above).
             cell_type: Cell type group such as 'microglia' (restricts one feature; selects the group of the top list).
             scope: human_postmortem (default) or xenograft_human_in_mouse (variability between host animals).
             rung: raw, D0, D1 (default), D2, D3, D4 or F.
@@ -1838,6 +2147,9 @@ def main() -> None:
             min_cohorts: Top list: results needed in at least this many cohorts (default 2).
             exclude_secondary: Do not count reanalyses (default true).
         """
+        if db_id:
+            return await _dataset_donor_variability(db_id, gene=gene, geneset=geneset, cell_type=cell_type,
+                                                    rung=rung, feature_type=feature_type, n=n)
         params = {'scope': scope, 'rung': rung, 'exclude_secondary': str(bool(exclude_secondary)).lower()}
         try:
             if gene:
@@ -1916,7 +2228,9 @@ def main() -> None:
         combines pathology-based definitions, Braak is a linear trend per stage,
         age per decade, app_nlgf is App NL-G-F vs control (mouse, xenograft hosts).
         Use facet_effects on a gene from this list to see every dataset row
-        and its model.
+        and its model; facet_overview gives every cell type group in one call.
+        Call explain('facet-replication'), explain('r-value') and
+        explain('k-of-m') before explaining the list to a user.
 
         Args:
             facet: sex, disease, apoe4_carrier, braak, age or app_nlgf.
@@ -1972,6 +2286,72 @@ def main() -> None:
                          f"{' | flags: ' + ', '.join(row['gene_flags']) if row.get('gene_flags') else ''}")
         return '\n'.join(lines)
 
+    @mcp.tool()
+    async def facet_overview(facet: str, n: int = 10, scope: Optional[str] = None,
+                             exclude_secondary: bool = True) -> str:
+        """One-call overview of a facet: per cell type group, how many genes replicate across cohorts and the strongest of them.
+
+        EXPLORATORY. Start here for "what changes with Braak (or sex, age, disease, APOE e4, App NL-G-F)?". The
+        reply gives the headline cell type group (counted cohorts, genes testable in at least two cohorts,
+        replicated genes, how many also pass the 10 percent effect gate and the strict minimum-effect test), then
+        each cell type group with its top genes (r-value, direction, median log2 fold change, k of m cohorts,
+        low detection), and the quiet groups where nothing replicates (with a low power flag when too few cohorts
+        or donors could show an effect). A gene replicated in several groups is listed once, in the group where it
+        is strongest (also_in names the others). Same replication rules as facet_top_genes; use facet_top_genes
+        for the full ranked list of one group and facet_effects for one gene's cohorts and models.
+
+        Before explaining the numbers to a user, call explain('facet-overview'), explain('facet-replication')
+        and explain('r-value') (r-value: partial-conjunction replication across cohorts, BH-adjusted; not the
+        q value of one dataset), and explain('k-of-m').
+
+        Args:
+            facet: sex, graft_sex, host_sex, disease, apoe4_carrier, braak, age or app_nlgf.
+            n: Top genes per cell type group (default 10).
+            scope: human_postmortem or xenograft_human_in_mouse. Default: human_postmortem
+                (app_nlgf: xenograft_human_in_mouse). Scopes are never merged.
+            exclude_secondary: Do not count reanalyses (default true).
+        """
+        try:
+            data = await _get(f'/facets/{facet}/effects/overview', n=max(1, int(n)), scope=scope,
+                              exclude_secondary=str(bool(exclude_secondary)).lower())
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
+        headline = data.get('headline') or {}
+        others = [s for s in data.get('scopes') or [] if s != data.get('scope')]
+        lines = [_FACET_TOOL_RULES,
+                 f"\n# {data.get('facet')} [{data.get('scope')}]"
+                 + (f" (other scopes with results: {', '.join(others)}; ask with scope=)" if others else ''),
+                 f"Headline {headline.get('celltype_group')}: {headline.get('cohorts')} counted cohorts; "
+                 f"{headline.get('n_replicated')} of {headline.get('n_genes_in_family')} testable genes replicate (r < 0.05), "
+                 f"{headline.get('n_effect_gate')} with a change of at least {headline.get('effect_gate_unit') or '10%'} "
+                 f"in 2 cohorts, {headline.get('n_strict')} strict"
+                 + (f": {', '.join(headline['strict_genes'])}" if headline.get('strict_genes') else '') + '.']
+        for group in data.get('cell_types') or []:
+            lines.append(f"\n## {group['celltype_group']}: {group.get('n_cohorts')} cohorts, {group.get('n_replicated')} of "
+                         f"{group.get('n_genes_in_family')} genes replicate ({group.get('n_effect_gate')} effect gate, "
+                         f"{group.get('n_strict')} strict; {group.get('n_assigned')} of them are strongest in this group)")
+            lines.append('gene | r_value | direction | median log2FC | k of m | effect gate | notes')
+            for gene in group.get('genes') or []:
+                notes = []
+                if gene.get('strict'):
+                    notes.append('strict')
+                if gene.get('also_in'):
+                    notes.append('also in ' + ', '.join(gene['also_in']))
+                if gene.get('low_detection'):
+                    notes.append(f"low detection ({_fmt_number((gene.get('detection') or {}).get('pct_median'))} percent of cells)")
+                if gene.get('gene_flags'):
+                    notes.append('flags: ' + ', '.join(gene['gene_flags']))
+                lines.append(f"{gene['gene']} | {_fmt_number(gene.get('r_value'))} | {gene.get('direction')} | "
+                             f"{_fmt_number(gene.get('median_logFC'))} | {gene.get('k')} of {gene.get('m')} | "
+                             f"{'passed' if gene.get('effect_gate_passed') else 'no'} | {'; '.join(notes) or '-'}")
+        quiet = data.get('quiet_groups') or []
+        if quiet:
+            lines.append('\nNo replicated gene in: ' + '; '.join(
+                f"{group['celltype_group']} ({group.get('n_cohorts')} cohorts, {group.get('n_genes_in_family')} genes"
+                + (', LOW POWER: absence of evidence, not evidence of absence' if group.get('low_power') else '') + ')'
+                for group in quiet))
+        return '\n'.join(lines)
+
     _MODULE_TOOL_RULES = (
         'EXPLORATORY. A module is a gene set; its score per donor is tested the same way as a gene, per dataset and cell '
         'type, then combined across cohorts: one anchor unit per cohort and cell type group, permutation p values of the '
@@ -1995,6 +2375,7 @@ def main() -> None:
         whether the two variants disagree, then the member genes that replicate for the same facet (plain counts and names,
         never truncated, with the up and down split and the subset passing the 10 percent effect filter). It also says
         in which datasets the module was tested, whether the set is quality sensitive or directionless.
+        Call explain('module-replication') and explain('r-value') before explaining the result to a user.
 
         Args:
             geneset: Gene set id 'study/experiment/name', e.g. 'Mancuso2024/Cell_states/DAM'.
@@ -2063,6 +2444,7 @@ def main() -> None:
         the standardised effect. Each row shows the pseudobulk-of-counts result where it exists, else the mean of
         per-cell scores, and flags A/B disagreement, quality-sensitive sets (mitochondrial or ribosomal) and
         directionless (GWAS-like) sets. Use module_facet_effects on a row for its cohorts and member genes.
+        Call explain('module-replication') before explaining the list to a user.
 
         Args:
             facet: sex, disease, apoe4_carrier, braak, age or app_nlgf.
@@ -2112,6 +2494,8 @@ def main() -> None:
         pseudobulk (limma-voom for genes, OLS + permutations for modules,
         10,000 by default); disease is provisional. State the model when you report a
         unit. For gene and module rows of one unit use get_facet_tests.
+        Call explain('facet-tested') and explain('facet-replicate-unit') for
+        why units were or were not tested.
 
         Args:
             db_id: Dataset id, e.g. 'G24/MMG'.
@@ -2268,6 +2652,216 @@ def main() -> None:
         lines.append("")
         lines.append("Use this session_id with analytics_viz to plot the score distribution,")
         lines.append("e.g. a histogram or overlay on UMAP embeddings.")
+        return '\n'.join(lines)
+
+    # ── differential expression stored with datasets (author or custom DE) ──────
+
+    _de_scan_state: Dict[str, Any] = {}
+    _DE_SCAN_TTL = 3600.0
+
+    def _dataset_path(db_id: str) -> str:
+        return '/databases/' + '/'.join(quote(part, safe='') for part in db_id.strip('/').split('/'))
+
+    async def _de_studies_by_dataset() -> Dict[str, List[dict]]:
+        """db_id -> stored DE studies for every dataset the caller may see; cached an hour per identity."""
+        identity = _current_identity.get() or {}
+        key = (identity.get('user', ''), tuple(sorted(identity.get('groups', []))))
+        cached = _de_scan_state.get(key)
+        if cached and time.monotonic() - cached[0] < _DE_SCAN_TTL:
+            return cached[1]
+        databases = (await _get('/databases')).get('databases', [])
+        limiter = asyncio.Semaphore(8)
+
+        async def studies_of(db_id: str) -> Tuple[str, List[dict]]:
+            async with limiter:
+                try:
+                    return db_id, (await _get(_dataset_path(db_id) + '/de')).get('studies') or []
+                except (httpx.HTTPError, ValueError):
+                    return db_id, []
+        found = {db_id: studies for db_id, studies in
+                 await asyncio.gather(*(studies_of(db['id']) for db in databases if db.get('id'))) if studies}
+        if len(_de_scan_state) > 64:
+            _de_scan_state.clear()
+        _de_scan_state[key] = (time.monotonic(), found)
+        return found
+
+    def _de_study_line(db_id: str, study: dict) -> str:
+        covariates = study.get('covariates')
+        return (f"{db_id} | {study.get('study_id')} | {study.get('target') or 'gene'} | method {study.get('method') or 'not recorded'} "
+                f"[{de_level_note(study.get('method')).split(':')[0]}] | reference {study.get('reference_type') or '-'} | "
+                f"{study.get('n_terms')} terms, {study.get('n_contrasts')} contrasts"
+                + (f" | covariates {', '.join(covariates) if isinstance(covariates, list) else covariates}" if covariates else '')
+                + (f" | {study['description']}" if study.get('description') else ''))
+
+    @mcp.tool()
+    async def list_de_studies(db_id: Optional[str] = None) -> str:
+        """List the differential expression (DE) studies stored with a dataset, or with every dataset.
+
+        AUTHOR OR CUSTOM DE, not anthive's own tests: each study is the authors' published analysis or one the
+        lab added, with its own model, covariates and group definitions. Every study is labelled with its analysis
+        level from the method: cell-level models (glmm, lmem, wilcoxon, MAST, scanpy, Seurat, ...) treat cells as
+        independent replicates, so their p values are pseudoreplicated and the results are DESCRIPTIVE only;
+        pseudobulk methods (DESeq2, edgeR, limma, dream on donor or sample sums) test at the replicate level. These
+        results never count towards anthive's replication across cohorts; for donor-level evidence use the facet
+        tools (facet_effects, facet_top_genes). Call explain('differential-expression') and
+        explain('per-cell-per-donor') before interpreting, and explain('fdr') for adjusted p values.
+
+        Next: de_study for the contrasts and their gene counts or top genes, gene_de for one gene.
+
+        Args:
+            db_id: Dataset id, e.g. 'SF9/CMR'; omit to list the studies of every dataset (one scan, cached an hour).
+        """
+        try:
+            if db_id:
+                studies_by_db = {db_id: (await _get(_dataset_path(db_id) + '/de')).get('studies') or []}
+            else:
+                studies_by_db = await _de_studies_by_dataset()
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
+        studies_by_db = {key: value for key, value in studies_by_db.items() if value}
+        if not studies_by_db:
+            return (f"{db_id}: no stored DE studies." if db_id else 'No dataset has stored DE studies.')
+        lines = [DE_RULES, f"{sum(len(v) for v in studies_by_db.values())} DE studies in {len(studies_by_db)} dataset(s):",
+                 'dataset | study_id | target | method [analysis level] | reference | size | covariates | description']
+        for key, studies in sorted(studies_by_db.items()):
+            lines += [_de_study_line(key, study) for study in studies]
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def de_study(db_id: str, study_id: str, term: Optional[str] = None, contrast: Optional[str] = None,
+                       padj_max: float = 0.05, n: int = 30, sort: str = 'padj', direction: str = 'both') -> str:
+        """One stored DE study (author or custom DE): its contrasts with significant gene counts, or the top genes of one contrast.
+
+        Without term and contrast: the study's method, analysis level, covariates, subset and, per term and
+        contrast, the genes (or modules) tested and those with padj below padj_max split up and down by the sign of
+        the effect. With term and contrast: the top rows of that contrast (log2 fold change, effect, padj, CI).
+
+        AUTHOR OR CUSTOM DE, not anthive's donor-level facet tests, and never counted towards replication. For a
+        cell-level study (glmm, lmem, wilcoxon, MAST, scanpy, Seurat, ...) the p values are pseudoreplicated: with
+        thousands of cells nearly everything is significant, so the counts are not evidence; read the effect
+        sizes (sort='effsize') and call the result DESCRIPTIVE. padj is the study's own adjusted p, not a q value
+        or r-value of the facet tests. Call explain('differential-expression') and explain('per-cell-per-donor')
+        before interpreting. The MCP has no DE plot; the dataset page (Facet tab, Other DE) has the volcano and
+        MA plots of a contrast.
+
+        Args:
+            db_id: Dataset id, e.g. 'SF9/CMR'.
+            study_id: From list_de_studies.
+            term: Model term of one contrast (from the summary), with contrast.
+            contrast: Contrast within the term, e.g. 'M_vs_F'.
+            padj_max: Significance cut on padj for the counts (default 0.05). With sort effsize or estimate it
+                also filters the rows of one contrast, so unstable estimates (huge intervals, padj near 1) do not
+                fill the top.
+            n: Rows for one contrast (default 30, max 2000).
+            sort: padj (default), effsize or estimate (effect sorts rank by size; use direction to pick a side).
+            direction: both (default), up or down.
+        """
+        study_path = _dataset_path(db_id) + '/de/' + quote(study_id, safe='')
+        try:
+            summary = await _get(study_path + '/summary', padj_max=padj_max)
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
+        covariates = summary.get('covariates')
+        lines = [DE_RULES,
+                 f"\n# {db_id} / {summary.get('study_id')}: {summary.get('name') or ''}",
+                 f"method {summary.get('method') or 'not recorded'}; {de_level_note(summary.get('method'))}.",
+                 f"target {summary.get('target') or 'gene'}; reference {summary.get('reference_type') or '-'}; covariates "
+                 f"{', '.join(covariates) if isinstance(covariates, list) else (covariates or 'not recorded')}; subset "
+                 f"{json.dumps(summary.get('subset_filter')) if summary.get('subset_filter') else 'all cells'}"
+                 + (f"; clusters from obs column {summary['cluster_obs_column']}" if summary.get('cluster_obs_column') else '')
+                 + (f"; {summary['n_cells_total']} cells" if summary.get('n_cells_total') else '')
+                 + (f"; source {summary['source']}" if summary.get('source') else '')]
+        if summary.get('description'):
+            lines.append(f"description: {summary['description']}")
+        if summary.get('notes'):
+            lines.append(f"notes: {summary['notes']}")
+        if not (term and contrast):
+            lines.append(f"term | contrast | tested | padj < {padj_max} (up, down) | effect type")
+            for row in summary.get('contrasts') or []:
+                lines.append(f"{row['term']} | {row['contrast']} | {row.get('n_genes')} | {row.get('n_sig')} "
+                             f"({row.get('n_up')} up, {row.get('n_down')} down) | {row.get('efftype') or '-'}")
+            lines.append('Give term and contrast for the top rows of one contrast.')
+            return '\n'.join(lines)
+        try:
+            data = await _get(study_path + '/terms/' + quote(term, safe='') + '/contrasts/' + quote(contrast, safe=''),
+                              sort=sort, direction=direction, limit=max(1, min(int(n), 2000)),
+                              padj_max=padj_max if sort != 'padj' else None)
+        except httpx.HTTPStatusError as exc:
+            lines.append(f"Error {exc.response.status_code}: {exc.response.text[:300]}")
+            return '\n'.join(lines)
+        lines.append(f"\n{term} / {contrast}: top {data.get('n_rows')} rows by {sort} ({direction})"
+                     + (f", padj <= {padj_max}" if sort != 'padj' else ''))
+        lines.append('gene | log2FC | effect (type) | estimate [CI] | padj | p')
+        for row in data.get('rows') or []:
+            lines.append(f"{row.get('gene_name')} | {_fmt_number(row.get('log2fc'))} | {_fmt_number(row.get('effsize'))} "
+                         f"({row.get('efftype') or '-'}) | {_fmt_number(row.get('estimate'))} [{_fmt_number(row.get('ci_low'))}, "
+                         f"{_fmt_number(row.get('ci_high'))}] | {_fmt_number(row.get('padj'))} | {_fmt_number(row.get('pvalue'))}")
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def gene_de(gene: str, db_id: Optional[str] = None, padj_max: Optional[float] = None,
+                      include_technical_terms: bool = False) -> str:
+        """One gene in every stored DE study (author or custom DE) of one dataset, or of every dataset that has DE.
+
+        One row per study, term and contrast: log2 fold change, effect, padj and the analysis level of the study.
+        AUTHOR OR CUSTOM DE, not anthive's donor-level facet tests: each study has its own model and groups, rows
+        of different studies are not on the same footing, and none of them count towards replication across
+        cohorts. Rows from cell-level studies are marked DESCRIPTIVE (pseudoreplicated p values). Gene symbols
+        are matched exactly (mouse and human symbols are different genes). Intercept rows are left out, and so
+        are batch, interaction and per sample or line terms unless include_technical_terms is true. Call
+        explain('differential-expression') and explain('per-cell-per-donor') before interpreting; for the
+        donor-level evidence use facet_effects.
+
+        Args:
+            gene: Gene symbol, exactly as in the dataset (e.g. 'APOE' human, 'Apoe' mouse).
+            db_id: One dataset; omit for every dataset with stored DE.
+            padj_max: Only rows with padj at or below this (default: all rows).
+            include_technical_terms: Also list batch, interaction and per sample or line terms.
+        """
+        try:
+            if db_id:
+                studies_by_db = {db_id: (await _get(_dataset_path(db_id) + '/de')).get('studies') or []}
+            else:
+                studies_by_db = await _de_studies_by_dataset()
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text[:300]}"
+        targets = [key for key, value in studies_by_db.items() if value]
+        if not targets:
+            return f"{db_id}: no stored DE studies." if db_id else 'No dataset has stored DE studies.'
+        limiter = asyncio.Semaphore(6)
+
+        async def rows_of(key: str) -> Tuple[str, List[dict]]:
+            async with limiter:
+                try:
+                    return key, (await _get(_dataset_path(key) + '/de/by-gene/' + quote(gene, safe=''))).get('rows') or []
+                except (httpx.HTTPError, ValueError):
+                    return key, []
+        results = await asyncio.gather(*(rows_of(key) for key in targets))
+        lines = [DE_RULES, f"\n# {gene} in stored DE ({len(targets)} dataset(s) with DE)",
+                 'dataset | study | level | term | contrast | log2FC | effect (type) | padj']
+        n_rows = n_hidden = 0
+        for key, rows in sorted(results):
+            for row in rows:
+                term_text = str(row.get('term') or '')
+                if term_text == 'intercept':
+                    continue
+                if not include_technical_terms and DE_TECHNICAL_TERM.search(term_text):
+                    n_hidden += 1
+                    continue
+                if padj_max is not None and (row.get('padj') is None or row['padj'] > padj_max):
+                    continue
+                level = de_method_level(row.get('method'))
+                n_rows += 1
+                lines.append(f"{key} | {row.get('study_id')} ({row.get('method') or '-'}) | "
+                             f"{'cell, DESCRIPTIVE' if level == 'cell' else (level or 'not recorded')} | {term_text} | "
+                             f"{row.get('contrast')} | {_fmt_number(row.get('log2fc'))} | {_fmt_number(row.get('effsize'))} "
+                             f"({row.get('efftype') or '-'}) | {_fmt_number(row.get('padj'))}")
+        if not n_rows:
+            lines.append(f"No row for {gene}" + (f' at padj <= {padj_max}' if padj_max is not None else '')
+                         + '. Check the symbol with search_genes (case and species matter).')
+        if n_hidden:
+            lines.append(f"{n_hidden} rows of technical terms (batch, interaction, per sample or line) left out; "
+                         'include_technical_terms=true lists them.')
         return '\n'.join(lines)
 
     # ── literature: library search, papers, dataset background (REST 2.39) ──────

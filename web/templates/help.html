@@ -255,8 +255,16 @@
       <tr><td><code>analytics_query</code></td><td>Run a read-only SQL query on a dataset.</td></tr>
       <tr><td><code>analytics_viz</code></td><td>Draw a custom figure from a query result with Python (admins only).</td></tr>
       <tr><td><code>module_score</code></td><td>Score a gene set per cell (like scanpy <code>score_genes</code> or Seurat <code>AddModuleScore</code>).</td></tr>
-      <tr><td><code>list_module_scores</code></td><td>Module scores already computed for a dataset.</td></tr>
-      <tr><td><code>list_genesets</code>, <code>get_geneset</code></td><td>Browse the curated gene sets and fetch one with its genes.</td></tr>
+      <tr><td><code>list_module_scores</code></td><td>Module scores already computed for a dataset; optionally each set's <a href="#glossary-rank-among-gene-sets">rank among gene sets</a> in that dataset.</td></tr>
+      <tr><td><code>list_genesets</code>, <code>get_geneset</code></td><td>Browse the curated gene sets and fetch one with its genes; with a dataset, the set's rank among the gene sets scored there.</td></tr>
+      <tr><td><code>facet_overview</code></td><td>One facet in one call: per cell type group, how many genes replicate across cohorts and the strongest of them.</td></tr>
+      <tr><td><code>facet_effects</code>, <code>facet_top_genes</code></td><td>One gene across cohorts for the facets, and the genes that replicate in the most cohorts.</td></tr>
+      <tr><td><code>module_facet_effects</code>, <code>facet_top_modules</code></td><td>The same for gene sets, with the member genes that replicate.</td></tr>
+      <tr><td><code>facet_donor_values</code></td><td>The values per donor behind one result, with a link to the per donor plot; optionally for one dataset.</td></tr>
+      <tr><td><code>get_facet_tests</code>, <code>facet_units</code></td><td>The facet tests of one dataset (counts up and down, rows, models) and which units were tested.</td></tr>
+      <tr><td><code>donor_variability</code></td><td>How much donors differ for a gene or gene set, the genes that vary most in several cohorts, or one dataset's units and most variable genes (exploratory).</td></tr>
+      <tr><td><code>list_de_studies</code>, <code>de_study</code>, <code>gene_de</code></td><td>Differential expression stored with a dataset by its authors or the lab: the studies, one study's contrasts and top genes, and one gene in every study. Not anthive's own tests; cell-level studies are marked descriptive.</td></tr>
+      <tr><td><code>donor_groups</code></td><td>Datasets that share donors, so they are not counted twice.</td></tr>
       <tr><td><code>search_literature</code></td><td>Search the full text of the library papers; returns passages with the citation, page and section.</td></tr>
       <tr><td><code>get_paper</code></td><td>One paper: record, summary, topics and the datasets it is linked to.</td></tr>
       <tr><td><code>related_papers</code></td><td>Papers related to a paper, and why.</td></tr>

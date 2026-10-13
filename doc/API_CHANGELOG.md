@@ -327,6 +327,18 @@ New endpoint:
 - MCP: `facet_effects` prints the call, the forest with intervals, inflation, modality and the low-detection warning;
   `facet_top_genes` takes `offset`, `effect_gate`, `strict` and has no row cap; new tools `module_facet_effects` (one
   gene set across facets, with member-gene counts) and `facet_top_modules`.
+- MCP (sync with 2.45, 2026-10-13): new tool `facet_overview` (`/facets/{facet}/effects/overview`); new tools for the
+  DE stored with a dataset, labelled author or custom DE and never replication: `list_de_studies` (one dataset or every
+  dataset), `de_study` (`/de/{study}/summary`, or the rows of one contrast) and `gene_de` (`/de/by-gene/{gene}`); each
+  study carries its analysis level from the method name (the web UI's rule), and cell-level studies are marked
+  descriptive and pseudoreplicated. `donor_variability` takes `db_id` (`/databases/{id}/donor-variability`),
+  `facet_donor_values` takes `db_id` and prints an absolute donor plot link (`mcp.public_url` + `/api`), `get_facet_tests`
+  prints the gene `n_up` / `n_down` and the module `n_q05` / `n_up` / `n_down`, `get_geneset` takes `db_id` for the
+  rank among gene sets (`/genesets/.../rank`), and `list_module_scores` takes `with_ranks` (`/databases/{id}/module-ranks`;
+  it also lists scores held only in the scores sidecar, which `/module_scores` misses). `plot` calls the per-geom routes
+  `/databases/{id}/plot/{geom}` instead of the deprecated `/plot?geom=` (same figures). Tool texts, the server
+  instructions and `anthive://guide` say when to call `explain()` (facets, replication, q vs adj. p vs r, per cell vs
+  per donor).
 - Help: new topics `module-replication`, `facet-low-detection`, `facet-modality` (children of `facet-counting`), glossary
   terms `forest-plot`, `low-detection`, `modality`; `facet-replication`, `facet-effect-size` and `facet-technical-genes`
   describe the forest rows, the marks and the pill.

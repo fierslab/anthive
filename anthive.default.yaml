@@ -249,7 +249,8 @@ mcp:
   # Set to null to disable file-based plots (falls back to data: URIs).
   plots_dir: ./webapp/plots
 
-  # Public base URL used to construct plot image URLs
+  # Public base URL used to construct plot image URLs and the API links
+  # tools print (<public_url>/api/..., e.g. donor plots)
   # (scheme + host only, no trailing slash)
   public_url: http://localhost:8501
 

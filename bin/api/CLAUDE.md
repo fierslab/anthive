@@ -241,6 +241,16 @@ and `lib/config.py` (anthive.yaml loader).
   short-circuited by Caddy with valid JSON 404s (see `config/Caddyfile`).
 - Plot output saved to `webapp/plots/` for URL-based serving; falls back to
   data: URIs if `plots_dir` is null.
+- `plot` calls the per-geom routes `/databases/{id}/plot/{geom}` and sends
+  only the parameters that route declares (`PLOT_COMMON_PARAMS`,
+  `PLOT_GEOM_PARAMS`; `tests/test_mcp_api_245.py` checks them against the
+  ant-serve route signatures). Add a parameter to both when a route grows one.
+- Links a tool prints for the user's browser are absolute: `public_api_url`
+  (`mcp.public_url` + `/api`, the Caddy prefix). Never print an API-relative URL.
+- Stored DE (`list_de_studies`, `de_study`, `gene_de`) is author or custom DE:
+  label it so, mark cell-level methods descriptive (`de_method_level`, the same
+  rule as the web UI's `_de_method_level`; keep the two in step) and never
+  present it as replication. The all-datasets scan is cached an hour per caller.
 
 ## Hosts / ports
 
