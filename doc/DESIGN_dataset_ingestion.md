@@ -808,7 +808,7 @@ that `md_edit` cannot change with a verified minimal edit.
 | `ant-ingest-check` | errors -> `failed`, held reasons -> `held` (retry when killed) | public data is always held; an approval lets the held reasons it names through |
 | placement | | through the swap journal (21.5); a new dataset is staged the same way |
 | rescan + served | no (warning) | `POST /admin/rescan` with backoff right after the restore (a rescan retires every pooled instance, so nothing opened during the swap survives), then `GET /databases/{db_id}/info` must report the new sha256 and version |
-| catalog push | no (warning, retried next poll) | h5ad (metadata `sha256`), sidecar (`s3_*` always re-stamped from the catalog object; the deposit's own `s3_*` keys are dropped), duckdb, layer parquets, DE sidecar; verified by HEAD: size plus the `sha256` metadata, or for a legacy object without it an ETag recomputed from the store file (single-part MD5, or a multipart ETag for 8, 16, 64 or 256 MB parts). Only a real match counts, and only then is the metadata backfilled (a failed backfill, e.g. over 5 GB, keeps the verdict). A retry first checks that the store h5ad still has the published sha256, else `needs_decision` |
+| catalog push | no (warning, retried next poll) | h5ad (metadata `sha256`), sidecar (`s3_*` always re-stamped from the catalog object; the deposit's own `s3_*` keys are dropped), duckdb, layer parquets, DE sidecar; verified by HEAD: size plus the `sha256` metadata, or for a legacy object without it an ETag recomputed from the store file (single-part MD5, or a multipart ETag for parts of 5 MiB (AWS Go SDK, rclone, mus), 8 MiB (boto3), 16, 64 or 256 MiB, each enlarged the way boto3 does for more than 10,000 parts (doubled until they fit), plus `ceil(size / 10000)` rounded up to a MiB). Only a real match counts, and only then is the metadata backfilled (a failed backfill, e.g. over 5 GB, keeps the verdict). A retry first checks that the store h5ad still has the published sha256, else `needs_decision` |
 | post steps | no (warning) | as before; skipped after a stop request; `post_step_timeout_seconds` |
 | git commit | no (warning) | only the `.md`, `.h5ad.mus` and `index.md` the route itself wrote, and only while each still has the sha256 the route wrote (a file edited meanwhile: no commit, a warning); skipped when the curator has staged changes of those paths, so the index is never touched; `git commit --only`, a failed commit resets just those paths; an `unchanged` deposit commits nothing; author from a validated `depositor` / `depositor_email`, else the service identity (an invalid depositor is recorded in the changelog); `store_git_push` pushes only when the branch has no other unpushed commit |
 | work dir | | removed after live; held, failed and needs_decision work dirs are kept `work_ttl_days` (14) |
@@ -852,11 +852,21 @@ Placement order for an update:
 
 `recover_swaps` runs before every poll (and before `ant-ingest`): a journal still `staged` is rolled back
 (staged and partial files and links removed, the published version untouched), one `committing` is rolled
-forward and a dataset the swap had released is restored in ant-serve. A rolled-forward journal leaves a resume
-marker (`swaps/resume/`) with what the interrupted run still had to do. When the item comes back (its deposit
-now equals the store, so it looks unchanged), the marker makes the pipeline finish the publication: catalog
-push, versions row, post steps (scores, gene stats, facet tests, index), DE import, manifest, the store commit
-of the files the route wrote, then the deletes. A stop
+forward and a dataset the swap had released is restored in ant-serve.
+
+Every commit (also one finished by recovery) writes a resume marker `swaps/resume/<item>.json` before the
+journal goes away. It records whether the catalog push happened and which post steps (score, gene stats,
+module variability, facet tests, index, manifest, DE import, derived push, store commit) are done; each step
+updates it when it ends, and the marker is removed only after the last one. A stop request during the post
+steps (`systemctl restart` is a SIGTERM to the whole unit: the running tool dies and the watcher sees the stop)
+leaves the step undone and returns the item to `stable`; a SIGKILL leaves the marker as it was. The incoming
+objects are not deleted while a marker exists. The next pass that touches the item, whatever it is (the same
+deposit, now `unchanged`, or a newer upload that becomes a patch or minor version), first finishes the
+pending publication: served check, push if it had not happened, the remaining post steps, its versions rows.
+A marker whose version is no longer the store's (someone changed the dataset by hand) is removed with a
+warning. A post step that fails on its own (not a stop) is a warning; with
+`ingest_watch.delete_despite_post_warnings: true` (default) the delete still happens and the acceptance is
+recorded as an event; with `false` the incoming objects stay. A stop
 request is honoured between steps and never after staging has started a commit; an I/O error while staging
 rolls back and retries later.
 
@@ -879,8 +889,10 @@ logged, recorded as an event and cached for a week in `<ingest_state_dir>/ifmatc
 `IfMatch` there is a window of milliseconds between the HEAD and the delete in which a new upload of the same
 key would be deleted; the depositor's next upload then simply arrives again (mus re-uploads the whole item).
 On the lab bucket the self-test of 2026-10-14 returned `ignored`: the object store accepted the header and
-deleted the object anyway, so there the HEAD comparison is the only protection. Prefix-wide and batch deletes do not exist in the
-route; every key is logged with its ETag, outcome and time in `deletions`. When the rescan, the served check or
+deleted the object anyway, so there the HEAD comparison is the only protection. An S3 error on one key is recorded as `skipped:error:<code>`, never stops the
+other keys or the poll, and the next poll retries the remaining keys (a live row whose sidecar is already gone
+but whose h5ad is still listed is recognised as the same deposit, not a new upload). Prefix-wide and batch
+deletes do not exist in the route; every key is logged with its ETag, outcome and time in `deletions`. When the rescan, the served check or
 the catalog push failed, the next poll retries them (one rescan per poll) and deletes afterwards.
 
 ### 21.6a Trust model of approve and reject
@@ -945,3 +957,12 @@ Second review (same day):
 | N11 partial copies were not tracked | in the journal, removed by rollback and recovery, matched by the hidden-file check |
 | N12 uv, download and network failures of a tool counted as dataset errors | recognised in the output, retried |
 | nits | hidden-file check on the exact basename; a conflicting seed `.md` applies nothing |
+
+Third review (same day):
+
+| Finding | Change |
+| --- | --- |
+| a stop or kill during the post steps lost them, and the incoming objects were deleted anyway | resume marker written at commit, updated per post step, removed only at the end; a stop in the post steps retries the item; no delete while a marker exists; `delete_despite_post_warnings` for steps that fail on their own |
+| a delete error could stop the poll | per key `skipped:error:<code>`, retried next poll |
+| multipart ETags of 5 MiB parts and of large objects were not recognised | 5 MiB added; boto3's doubling and `ceil(size / 10000)` part sizes |
+| a pending marker was ignored when the next pass was an update | the next pass finishes the pending publication first; stale markers removed with a warning |

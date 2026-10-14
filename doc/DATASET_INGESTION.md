@@ -164,7 +164,9 @@ caveats are applied; if it differs in other keys it stays in `__incoming/` with 
 Caveats, curation fields and the facet mapping of the old `.md` stay as they are; the route appends one caveat
 saying which version was replaced. The served dataset is swapped under `/admin/release` and `/admin/restore`, through a journal: if the
 process dies in the middle, the next start finishes or undoes the swap before anything else, and a finished
-swap then still gets its catalog push, scores, facet tests and store commit. The previous
+swap then still gets its catalog push, scores, facet tests and store commit. The same holds when the service
+is stopped or restarted during the post steps (which can take hours): the steps that did not finish run on the
+next start, and the incoming objects are deleted only after that. The previous
 version is kept in `<Group>/_versions/<basename>/<version>/` (hard links to the h5ad, `.md`, `.h5ad.mus` and old
 scores, so no extra space while they are unchanged) and on S3 under `<Group>/_versions/<basename>/<version>/`. To go back, copy those files over the
 current ones, bump the version with a changelog entry, convert and rescan.
