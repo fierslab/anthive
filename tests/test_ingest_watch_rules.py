@@ -29,14 +29,15 @@ def test_the_destructive_checkers_are_never_called(source):
 
 
 def test_s3_deletes_live_only_in_the_guarded_functions():
-    """DeleteObject appears only in _delete_if_match (watch) and purge (versions); no batch delete in the route."""
+    """DeleteObject appears only in _delete_if_unchanged and _delete_selftest_object (watch) and purge (versions)."""
     for source in WATCH_SOURCES[:5]:
         text = source.read_text()
         assert 'delete_objects' not in text, source.name
         calls = [match.start() for match in re.finditer(r'\.delete_object\(', text)]
         enclosing = {text[text.rfind('\ndef ', 0, start):].split('(')[0].strip() for start in calls}
         if source.name == 'ingest_pipeline.py':
-            assert enclosing == {'def _delete_if_match'} and len(calls) == 2
+            # consumed incoming keys (HEAD-compared, optional IfMatch) and the IfMatch self-test's own scratch key
+            assert enclosing == {'def _delete_if_unchanged', 'def _delete_selftest_object'} and len(calls) == 3
         elif source.name == 'ingest_versions.py':
             assert enclosing == {'def purge'} and len(calls) == 1
         else:
@@ -151,7 +152,8 @@ def test_sidecar_merge_store_wins_override_and_guarded_keys():
         'organism=human\ntissue=cortex\ncell_type=astrocyte\noverride_cell_type=true\nnew_key=v\ns3_etag=new\n'
         'access=public\n')
     assert 'tissue=brain' in merge.text and 'cell_type=astrocyte' in merge.text
-    assert 'local_only=1' in merge.text and '# local' in merge.text and 's3_etag=new' in merge.text
+    assert 'local_only=1' in merge.text and '# local' in merge.text
+    assert 's3_etag=old' in merge.text                     # the deposit's s3_* stamps never replace the store's
     assert 'override_' not in merge.text and 'access=internal' in merge.text
     assert merge.conflicts == [('tissue', 'brain', 'cortex')]
     assert merge.overridden == [('cell_type', 'microglia', 'astrocyte')]

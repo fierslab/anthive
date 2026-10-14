@@ -49,18 +49,18 @@ def test_c1_failure_while_staging_rolls_back_and_the_retry_is_an_update(tmp_path
     real_place = ingest_pipeline.place_file
     state = {'n': 0}
 
-    def flaky(source, target):
+    def flaky(source, target, partial=None):
         if target.name.endswith('micro.h5ad.ingest-new') and state['n'] == 0:
             state['n'] += 1
             raise OSError(28, 'No space left on device')
-        return real_place(source, target)
+        return real_place(source, target, partial)
 
     monkeypatch.setattr(ingest_pipeline, 'place_file', flaky)
     assert env.poll_twice() == {'retry': 1}
     assert env.row(keys['h5ad'])['state'] == 'stable'
     after = sorted(path.name for path in group.iterdir() if not path.name.endswith('.lock'))
     assert after == before                                                  # nothing moved, nothing left behind
-    assert 'restore:WT6/MIC' in env.api.calls
+    assert 'release:WT6/MIC' not in env.api.calls          # staging happens before the release (N6)
     assert not (env.state / 'swaps').exists() or not list((env.state / 'swaps').glob('*.json'))
     env.clock_value += 3600                                                 # past the retry delay
     assert env.watcher.poll() == {'live': 1}
@@ -92,7 +92,7 @@ def test_c1_crash_during_commit_is_rolled_forward_on_the_next_run(tmp_path, monk
     monkeypatch.setattr(ingest_pipeline.os, 'replace', real_replace)
     restored = []
     assert recover_swaps(env.state / 'swaps', log=lambda message: None, restore=restored.append) == \
-        [f'swap {journals[0].stem}: rolled forward, WT6/MIC restored in ant-serve']
+        [f'swap {journals[0].stem}: rolled forward, post steps pending, WT6/MIC restored in ant-serve']
     assert restored == ['WT6/MIC']
     meta = _meta(group / 'micro.md')
     assert meta['version'] == '1.1.0' and 'curator note' in (group / 'micro.md').read_text()
@@ -496,7 +496,7 @@ def test_cc_conditional_delete_and_fallback():
     s3 = FakeS3()
     etag = s3.put(f'{PREFIX}G/a.h5ad', b'one')
     s3.before_delete = lambda key: s3.put(key, b'two') if s3.objects[key]['body'] == b'one' else None
-    deleted, skipped = delete_consumed(s3, BUCKET, PREFIX, {f'{PREFIX}G/a.h5ad': etag})
+    deleted, skipped = delete_consumed(s3, BUCKET, PREFIX, {f'{PREFIX}G/a.h5ad': etag}, if_match=True)
     assert not deleted and f'{PREFIX}G/a.h5ad' in s3.objects            # IfMatch caught the race
     s3 = FakeS3()
     s3.if_match_supported = False

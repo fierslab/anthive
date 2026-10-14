@@ -116,7 +116,8 @@ class FakeS3:
 
     @property
     def deleted(self) -> List[str]:
-        return [call[1] for call in self.calls if call[0] == 'delete']
+        """Deleted keys, without the IfMatch self-test's own scratch object."""
+        return [call[1] for call in self.calls if call[0] == 'delete' and '/_selftest/' not in call[1]]
 
 
 class FakeRunner:
