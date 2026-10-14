@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS items (
     db_id TEXT, kind TEXT, version TEXT, report_path TEXT, log_path TEXT, error TEXT,
     warnings TEXT, held_reasons TEXT, consumed TEXT, served INTEGER DEFAULT 0,
     catalog_verified INTEGER DEFAULT 0, deleted INTEGER DEFAULT 0, git_commit TEXT, timings TEXT,
-    updated REAL, sha256 TEXT, approval TEXT, shared_keys TEXT
+    updated REAL, sha256 TEXT, approval TEXT, shared_keys TEXT, post_failed TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, ts REAL, state TEXT, detail TEXT
@@ -117,7 +117,7 @@ class StateDB:
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.executescript(SCHEMA)
         columns = {row[1] for row in self.conn.execute('PRAGMA table_info(items)')}
-        for column in ('sha256', 'approval', 'shared_keys'):
+        for column in ('sha256', 'approval', 'shared_keys', 'post_failed'):
             if column not in columns:                  # state files written before 2026-10-14
                 self.conn.execute(f'ALTER TABLE items ADD COLUMN {column} TEXT')
         self.conn.commit()
@@ -185,6 +185,12 @@ class StateDB:
 
 # ── settle logic ─────────────────────────────────────────────────────────────
 
+def leftover_of_live(row: Dict[str, Any], item: Item) -> bool:
+    """The listed objects are what is left of a live deposit after some of its keys were deleted."""
+    return (row['state'] == 'live' and item.h5ad.etag == row['h5ad_etag'] and item.h5ad.size == row['h5ad_size']
+            and (item.mus is None or item.mus.etag == row['mus_etag']))
+
+
 def observe(db: StateDB, items: Sequence[Item], now: float, settle_seconds: float) -> List[Item]:
     """Record one poll; return the items that are ready to process (oldest first).
 
@@ -209,7 +215,7 @@ def observe(db: StateDB, items: Sequence[Item], now: float, settle_seconds: floa
                 db.upsert(item.key, error=f'waiting for {item.key}.mus')
             continue
         if row['state'] in FINAL_STATES:
-            if row['processed_signature'] == content:
+            if row['processed_signature'] == content or leftover_of_live(row, item):
                 continue
             db.transition(item.key, 'seen', 'new upload (ETag or size changed)', content_signature=content,
                           settle_signature=settle, polls_unchanged=0, attempts=0, next_attempt=0, error=None,
@@ -496,7 +502,14 @@ class Watcher:
             catalog_verified=int(outcome.catalog_verified), git_commit=outcome.git_commit,
             timings=json.dumps(outcome.timings), attempts=0, next_attempt=0, sha256=outcome.sha256,
             shared_keys=json.dumps(outcome.shared_keys), approval=json.dumps(approval) if approval else None,
+            post_failed=json.dumps(outcome.post_failed),
             log_path=str(getattr(self.pipeline.runner, 'log_path', '') or ''))
+        pending = outcome.finished_pending
+        if live and pending is not None and pending.version != outcome.version and pending.kind != 'new':
+            self.db.record_version(pending.db_id or '', item.display, 'current', pending.version or '',
+                                   pending.sha256 or '', pending.store_h5ad or '')
+            self.db.record_version(pending.db_id or '', item.display, 'archived', pending.previous_version or '',
+                                   pending.previous_sha256 or '', '; '.join(pending.archived_local[:1]))
         if live and outcome.kind in ('new', 'update_minor', 'update_patch'):
             self.db.record_version(outcome.db_id or '', item.display, 'current', outcome.version or '',
                                    outcome.sha256 or '', outcome.store_h5ad or '')
@@ -527,17 +540,31 @@ class Watcher:
         if outcome.store_h5ad and not Path(outcome.store_h5ad).exists():
             self.db.event(item.key, 'live', 'incoming objects kept: the store copy is missing')
             return
+        if self.pipeline.has_pending(item):
+            self.db.event(item.key, 'live', 'incoming objects kept: push or post steps still pending')
+            return
+        if outcome.post_failed:
+            if not self.settings.get('delete_despite_post_warnings', True):
+                self.db.event(item.key, 'live', 'incoming objects kept: post steps failed ('
+                              + ', '.join(outcome.post_failed) + '); delete_despite_post_warnings is off')
+                return
+            self.db.event(item.key, 'live', 'post steps failed (' + ', '.join(outcome.post_failed)
+                          + '): accepted for the delete (ingest_watch.delete_despite_post_warnings)')
         pending = self._pending_siblings(item, listed)
         keep = {key: 'shared_with_pending_sibling' for key in outcome.shared_keys} if pending else {}
 
+        results: Dict[str, str] = {}
+
         def record(s3_key: str, etag: str, result: str) -> None:
+            results[s3_key] = result
             self.db.record_deletion(item.key, s3_key, etag, result)
             self.log(f'incoming {result}: {s3_key} ({etag})')
 
         deleted, skipped = delete_consumed(self.s3, self.bucket, self.settings['prefix'], outcome.consumed, record,
                                            keep=keep, if_match=self.check_if_match())
         own_keys = [key for key in outcome.consumed if key not in keep]
-        self.db.upsert(item.key, deleted=int(bool(deleted) and set(own_keys) <= set(deleted)))
+        gone = all(results.get(key) in ('deleted', 'skipped:absent') for key in own_keys)
+        self.db.upsert(item.key, deleted=int(bool(own_keys) and gone))
         self.db.event(item.key, 'live', f'incoming: {len(deleted)} deleted, {len(skipped)} kept'
                                         + (f' (shared static kept for {len(pending)} pending sibling(s))'
                                            if keep else ''))
@@ -552,8 +579,10 @@ class Watcher:
         listed = {item.key: item for item in items}
         candidates = [row for row in self.db.items()
                       if row['state'] == 'live' and not row['deleted'] and row['key'] in listed
-                      and row['processed_signature'] == listed[row['key']].content_signature()
-                      and not (row['served'] and row['catalog_verified'])]
+                      and (row['processed_signature'] == listed[row['key']].content_signature()
+                           or leftover_of_live(row, listed[row['key']]))
+                      and not (json.loads(row['post_failed'] or '[]')
+                               and not self.settings.get('delete_despite_post_warnings', True))]
         if not candidates:
             return
         rescan_result: Optional[Dict[str, Any]] = None
@@ -578,10 +607,11 @@ class Watcher:
             self.db.upsert(row['key'], served=int(served), catalog_verified=int(verified))
             if warnings:
                 self.db.event(row['key'], 'live', 'retry: ' + '; '.join(warnings)[:1000])
-            if served and verified:
+            if served and verified:                 # also retries deletes that failed with an S3 error
                 outcome = Outcome(state='live', served=True, catalog_verified=True, db_id=row['db_id'],
                                   consumed=json.loads(row['consumed'] or '{}'),
-                                  shared_keys=json.loads(row['shared_keys'] or '[]'))
+                                  shared_keys=json.loads(row['shared_keys'] or '[]'),
+                                  post_failed=json.loads(row['post_failed'] or '[]'))
                 self.delete_if_verified(item, outcome, items)
 
     def prune_work_dirs(self) -> None:

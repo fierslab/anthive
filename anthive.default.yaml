@@ -152,6 +152,10 @@ ingest_watch:
   # when their ETag is still the one that was pulled). `ant ingest prune`
   # handles anything left over.
   delete_incoming_after_ingest: true
+  # The delete waits until every post step has run. A post step that failed on
+  # its own (not a stop) is a warning; true: the delete happens anyway (recorded
+  # as an event); false: the incoming objects stay until a person looks.
+  delete_despite_post_warnings: true
   # Base URL of the local ant-serve (empty: api_url / rest_api_host:port).
   api_url: ''
   # Lower the priority of the pipeline's children (nice 19, ionice idle).

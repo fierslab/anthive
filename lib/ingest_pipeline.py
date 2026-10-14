@@ -352,7 +352,28 @@ def md5_file(path: Path) -> str:
 
 #: Part sizes tried when recomputing a multipart ETag: boto3's default (8 MB), common tool settings,
 #: and ant-sync / ant-ingest's 256 MB (MULTIPART_CHUNKSIZE).
-MULTIPART_PART_SIZES_MB = (8, 16, 64, 256)
+MULTIPART_PART_SIZES_MB = (5, 8, 16, 64, 256)
+MAX_PARTS = 10000
+
+
+def candidate_part_sizes(size: int) -> List[int]:
+    """Part sizes an uploader may have used for an object of ``size`` bytes.
+
+    The configured sizes (5 MiB: AWS Go SDK, rclone and mus; 8 MiB: boto3;
+    16, 64, 256 MiB), each enlarged as boto3 does for more than 10,000 parts
+    (s3transfer ``ChunksizeAdjuster``: doubled until the parts fit), plus
+    ``ceil(size / 10000)`` rounded up to a whole MiB (the rule of uploaders that
+    grow the part size to the minimum that fits).
+    """
+    mib = 1024 * 1024
+    sizes = []
+    for size_mb in MULTIPART_PART_SIZES_MB:
+        part = size_mb * mib
+        while -(-size // part) > MAX_PARTS:
+            part *= 2
+        sizes.append(part)
+    sizes.append(-(-(-(-size // MAX_PARTS)) // mib) * mib)
+    return sorted(set(sizes))
 
 
 def multipart_etag(path: Path, part_size: int) -> str:
@@ -379,8 +400,7 @@ def etag_matches_file(etag: str, path: Path) -> bool:
     except ValueError:
         return False
     size = path.stat().st_size
-    for size_mb in MULTIPART_PART_SIZES_MB:
-        part_size = size_mb * 1024 * 1024
+    for part_size in candidate_part_sizes(size):
         if -(-size // part_size) == parts and multipart_etag(path, part_size) == etag:
             return True
     return False
@@ -456,7 +476,10 @@ def delete_consumed(s3: Any, bucket: str, prefix: str, consumed: Dict[str, str],
             if record:
                 record(key, etag, f'skipped:{keep[key]}')
             continue
-        outcome = _delete_if_unchanged(s3, bucket, key, etag, if_match)
+        try:
+            outcome = _delete_if_unchanged(s3, bucket, key, etag, if_match)
+        except Exception as exc:  # noqa: BLE001 - one failing key never stops the others or the poll
+            outcome = f'skipped:error:{_error_code(exc)}'
         (deleted if outcome == 'deleted' else skipped).append(key)
         if record:
             record(key, etag, outcome)
@@ -471,7 +494,11 @@ def _delete_if_unchanged(s3: Any, bucket: str, key: str, etag: str, if_match: bo
     if current != etag:
         return f'skipped:etag_changed:{current}'
     if not if_match:
-        s3.delete_object(Bucket=bucket, Key=key)
+        try:
+            s3.delete_object(Bucket=bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001
+            code = _error_code(exc)
+            return 'skipped:absent' if code in ('NoSuchKey', '404') else f'skipped:error:{code}'
         return 'deleted'
     try:
         s3.delete_object(Bucket=bucket, Key=key, IfMatch=f'"{etag}"')
@@ -483,7 +510,7 @@ def _delete_if_unchanged(s3: Any, bucket: str, key: str, etag: str, if_match: bo
             return 'skipped:absent' if current is None else f'skipped:etag_changed:{current}'
         if code in ('NoSuchKey', '404'):
             return 'skipped:absent'
-        raise
+        return f'skipped:error:{code}'
 
 
 SELFTEST_DIR = '_selftest'
@@ -733,6 +760,9 @@ class SwapJournal:
         for entry in self.data['entries']:
             if entry.get('partial'):
                 Path(entry['partial']).unlink(missing_ok=True)
+        meta = self.data.get('meta') or {}
+        if meta.get('post_pending'):          # the publication is finished only after push and post steps
+            write_resume(self.path.parent, self.path.stem, {**meta, 'done_steps': [], 'pushed': False})
         self.path.unlink(missing_ok=True)
 
     def rollback(self) -> None:
@@ -752,6 +782,19 @@ class SwapJournal:
         self.path.unlink(missing_ok=True)
 
 
+def resume_path(journal_dir: Path, name: str) -> Path:
+    return Path(journal_dir) / 'resume' / f'{name}.json'
+
+
+def write_resume(journal_dir: Path, name: str, data: Dict[str, Any]) -> None:
+    """Write (atomically) the marker of a publication whose push or post steps are not finished."""
+    path = resume_path(journal_dir, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_suffix('.json.partial')
+    partial.write_text(json.dumps(data, indent=1))
+    os.replace(partial, path)
+
+
 def recover_swaps(journal_dir: Path, log: Callable[[str], None] = print,
                   restore: Optional[Callable[[str], Any]] = None) -> List[str]:
     """Finish or undo every interrupted swap. Returns one message per journal.
@@ -768,12 +811,8 @@ def recover_swaps(journal_dir: Path, log: Callable[[str], None] = print,
         if journal.data.get('phase') == 'committing':
             journal.commit()
             message = f'swap {path.stem}: rolled forward'
-            meta = journal.data.get('meta') or {}
-            if meta.get('post_pending'):               # the item is finished (push, post steps) when it comes back
-                resume = folder / 'resume' / f'{path.stem}.json'
-                resume.parent.mkdir(parents=True, exist_ok=True)
-                resume.write_text(json.dumps(meta, indent=1))
-                message += ', post steps pending'
+            if (journal.data.get('meta') or {}).get('post_pending'):
+                message += ', post steps pending'       # commit() wrote the resume marker
         else:
             journal.rollback()
             message = f'swap {path.stem}: rolled back'
@@ -842,6 +881,8 @@ class Outcome:
     store_h5ad: Optional[str] = None
     written: Dict[str, str] = field(default_factory=dict)       # store file -> sha256 the route wrote
     resumed: bool = False
+    post_failed: List[str] = field(default_factory=list)          # post steps that ended with an error
+    finished_pending: Optional['Outcome'] = None                  # an earlier publication finished first
 
     @property
     def deletable(self) -> bool:
@@ -1020,6 +1061,20 @@ class Pipeline:
             if head_etag(self.s3, cfg.bucket, catalog_h5ad) is not None:
                 raise Blocked('needs_decision', f'{catalog_h5ad} exists on S3 but there is no local dataset: '
                                                 f'pull it (ant sync pull) or retire it before depositing again')
+
+        # 0b. an earlier publication of this item whose push or post steps did not finish
+        marker = self._load_resume(item)
+        if marker:
+            from metadata import parse_md_file as _parse  # noqa: PLC0415
+
+            store_meta = _parse(store_md)[0] if store_md.exists() else {}
+            if str(marker.get('to')) != str(store_meta.get('version')) or marker.get('sha256') != store_meta.get('sha256'):
+                outcome.warnings.append(f'stale resume marker for version {marker.get("to")} removed: the store '
+                                        f'is at {store_meta.get("version")}; its post steps were not run')
+                self._resume_path(item).unlink(missing_ok=True)
+            else:
+                outcome.finished_pending = self._finish_pending(item, marker, store_dir)
+                outcome.warnings.extend(outcome.finished_pending.warnings)
 
         # 1. pull, pinned to the listed ETags, kept across retries
         self._checkpoint('the pull')
@@ -1206,15 +1261,18 @@ class Pipeline:
                 outcome.kind = 'unchanged'
                 outcome.version = outcome.previous_version
                 self._timed(outcome, 'catalogue', started)
-                resume = self._load_resume(item)
-                if resume and resume.get('sha256') == actual and str(resume.get('to')) == outcome.version:
-                    self._resume_after_recovery(item, outcome, store_dir, work, resume, plain_static, store_group,
-                                                md_seed if seed_md_applied else None,
-                                                index_seed if index_consumed else None)
-                    return
+                pending = outcome.finished_pending
+                if pending is not None and pending.version == outcome.version:
+                    for name in ('kind', 'previous_version', 'previous_sha256', 'archived_local', 'written'):
+                        setattr(outcome, name, getattr(pending, name))
+                    outcome.post_failed = list(pending.post_failed)
+                    outcome.resumed = True
                 self._publish_unchanged(item, outcome, store_dir, actual, plain_static, store_group,
                                         md_seed if seed_md_applied else None,
                                         index_seed if index_consumed else None)
+                if outcome.resumed:
+                    outcome.detail = f'{outcome.kind} {outcome.version} (finished after an interruption)'
+                    outcome.catalog_verified = outcome.catalog_verified or pending.catalog_verified
                 shutil.rmtree(work, ignore_errors=True)
                 return
             caveat = md_fill.curation_caveat(
@@ -1323,6 +1381,7 @@ class Pipeline:
             started = time.time()
             self._push_catalog(item, outcome, store_dir, include_h5ad=outcome.kind != 'update_patch')
             self._timed(outcome, 'push', started)
+            self._update_resume(item, pushed=True)
             self.log(f'catalog push: {len(outcome.catalog_keys)} object(s), verified {outcome.catalog_verified}')
 
         # 10. post steps, DE, derived push, git, final rescan: warnings only
@@ -1524,7 +1583,7 @@ class Pipeline:
                                                             outcome)
 
     def _resume_path(self, item: Item) -> Path:
-        return self.config.journal_dir / 'resume' / f'{slug(item.key)}.json'
+        return resume_path(self.config.journal_dir, slug(item.key))
 
     def _load_resume(self, item: Item) -> Optional[Dict[str, Any]]:
         path = self._resume_path(item)
@@ -1533,28 +1592,38 @@ class Pipeline:
         except ValueError:
             return None
 
-    def _resume_after_recovery(self, item: Item, outcome: Outcome, store_dir: Path, work: Path,
-                               resume: Dict[str, Any], plain_static: Dict[str, Tuple[ObjInfo, Path]],
-                               store_group: Path, md_seed: Optional[Tuple[ObjInfo, Path]],
-                               index_seed: Optional[Tuple[ObjInfo, Path]]) -> None:
-        """Finish a publication whose swap was rolled forward by recovery: push, post steps, versions, commit."""
-        self.log(f'resuming {item.display}: the swap to {resume.get("to")} was finished by recovery')
-        outcome.kind = str(resume.get('kind') or 'unchanged')
-        outcome.previous_version = resume.get('from')
-        outcome.previous_sha256 = resume.get('previous_sha256')
-        outcome.archived_local = list(resume.get('archived_local') or [])
-        outcome.written = dict(resume.get('written') or {})
-        outcome.resumed = True
-        self._publish_unchanged(item, outcome, store_dir, outcome.sha256 or '', plain_static, store_group, md_seed,
-                                index_seed)
-        outcome.detail = f'{outcome.kind} {outcome.version} (finished after recovery)'
+    def has_pending(self, item: Item) -> bool:
+        """A publication of this item whose push or post steps have not finished."""
+        return self._resume_path(item).exists()
+
+    def _update_resume(self, item: Item, **fields: Any) -> None:
+        marker = self._load_resume(item)
+        if marker is not None:
+            marker.update(fields)
+            write_resume(self.config.journal_dir, slug(item.key), marker)
+
+    def _finish_pending(self, item: Item, marker: Dict[str, Any], store_dir: Path) -> Outcome:
+        """Finish the publication a marker describes: verify serving, push if needed, the remaining post steps."""
+        self.log(f'finishing {item.display} {marker.get("to")}: push and post steps were interrupted')
+        pending = Outcome(state='live', kind=str(marker.get('kind') or 'new'), db_id=marker.get('db_id'),
+                          version=str(marker.get('to')), previous_version=marker.get('from'),
+                          sha256=marker.get('sha256'), previous_sha256=marker.get('previous_sha256'),
+                          archived_local=list(marker.get('archived_local') or []),
+                          written=dict(marker.get('written') or {}), resumed=True,
+                          store_h5ad=str(store_dir / f'{item.basename}{H5AD_SUFFIX}'))
+        work = self.config.work_root / f'{slug(item.key)}_finish'
+        work.mkdir(parents=True, exist_ok=True)
+        self._rescan_and_verify(pending)
         if self.config.push_catalog:
-            self._push_catalog(item, outcome, store_dir, include_h5ad=outcome.kind != 'update_patch')
-        if outcome.kind != 'new':
-            self._record_version(outcome, item)
-        self._post(item, outcome, store_dir, work)
-        self._resume_path(item).unlink(missing_ok=True)
+            if not marker.get('pushed'):
+                self._push_catalog(item, pending, store_dir, include_h5ad=pending.kind != 'update_patch')
+                self._update_resume(item, pushed=True)
+            else:
+                pending.catalog_verified = self._verify_catalog(item, Path(pending.store_h5ad), pending.sha256 or '',
+                                                                pending)
+        self._post(item, pending, store_dir, work)
         shutil.rmtree(work, ignore_errors=True)
+        return pending
 
     def _rescan_and_verify(self, outcome: Outcome) -> None:
         """Rescan, then check that the server answers with the new sha256 and version."""
@@ -1655,6 +1724,7 @@ class Pipeline:
                     etag=str(head.get('ETag', '')).strip('"'), uploaded_at=_now_iso()))
                 if str(store_mus) in outcome.written:
                     outcome.written[str(store_mus)] = sha256_file(store_mus)
+                    self._update_resume(item, written=dict(outcome.written))   # the re-stamp is the route's own
             mus_key = self._catalog_key(item, store_mus.name)
             self._upload(store_mus, mus_key)
             outcome.catalog_keys.append(mus_key)
@@ -1686,11 +1756,21 @@ class Pipeline:
     # after publication -----------------------------------------------------
 
     def _post(self, item: Item, outcome: Outcome, store_dir: Path, work: Path) -> None:
+        """Post steps, DE import, derived push and store commit, each recorded in the resume marker when done.
+
+        A stop request between or during steps raises :class:`TransientError`:
+        the marker keeps the steps still to run and the next pass runs them. A
+        step that fails on its own is a warning (``post_failed``) and counts as
+        done. The marker is removed only when every step has run.
+        """
         cfg = self.config
         store = cfg.store_root
         db_id = outcome.db_id
         steps: List[str] = ['manifest'] if outcome.kind == 'update_patch' else \
             [step for step in cfg.post_steps if step in POST_STEPS]
+        if not db_id:
+            outcome.warnings.append('no db id: post steps skipped')
+            steps = []
         state_dir = cfg.state_dir or work
         commands = {
             'score': [self._tool('annot', 'ant-score-fleet'), '--h5adstore-root', store, '--only', db_id, 'run',
@@ -1706,40 +1786,50 @@ class Pipeline:
                                    '--db-id', db_id],
             'ingest_index': [self._tool('ingest', 'ant-ingest-index'), 'build', '--store', store, '--only', db_id],
         }
-        if db_id:
-            for step in steps:
-                if self.stop_requested():
-                    outcome.warnings.append(f'stop requested: post steps from {step} on were skipped')
-                    break
-                started = time.time()
+        marker = self._load_resume(item) or {}
+        done = set(marker.get('done_steps') or [])
+        for step in steps + ['de', 'push_derived', 'git']:
+            if step in done:
+                continue
+            if self.stop_requested():
+                raise TransientError(f'stop requested before post step {step}; the next run continues from there')
+            started = time.time()
+            if step == 'manifest':
+                self.log('post step manifest')
+                self._manifest(outcome)
+            elif step == 'de':
+                self._ingest_de(item, outcome, store_dir, work)
+            elif step == 'push_derived':
+                if cfg.push_catalog:
+                    for suffix in ('.scores.parquet', '.de.parquet'):
+                        path = store_dir / f'{item.basename}{suffix}'
+                        if path.exists():
+                            try:
+                                self._upload(path, self._catalog_key(item, path.name))
+                            except Exception as exc:  # noqa: BLE001
+                                outcome.warnings.append(f'push of {path.name} failed: {exc}')
+            elif step == 'git':
+                if cfg.store_git_commit:
+                    self._git_commit(item, outcome, store_dir)
+            else:
                 self.log(f'post step {step}')
-                if step == 'manifest':
-                    self._manifest(outcome)
-                else:
-                    code, tail = self.runner.run(f'post:{step}', commands[step], cwd=work,
-                                                 timeout=cfg.post_step_timeout)
-                    if code != 0:
-                        outcome.warnings.append(f'post step {step} failed (exit {code}): '
-                                                f'{tail.splitlines()[-1] if tail else ""}')
+                code, tail = self.runner.run(f'post:{step}', commands[step], cwd=work, timeout=cfg.post_step_timeout)
+                if code != 0 and self.stop_requested():
+                    raise TransientError(f'post step {step} stopped (exit {code}); it runs again on the next start')
+                if code != 0:
+                    outcome.warnings.append(f'post step {step} failed (exit {code}): '
+                                            f'{tail.splitlines()[-1] if tail else ""}')
+                    outcome.post_failed.append(step)
                 self._timed(outcome, f'post:{step}', started)
-        else:
-            outcome.warnings.append('no db id: post steps skipped')
-        if not self.stop_requested():
-            self._ingest_de(item, outcome, store_dir, work)
-        if cfg.push_catalog:
-            for suffix in ('.scores.parquet', '.de.parquet'):
-                path = store_dir / f'{item.basename}{suffix}'
-                if path.exists():
-                    try:
-                        self._upload(path, self._catalog_key(item, path.name))
-                    except Exception as exc:  # noqa: BLE001
-                        outcome.warnings.append(f'push of {path.name} failed: {exc}')
-        if cfg.store_git_commit:
-            self._git_commit(item, outcome, store_dir)
+            done.add(step)
+            self._update_resume(item, done_steps=sorted(done), post_failed=sorted(
+                set(marker.get('post_failed') or []) | set(outcome.post_failed)))
+        outcome.post_failed = sorted(set(marker.get('post_failed') or []) | set(outcome.post_failed))
         try:
             self.api.rescan()
         except TransientError as exc:
             outcome.warnings.append(f'final rescan failed: {exc}')
+        self._resume_path(item).unlink(missing_ok=True)
 
     def _manifest(self, outcome: Outcome) -> None:
         if not self.config.push_catalog:

@@ -478,6 +478,7 @@ INGEST_WATCH_DEFAULTS: Dict[str, Any] = {
     'store_git_push': False,
     'git_identity': 'anthive ingest-watch <noreply@anthive.local>',
     'delete_incoming_after_ingest': True,
+    'delete_despite_post_warnings': True,
     'api_url': '',
     'low_priority': True,
     'require_update_marker': False,
