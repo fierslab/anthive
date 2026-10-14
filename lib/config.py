@@ -187,7 +187,7 @@ def load_config() -> Dict[str, Any]:
     # provider_order / base_url / history_path defaults from
     # anthive.default.yaml would otherwise be silently dropped by a shallow
     # merge).
-    for subkey in ('s3', 'mcp', 'chat', 'sync_policy', 'auth'):
+    for subkey in ('s3', 'mcp', 'chat', 'sync_policy', 'auth', 'ingest_watch'):
         if isinstance(user_config.get(subkey), dict):
             merged = defaults.get(subkey, {}).copy()
             merged.update(user_config[subkey])
@@ -449,6 +449,90 @@ def get_ingest_scratch_dir(cfg: Optional[Dict[str, Any]] = None, create: bool = 
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def get_ingest_work_dir(cfg: Optional[Dict[str, Any]] = None, create: bool = True) -> Path:
+    """Working space of ``ant-ingest`` and ``ant-ingest-watch``: pulled uploads and staged datasets.
+
+    Key ``ingest_work_dir`` / env ``ANTHIVE_INGEST_WORK_DIR``, default
+    ``<tmp_dir>/ingest_work``. Never inside the store: the store only receives
+    finished files, each placed with an atomic rename.
+    """
+    configured = _setting(cfg, 'ingest_work_dir', 'ANTHIVE_INGEST_WORK_DIR', None)
+    path = resolve_path(configured) if configured else get_tmp_dir(cfg, create=create) / 'ingest_work'
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+INGEST_WATCH_DEFAULTS: Dict[str, Any] = {
+    'enabled': False,
+    'interval_seconds': 300,
+    'settle_seconds': 900,
+    'prefix': '__incoming/',
+    'catalog_prefix': '',
+    'post_steps': ['score', 'gene_stats', 'module_variability', 'facet_test', 'facet_test_modules',
+                   'ingest_index', 'manifest'],
+    'post_step_timeout_seconds': 21600,
+    'store_git_commit': True,
+    'store_git_push': False,
+    'git_identity': 'anthive ingest-watch <noreply@anthive.local>',
+    'delete_incoming_after_ingest': True,
+    'api_url': '',
+    'low_priority': True,
+    'notify': {'on': ['live', 'held', 'failed', 'needs_decision'], 'webhook_url': '', 'email_to': '',
+               'email_from': 'anthive-ingest@localhost', 'smtp_host': '', 'smtp_port': 25},
+}
+
+
+def _coerce_like(default: Any, value: Any, key: str) -> Any:
+    """Convert an env or yaml value to the type of its default (bool, int, list, str)."""
+    if isinstance(default, bool):
+        return _flag(value, default)
+    if isinstance(default, int):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise ConfigError(f'ERROR: [Config] ingest_watch.{key} must be an integer, got {value!r}')
+    if isinstance(default, list):
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(',') if item.strip()]
+        return [str(item) for item in (value or [])]
+    return '' if value is None else str(value)
+
+
+def get_ingest_watch_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Settings of ``ant-ingest-watch`` (the S3 watch route).
+
+    Precedence per key: env ``ANTHIVE_INGEST_WATCH_<KEY>`` (``notify`` keys:
+    ``ANTHIVE_INGEST_WATCH_NOTIFY_<KEY>``) > ``ingest_watch:`` in anthive.yaml
+    > :data:`INGEST_WATCH_DEFAULTS`. The prefixes always end in ``/`` (an
+    empty catalog prefix stays empty).
+    """
+    cfg = cfg if cfg is not None else get_config()
+    block = cfg.get('ingest_watch') or {}
+    settings: Dict[str, Any] = {}
+    for key, default in INGEST_WATCH_DEFAULTS.items():
+        if key == 'notify':
+            continue
+        env_value = os.environ.get(f'ANTHIVE_INGEST_WATCH_{key.upper()}', '').strip()
+        raw = env_value if env_value else block.get(key, default)
+        settings[key] = _coerce_like(default, raw, key)
+    notify_block = dict(block.get('notify') or {})
+    notify: Dict[str, Any] = {}
+    for key, default in INGEST_WATCH_DEFAULTS['notify'].items():
+        env_value = os.environ.get(f'ANTHIVE_INGEST_WATCH_NOTIFY_{key.upper()}', '').strip()
+        raw = env_value if env_value else notify_block.get(key, default)
+        notify[key] = _coerce_like(default, raw, f'notify.{key}')
+    settings['notify'] = notify
+    if settings['interval_seconds'] < 10:
+        raise ConfigError('ERROR: [Config] ingest_watch.interval_seconds must be at least 10')
+    for key in ('prefix', 'catalog_prefix'):
+        value = settings[key].strip().lstrip('/')
+        settings[key] = (value.rstrip('/') + '/') if value else ''
+    if not settings['prefix']:
+        raise ConfigError('ERROR: [Config] ingest_watch.prefix must not be empty')
+    return settings
 
 
 def get_dataset_ingest_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

@@ -105,6 +105,65 @@ ingest_state_dir: ''
 # Overlap indexes of `ant ingest-index`. Empty: <ingest_state_dir>/index.
 # Env: ANTHIVE_INGEST_INDEX_DIR.
 ingest_index_dir: ''
+# Working space of ant-ingest and ant-ingest-watch (pulled uploads, staged
+# datasets before they are placed in the store). Empty: <tmp_dir>/ingest_work.
+# Env: ANTHIVE_INGEST_WORK_DIR. Put it on the store's filesystem when you can:
+# placement then only copies once.
+ingest_work_dir: ''
+
+# S3 watch route (doc/DESIGN_dataset_ingestion.md, "S3 watch route"):
+# `ant ingest-watch` polls S3 for complete `mus s3 upload` deposits, checks
+# them with ant-ingest-check and publishes the clean ones. It runs as its own
+# process (config/examples/anthive-ingest-watch.service.example), never inside
+# the serving stack. Env overrides: ANTHIVE_INGEST_WATCH_<KEY> (upper case).
+ingest_watch:
+  # Off by default: `ant ingest-watch` refuses to loop unless this is true
+  # (`--once` and `status` always work).
+  enabled: false
+  # Seconds between two polls of the prefix.
+  interval_seconds: 300
+  # An upload counts as complete when its h5ad and .h5ad.mus (and the static/
+  # and de/ files of its project) kept the same ETag and size over two polls,
+  # or when the newest of them is older than this many seconds.
+  settle_seconds: 900
+  # S3 prefix that mus writes deposits to.
+  prefix: __incoming/
+  # Prefix the published files are pushed to ('' = the catalog root, as
+  # ant-sync does). Only tests set this.
+  catalog_prefix: ''
+  # Steps after publication. A failing step is a warning; the dataset stays live.
+  # score: ant-score-fleet run --only <db>; gene_stats: ant-gene-stats-precompute
+  # --only <db>; module_variability; facet_test; facet_test_modules (results
+  # stay uncounted until the dataset is in the cohort table); ingest_index;
+  # manifest (S3 _catalog/manifest.json that mus reads).
+  post_steps: [score, gene_stats, module_variability, facet_test, facet_test_modules, ingest_index, manifest]
+  # A post step still running after this many seconds is stopped and recorded
+  # as a warning (ant-score-fleet pauses while the host is busy).
+  post_step_timeout_seconds: 21600
+  # Commit the dataset's .md, .h5ad.mus and index.md in the store repository.
+  store_git_commit: true
+  # Push that commit. Off: the commit is recorded and a person pushes.
+  store_git_push: false
+  # Author of the store commit when the sidecar names no depositor.
+  git_identity: 'anthive ingest-watch <noreply@anthive.local>'
+  # After a dataset went live and its catalog copy on S3 was verified, delete
+  # the objects it consumed from the incoming prefix (only those keys, only
+  # when their ETag is still the one that was pulled). `ant ingest prune`
+  # handles anything left over.
+  delete_incoming_after_ingest: true
+  # Base URL of the local ant-serve (empty: api_url / rest_api_host:port).
+  api_url: ''
+  # Lower the priority of the pipeline's children (nice 19, ionice idle).
+  low_priority: true
+  # Optional notification when an item goes live, is held, fails or needs a
+  # decision. webhook_url gets a JSON POST; email needs smtp_host and email_to.
+  notify:
+    on: [live, held, failed, needs_decision]
+    webhook_url: ''
+    email_to: ''
+    email_from: 'anthive-ingest@localhost'
+    smtp_host: ''
+    smtp_port: 25
 
 # Precomputed literature index (folder holding library_chunks.parquet, built
 # by `ant lib-index`, synced via S3). See doc/LIBRARY_INDEX.md.
