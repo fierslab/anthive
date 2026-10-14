@@ -19,8 +19,12 @@ Architecture (mirrors `ant-module-variability`):
 
   * Per-dataset parquet cache under
     ``<h5adstore>/_gene_stats_cache/<db_id_flat>/genestats.parquet``.
-    Invalidated by mtime comparison against the dataset's ``.duckdb``
-    (and its by-gene layer parquet, if present).
+    Fresh while its expression source is unchanged: the by-gene layer
+    parquet of the default layer (else the ``.duckdb`` holding the layer)
+    and the resolved ``default_layer`` value, both recorded in the cache's
+    parquet metadata (:func:`cache_is_fresh`). An ``.md`` edit or an
+    obs-only duckdb rewrite does not invalidate it; a changed
+    ``default_layer`` or a re-ingested layer does.
   * Two-phase build:
       Phase 1 — per dataset, compute top-N most-variable genes over the
                 default layer (native STDDEV_POP over the by-gene parquet).
@@ -44,7 +48,7 @@ Usage:
   ant-gene-stats-precompute [--only DB1,DB2,...] [--top-n N]
                             [--hot-set FILE] [--out PATH]
                             [--workers N] [--force] [--dry-run]
-                            [--h5adstore-root DIR]
+                            [--list-stale] [--h5adstore-root DIR]
 """
 from __future__ import annotations
 
@@ -154,8 +158,10 @@ class DatasetInputs:
         layer: Default layer name (e.g. ``'X'``).
         by_gene_parquet: Path to ``<stem>.layer.<layer>.by_gene.parquet``
             (may or may not exist).
-        source_mtime: Newest mtime among (duckdb, by-gene parquet, md) —
-            the cache invalidation key.
+        source_mtime: Kept for callers; mtime of ``expression_source``.
+        expression_source: File the statistics are computed from (the
+            by-gene parquet, else the duckdb); with ``layer`` it decides
+            cache freshness (:func:`cache_is_fresh`).
         fingerprint: ``src_fingerprint`` JSON snapshot of the expression
             source (by-gene parquet, else the duckdb) taken at discovery;
             ant-serve compares it to the live files before serving rows.
@@ -167,6 +173,7 @@ class DatasetInputs:
     by_gene_parquet: Path
     source_mtime: float
     fingerprint: str = STALE_FINGERPRINT
+    expression_source: Optional[Path] = None
 
 
 def _default_layer_from_md(md_path: Path) -> Optional[str]:
@@ -201,15 +208,11 @@ def build_dataset_inputs(entry, root: Path) -> Optional[DatasetInputs]:
     by_gene = entry.duckdb_path.with_name(
         f'{entry.duckdb_path.stem}.layer.{layer}.by_gene.parquet'
     )
-    source_mtime = max(
-        _mtime(entry.duckdb_path),
-        _mtime(by_gene),
-        _mtime(entry.md_path),
-    )
     # Expression stats depend only on the layer values (and the gene/cell
     # tables that a re-ingest rewrites alongside them), so obs-only
-    # annotation writes to the duckdb do not invalidate the served rows.
+    # annotation writes to the duckdb and .md edits do not invalidate them.
     expression_source = by_gene if by_gene.exists() else entry.duckdb_path
+    source_mtime = _mtime(expression_source)
     return DatasetInputs(
         db_id=entry.db_id,
         duckdb_path=entry.duckdb_path.resolve(),
@@ -218,6 +221,7 @@ def build_dataset_inputs(entry, root: Path) -> Optional[DatasetInputs]:
         by_gene_parquet=by_gene.resolve() if by_gene.exists() else by_gene,
         source_mtime=source_mtime,
         fingerprint=build_fingerprint(root, [expression_source]),
+        expression_source=expression_source.resolve(),
     )
 
 
@@ -491,7 +495,70 @@ def _read_cache(cache_path: Path) -> Optional[pd.DataFrame]:
         return None
 
 
-def _write_cache(cache_path: Path, rows: list[dict]) -> None:
+#: Parquet key-value metadata key of a cache file: JSON ``{layer, source,
+#: size, mtime_ns}`` describing the expression source the rows came from.
+CACHE_META_KEY = b'anthive_gene_stats_source'
+
+
+def _source_signature(inputs: DatasetInputs) -> Optional[dict]:
+    """``{layer, source, size, mtime_ns}`` of a dataset's expression source now."""
+    source = inputs.expression_source
+    if source is None:
+        return None
+    try:
+        stat = Path(source).stat()
+    except OSError:
+        return None
+    return {'layer': inputs.layer, 'source': str(source),
+            'size': int(stat.st_size), 'mtime_ns': int(stat.st_mtime_ns)}
+
+
+def _read_cache_meta(cache_path: Path) -> Optional[dict]:
+    """The recorded source signature of a cache file, or None (old cache, unreadable)."""
+    try:
+        import pyarrow.parquet as pq  # noqa: PLC0415
+        metadata = pq.read_schema(cache_path).metadata or {}
+        raw = metadata.get(CACHE_META_KEY)
+        return json.loads(raw) if raw else None
+    except Exception:  # noqa: BLE001 — treated as an old cache
+        return None
+
+
+def cache_is_fresh(cache_path: Path, inputs: DatasetInputs) -> bool:
+    """Whether a dataset's cache still matches its expression source.
+
+    With recorded metadata: fresh when the ``default_layer`` value, the
+    source path and size are unchanged, and the source mtime is unchanged
+    or not newer than the cache (a pull from S3 resets mtimes). Without
+    metadata (caches written before 2026-10-13): fresh only when the
+    expression source is not newer than the cache and every cached row
+    carries the current layer. ``.md`` and obs-only duckdb changes never
+    count.
+    """
+    cache_mtime = _mtime(cache_path)
+    if cache_mtime <= 0.0:
+        return False
+    current = _source_signature(inputs)
+    if current is None:
+        return False
+    recorded = _read_cache_meta(cache_path)
+    if recorded is not None:
+        if (recorded.get('layer') != current['layer'] or recorded.get('source') != current['source']
+                or recorded.get('size') != current['size']):
+            return False
+        return (recorded.get('mtime_ns') == current['mtime_ns']
+                or current['mtime_ns'] / 1e9 <= cache_mtime)
+    if current['mtime_ns'] / 1e9 > cache_mtime:
+        return False
+    try:
+        layers = set(pd.read_parquet(cache_path, columns=['layer'])['layer'].dropna().astype(str))
+    except Exception:  # noqa: BLE001
+        return False
+    return layers <= {inputs.layer}
+
+
+def _write_cache(cache_path: Path, rows: list[dict], inputs: Optional[DatasetInputs] = None) -> None:
+    """Write a dataset cache; ``inputs`` stamps its expression source signature."""
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     if rows:
         df = pd.DataFrame(rows, columns=list(OUTPUT_COLUMNS)).astype(
@@ -502,7 +569,14 @@ def _write_cache(cache_path: Path, rows: list[dict]) -> None:
             OUTPUT_DTYPES,
         )
     tmp = cache_path.with_suffix(cache_path.suffix + '.tmp')
-    df.to_parquet(tmp, engine='pyarrow', compression='zstd')
+    import pyarrow as pa  # noqa: PLC0415
+    import pyarrow.parquet as pq  # noqa: PLC0415
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    signature = _source_signature(inputs) if inputs is not None else None
+    if signature is not None:
+        table = table.replace_schema_metadata(
+            {**(table.schema.metadata or {}), CACHE_META_KEY: json.dumps(signature).encode()})
+    pq.write_table(table, tmp, compression='zstd')
     os.replace(tmp, cache_path)
 
 
@@ -534,19 +608,16 @@ def _process_topvar(job: DatasetJob) -> DatasetResult:
 def _process_full(job: DatasetJob, force: bool) -> DatasetResult:
     """Phase 2: compute per-(dataset, gene) stats for the hot set.
 
-    Cache is valid if (a) cache mtime ≥ source mtime AND (b) it already
+    Cache is valid if (a) :func:`cache_is_fresh` AND (b) it already
     contains every gene in ``job.hot_set``. If (a) but not (b), we
     compute stats for the missing genes and *append* them to the cache
     (append-only backfill).
     """
     start = time.time()
     try:
-        cache_mtime = _mtime(job.cache_path)
-        source_mtime = job.inputs.source_mtime
-
         cached_df: Optional[pd.DataFrame] = None
         cached_genes: set[str] = set()
-        if not force and cache_mtime >= source_mtime and cache_mtime > 0.0:
+        if not force and cache_is_fresh(job.cache_path, job.inputs):
             cached_df = _read_cache(job.cache_path)
             if cached_df is not None:
                 cached_genes = set(cached_df['gene'].astype(str))
@@ -573,11 +644,9 @@ def _process_full(job: DatasetJob, force: bool) -> DatasetResult:
         finally:
             conn.close()
 
-        # Merge — cached rows (still valid, still current mtime) + new rows.
-        # The cache mtime is unchanged when we only backfill new genes, but we
-        # trust source_mtime as the truth: any dataset-content change would
-        # have bumped it above cache_mtime and we'd already be recomputing
-        # from scratch.
+        # Merge — cached rows (still fresh) + new rows. Any change of the
+        # expression source or layer would have failed cache_is_fresh and
+        # we would be recomputing from scratch.
         if cached_df is not None:
             new_df = pd.DataFrame(new_rows, columns=list(OUTPUT_COLUMNS))
             merged = pd.concat([cached_df, new_df], ignore_index=True)
@@ -585,10 +654,10 @@ def _process_full(job: DatasetJob, force: bool) -> DatasetResult:
             merged = merged.drop_duplicates(
                 subset=['dataset', 'gene'], keep='last',
             )
-            _write_cache(job.cache_path, merged.to_dict(orient='records'))
+            _write_cache(job.cache_path, merged.to_dict(orient='records'), job.inputs)
             n_rows = int(len(merged))
         else:
-            _write_cache(job.cache_path, new_rows)
+            _write_cache(job.cache_path, new_rows, job.inputs)
             n_rows = len(new_rows)
 
         return DatasetResult(
@@ -675,8 +744,8 @@ def _cache_fingerprints(
 ) -> list[tuple[Path, str, str]]:
     """Pair every existing cache file with its dataset's ``src_fingerprint``.
 
-    A cache the script itself would recompute (older than its sources,
-    e.g. skipped by ``--only`` or errored this run) is stamped with
+    A cache the script itself would recompute (:func:`cache_is_fresh`
+    false, e.g. skipped by ``--only`` or errored this run) is stamped with
     :data:`STALE_FINGERPRINT` so ant-serve never serves its rows.
     """
     out: list[tuple[Path, str, str]] = []
@@ -684,8 +753,7 @@ def _cache_fingerprints(
         cache_path = _cache_file(root, inputs.db_id)
         if not cache_path.exists():
             continue
-        cache_mtime = _mtime(cache_path)
-        fresh = cache_mtime > 0.0 and cache_mtime >= inputs.source_mtime
+        fresh = cache_is_fresh(cache_path, inputs)
         out.append((
             cache_path, inputs.db_id,
             inputs.fingerprint if fresh else STALE_FINGERPRINT,
@@ -828,6 +896,11 @@ def main() -> int:
         help=f'parallel workers (default: {_default_workers()})',
     )
     parser.add_argument('--no-prune', action='store_true')
+    parser.add_argument(
+        '--list-stale', action='store_true',
+        help='print which dataset caches are fresh / stale / missing under '
+             'cache_is_fresh and exit (computes nothing)',
+    )
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
 
@@ -853,6 +926,17 @@ def main() -> int:
         f'{len(active_subset)} in scope',
         file=sys.stderr,
     )
+
+    if args.list_stale:
+        verdicts: dict[str, list[str]] = {'fresh': [], 'stale': [], 'missing': []}
+        for inputs in active_subset:
+            cache_path = _cache_file(root, inputs.db_id)
+            verdict = ('missing' if not cache_path.exists()
+                       else 'fresh' if cache_is_fresh(cache_path, inputs) else 'stale')
+            verdicts[verdict].append(inputs.db_id)
+        for verdict, ids in verdicts.items():
+            print(f'{verdict}: {len(ids)}' + (f"  {' '.join(ids)}" if verdict != 'fresh' else ''))
+        return 0
 
     _cache_root(root).mkdir(parents=True, exist_ok=True)
 

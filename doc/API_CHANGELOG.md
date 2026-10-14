@@ -383,6 +383,17 @@ Fixes (2026-10-13):
   scanning it.
 - ant-mcp: `list_module_scores` shows storage and the query per score, `analytics_schema` shows the view,
   `get_geneset` gives the sidecar query.
+- **Low-detection pill read from a stale gene statistics index.** `ant-gene-stats-precompute` judged a dataset's
+  cache stale when its `.md` or `.duckdb` was newer than the cache, so `.md` edits and obs-only duckdb rewrites
+  stamped 141 of 143 datasets stale in `gene_stats_index.parquet`; the pill on the facet views was then computed from
+  the two left (PTPRG in microglia: 1.3 percent from one MS white-matter dataset instead of a median of about 17 over
+  19 datasets). Freshness now follows the expression source only: the by-gene layer parquet (else the duckdb holding
+  the layer) and the resolved `default_layer`, both recorded in the cache's parquet metadata (older caches: fresh only
+  when the source is not newer than the cache and the cached layer matches). The index was rebuilt (0 stale).
+- **Coverage guard on the pill.** The `detection` object of the facet views (gene cards, top lists, overview, gene
+  set member genes) adds `n_group_datasets` (single-cell-type datasets of that scope and cell type group), `coverage`
+  (`n_datasets / n_group_datasets`) and `coverage_ok`. `low_detection` is null, and the views draw no pill, when fewer
+  than 3 datasets or under half of the group's datasets contribute. `/genes/{gene}/detection` is unchanged.
 - ant-mcp with `transport: stdio` writes its startup banner to stderr. It went to stdout, the protocol stream: with
   unbuffered output (`PYTHONUNBUFFERED=1`) a client read five non-JSON lines before the `initialize` answer.
 - Clients: pyvark, vark and the skills reach none of the new routes yet; pass-through clients keep working with

@@ -178,12 +178,36 @@ def test_detection_table_and_pill():
     tables = gene_detection.detection_table(frame, candidates, fresh=lambda db_id: db_id != 'H/astro')
     assert set(tables) == {('human_postmortem', 'microglia')}                  # stale, tiny and mixed are out
     pill = gene_detection.pill(tables[('human_postmortem', 'microglia')], 'meis1')
-    assert pill == {'pct_median': 3.0, 'n_datasets': 2, 'low_detection': True}
-    assert gene_detection.pill(tables[('human_postmortem', 'microglia')], 'APOE')['low_detection'] is False
+    # 2 of the 3 eligible microglia datasets (H/mic1, H/mic2, H/list is mixed, H/tiny too small): below the
+    # 3-dataset minimum, so no low-detection call; the median and coverage are still reported
+    assert pill == {'pct_median': 3.0, 'n_datasets': 2, 'n_group_datasets': 2, 'coverage': 1.0,
+                    'coverage_ok': False, 'low_detection': None}
+    assert gene_detection.pill(tables[('human_postmortem', 'microglia')], 'APOE')['low_detection'] is None
     assert gene_detection.pill(tables[('human_postmortem', 'microglia')], 'NOPE') is None
     assert gene_detection.pill(None, 'APOE') is None
     assert gene_detection.detection_table(None, candidates) == {}
     assert gene_detection.summarise([]) == []
+
+
+def test_detection_pill_coverage_guard():
+    """The pill needs >= 3 contributing datasets and >= half of the scope-group's single-cell-type datasets."""
+    meta = {f'H/m{i}': {'facet_scope': 'human_postmortem', 'cell_type': 'microglial cell', 'n_cells': 1000}
+            for i in range(8)}
+    candidates = gene_detection.candidate_datasets(meta)
+    rows = [{'dataset': f'H/m{i}', 'gene': 'LOW', 'n_cells': 1000, 'pct_nonzero': 1.0} for i in range(8)]
+    rows += [{'dataset': f'H/m{i}', 'gene': 'FEW', 'n_cells': 1000, 'pct_nonzero': 1.0} for i in range(3)]
+    tables = gene_detection.detection_table(pd.DataFrame(rows), candidates)
+    table = tables[('human_postmortem', 'microglia')]
+    low = gene_detection.pill(table, 'LOW')
+    assert low['low_detection'] is True and low['coverage'] == 1.0 and low['n_group_datasets'] == 8
+    few = gene_detection.pill(table, 'FEW')        # 3 of 8 datasets: under half
+    assert few['low_detection'] is None and few['coverage_ok'] is False and few['coverage'] == 0.38
+    # one fresh dataset out of eight (the stale-index case): no call either
+    stale = gene_detection.detection_table(pd.DataFrame(rows), candidates, fresh=lambda db_id: db_id == 'H/m0')
+    single = gene_detection.pill(stale[('human_postmortem', 'microglia')], 'LOW')
+    assert single == {'pct_median': 1.0, 'n_datasets': 1, 'n_group_datasets': 8, 'coverage': 0.12,
+                      'coverage_ok': False, 'low_detection': None}
+    assert gene_detection.coverage_ok(4, 8) and not gene_detection.coverage_ok(3, 7) and gene_detection.coverage_ok(3, None)
 
 
 # ── gene cards: forest, calls, small cohorts ─────────────────────────────────
@@ -552,6 +576,14 @@ STATS_ROWS = [
     {'dataset': 'G5/ds5', 'gene': 'PTPRG2', 'n_cells': 4000, 'pct_nonzero': 90.0},
     {'dataset': 'G1/ds1', 'gene': 'HOUSE', 'n_cells': 2000, 'pct_nonzero': 95.0},
     {'dataset': 'G5/ds5', 'gene': 'HOUSE', 'n_cells': 4000, 'pct_nonzero': 99.0},
+    # a third microglia dataset (no facet results) so the detection pill passes its coverage guard; values keep the
+    # microglia medians of the two-dataset fixture
+    {'dataset': 'G7/ds7', 'gene': 'PTPRG', 'n_cells': 2500, 'pct_nonzero': 2.5},
+    {'dataset': 'G7/ds7', 'gene': 'APOE', 'n_cells': 2500, 'pct_nonzero': 65.0},
+    {'dataset': 'G7/ds7', 'gene': 'SNAP25', 'n_cells': 2500, 'pct_nonzero': 1.5},
+    {'dataset': 'G7/ds7', 'gene': 'MBP', 'n_cells': 2500, 'pct_nonzero': 0.5},
+    {'dataset': 'G7/ds7', 'gene': 'PTPRG2', 'n_cells': 2500, 'pct_nonzero': 32.5},
+    {'dataset': 'G7/ds7', 'gene': 'HOUSE', 'n_cells': 2500, 'pct_nonzero': 95.0},
 ]
 VIEW_METADATA = {
     'G1/ds1': {'facet_scope': 'human_postmortem', 'cell_type': 'microglial cell', 'n_cells': 2000, 'title': 'Dataset one',
@@ -560,6 +592,8 @@ VIEW_METADATA = {
                'suspension_type': 'cell', 'default_layer': 'X'},
     'G5/ds5': {'facet_scope': 'human_postmortem', 'cell_type': 'excitatory neuron', 'n_cells': 4000, 'title': 'Neurons'},
     'G6/ds6': {'facet_scope': 'human_postmortem', 'cell_type': 'oligodendrocyte', 'n_cells': 4000, 'title': 'Oligos'},
+    'G7/ds7': {'facet_scope': 'human_postmortem', 'cell_type': 'microglial cell', 'n_cells': 2500, 'title': 'Dataset seven',
+               'suspension_type': 'nucleus', 'default_layer': 'X'},
     'M1/mus': {'suspension_type': 'cell'},
 }
 
@@ -576,7 +610,7 @@ def api(views: Path, tmp_path: Path):
                                 _Geneset('Microglia', ['APOE', 'P2RY12'], role='markers'),
                                 root=store)
     return build_serve(views, geneset_registry=registry, stats_rows=STATS_ROWS, metadata=VIEW_METADATA,
-                       extra_databases=('G5/ds5', 'G6/ds6'))
+                       extra_databases=('G5/ds5', 'G6/ds6', 'G7/ds7'))
 
 
 def test_endpoint_gene_detection(api):
@@ -592,7 +626,8 @@ def test_endpoint_gene_detection(api):
 def test_gene_effect_cards_carry_the_low_detection_pill(api):
     card = api.get('/facets/braak/effects', params={'gene': 'PTPRG'}).json()
     entry = _replication(card)
-    assert entry['low_detection'] is True and entry['detection']['n_datasets'] == 2
+    assert entry['low_detection'] is True and entry['detection']['n_datasets'] == 3
+    assert entry['detection']['n_group_datasets'] == 3 and entry['detection']['coverage_ok'] is True
     allf = api.get('/genes/PTPRG/facet-effects').json()
     assert _replication(allf['facets']['braak'])['low_detection'] is True
     assert _replication(allf['by_scope']['human_postmortem']['braak'])['detection']['pct_median'] == 2.5

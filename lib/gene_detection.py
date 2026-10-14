@@ -8,6 +8,12 @@ the ``.h5ad.mus`` maps to the group; mixed datasets are not summarised). Seconda
 out, as are datasets below ``MIN_CELLS`` cells. Scopes are never mixed.
 
 ``LOW_DETECTION_PCT`` is 5: a gene detected in fewer than 5 percent of the cells of the cell type is flagged.
+
+Coverage guard (2026-10-13): the facet-view pill is drawn only when at least ``MIN_PILL_DATASETS`` datasets and at
+least ``MIN_PILL_COVERAGE`` of the single-cell-type datasets of that scope and group contribute a value (a dataset
+whose precomputed statistics are stale, or that lacks the gene, does not). Otherwise ``low_detection`` is null and
+``coverage_ok`` false; the median is still reported with its coverage. Before the guard, a stale index left one MS
+white-matter dataset to speak for 19 microglia datasets (PTPRG 1.3 percent instead of 17).
 """
 from __future__ import annotations
 
@@ -25,6 +31,10 @@ MIN_CELLS = 50
 #: Scopes whose datasets are summarised.
 SUMMARY_SCOPES = ('human_postmortem', 'xenograft_human_in_mouse', 'in_vitro')
 NOT_SUMMARISED = 'mixed / other'
+#: The pill needs values from at least this many datasets ...
+MIN_PILL_DATASETS = 3
+#: ... and from at least this share of the single-cell-type datasets of its scope and group.
+MIN_PILL_COVERAGE = 0.5
 #: Expression statistics copied from the gene statistics into every dataset entry (the expanded rows of the panel).
 EXPRESSION_COLUMNS = ('mean', 'median_nonzero', 'q10_nonzero', 'q90_nonzero', 'rank_mean')
 
@@ -139,11 +149,16 @@ def detection_table(frame: pd.DataFrame, candidates: Mapping[str, Mapping[str, A
         fresh: Optional ``fresh(db_id) -> bool``; datasets whose precomputed rows are stale are left out.
 
     Returns:
-        ``(scope, group) -> DataFrame`` indexed by lower-case gene symbol with ``pct_median`` and ``n_datasets``.
+        ``(scope, group) -> DataFrame`` indexed by lower-case gene symbol with ``pct_median``, ``n_datasets``
+        (datasets with a value for the gene) and ``n_group_datasets`` (single-cell-type datasets of that scope and
+        group with at least ``MIN_CELLS`` cells, fresh or not: the denominator of the coverage guard).
         Only datasets whose content is a single cell type (``group`` not None, at least ``MIN_CELLS`` cells).
     """
-    usable = {db_id: info for db_id, info in candidates.items()
-              if info['group'] and info['n_cells'] >= MIN_CELLS and (fresh is None or fresh(db_id))}
+    eligible = {db_id: info for db_id, info in candidates.items() if info['group'] and info['n_cells'] >= MIN_CELLS}
+    group_sizes: Dict[Tuple[str, str], int] = {}
+    for info in eligible.values():
+        group_sizes[(info['scope'], info['group'])] = group_sizes.get((info['scope'], info['group']), 0) + 1
+    usable = {db_id: info for db_id, info in eligible.items() if fresh is None or fresh(db_id)}
     if frame is None or not usable:
         return {}
     sub = frame.loc[frame['dataset'].isin(usable), ['dataset', 'gene', 'pct_nonzero']].copy()
@@ -153,13 +168,26 @@ def detection_table(frame: pd.DataFrame, candidates: Mapping[str, Mapping[str, A
     tables: Dict[Tuple[str, str], pd.DataFrame] = {}
     for (scope, group), part in sub.groupby(['scope', 'group'], sort=False):
         grouped = part.groupby('gene_key')['pct_nonzero'].agg(['median', 'size'])
-        tables[(scope, group)] = grouped.rename(columns={'median': 'pct_median', 'size': 'n_datasets'})
+        grouped = grouped.rename(columns={'median': 'pct_median', 'size': 'n_datasets'})
+        grouped['n_group_datasets'] = group_sizes.get((scope, group), int(part['dataset'].nunique()))
+        tables[(scope, group)] = grouped
     return tables
 
 
+def coverage_ok(n_datasets: int, n_group_datasets: Optional[int]) -> bool:
+    """Whether enough datasets contribute for the pill: ``MIN_PILL_DATASETS`` and ``MIN_PILL_COVERAGE``."""
+    if n_datasets < MIN_PILL_DATASETS:
+        return False
+    return not n_group_datasets or n_datasets >= MIN_PILL_COVERAGE * n_group_datasets
+
+
 def pill(table: Optional[pd.DataFrame], gene: str) -> Optional[Dict[str, Any]]:
-    """The detection pill of one gene from a ``detection_table`` entry: ``{pct_median, n_datasets, low_detection}``,
-    None when the gene has no value (not in the index for that scope and group)."""
+    """The detection pill of one gene from a ``detection_table`` entry, None when the gene has no value.
+
+    ``{pct_median, n_datasets, n_group_datasets, coverage, coverage_ok, low_detection}``: ``coverage`` is
+    ``n_datasets / n_group_datasets``; ``low_detection`` is null when ``coverage_ok`` is false (too few datasets
+    contribute to call the gene low or not, see the module docstring).
+    """
     if table is None:
         return None
     key = gene.lower()
@@ -167,8 +195,12 @@ def pill(table: Optional[pd.DataFrame], gene: str) -> Optional[Dict[str, Any]]:
         return None
     row = table.loc[key]
     median = float(row['pct_median'])
-    return {'pct_median': round(median, 1), 'n_datasets': int(row['n_datasets']),
-            'low_detection': median < LOW_DETECTION_PCT}
+    n_datasets = int(row['n_datasets'])
+    n_group = int(row['n_group_datasets']) if 'n_group_datasets' in row.index else None
+    enough = coverage_ok(n_datasets, n_group)
+    return {'pct_median': round(median, 1), 'n_datasets': n_datasets, 'n_group_datasets': n_group,
+            'coverage': round(n_datasets / n_group, 2) if n_group else None, 'coverage_ok': enough,
+            'low_detection': (median < LOW_DETECTION_PCT) if enough else None}
 
 
 def group_pcts(tables: Mapping[Tuple[str, str], pd.DataFrame], scope: Optional[str], gene: str) -> Dict[str, float]:
