@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 
 import md_edit
-from sidecar_merge import MACHINE_KEYS, parse_lines
+from sidecar_merge import MACHINE_KEYS, S3_KEYS, parse_lines
 
 #: Categorical obs columns with more distinct values than this are not
 #: listed in ``obscat_include`` by default (cell ids, barcodes).
@@ -444,6 +444,8 @@ def merge_sidecar_store_wins(store_text: str, incoming_text: str) -> SidecarMerg
             old, new = raw.strip(), incoming[key].strip()
             if key in GUARDED_SIDECAR_KEYS:
                 result.guarded.append((key, old, new))
+            elif key in S3_KEYS:
+                pass                                  # the deposit's stamps describe the incoming copy
             elif key in UNREPORTED_SIDECAR_KEYS:
                 value = incoming[key]
             elif key in overrides:
@@ -452,7 +454,8 @@ def merge_sidecar_store_wins(store_text: str, incoming_text: str) -> SidecarMerg
             else:
                 result.conflicts.append((key, old, new))
         out_lines.append(f'{key}={value}')
-    new_keys = sorted(key for key in incoming if key not in written and not key.startswith(OVERRIDE_PREFIX))
+    new_keys = sorted(key for key in incoming if key not in written and not key.startswith(OVERRIDE_PREFIX)
+                      and key not in S3_KEYS)
     if new_keys and out_lines and out_lines[-1].strip():
         out_lines.append('')
     for key in new_keys:

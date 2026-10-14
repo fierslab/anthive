@@ -38,7 +38,8 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
-from ingest_pipeline import Item, Outcome, Pipeline, TransientError, delete_consumed, plan_items
+from ingest_pipeline import (Item, Outcome, Pipeline, TransientError, delete_consumed, if_match_selftest,
+                             plan_items)
 
 STATES = ('seen', 'stable', 'pulled', 'checked', 'live', 'held', 'failed', 'needs_decision', 'rejected')
 FINAL_STATES = ('live', 'held', 'failed', 'needs_decision', 'rejected')
@@ -217,11 +218,11 @@ def observe(db: StateDB, items: Sequence[Item], now: float, settle_seconds: floa
                           timings=None, approval=None, shared_keys=None, sha256=None, **base)
             continue
         if row['settle_signature'] != settle or row['content_signature'] != content:
-            if row['content_signature'] != content and row['approval']:
-                db.event(item.key, row['state'], 'upload changed: the approval no longer applies')
+            if row['approval']:
+                db.event(item.key, row['state'], 'deposit changed (data, sidecar, seeds or static files): '
+                                                 'the approval no longer applies')
             db.upsert(item.key, content_signature=content, settle_signature=settle, polls_unchanged=0,
-                      state='seen' if row['state'] == 'stable' else row['state'],
-                      approval=None if row['content_signature'] != content else row['approval'], **base)
+                      state='seen' if row['state'] == 'stable' else row['state'], approval=None, **base)
             continue
         db.upsert(item.key, polls_unchanged=int(row['polls_unchanged'] or 0) + 1, **base)
         if item.mus is None:
@@ -236,6 +237,15 @@ def observe(db: StateDB, items: Sequence[Item], now: float, settle_seconds: floa
     return sorted(ready, key=lambda entry: entry.newest_modified())
 
 
+def _os_user() -> str:
+    import getpass  # noqa: PLC0415
+
+    try:
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001
+        return f'uid {os.getuid()}'
+
+
 def approve(db: StateDB, key_or_db_id: str, by: str, note: str = '') -> Dict[str, Any]:
     """Mark a held item for publication by the next poll, past the held reasons it has now.
 
@@ -247,9 +257,10 @@ def approve(db: StateDB, key_or_db_id: str, by: str, note: str = '') -> Dict[str
         raise ValueError('approve needs --by <name>')
     if row['state'] != 'held':
         raise ValueError(f'{row["key"]} is {row["state"]}, not held')
-    approval = {'by': by.strip(), 'reasons': json.loads(row['held_reasons'] or '[]'), 'note': note.strip(),
-                'date': time.strftime('%Y-%m-%d'), 'signature': row['content_signature']}
-    db.transition(row['key'], 'stable', f'approved by {by} for {", ".join(approval["reasons"])}',
+    approval = {'by': by.strip(), 'os_user': _os_user(), 'reasons': json.loads(row['held_reasons'] or '[]'),
+                'note': note.strip(), 'date': time.strftime('%Y-%m-%d'), 'signature': row['settle_signature']}
+    db.transition(row['key'], 'stable', f'approved by {by} (OS user {approval["os_user"]}) for '
+                                        f'{", ".join(approval["reasons"])}',
                   approval=json.dumps(approval), polls_unchanged=1, next_attempt=0)
     return approval
 
@@ -259,8 +270,8 @@ def reject(db: StateDB, key_or_db_id: str, by: str, note: str = '') -> None:
     row = _find(db, key_or_db_id)
     if row['state'] not in ('held', 'failed', 'needs_decision'):
         raise ValueError(f'{row["key"]} is {row["state"]}; only held, failed or needs_decision items are rejected')
-    db.transition(row['key'], 'rejected', f'rejected by {by}' + (f': {note}' if note else ''),
-                  error=f'rejected by {by}' + (f': {note}' if note else ''))
+    text = f'rejected by {by} (OS user {_os_user()})' + (f': {note}' if note else '')
+    db.transition(row['key'], 'rejected', text, error=text)
 
 
 def _find(db: StateDB, key_or_db_id: str) -> Dict[str, Any]:
@@ -377,6 +388,32 @@ class Watcher:
         self.clock = clock
         self.max_items = max_items
         self.stop_requested = stop_requested
+        self.if_match: Optional[bool] = None
+
+    def check_if_match(self) -> bool:
+        """Whether the backend enforces ``IfMatch`` on DeleteObject (self-test, cached a week per bucket and prefix)."""
+        if self.if_match is not None:
+            return self.if_match
+        cache = self.state_dir / 'ifmatch_selftest.json'
+        prefix = self.settings['prefix']
+        try:
+            cached = json.loads(cache.read_text())
+            if cached.get('bucket') == self.bucket and cached.get('prefix') == prefix \
+                    and self.clock() - float(cached.get('ts', 0)) < 7 * 86400:
+                self.if_match = cached.get('result') == 'enforced'
+                return self.if_match
+        except (OSError, ValueError):
+            pass
+        result = if_match_selftest(self.s3, self.bucket, prefix)
+        self.if_match = result == 'enforced'
+        self.log(f'IfMatch self-test on {prefix}_selftest/: {result} '
+                 f'({"used on top of the HEAD check" if self.if_match else "not relied on; HEAD check only"})')
+        self.db.event('-', 'selftest', f'IfMatch delete: {result}')
+        try:
+            cache.write_text(json.dumps({'bucket': self.bucket, 'prefix': prefix, 'result': result, 'ts': self.clock()}))
+        except OSError:
+            pass
+        return self.if_match
 
     def list_prefix(self) -> List[Dict[str, Any]]:
         """Every object under the prefix (raises TransientError on an S3 error)."""
@@ -416,7 +453,7 @@ class Watcher:
         key = item.key
         row = self.db.get(key) or {}
         approval = json.loads(row['approval']) if row.get('approval') else None
-        if approval and approval.get('signature') != item.content_signature():
+        if approval and approval.get('signature') != item.settle_signature():
             approval = None
         self.db.transition(key, 'pulled', 'processing started' + (' (approved)' if approval else ''))
         self.log(f'processing {item.display}')
@@ -498,7 +535,7 @@ class Watcher:
             self.log(f'incoming {result}: {s3_key} ({etag})')
 
         deleted, skipped = delete_consumed(self.s3, self.bucket, self.settings['prefix'], outcome.consumed, record,
-                                           keep=keep)
+                                           keep=keep, if_match=self.check_if_match())
         own_keys = [key for key in outcome.consumed if key not in keep]
         self.db.upsert(item.key, deleted=int(bool(deleted) and set(own_keys) <= set(deleted)))
         self.db.event(item.key, 'live', f'incoming: {len(deleted)} deleted, {len(skipped)} kept'
@@ -530,7 +567,11 @@ class Watcher:
             served, verified = bool(row['served']), bool(row['catalog_verified'])
             warnings: List[str] = []
             if not verified and self.pipeline.config.push_catalog:
-                verified, warnings = self.pipeline.repush(item, row['kind'] or 'new', row['sha256'] or '')
+                pushed, warnings = self.pipeline.repush(item, row['kind'] or 'new', row['sha256'] or '')
+                if pushed is None:
+                    self.db.transition(row['key'], 'needs_decision', '; '.join(warnings), error='; '.join(warnings))
+                    continue
+                verified = pushed
             if not served and rescan_result is not None:
                 served = self.pipeline.verify_served(row['db_id'], row['sha256'], row['version'], rescan_result,
                                                      warnings)

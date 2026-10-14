@@ -152,6 +152,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         print(f'usage: ant-ingest-watch {args.command} <item key or db id> --by <name> [--note TEXT]',
               file=sys.stderr)
         return 2
+    config.require_primary(config.get_config(), tool=f'ant-ingest-watch {args.command}')
     state_dir = config.get_ingest_state_dir()
     db = ingest_watch.StateDB(state_dir / ingest_watch.DB_FILE)
     try:
