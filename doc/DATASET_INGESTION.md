@@ -112,8 +112,13 @@ ant ingest-watch reject  __incoming/<Group>/<basename>.h5ad --by "Your Name" --n
 ```
 
 `approve` lets the item through the held reasons it has now (errors still block) and the next poll publishes
-it; the dataset gets a caveat naming who approved it and why. A new upload of the same item voids the
-approval. `reject` marks it final; nothing is published or deleted.
+it; the dataset gets a caveat naming who approved it and why, and the OS user who ran the command is recorded.
+Any change to the deposit (the data, the sidecar, a seed or a static file) voids the approval. `reject` marks
+it final; nothing is published or deleted. Both run only on the primary site, on the watcher's host: whoever
+can run them there is trusted as an admin of the route.
+
+Updates of a dataset that is published with `access=public` are always held, so a person approves every new
+version of public data.
 
 A deposit in a final state is looked at again only when its h5ad or sidecar changes (new ETag). Uploading
 a corrected sidecar is enough to retry a held or failed deposit.
@@ -140,7 +145,9 @@ copy, an update that changes `access`, `data_use` or `license`, an update marker
 Upload again under the same `<data_project>/<basename>`. To make sure the upload lands on the dataset you
 mean, add `update_of=<db_id>` or `previous_sha256=<sha256 of the published h5ad>` to the sidecar: a mismatch
 stops the item (`needs_decision`). With `ingest_watch.require_update_marker: true` an update without either
-stops too; this protects against two depositors who pick the same group and file name. The same checks run.
+stops too; this protects against two depositors who pick the same group and file name. It is off by default
+(updates publish as new versions without asking): the cost is that a name collision silently produces a new
+version of someone else's dataset (the old one stays restorable). The same checks run.
 When they are clean:
 
 - a different h5ad (another sha256) becomes a new minor version (1.0.0 to 1.1.0), with a changelog entry
@@ -156,7 +163,8 @@ caveats are applied; if it differs in other keys it stays in `__incoming/` with 
 
 Caveats, curation fields and the facet mapping of the old `.md` stay as they are; the route appends one caveat
 saying which version was replaced. The served dataset is swapped under `/admin/release` and `/admin/restore`, through a journal: if the
-process dies in the middle, the next start finishes or undoes the swap before anything else. The previous
+process dies in the middle, the next start finishes or undoes the swap before anything else, and a finished
+swap then still gets its catalog push, scores, facet tests and store commit. The previous
 version is kept in `<Group>/_versions/<basename>/<version>/` (hard links to the h5ad, `.md`, `.h5ad.mus` and old
 scores, so no extra space while they are unchanged) and on S3 under `<Group>/_versions/<basename>/<version>/`. To go back, copy those files over the
 current ones, bump the version with a changelog entry, convert and rescan.

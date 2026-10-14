@@ -807,10 +807,10 @@ that `md_edit` cannot change with a verified minimal edit.
 | `ant-convert` | `failed` (retry when killed) | in the work dir; skipped for a metadata-only update |
 | `ant-ingest-check` | errors -> `failed`, held reasons -> `held` (retry when killed) | public data is always held; an approval lets the held reasons it names through |
 | placement | | through the swap journal (21.5); a new dataset is staged the same way |
-| rescan + served | no (warning) | `POST /admin/rescan` with backoff, then `GET /databases/{db_id}/info` must report the new sha256 and version |
-| catalog push | no (warning, retried next poll) | h5ad (metadata `sha256`), sidecar (re-stamped `s3_*`), duckdb, layer parquets, DE sidecar; verified by HEAD: size plus the `sha256` metadata, or for a legacy object without it a single-part MD5 ETag or the size and the local sha256, after which the metadata is backfilled |
+| rescan + served | no (warning) | `POST /admin/rescan` with backoff right after the restore (a rescan retires every pooled instance, so nothing opened during the swap survives), then `GET /databases/{db_id}/info` must report the new sha256 and version |
+| catalog push | no (warning, retried next poll) | h5ad (metadata `sha256`), sidecar (`s3_*` always re-stamped from the catalog object; the deposit's own `s3_*` keys are dropped), duckdb, layer parquets, DE sidecar; verified by HEAD: size plus the `sha256` metadata, or for a legacy object without it an ETag recomputed from the store file (single-part MD5, or a multipart ETag for 8, 16, 64 or 256 MB parts). Only a real match counts, and only then is the metadata backfilled (a failed backfill, e.g. over 5 GB, keeps the verdict). A retry first checks that the store h5ad still has the published sha256, else `needs_decision` |
 | post steps | no (warning) | as before; skipped after a stop request; `post_step_timeout_seconds` |
-| git commit | no (warning) | `git commit --only`; on failure the paths are unstaged again; author from a validated `depositor` / `depositor_email`, else the service identity (an invalid depositor is recorded in the changelog); `store_git_push` pushes only when the branch has no other unpushed commit; an `unchanged` deposit commits only files that are still uncommitted (a swap finished by recovery after a crash) |
+| git commit | no (warning) | only the `.md`, `.h5ad.mus` and `index.md` the route itself wrote, and only while each still has the sha256 the route wrote (a file edited meanwhile: no commit, a warning); skipped when the curator has staged changes of those paths, so the index is never touched; `git commit --only`, a failed commit resets just those paths; an `unchanged` deposit commits nothing; author from a validated `depositor` / `depositor_email`, else the service identity (an invalid depositor is recorded in the changelog); `store_git_push` pushes only when the branch has no other unpushed commit |
 | work dir | | removed after live; held, failed and needs_decision work dirs are kept `work_ttl_days` (14) |
 | delete incoming | | 21.6 |
 
@@ -821,7 +821,11 @@ checks (`--mode existing`). A sidecar may name the dataset it updates: `update_o
 `previous_sha256=<sha256 of the published h5ad>`. A mismatch is `needs_decision`; with
 `ingest_watch.require_update_marker: true` an update without either is `needs_decision` too (protection
 against two depositors choosing the same `<group>/<basename>`; off by default, as Mark decided that updates
-publish as new versions). Clean, the upload becomes a new version:
+publish as new versions). The trade-off: with the marker off, a second lab that happens to deposit
+`<group>/<basename>` replaces the first lab's dataset by a new version without anyone being asked (the old
+version stays in `_versions/` and on S3, and the checks still run); with it on, every update needs the extra
+sidecar line. Data updates of a dataset with `access=public` are always held for an admin. Clean, the upload
+becomes a new version:
 
 - the h5ad sha256 differs: minor bump, changelog `{version, date, previous_sha256, changes}`;
 - same h5ad, other sidecar keys or new caveats from the deposited `.md` seed: patch bump;
@@ -838,19 +842,21 @@ stay byte for byte. A `.md` without `version` is treated as 0.0.0 (archived as 0
 Placement order for an update:
 1. the S3 copy of the current catalog objects to `<group>/_versions/<basename>/<old>/` (a failure stops here,
    nothing changed);
-2. `POST /admin/release/<db_id>` for a data update (a failure stops here);
-3. under the per-dataset writer flock, a journal in `<ingest_state_dir>/swaps/`: hard links of the current
-   source files into `_versions/<basename>/<old>/` (nothing moves), the new files staged as hidden siblings
-   (`.<name>.ingest-new`), the files to remove afterwards (old scores, stale layer parquets);
+2. under the per-dataset writer flock, a journal in `<ingest_state_dir>/swaps/`: hard links of the current
+   source files into `_versions/<basename>/<old>/` (nothing moves), the new files and new static files staged
+   as hidden siblings (`.<name>.ingest-new`, a cross-device copy as `.<name>.ingest-partial`, both tracked),
+   the files to remove afterwards (old scores, stale layer parquets);
+3. `POST /admin/release/<db_id>` for a data update, only now (a failure rolls the journal back and retries);
 4. commit: journal phase `committing`, renames over the targets with the `.md` last, removals, journal deleted;
-5. `POST /admin/restore/<db_id>`, rescan, served check.
+5. `POST /admin/restore/<db_id>`, then at once the rescan and the served check.
 
 `recover_swaps` runs before every poll (and before `ant-ingest`): a journal still `staged` is rolled back
-(staged files and links removed, the published version untouched), one `committing` is rolled forward; a
-dataset the swap had released is restored in ant-serve. The item itself is then processed again: it is
-`unchanged` (the deposit equals the recovered version), its catalog copy is pushed by the retry of the next
-poll, and the uncommitted `.md` / `.h5ad.mus` are committed. The `versions` row of the interrupted update is not
-written (the `.md` changelog and `_versions/` hold the history). A stop
+(staged and partial files and links removed, the published version untouched), one `committing` is rolled
+forward and a dataset the swap had released is restored in ant-serve. A rolled-forward journal leaves a resume
+marker (`swaps/resume/`) with what the interrupted run still had to do. When the item comes back (its deposit
+now equals the store, so it looks unchanged), the marker makes the pipeline finish the publication: catalog
+push, versions row, post steps (scores, gene stats, facet tests, index), DE import, manifest, the store commit
+of the files the route wrote, then the deletes. A stop
 request is honoured between steps and never after staging has started a commit; an I/O error while staging
 rolls back and retries later.
 
@@ -865,11 +871,25 @@ version, its catalog h5ad verified and the store copy present. Only the keys tha
 applied count as consumed: the h5ad and sidecar, static files that were placed or are identical in the store,
 seeds that were used, DE tables that were ingested. Static files of the project (and `static/index.md`) are
 shared: they stay while any other item of the project is still in incoming and not live (held, failed,
-needs_decision, waiting); the last item to go live deletes them. Each key is deleted with a conditional
-`DeleteObject` (`IfMatch` on the pulled ETag); where the store refuses the condition, a HEAD right before the
-delete. A changed ETag means a newer upload: the key stays. Prefix-wide and batch deletes do not exist in the
+needs_decision, waiting); the last item to go live deletes them. Before each delete the key is HEAD-compared with the pulled ETag; a changed ETag means a newer upload and the
+key stays. `IfMatch` is sent on top of that only when the backend is known to enforce it: at the first delete
+a run makes, the watcher writes a scratch object `<prefix>_selftest/<random>` twice, tries to delete it with
+the first ETag and looks whether it survived (`enforced`, `ignored`, `unsupported:<code>`); the result is
+logged, recorded as an event and cached for a week in `<ingest_state_dir>/ifmatch_selftest.json`. Without
+`IfMatch` there is a window of milliseconds between the HEAD and the delete in which a new upload of the same
+key would be deleted; the depositor's next upload then simply arrives again (mus re-uploads the whole item).
+On the lab bucket the self-test of 2026-10-14 returned `ignored`: the object store accepted the header and
+deleted the object anyway, so there the HEAD comparison is the only protection. Prefix-wide and batch deletes do not exist in the
 route; every key is logged with its ETag, outcome and time in `deletions`. When the rescan, the served check or
 the catalog push failed, the next poll retries them (one rescan per poll) and deletes afterwards.
+
+### 21.6a Trust model of approve and reject
+
+`ant-ingest-watch approve` and `reject` run on the watcher's host as a user who can write its state dir, and
+only on a primary site (`require_primary`). Anyone with that access is trusted as an admin of the route: the
+`--by` name is what they type, and the OS user is recorded next to it in the event log and the caveat. The
+approval is bound to the exact deposit (ETag and size of the h5ad, sidecar, seeds, static and DE files); any
+change voids it. There is no web or API path to approve.
 
 ### 21.7 How it relates to the presigned-upload route
 
@@ -907,3 +927,21 @@ same time.
 | S10 work dirs, retries, disk space | removed after live, TTL for the rest, pulls reused, free-space check |
 | S11 legacy catalog objects without `sha256` metadata never verified | MD5 ETag or size + local sha256, metadata backfilled |
 | C-a to C-j, nits | two identical listings, public always held, `IfMatch`, prune skips `_versions/` and checks ETags, one rescan per poll, catalog object without local dataset, runtime dirs outside the checkout, unstage on a failed commit, approve and reject, 0.0.0, case-insensitive ids, depositor validation |
+
+Second review (same day):
+
+| Finding | Change |
+| --- | --- |
+| N1 a swap finished by recovery was reprocessed as `unchanged`: no push, post steps, DE, manifest or versions row | resume marker from recovery; the pipeline finishes the publication when the item comes back |
+| N2 `IfMatch` was trusted although a backend may ignore it | HEAD comparison before every delete; `IfMatch` only on top, after a self-test on a scratch key |
+| N3 a multipart legacy object was accepted on size and its sha256 backfilled unverified | recomputed multipart ETags for common part sizes; backfill only after a match |
+| N4 a retried push could publish a changed store file | the store h5ad must still have the published sha256, else `needs_decision` |
+| N5 the deposit's `s3_*` stamps could end up in the store sidecar | dropped; always re-stamped from the catalog object |
+| N6 the dataset was released while staging ran | staging first, release just before the commit, rescan right after the restore |
+| N7 an approval survived changes of seeds or static files | bound to the full settle signature |
+| N8 approve / reject | primary sites only; OS user recorded; trust model in 21.6a |
+| N9 commits of files the route did not write, or edited meanwhile; the curator's staged changes | commit only the route's own files with the sha256 it wrote; leave staged changes alone |
+| N10 | public data updates are held: documented |
+| N11 partial copies were not tracked | in the journal, removed by rollback and recovery, matched by the hidden-file check |
+| N12 uv, download and network failures of a tool counted as dataset errors | recognised in the output, retried |
+| nits | hidden-file check on the exact basename; a conflicting seed `.md` applies nothing |
