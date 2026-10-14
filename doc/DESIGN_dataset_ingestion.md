@@ -2,6 +2,8 @@
 
 Status: accepted 2026-10-05 (Mark), with the recommended defaults of section 19. **P1 is implemented**
 (`ant ingest-check`, `ant ingest-index`; see section 20 for what differs from this plan). P2 to P5 are open.
+The S3 watch route (`ant ingest-watch`, section 21, 2026-10-14) publishes `mus s3 upload` deposits without the
+upload API; it shares the build pipeline the P3/P4 worker should reuse.
 It includes Mark's decisions sent mid-task:
 - The role is called `curators`.
 - A submission whose server-side checks pass is published automatically, with a "new, unreviewed" badge. Admins can retire it or send it back afterwards.
@@ -715,3 +717,149 @@ warnings about missing optional fields (`license`, `data_use`, `description`):
 | AZ5/SLM | xenograft | 0 | animal replicate unit, donor checks skipped, `access=public` held, stale `sha256` in the `.md`, no `ant_donor` / `ant_sex` / `ant_disease` |
 | H26/EBP | bulk | 1 | `layers.consistency` fails (r 0.81: X is not log1p CP10k of the counts and the `.md` does not declare a `normalisation`) |
 | G24/MMG | clean primary | 0 | warnings only: deprecated `ant_region`, stale `sha256`, short description |
+
+---
+
+## 21. S3 watch route (2026-10-14)
+
+A second way in, built before the presigned-upload route of sections 3 to 7 (P3, not built). The curator
+deposits with `mus s3 upload` exactly as for `ant-ingest`; a long-running watcher on the dev box finds the
+upload, checks it and publishes it. Decisions by Mark, 2026-10-14:
+
+- S3 `__incoming/` is the source. A watcher polls it every few minutes; complete uploads are pulled,
+  ingested and pushed back to the catalog on S3.
+- Publication is automatic unless there are errors. Held results of `ant-ingest-check` (`donor_overlap`,
+  `data_use_unknown`, `licence_unknown`, `public_access`, `controlled_access`) block like errors and are
+  recorded for a person. Warnings do not block.
+- After a verified publication the watcher deletes the incoming objects that item consumed, and only those
+  (see "Deletes" below). `ant-ingest prune` stays for leftovers.
+- An upload for a dataset that is already published is a new version, never a silent replacement. The previous
+  version is kept until someone purges it.
+- It runs as its own process on the dev box first (systemd unit or `make ingest-watch`), never as a child of
+  the serving stack. A compose service comes later; everything already resolves through `lib/config.py`.
+
+### 21.1 Pieces
+
+| Piece | Role |
+| --- | --- |
+| `bin/ingest/ant-ingest-watch` | the loop (`--once`, `status`), lock, low priority, S3 client, CLI overrides (`--store`, `--prefix`, `--catalog-prefix`, `--api-url`, `--post-steps`, `--no-delete`, `--no-git`) |
+| `lib/ingest_watch.py` | state database, settle logic, the poll (`Watcher`), deletes after verification, status file, notifications |
+| `lib/ingest_pipeline.py` | one item from S3 to the served store (`Pipeline`), shared with `ant-ingest`; `delete_consumed`, the only S3 delete of the route |
+| `lib/ingest_md_fill.py` | h5ad profile (h5py only), non-destructive `.md` fill for new datasets, index.md from the sidecar, version plan and minimal `.md` edits for updates, sidecar merge for updates |
+| `lib/ingest_versions.py` | archive the replaced version locally and on S3, list versions, plan and run a purge |
+| `lib/md_edit.py` | gained `bump_version(part='minor', previous_sha256=...)` and `append_top` (append one caveat) |
+| `config.get_ingest_watch_settings`, `config.get_ingest_work_dir` | the `ingest_watch:` block and the work dir, env > anthive.yaml > default |
+| `config/examples/anthive-ingest-watch.service.example` | systemd unit (Nice 19, idle IO class, CPU and memory caps, `Restart=on-failure`) |
+
+### 21.2 What counts as an item, and when it is complete
+
+The keys `mus s3 upload` writes (mus `internal/cli/s3_upload.go`) are
+`__incoming/<data_project>/[<subfolder>/]<basename>.h5ad`, the collapsed sidecar `<basename>.h5ad.mus` beside it
+(with `sha256=`), `__incoming/<data_project>/static/<file>` and `__incoming/<data_project>/de/<folder>/<file>`
+with a `.mus` per DE table. One item is one h5ad with its sidecar. It also uses the static files of its project
+and the DE tables whose sidecar names it (`de_dataset_id`, else `de_dataset_h5ad`).
+
+Two static names are catalogue seeds, not files for the `static/` folder: `static/<basename>.md` (the dataset
+`.md` the curator wrote) and `static/index.md` (for a new group). mus has no other way to carry them, so a
+depositor adds them with `--static`.
+
+An item is processed when its h5ad and sidecar exist and every object it may consume kept its ETag and size
+across two polls, or when the newest of them is older than `settle_seconds` (default 900). One item at a time,
+oldest first, under nice 19 and the idle IO class.
+
+### 21.3 States
+
+```
+seen -> stable -> pulled -> checked -> live | held | failed | needs_decision
+```
+
+One row per h5ad key in `<ingest_state_dir>/ingest_watch.sqlite` (tables `items`, `events`, `deletions`,
+`versions`), with the ETags, timestamps, report path, warnings, held reasons, consumed keys and timings. A row
+in a final state is processed again only when the ETag or size of its h5ad or sidecar changes. An S3 error
+while listing backs the poll interval off (doubling, at most an hour); an error during a pull leaves the item
+`stable` with a retry after 2, 4, 8 ... minutes, and after 8 attempts it is `failed`. A process killed
+mid-item picks the item up again on the next start (its work dir is rebuilt).
+
+`needs_decision` is for store states the route cannot reconcile: an h5ad in the store without its `.md`, a
+`.md` without its h5ad (an S3-only or retired dataset), or a store `.md` that `md_edit` cannot change with a
+verified minimal edit.
+
+### 21.4 The pipeline of one item
+
+| Step | Blocks publication when it fails | Notes |
+| --- | --- | --- |
+| pull | retry later | every GET is pinned to the ETag of the listing (HEAD before and after); the work dir is `<ingest_work_dir>/watch/<item>/`, never the store |
+| sha256 | yes (`failed`) | the sidecar must declare `sha256=` and it must match; `data_project=` in the sidecar must match the folder |
+| catalogue `.md` | yes | new: seed + `fill_catalog_fields` (id, title, sha256, n_obs, n_vars, layer stats, obsnum/obscat/obsm/layers defaults, version 1.0.0 and a first changelog entry, an `ingest:` block); update: see 21.5 |
+| `access` default | no | a sidecar without `access` gets `access=internal`, recorded as a caveat and in the changelog |
+| `ant-convert` | yes | in the work dir; skipped for a metadata-only update |
+| `ant-ingest-check` | yes: errors -> `failed`, held reasons -> `held` | `--mode new` or `existing`, report JSON and markdown under `<ingest_state_dir>/reports/<item>/` |
+| placement | | per file `os.replace` (or copy to a partial name, then rename); `.md` and `.duckdb` last; new group: `index.md`; then `static/` (an existing file with other content is kept and reported) |
+| rescan | no (warning) | `POST /admin/rescan` with backoff (5 s up to 60 s, about 4 minutes); the item is `served` only when its db id is in the answer |
+| catalog push | no (warning) | h5ad (object metadata `sha256`), sidecar (re-stamped `s3_*`), duckdb, layer parquets, DE sidecar to `<catalog_prefix><group>/...`; verified by HEAD (size and the `sha256` metadata) |
+| post steps | no (warning) | `score` (`ant-score-fleet --only <db> run`), `gene_stats`, `module_variability` (both `--only <db> --no-prune`), `facet_test`, `facet_test_modules` (results stay uncounted until an admin adds the dataset to the cohort table), `ingest_index` (`build --only <db>`), `manifest` (`<catalog_prefix>_catalog/manifest.json`); then DE tables through `ant-de-ingest`, push of `.scores.parquet` / `.de.parquet` |
+| git commit | no (warning) | `.md`, `.h5ad.mus`, `index.md` with `git commit --only`; author from `depositor` / `depositor_email` in the sidecar, else `git_identity`; pushed only with `store_git_push: true` |
+| final rescan | no | |
+| delete incoming | no | see "Deletes" |
+
+The legacy h5ad checker and `bin/meta/ant-check` are never called; a test greps every source of the route.
+
+### 21.5 Updates and versions
+
+An upload for `<group>/<basename>` that already has an h5ad and a `.md` in the store goes through the same
+checks (`--mode existing`). Clean, it becomes a new version:
+
+- the h5ad sha256 differs: minor bump (X.Y+1.0), changelog entry `{version, date, previous_sha256, changes}`
+  with what changed (sha, cells, genes added and removed, obs columns added and removed, sidecar keys);
+- same h5ad, sidecar keys changed: patch bump, the changed keys in the changelog;
+- nothing changed: `live` with kind `unchanged`, no new version.
+
+The new `.md` is the old one with verified minimal edits (`md_edit`): `sha256`, `n_obs`, `n_vars`,
+`layer_stats` when it had them, the `ingest` block, one appended caveat saying which version was replaced and
+why, the version bump and the changelog entry. Caveats, curation fields, the `api:` facet mapping and the body
+stay byte for byte. The sidecar is merged with the upload winning for every key it sets; local-only keys stay.
+
+The swap uses the writer protocol: `POST /admin/release/<db_id>`, the per-dataset writer flock
+(`<duckdb>.lock`, the one `AnnotationWriter` takes), archive, placement, removal of stale layer parquets,
+`POST /admin/restore/<db_id>`, rescan, post steps. The previous version moves to
+`<group>/_versions/<basename>/<old_version>/` (h5ad, `.md`, `.h5ad.mus`, `.scores.parquet` of the old cells,
+a copy of `.de.parquet`; derived `.duckdb` and layer parquets are rebuilt from the h5ad and are not kept) and
+its catalog objects are copied to the same `_versions/...` key on S3, with the old `.md`. A metadata-only update
+hard-links the h5ad into the version folder and copies only the sidecar and `.md` on S3. Underscore folders are
+skipped by the catalogue scan of ant-serve, `ant-sync`, `md_check` and the catalog manifest (tested). The
+existing `.de.parquet` is copied into the work dir before the convert, so `ant-convert` re-imports the DE
+studies; if the genes changed so much that the re-import fails, the update fails and is recorded.
+
+`ant-ingest purge <db_id> [--keep N]` (default 1, only the current version) and `ant-ingest purge --all --keep N`
+remove archived versions locally and on S3, with `--dry-run`, a typed confirmation (or `--yes`) and
+`--local-only`. On S3 they delete only keys under the version's own `_versions/<basename>/<version>/` prefix,
+one key at a time. The watcher never purges.
+
+### 21.6 Deletes
+
+`delete_incoming_after_ingest` (default true). After an item is `live`, its db id was listed by the rescan, its
+catalog h5ad on S3 has the right size and `sha256` metadata, and the store copy exists, `delete_consumed`
+deletes the exact keys the item consumed (h5ad, sidecar, the static files it used, the DE tables it ingested),
+each with its own `DeleteObject` and only when its ETag still equals the one recorded at the pull. A changed
+ETag means a newer upload: the key stays and the next poll processes it. Keys outside the prefix, the prefix
+itself and prefix-wide deletes are refused. Every key is logged with its ETag, the outcome and the time in the
+`deletions` table. Held, failed and needs_decision items never delete anything. When the rescan failed (the
+server was down) the item stays live with `served=0` and the next poll retries the rescan, then deletes.
+
+### 21.7 How it relates to the presigned-upload route
+
+Both end in the same store and use the same checks, the same `.md` fill and the same post steps. The watch
+route trusts whoever can write to `__incoming/` on S3 (lab members with mus and the S3 keys); the presigned
+route (P3) is for curators without S3 keys and adds the submission database, roles and the admin page. When
+P3 is built, its worker should call `lib/ingest_pipeline.Pipeline` for the build instead of a second
+implementation, and `__incoming/` can stay as the lab's own route.
+
+### 21.8 Not done yet
+
+- The compose service (`site.yaml` key, `ant-stack` rendering and checks); `doc/DEPLOY_CONTAINERS.md` says so.
+- DE-only deposits (a DE table for a dataset that is already published, without an h5ad) still go through
+  `ant-ingest`; the watcher only ingests DE tables that come with their dataset.
+- A deposit under a subfolder (`<group>/<sub>/x.h5ad`) is checked in a flat staging folder, so a `.env` at the
+  subfolder level is not part of the check.
+- Large h5ads are pulled whole; there is no size routing to an HPC worker.
+- No admin page: `ant ingest-watch status`, the JSON status file and the notification are the surface.

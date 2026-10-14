@@ -544,6 +544,16 @@ absolute path (`/home/you/.local/bin/uv run --script <repo>/bin/ops/ant-stack ..
 the command with `bin/ops/ant-cron-run`, which adds the usual uv folders to
 `PATH` and, when uv is still missing, prints that plainly and exits 127.
 
+### The S3 ingest watcher (not in the compose stack yet)
+
+`ant ingest-watch` (the S3 watch route of `doc/DATASET_INGESTION.md`) has no compose service and no
+`site.yaml` key yet. It runs on the dev box as its own systemd unit
+(`config/examples/anthive-ingest-watch.service.example`), off unless `ingest_watch.enabled: true` in that
+host's `anthive.yaml`. Container sites receive what it publishes the usual way, through S3:
+`ant-stack ingest -- ant sync pull --include-duckdb '<Group>/*'` and a rescan. All its paths already resolve
+through `lib/config.py` (`ingest_state_dir`, `ingest_work_dir`, the store), so a later compose service only
+needs the store mounted read-write, the state and tmp dirs, and the ingest S3 keys.
+
 ### Upgrade to a new release
 
 ```sh
