@@ -829,8 +829,20 @@ def test_endpoint_across_datasets_and_effects(serve):
     assert serve.get('/facets/braak/effects', params={'gene': 'PTPRG', 'scope': 'nowhere'}).status_code == 400
     assert serve.get('/facets/braak/effects', params={'gene': 'PTPRG', 'scope': 'xenograft_human_in_mouse'}).json()['units'] == []
     cohorts = serve.get('/facets/cohorts').json()
-    assert cohorts['status'] == 'DRAFT' and cohorts['n_datasets'] == 4
+    assert cohorts['status'] == 'DRAFT' and cohorts['n_datasets'] == 3      # G2/ds9 is not served by this site
+    assert 'G2/ds9' not in {record['db_id'] for record in cohorts['datasets']}
     assert all('role_internal' not in record for record in cohorts['datasets'])
+
+
+def test_endpoint_cohorts_drop_pools_with_a_member_the_site_lacks(results):
+    table = results / fr.COHORT_TABLE_NAME
+    lines = table.read_text().splitlines()
+    out = [lines[0] + '\tpool_members'] + [line + '\t' for line in lines[1:]]
+    out.append('DRAFT\tCohortB\tmicroglia\tanchor (donor-pooled)\tpool:served\tanchor\tG1/ds1,G2/ds2')
+    out.append('DRAFT\tCohortB\tmicroglia\tanchor (donor-pooled)\tpool:partial\tanchor\tG2/ds2,G2/ds9')
+    table.write_text('\n'.join(out) + '\n')
+    ids = {record['db_id'] for record in build_serve(results).get('/facets/cohorts').json()['datasets']}
+    assert 'pool:served' in ids and 'pool:partial' not in ids and 'G2/ds9' not in ids
 
 
 # ── MCP ──────────────────────────────────────────────────────────────────────

@@ -14905,10 +14905,17 @@ def get_facet_cohorts():
     """The DRAFT cohort selection table used to count independent cohorts:
     one row per dataset with ``cohort``, ``cohort_label``, ``role``,
     ``cell_class``, ``counted`` and ``note``. Empty when the table is
-    missing. Registered before ``/facets/{name}``."""
+    missing. Registered before ``/facets/{name}``.
+
+    Only rows of datasets this site serves to the caller: a dataset the site
+    lacks or hides (internal access) is absent, and so is a donor-pooled
+    ``pool:`` row with such a member (``facet_results.pool_is_visible``)."""
     hidden = _hidden_db_ids()
+    served = set(registry.databases) if registry is not None else set()
     table = {db_id: record for db_id, record in _facet_results().cohorts().items()
-             if db_id not in hidden and not any(member in hidden for member in record.get('pool_members') or [])}
+             if (facet_results_lib.pool_is_visible(record.get('pool_members') or [], served, hidden)
+                 if db_id.startswith(facet_results_lib.POOL_PREFIX)
+                 else db_id in served and db_id not in hidden)}
     return {'status': 'DRAFT', 'n_datasets': len(table),
             'datasets': [{'db_id': db_id, **{k: v for k, v in record.items() if k != 'role_internal'}}
                          for db_id, record in sorted(table.items())]}

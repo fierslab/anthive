@@ -37,7 +37,7 @@ import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -363,6 +363,19 @@ class FacetResultsError(ValueError):
 def default_results_dir(store_root: Path) -> Path:
     """``<h5adstore>/_facet_tests``, where the test tools write."""
     return Path(store_root) / RESULTS_DIRNAME
+
+
+def pool_is_visible(members: Sequence[str], available: Collection[str],
+                    hidden: Collection[str] = frozenset()) -> bool:
+    """Whether a donor-pooled unit with these member db_ids may be served.
+
+    Every member must be ``available`` (served by this site and visible to the caller) and none
+    ``hidden``. A pool whose members are unknown (no ``pool_members`` in the cohort table) is not
+    served: what it contains cannot be checked (fail closed, lib/dataset_access.py).
+    """
+    if not members:
+        return False
+    return all(member in available and member not in hidden for member in members)
 
 
 def pool_definitions(results_dir: Path) -> Dict[str, List[str]]:
@@ -731,8 +744,12 @@ class FacetResults:
         return facet_scopes.DEFAULT_SCOPE if facet_scopes.DEFAULT_SCOPE in allowed else allowed[0]
 
     def _with_pooled(self, datasets: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """``datasets`` plus the donor-pooled units; a pool takes the ``disease_basis`` its
-        member datasets agree on (None when they differ or declare none)."""
+        """``datasets`` plus the donor-pooled units whose members are all among ``datasets``.
+
+        ``datasets`` is everything the caller may see (ant-serve: the served datasets minus the ones hidden
+        from this request), so a pool with a member the site lacks or hides from the caller is dropped like
+        the member itself (``pool_is_visible``). A pool takes the ``disease_basis`` its member datasets agree
+        on (None when they differ or declare none)."""
         known = {d['db_id'] for d in datasets}
         basis_of = {d['db_id']: d.get('disease_basis') for d in datasets}
         cohorts = self.cohorts()
@@ -742,8 +759,8 @@ class FacetResults:
             if pool['db_id'] in known:
                 continue
             members = (cohorts.get(pool['db_id']) or {}).get('pool_members') or []
-            if any(member in hidden for member in members):
-                continue    # a pool of an internal dataset is as hidden as the dataset (lib/dataset_access.py)
+            if not pool_is_visible(members, known, hidden):
+                continue
             bases = {basis_of.get(member) for member in members}
             pools.append({**pool, 'disease_basis': bases.pop() if len(bases) == 1 else None})
         return list(datasets) + pools

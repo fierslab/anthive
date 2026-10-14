@@ -415,6 +415,60 @@ def test_pooled_units_are_served_and_win_the_anchor(tmp_path):
     assert 'pool:madrc' in {r['db_id'] for r in overview['rows']}
 
 
+def _pool_fixture(tmp_path):
+    root = tmp_path / '_facet_tests'
+    _write_unit(root / 'WA4', 'WA4/MIT', 'mit', 0.5, 0.01)
+    _write_unit(root / 'WA4', 'WA4/MPF', 'mpf', 0.5, 0.01)
+    _write_unit(root / '_pooled', 'pool:madrc', 'madrc', 0.6, 1e-4)
+    _write_unit(root / '_pooled', 'pool:orphan', 'orphan', 0.6, 1e-4)      # no cohort table row: members unknown
+    _write_unit(root / 'G1', 'G1/ds', 'ds', 0.4, 1e-4)
+    (root / fr.COHORT_TABLE_NAME).write_text(
+        'status\tcohort\tcell_class\trole\tdb_id\tpool_members\tindependence\n'
+        'DRAFT\tMADRC\tmyeloid\tanchor\tWA4/MIT\t\tchecked\n'
+        'DRAFT\tMADRC\tmyeloid\tanchor\tWA4/MPF\t\tchecked\n'
+        'DRAFT\tMADRC\tmyeloid\tanchor (donor-pooled)\tpool:madrc\tWA4/MIT,WA4/MPF\tchecked\n'
+        'DRAFT\tOther (x)\tmicroglia\tanchor\tG1/ds\t\tunknown\n')
+    return fr.FacetResults(root)
+
+
+_ALL = [{'db_id': 'WA4/MIT', 'group_folder': 'WA4', 'stem': 'mit'},
+        {'db_id': 'WA4/MPF', 'group_folder': 'WA4', 'stem': 'mpf'},
+        {'db_id': 'G1/ds', 'group_folder': 'G1', 'stem': 'ds'}]
+
+
+def test_pool_is_visible_needs_every_member_available_and_none_hidden():
+    assert fr.pool_is_visible(['A/a', 'B/b'], {'A/a', 'B/b'})
+    assert not fr.pool_is_visible(['A/a', 'B/b'], {'A/a'})                       # a member the site lacks
+    assert not fr.pool_is_visible(['A/a', 'B/b'], {'A/a', 'B/b'}, frozenset({'B/b'}))   # a member hidden from the caller
+    assert not fr.pool_is_visible([], {'A/a'})                                    # members unknown: fail closed
+
+
+def test_pool_with_a_member_absent_from_the_site_is_not_served(tmp_path):
+    reader = _pool_fixture(tmp_path)
+    served = [d['db_id'] for d in reader.prepare(_ALL).datasets]
+    assert 'pool:madrc' in served and 'pool:orphan' not in served
+    lacking = [d for d in _ALL if d['db_id'] != 'WA4/MPF']                       # the site does not hold WA4/MPF
+    prepared = reader.prepare(lacking)
+    assert [d['db_id'] for d in prepared.datasets] == ['WA4/MIT', 'G1/ds']
+    card = reader.gene_effects('sex', 'G0', lacking)
+    assert 'pool:madrc' not in {u['db_id'] for u in card['units']}
+    assert {a['db_id'] for a in card['replication'][0]['anchors']} == {'WA4/MIT', 'G1/ds'}
+    assert 'pool:madrc' not in {r['db_id'] for r in reader.facet_overview('sex', lacking)['rows']}
+
+
+def test_pool_with_a_member_hidden_from_the_caller_is_not_served(tmp_path):
+    import dataset_access
+    reader = _pool_fixture(tmp_path)
+    token = dataset_access.HIDDEN_DB_IDS.set(frozenset({'WA4/MIT'}))
+    try:
+        visible = [d for d in _ALL if d['db_id'] != 'WA4/MIT']                    # ant-serve lists only visible datasets
+        assert 'pool:madrc' not in {d['db_id'] for d in reader.prepare(visible).datasets}
+        assert 'pool:madrc' not in {u['db_id'] for u in reader.gene_effects('sex', 'G0', visible)['units']}
+    finally:
+        dataset_access.HIDDEN_DB_IDS.reset(token)
+    assert 'pool:madrc' in {d['db_id'] for d in reader.prepare(_ALL).datasets}
+
+
 def test_summary_units_report_analysis_level_for_untested_and_old_runs(tmp_path):
     root = tmp_path / '_facet_tests'
     _write_unit(root / 'G1', 'G1/ds', 'ds', 0.4, 1e-4)
