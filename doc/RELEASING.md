@@ -55,6 +55,11 @@ Tick every box before step 1 of "Cutting a release".
 - [ ] For any change to how a site is set up or run: `doc/DEPLOY_CONTAINERS.md`
       (including the upgrade table row), `site.example.yaml` and
       `ant-stack check` are updated.
+- [ ] Non-container guide (`doc/DEPLOY.md`): an upgrade section for changes
+      that affect host installs (nginx vhost, `anthive.yaml` keys, services
+      to restart together, scripts and cron jobs), with the nginx examples in
+      `config/examples/` updated and passing `nginx -t`. Containers stay the
+      preferred way; this section only keeps existing hosts safe.
 - [ ] Release numbers are bumped in `doc/DEPLOY_CONTAINERS.md` (the "run
       end to end ... for release X.Y.Z" line, `git checkout vX.Y.Z`,
       `tag: X.Y.Z` in step 4) and `images.tag` in `site.example.yaml`.

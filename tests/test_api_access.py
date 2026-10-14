@@ -324,7 +324,12 @@ def test_proxy_snippets_drop_x_remote_headers():
     for header in ('Remote-User', 'Remote-Groups', 'X-Remote-User', 'X-Remote-Groups'):
         assert re.search(rf'proxy_set_header {header}\s+"";', public), header
     authelia = (REPO_ROOT / 'config' / 'examples' / 'nginx-vhost.authelia.conf.example').read_text()
-    assert authelia.count('proxy_set_header X-Remote-Groups   "";') == 2
+    # /api/, / and the ungated /mcp location (personal MCP links)
+    assert authelia.count('proxy_set_header X-Remote-Groups   "";') == 3
+    assert authelia.count('proxy_set_header Remote-Groups     $auth_groups;') == 2
+    mcp_block = authelia.split('location /mcp {', 1)[1].split('}', 1)[0]
+    for header in ('Remote-User', 'Remote-Groups', 'Remote-Email', 'Remote-Name'):
+        assert re.search(rf'proxy_set_header {header}\s+"";', mcp_block), header
 
 
 # ── server-control routes need an admin, a local tool or the internal secret ──

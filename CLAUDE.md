@@ -55,9 +55,9 @@ frontend/
              as `vark/`                              frontend/jupyter/CLAUDE.md
 config/      Caddyfile (single source of path routing on dev + prod),
              caddy-{tls,auth,http-redirect,servers}.{dev,prod} (env-toggled snippets),
-             nginx.conf (thin shim → Caddy for `make serve-nginx`),
-             nginx-intern-anthive.conf (drop-in prod vhost),
-             Caddyfile-prod-snippet (annotated env-var reference)
+             nginx.conf (thin dev shim → Caddy for `make serve-nginx`),
+             examples/nginx-vhost.{authelia,public}.conf.example (host-install
+             nginx vhosts), examples/*.{service,cron,timer}.example
 ```
 
 The web UI is now a **top-level seam** (`./web/`), not an `ant` subcommand.

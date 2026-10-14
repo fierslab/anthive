@@ -224,7 +224,7 @@ serve-debug:
 # front of it terminates TLS + Authelia gate. See doc/DEPLOY.md.
 serve-prod:
 	@echo "Starting Anthive in PROD mode — Caddy on http://127.0.0.1:8500"
-	@echo "(expects nginx in front; see doc/DEPLOY.md and config/nginx-intern-anthive.conf)"
+	@echo "(expects nginx in front; see doc/DEPLOY.md and config/examples/nginx-vhost.*.conf.example)"
 	@./bin/ops/ant-supervisor --prod --caddy
 
 # Restart one or more children of a running supervisor.

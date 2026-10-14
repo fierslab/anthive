@@ -826,7 +826,7 @@ starCAT modules/scores (`.description` on `/catalogs`). Wire each up when shippe
   via the `caddy-{tls,auth,http-redirect}.{dev,prod}` snippets — see
   `doc/DEPLOY.md`). On prod, nginx is a thin SSL+Authelia shim that
   forwards every path to Caddy on `127.0.0.1:8500`
-  (`config/nginx-intern-anthive.conf`).
+  (`config/examples/nginx-vhost.{authelia,public}.conf.example`).
 - Companion in-browser notebooks: `frontend/jupyter/` (built into
   `webapp/jupyter/`, served as static files at `/jupyter/`).
 - **Auth (Authelia cookie SSO):** the proxy (`config/Caddyfile` / nginx)

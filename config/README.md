@@ -1,5 +1,10 @@
 # Configuration
 
+New sites run as containers (`doc/DEPLOY_CONTAINERS.md`, `bin/ops/ant-stack`),
+which render their own Caddy config from `site.yaml`. The files here are
+the mechanism behind that and the reference for existing host installs
+(`doc/DEPLOY.md`).
+
 Caddy is the **single source of path routing** on dev and prod. The same
 `Caddyfile` runs everywhere; a handful of env vars flip it between dev
 (Caddy terminates TLS itself) and prod (an upstream nginx terminates TLS and
@@ -17,7 +22,8 @@ prod:   browser ─https─▶ nginx :443 (TLS [+ auth]) ─http─▶ Caddy 127
 | `Caddyfile` | ✅ | The shared, env-driven router. All path routing lives here. |
 | `caddy-{tls,auth,http-redirect,servers}.{dev,prod}` | ✅ | Snippets imported by the Caddyfile; pick dev vs prod behaviour. |
 | `authelia/` | partial | `configuration.example.yml` is tracked; the real `configuration.yml`, `secrets/`, `users_database.yml` are gitignored. |
-| `examples/` | ✅ | Templates for the per-instance files you must create (nginx vhost, systemd unit, anthive.yaml). Placeholders only. |
+| `examples/` | ✅ | Templates for the per-instance files of a host install (nginx vhosts, systemd unit, sync and library cron/timer jobs). Placeholders only. |
+| `nginx.conf` | ✅ | Dev-only nginx shim for `make serve-nginx` (no login; drops every identity header). |
 | `server/` | ❌ gitignored | **Real** per-instance/-server configs (hostnames, ports, paths, cert locations, units). Lives in a separate private repo. |
 
 There is no basic-auth file to drop in here: basic auth exists only in the
@@ -59,6 +65,12 @@ vars the `Caddyfile` reads. Defaults (no `--prod`) reproduce dev behaviour.
 5. Keep the filled-in copies in the private `server/` repo, not here.
 
 ## Critical gotchas
+
+- **nginx owns the identity.** `caddy-auth.prod` trusts the `Remote-User` /
+  `Remote-Groups` / `Remote-Email` / `Remote-Name` headers nginx sends. Every
+  location must set them only from Authelia's `auth_request` response (or
+  drop them on a public vhost) and drop `X-Remote-*`, exactly as the
+  examples do. See `doc/DEPLOY.md`, "Upgrading a host install to 2.45".
 
 - **`ANTHIVE_LISTEN` must be host-agnostic in prod** (`http://:<port>`, not
   `http://127.0.0.1:<port>`). nginx forwards the real public Host; a

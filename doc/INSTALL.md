@@ -1,5 +1,12 @@
 # Anthive deployment — install instructions
 
+> **Legacy host install, not for new sites.** Containers are the preferred
+> and supported way to deploy anthive: follow
+> [DEPLOY_CONTAINERS.md](DEPLOY_CONTAINERS.md) (`bin/ops/ant-stack` with
+> `site.yaml`). This file and [DEPLOY.md](DEPLOY.md) only serve existing
+> host installs; where they disagree, DEPLOY.md wins, and its section
+> "Upgrading a host install to 2.45" applies here too.
+
 End-to-end recipe for getting an anthive stack up on a new host.
 Two paths covered:
 
@@ -304,9 +311,12 @@ identical on dev and prod, and nginx never changes after this deploy.
 - The `:8500` HTTPS-redirect block is omitted (would collide with the
   prod listener on the same port).
 
-**Nginx** is a thin shim — see `config/nginx-intern-anthive.conf` for
-the drop-in slim vhost (~150 lines, of which only ~10 are anthive-
-specific routing). Step-by-step deploy recipe:
+**Nginx** is a thin shim. Copy
+`config/examples/nginx-vhost.authelia.conf.example` (login through
+Authelia) or `config/examples/nginx-vhost.public.conf.example` (public,
+no login); neither holds any anthive routing. Both set or drop the
+`Remote-*` identity headers, which Caddy in prod mode trusts, so keep
+those lines. Step-by-step deploy recipe:
 
 → **`doc/DEPLOY.md`** — has the systemd unit, the smoke-test commands,
 and a rollback procedure.
@@ -315,7 +325,7 @@ Quick reference for the env-var split that drives `config/Caddyfile`:
 
 | Env var                          | Dev default                 | Prod value                  |
 | -------------------------------- | --------------------------- | --------------------------- |
-| `ANTHIVE_LISTEN`                 | `:8501`                     | `http://127.0.0.1:8500`     |
+| `ANTHIVE_LISTEN`                 | `:8501`                     | `http://:8500` (host-agnostic; loopback via `ANTHIVE_CADDY_BIND`) |
 | `ANTHIVE_TLS_SNIPPET`            | `caddy-tls.dev`             | `caddy-tls.prod` (empty)    |
 | `ANTHIVE_AUTH_SNIPPET`           | `caddy-auth.dev`            | `caddy-auth.prod` (empty)   |
 | `ANTHIVE_HTTP_REDIRECT_SNIPPET`  | `caddy-http-redirect.dev`   | `caddy-http-redirect.prod` (empty) |

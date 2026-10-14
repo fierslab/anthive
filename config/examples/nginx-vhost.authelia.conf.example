@@ -4,8 +4,27 @@
 # port. Browser routes use a cookie-only gate; /api/ also accepts HTTP Basic
 # (validated against the same Authelia users) for CLI clients (e.g. vark).
 #
+# Identity: Remote-User / Remote-Groups / Remote-Email / Remote-Name reach
+# Caddy ONLY as set from Authelia's auth_request response (auth_request_set
+# below); a client-sent copy is always overwritten, and an empty value makes
+# nginx drop the header. X-Remote-* is no identity anywhere (anthive ignores
+# it since 2.45); it is dropped too. Caddy in prod mode (caddy-auth.prod)
+# trusts whatever nginx sends, so every proxied location must keep these lines.
+#
 # Keep the filled-in copy in your private server-config repo, NOT in anthive4.
 # <CADDY_PORT> = this instance's Caddy listener; <AUTHELIA_PORT> = its Authelia.
+
+# Mask personal MCP link tokens (/mcp/u/amcp_...) in the access log. map and
+# log_format live at http level; a file in /etc/nginx/conf.d/ is included there.
+# Several anthive vhosts on one nginx: keep ONE copy of these two blocks
+# (a second copy is a duplicate log_format and fails nginx -t).
+map $request_uri $anthive_log_uri {
+    ~^(?<mcp_prefix>/mcp/u/)amcp_  "${mcp_prefix}amcp_REDACTED";
+    default                        $request_uri;
+}
+log_format anthive_masked '$remote_addr - $remote_user [$time_local] '
+                          '"$request_method $anthive_log_uri $server_protocol" '
+                          '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
 
 server {
     listen 80;
@@ -24,12 +43,16 @@ server {
 
     client_max_body_size 1024m;
 
+    access_log /var/log/nginx/<HOSTNAME>-access.log anthive_masked;
+    error_log  /var/log/nginx/<HOSTNAME>-error.log warn;
+
     # ── Authelia gate (server-level; locations opt out with auth_request off) ──
     auth_request /internal/authelia-verify;
     error_page 401 = @authelia_redirect;
     auth_request_set $auth_user   $upstream_http_remote_user;
     auth_request_set $auth_groups $upstream_http_remote_groups;
     auth_request_set $auth_email  $upstream_http_remote_email;
+    auth_request_set $auth_name   $upstream_http_remote_name;
 
     # Authelia portal — never gated; proxied through Caddy.
     location ^~ /authelia/ {
@@ -71,6 +94,34 @@ server {
         return 302 https://$host/authelia/?rd=$scheme://$host$request_uri;
     }
 
+    # Personal MCP links (/mcp/u/amcp_..., or Authorization: Bearer amcp_...
+    # on /mcp): ant-mcp verifies the token itself, so no auth_request here,
+    # and no client-sent identity or internal header gets through.
+    location /mcp {
+        auth_request off;
+        proxy_pass http://127.0.0.1:<CADDY_PORT>;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header Remote-User       "";
+        proxy_set_header Remote-Groups     "";
+        proxy_set_header Remote-Email      "";
+        proxy_set_header Remote-Name       "";
+        proxy_set_header X-Remote-User     "";
+        proxy_set_header X-Remote-Groups   "";
+        proxy_set_header X-Remote-Email    "";
+        proxy_set_header X-Remote-Name     "";
+        proxy_set_header X-Anthive-Internal "";
+        # MCP streamable HTTP uses long-lived SSE responses.
+        proxy_buffering    off;
+        proxy_read_timeout 3600s;
+    }
+
+    # Server-to-server routes; Caddy refuses them too.
+    location /api/internal/ { return 403; }
+
     # REST API — cookie OR HTTP Basic. Forwarded to Caddy (strips /api).
     location /api/ {
         auth_request /internal/authelia-verify-api;
@@ -82,9 +133,11 @@ server {
         proxy_set_header Remote-User       $auth_user;
         proxy_set_header Remote-Groups     $auth_groups;
         proxy_set_header Remote-Email      $auth_email;
-        proxy_set_header Remote-Name       "";
+        proxy_set_header Remote-Name       $auth_name;
         proxy_set_header X-Remote-User     "";
         proxy_set_header X-Remote-Groups   "";
+        proxy_set_header X-Remote-Email    "";
+        proxy_set_header X-Remote-Name     "";
         proxy_buffering    off;
         proxy_read_timeout 300s;
     }
@@ -102,8 +155,10 @@ server {
         proxy_set_header Remote-User       $auth_user;
         proxy_set_header Remote-Groups     $auth_groups;
         proxy_set_header Remote-Email      $auth_email;
-        proxy_set_header Remote-Name       "";
+        proxy_set_header Remote-Name       $auth_name;
         proxy_set_header X-Remote-User     "";
         proxy_set_header X-Remote-Groups   "";
+        proxy_set_header X-Remote-Email    "";
+        proxy_set_header X-Remote-Name     "";
     }
 }

@@ -44,6 +44,8 @@ server {
         proxy_set_header Remote-Name       "";
         proxy_set_header X-Remote-User     "";
         proxy_set_header X-Remote-Groups   "";
+        proxy_set_header X-Remote-Email    "";
+        proxy_set_header X-Remote-Name     "";
         # NOTE: do NOT add an unconditional `Connection: upgrade` here — on a
         # normal GET it makes nginx drop the body (HTTP 200, 0 bytes → blank
         # pages). Use an http-level `map $http_upgrade $connection_upgrade`

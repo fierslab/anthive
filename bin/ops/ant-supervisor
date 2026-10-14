@@ -22,7 +22,7 @@ Subcommands (control plane):
 Prod mode (via --prod or ANTHIVE_PROD=1 in the environment):
   - Caddy listens on http://127.0.0.1:8500 (plain HTTP, no TLS).
   - nginx terminates TLS on :443 in front of Caddy and is the
-    Authelia auth_request gate.  See config/nginx-intern-anthive.conf.
+    Authelia auth_request gate.  See config/examples/nginx-vhost.*.conf.example.
   - Caddy still owns ALL anthive path routing (single source of truth).
   - The :8500 → :8501 HTTPS redirect block is disabled (would collide
     with the prod listener on the same port).

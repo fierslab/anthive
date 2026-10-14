@@ -156,7 +156,7 @@ Ranked by how tightly coupled to the current author's box.
 | S3 bucket name (`anthive`) | `anthive.yaml.s3.bucket` | Per-user, prompted (default: no S3) |
 | h5adstore path (`data/h5adstore/`) | `Makefile`, various | Already parameterised via `ANTHIVE_H5ADSTORE` env var in the container; installer wires host path |
 | Authelia integration | `config/authelia/`, `config/caddy-auth.dev` | Skip in the easy-deploy path entirely. Advanced users follow `doc/DEPLOY.md`. |
-| nginx-in-front | `config/nginx-intern-anthive.conf` | Same — advanced-only |
+| nginx-in-front | `config/examples/nginx-vhost.{authelia,public}.conf.example` | Same, advanced-only |
 | The specific `data/h5adstore` git repo (`github.com/badslab/h5adstore`) | referenced in top-level `CLAUDE.md` | New users start with an empty h5adstore — don't clone this |
 | The `data/reports/` build (research reports for mfiers papers) | `bin/ops/ant-build-reports` | Off by default; feature-flag env var |
 | Anthive chat panel (Claude API key) | `anthive.yaml.chat.api_key` | Off by default; env var if enabled |

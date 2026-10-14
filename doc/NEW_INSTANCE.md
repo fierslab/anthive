@@ -12,6 +12,14 @@ loopback, leaving the routing in one place (`config/Caddyfile`).
 
 For Authelia internals and gotchas, see [`HANDOFF_authelia.md`](HANDOFF_authelia.md).
 
+> **Not for new sites.** Containers are the preferred and supported way to
+> deploy anthive ([DEPLOY_CONTAINERS.md](DEPLOY_CONTAINERS.md)). Hosts that
+> still run this pattern must apply
+> [DEPLOY.md, "Upgrading a host install to 2.45"](DEPLOY.md#upgrading-a-host-install-to-245)
+> before running 2.45: every location must set `Remote-*` only from
+> Authelia's response, drop `X-Remote-*`, and send `X-Forwarded-For` to
+> ant-serve (a loopback request without it counts as a tool on the host).
+
 ---
 
 ## Model
@@ -128,16 +136,20 @@ The supervisor already injects the four `AUTHELIA_*_FILE` env vars (see the
 
 ## 4. nginx
 
-Copy an existing instance's authelia nginx file as the starting point and
-adapt hostname / cert path / the three ports:
+The per-instance nginx files of this pattern live in the private
+server-config repo (`config/server/`, gitignored), not in anthive4. Start
+from an existing instance's file there, or from
+`config/examples/nginx-vhost.authelia.conf.example` (which forwards to
+Caddy instead of the per-path ports), and adapt hostname / cert path /
+ports:
 
 ```bash
-cp config/nginx-anthive.example.org.authelia.conf config/nginx-NEWHOST.conf
-$EDITOR config/nginx-NEWHOST.conf
+cp config/examples/nginx-vhost.authelia.conf.example config/server/nginx-NEWHOST.conf
+$EDITOR config/server/nginx-NEWHOST.conf
 #   server_name        -> NEWHOST
 #   ssl_certificate(_key) -> /etc/letsencrypt/live/NEWHOST/...
-#   proxy_pass ports   -> api 82A0 / browse 82B0 / authelia 92X0
-sudo cp config/nginx-NEWHOST.conf /etc/nginx/conf.d/NEWHOST.conf
+#   proxy_pass ports   -> Caddy (or api 82A0 / browse 82B0) / authelia 92X0
+sudo cp config/server/nginx-NEWHOST.conf /etc/nginx/conf.d/NEWHOST.conf
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
@@ -152,9 +164,9 @@ else gated. The `X-Original-URL` header on the verify locations is REQUIRED.
 Copy a `.service` template, adapt the paths, install:
 
 ```bash
-cp config/anthive-data.service config/anthive-NEWHOST.service
-$EDITOR config/anthive-NEWHOST.service        # WorkingDirectory + ExecStart -> /data/NEWHOST
-sudo cp config/anthive-NEWHOST.service /etc/systemd/system/
+cp config/examples/anthive-instance.service.example config/server/anthive-NEWHOST.service
+$EDITOR config/server/anthive-NEWHOST.service   # WorkingDirectory + ExecStart -> /data/NEWHOST
+sudo cp config/server/anthive-NEWHOST.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now anthive-NEWHOST.service
 ```

@@ -1,10 +1,17 @@
 # Deploying anthive4
 
-> **Legacy host install.** New sites are deployed with containers: see
-> [DEPLOY_CONTAINERS.md](DEPLOY_CONTAINERS.md) (docker compose driven by
-> `site.yaml`) and [HPC.md](HPC.md) for cluster ingest. This guide stays as
-> the reference for the existing non-container hosts and for background on
-> the multi-copy topology, Authelia and the per-derivative summary files.
+> **Containers are the preferred and supported way to deploy anthive.**
+> Follow [DEPLOY_CONTAINERS.md](DEPLOY_CONTAINERS.md): `bin/ops/ant-stack`
+> runs a docker compose stack described by one `site.yaml`, and
+> [HPC.md](HPC.md) covers cluster ingest.
+>
+> **This guide is for existing host installs only** (uv scripts run by
+> `ant-supervisor`, behind Caddy and usually nginx). New sites must not use
+> it. It is kept so the hosts that still run this way can be upgraded and
+> operated, and for background on the multi-copy topology, Authelia and the
+> per-derivative summary files. Upgrading such a host to 2.45: see
+> [Upgrading a host install to 2.45](#upgrading-a-host-install-to-245).
+> Leaving it for containers: see [Moving to containers](#moving-to-containers).
 
 End-to-end deployment guide covering two shapes.
 
@@ -22,6 +29,321 @@ Sister docs:
   already run system nginx. It stays as a reference for that pattern.
 - `doc/HANDOFF_authelia.md` is the self-contained Authelia walkthrough.
   Read that before wiring auth.
+
+---
+
+## Upgrading a host install to 2.45
+
+2.45.0 changed who may see what, and every part of a host install takes
+part in that decision: nginx says who the caller is, ant-serve decides,
+ant-browse and ant-mcp pass the caller on. Do the steps below in this
+order. Until step (c) is done the site is in a mixed state, so plan a short
+maintenance window. The full list of changes is in `doc/API_CHANGELOG.md`
+(2.45.0 "Security and access", 2.45.1).
+
+What changed, in short:
+
+- Datasets that are not `access: public` (internal, or no `access` value)
+  are hidden from callers without an identity: missing from every listing,
+  `404 Database '<id>' not found` on their routes.
+- An identity is a non-empty `Remote-User` that the proxy sets. Only
+  `Remote-User` and `Remote-Groups` count. `X-Remote-User` and
+  `X-Remote-Groups` are ignored (they used to be a fallback, which let a
+  client claim `X-Remote-Groups: admins`).
+- The server-control routes (rescans, cache stats and clears, index
+  reloads and rebuilds) need an admin, a tool on the host, or the internal
+  secret.
+
+### (a) nginx: identity only from Authelia
+
+Caddy in prod mode (`config/caddy-auth.prod`) trusts whatever `Remote-*`
+headers nginx sends. So nginx must make sure a client can never supply
+them. Compare your vhost with the two examples, which were checked with
+`nginx -t` on nginx 1.30 and tested against a stub upstream (a forged
+`Remote-Groups` / `X-Remote-Groups` never reached it):
+
+- `config/examples/nginx-vhost.authelia.conf.example` (login through Authelia)
+- `config/examples/nginx-vhost.public.conf.example` (public, no login)
+
+**Vhost with Authelia.** At server level, next to `auth_request`, take the
+identity from Authelia's `auth_request` response:
+
+```nginx
+auth_request /internal/authelia-verify;
+error_page 401 = @authelia_redirect;
+auth_request_set $auth_user   $upstream_http_remote_user;
+auth_request_set $auth_groups $upstream_http_remote_groups;
+auth_request_set $auth_email  $upstream_http_remote_email;
+auth_request_set $auth_name   $upstream_http_remote_name;
+```
+
+In **every** location that proxies to Caddy (`/`, `/api/`, any other you
+added), set the identity from those variables and drop the old names:
+
+```nginx
+proxy_set_header Remote-User       $auth_user;
+proxy_set_header Remote-Groups     $auth_groups;
+proxy_set_header Remote-Email      $auth_email;
+proxy_set_header Remote-Name       $auth_name;
+proxy_set_header X-Remote-User     "";
+proxy_set_header X-Remote-Groups   "";
+proxy_set_header X-Remote-Email    "";
+proxy_set_header X-Remote-Name     "";
+proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+```
+
+`proxy_set_header` always replaces a header the client sent, and an empty
+value (Authelia sent none, or the line says `""`) makes nginx leave the
+header out. Two nginx rules to keep in mind:
+
+- `proxy_set_header` in a location replaces **all** `proxy_set_header`
+  lines inherited from the server block. Put the lines in each location
+  (as the examples do), not once at server level next to a location that
+  sets its own headers.
+- Leave `underscores_in_headers` off (the default), so `Remote_User`
+  spellings are dropped too.
+
+nginx has no wildcard for headers, so "every `X-Remote-*`" means the four
+names above. ant-serve reads no `X-Remote-*` header at all since 2.45, so
+these lines are defence in depth.
+
+Personal MCP links (`/mcp/u/amcp_...`) must pass without the Authelia gate,
+and with no identity from the client; ant-mcp checks the token itself. The
+Authelia example now has this location (it was missing; without it the
+links were redirected to the login page):
+
+```nginx
+location /mcp {
+    auth_request off;
+    proxy_pass http://127.0.0.1:<CADDY_PORT>;
+    proxy_http_version 1.1;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host  $host;
+    proxy_set_header Remote-User       "";
+    proxy_set_header Remote-Groups     "";
+    proxy_set_header Remote-Email      "";
+    proxy_set_header Remote-Name       "";
+    proxy_set_header X-Remote-User     "";
+    proxy_set_header X-Remote-Groups   "";
+    proxy_set_header X-Remote-Email    "";
+    proxy_set_header X-Remote-Name     "";
+    proxy_set_header X-Anthive-Internal "";
+    proxy_buffering    off;
+    proxy_read_timeout 3600s;
+}
+location /api/internal/ { return 403; }
+```
+
+The example also masks the `amcp_` token in the access log
+(`map $request_uri $anthive_log_uri` and `log_format anthive_masked` at the
+top of the file). Both are http-level: with several anthive vhosts on one
+nginx keep a single copy, or `nginx -t` fails with a duplicate
+`log_format`.
+
+**Public vhost (no login).** There is no identity, so drop every identity
+header in each location:
+
+```nginx
+proxy_set_header Remote-User       "";
+proxy_set_header Remote-Groups     "";
+proxy_set_header Remote-Email      "";
+proxy_set_header Remote-Name       "";
+proxy_set_header X-Remote-User     "";
+proxy_set_header X-Remote-Groups   "";
+proxy_set_header X-Remote-Email    "";
+proxy_set_header X-Remote-Name     "";
+```
+
+Without these a visitor can send `Remote-User: anyone` and see internal
+datasets, or `Remote-Groups: admins` and reach the admin routes.
+
+**Legacy per-path vhosts** (`doc/NEW_INSTANCE.md`, nginx proxies straight
+to ant-serve and ant-browse instead of Caddy) need the same identity lines
+and, in addition, `proxy_set_header X-Forwarded-For
+$proxy_add_x_forwarded_for;` in every location that reaches ant-serve.
+ant-serve treats a loopback request without `X-Forwarded-For` and without
+`Remote-User` as a maintenance tool on the host, which sees every dataset
+and may call the admin routes. Caddy always adds the header; a bare nginx
+location does not. If you are on that pattern, switching to the examples
+above (everything to Caddy) is the simpler fix.
+
+Then:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### (b) anthive.yaml: new keys
+
+All three have working defaults in `anthive.default.yaml`; set them in
+`anthive.yaml` only to change them.
+
+`internal_requires_auth` (default `true`, env
+`ANTHIVE_INTERNAL_REQUIRES_AUTH`). With `true`, a caller without a
+forwarded identity sees only `access: public` datasets. That covers
+anonymous visitors of a public vhost and anyone whose request reaches
+ant-serve without `Remote-User`. If signed-in users suddenly see fewer
+datasets after the upgrade, nginx is not forwarding `Remote-User` (check
+the `auth_request_set` lines) or ant-browse and ant-mcp were not restarted
+(step c). Set `false` only on a site whose whole store may be public.
+
+On a host that serves a public vhost only (no Authelia,
+`ANTHIVE_SERVICES=api,browse`), also set
+
+```yaml
+auth:
+  mode: none
+```
+
+Then ant-serve ignores `Remote-User` and `Remote-Groups` whatever nginx
+lets through, serves only `access: public` datasets and switches the admin
+features off. Leave `auth.mode` unset (or `authelia`) on a login site.
+
+`warmup` (default on). After every start ant-serve fills its slowest
+caches in the background at low CPU priority: facet tables, per-donor
+values of `warmup.donor_genes`, the gene set rank tables. The facet tables
+are kept per kind of caller, signed-in and anonymous, and each set costs
+memory in the ant-serve process (above 1 GB each on a full store). On a
+site where everyone signs in, skip the anonymous set:
+
+```yaml
+warmup:
+  anonymous: false
+```
+
+Check that the host has the memory for the anonymous set otherwise (watch
+the RSS of ant-serve after the first warm-up). `warmup.enabled: false` or
+env `ANTHIVE_WARMUP=0` turns the warm-up off. Every key is explained in
+`anthive.default.yaml`; the container guide's "Cache warm-up after a start"
+section describes the same behaviour.
+
+`log_stderr_level` (default `warning`, env `ANTHIVE_LOG_STDERR_LEVEL`).
+The lowest ant-serve log level that is also copied to stderr. Keep
+`warning` under `ant-supervisor`: the full log, warm-up progress included,
+is in `<log_dir>/ant-serve.log` (`log_dir` defaults to the tmp dir, `tmp/`
+in the checkout unless `tmp_dir` says otherwise). Set `info` only if you
+want the warm-up lines in the supervisor output or the journal too.
+
+### (c) Upgrade the code, restart api, web and mcp together
+
+ant-browse (web) forwards the visitor's `Remote-User` to ant-serve on
+every server-side call and marks anonymous visitors; ant-mcp does the same
+for MCP callers. An old ant-browse against a new ant-serve makes signed-in
+users look anonymous (they lose the internal datasets). Restart all three
+at once:
+
+```bash
+cd "$BASE/anthive4"
+git fetch --tags
+git checkout v2.45.1          # or: git pull origin main, if this host tracks main
+./bin/ops/ant-supervisor restart api browse mcp
+```
+
+or, under systemd, restart the whole unit (also restarts Caddy and
+Authelia, which is harmless):
+
+```bash
+sudo systemctl restart anthive.service      # your unit name, e.g. anthive-<instance>
+```
+
+The first start after the upgrade resolves new PEP-723 dependencies for
+the changed scripts (up to a minute or two each), and the warm-up then
+runs in the background; `/health` answers before it is done.
+
+### (d) Scripts and cron jobs that call server routes
+
+`POST /admin/rescan`, `POST /genesets/rescan`, `POST /module-variability/rescan`,
+`POST /catalogs/rescan`, the `/admin/plot-cache/*`,
+`/admin/gene-stats-*` and `/admin/gene-variance-*` routes now answer 403
+unless the caller is one of:
+
+- a tool **on the host** that calls ant-serve's own port directly
+  (`http://127.0.0.1:<rest_api_port>/...`): loopback peer, no
+  `X-Forwarded-For`, no `Remote-User`. Do not go through Caddy (port 8500)
+  or nginx for this: Caddy adds `X-Forwarded-For`, and the request is then
+  an ordinary, anonymous one;
+- a signed-in member of the `admins` group, through the public URL
+  (`curl -u admin:... https://anthive.example.org/api/genesets/rescan -X POST`,
+  HTTP basic on `/api/` is checked by Authelia);
+- a tool presenting the internal secret without a user (`ant sync` does
+  this; nothing to change).
+
+pyvark's `rescan_genesets`, `rescan_module_variability`, `rescan_catalogs`,
+`plot_cache_stats` and `plot_cache_clear` need an admin account. A cron job
+that ran one of these as an ordinary user, or through the public URL
+without credentials, must be moved to the host (loopback) or given an
+admin account. Before 2.45 these calls silently worked; now they fail with
+403, so check the cron mail or the job logs after the upgrade.
+
+### (e) Verify
+
+Replace the ports and the host name with yours.
+
+```bash
+API=http://127.0.0.1:8080          # rest_api_port in anthive.yaml
+SITE=https://anthive.example.org
+
+# Version: 2.45.x
+curl -s $API/version | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'
+curl -s -u you:password $SITE/api/version | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'
+
+# Anonymous vs signed-in dataset counts. The anonymous count is the
+# number of access: public datasets; the signed-in count is all of them.
+count='import json,sys; print(json.load(sys.stdin)["total"])'
+curl -s -H 'X-Anthive-Anonymous: 1' $API/databases | python3 -c "$count"   # anonymous
+curl -s -u you:password $SITE/api/databases | python3 -c "$count"          # signed in
+# Public vhost: an anonymous call and one with a forged Remote-User must
+# give the SAME (public-only) count.
+curl -s $SITE/api/databases | python3 -c "$count"
+curl -s -H 'Remote-User: anyone' $SITE/api/databases | python3 -c "$count"
+
+# A forged admin claim gets 403 (use a non-admin account on a login site;
+# leave -u out on a public vhost).
+curl -s -o /dev/null -w '%{http_code}\n' -u jdoe:password \
+     -H 'X-Remote-User: mallory' -H 'X-Remote-Groups: admins' -H 'Remote-Groups: admins' \
+     $SITE/api/admin/plot-cache/stats                                    # 403
+# The same route from the host itself still works (maintenance tools).
+curl -s -o /dev/null -w '%{http_code}\n' $API/admin/plot-cache/stats   # 200
+```
+
+Whenever the store holds internal datasets the anonymous count must be
+lower than the signed-in one. Equal counts on a login site mean
+`internal_requires_auth` is off; a lower signed-in count than expected
+means the identity does not reach ant-serve (steps a and c).
+
+---
+
+## Moving to containers
+
+The container stack runs the same code with the same data folders; nothing
+in the stores changes. Follow [DEPLOY_CONTAINERS.md](DEPLOY_CONTAINERS.md)
+from step 4 (`ant-stack init`), on the same host or a new one, and carry
+the host settings over like this:
+
+| Host install | `site.yaml` |
+| --- | --- |
+| public host name in the nginx vhost | `site.public_url` (plus `site.hostnames`) |
+| `data/h5adstore`, `data/genesetstore` symlinks | `data.h5adstore`, `data.genesetstore` (absolute paths) |
+| paper library checkout, literature index | `data.library`, `data.library_index` |
+| symlink targets outside the stores (derivatives, section 10) | `data.extra_mounts` |
+| `sync_policy.role: slave` (serve-only derivative) | `data.readonly: true` |
+| Authelia + nginx `auth_request` | `auth.mode: authelia`, users in `auth.users` (`ant-stack init` gives each a new password, `ant-stack passwd` changes one) |
+| public vhost, `ANTHIVE_SERVICES=api,browse` | `auth.mode: none` |
+| nginx login in front, kept | `auth.mode: trusted-proxy`, `tls.mode: off`, `ports.bind: 127.0.0.1` |
+| TLS certificate in nginx | `tls.mode` (`acme`, `internal`, or `off` behind your own nginx) |
+| `internal_requires_auth`, `warmup`, other `anthive.yaml` keys | `auth.internal_requires_auth`; other keys under the `anthive:` block |
+| `s3:` block in `anthive.yaml` | `s3:` in `site.yaml`, keys in `state_dir/secrets/` |
+| `duckdb_server_*` limits | `resources.*` |
+| `ant-supervisor` systemd unit | `ant-stack up` (compose restarts crashed containers) |
+| `ant-sync` cron | `config/examples/anthive-sync.{cron,service}.example` |
+| `tmp/`, caches, secrets | the stack's own `state_dir` and `scratch_dir`; plan to issue personal MCP links again (carrying them over is untested) |
+
+`ant-stack check` reports what is missing before `up`. Stop the host
+install (`sudo systemctl disable --now anthive.service`) before the stack
+takes over its ports, and remove the old nginx vhost if the stack now
+terminates TLS itself.
 
 ---
 
@@ -270,7 +592,7 @@ The prod-mode env-var split that drives `config/Caddyfile`:
 
 | Env var                          | Dev default                 | Prod value                  |
 | -------------------------------- | --------------------------- | --------------------------- |
-| `ANTHIVE_LISTEN`                 | `:8501`                     | `http://127.0.0.1:8500`     |
+| `ANTHIVE_LISTEN`                 | `:8501`                     | `http://:8500` (host-agnostic; bound to loopback by `ANTHIVE_CADDY_BIND`) |
 | `ANTHIVE_TLS_SNIPPET`            | `caddy-tls.dev`             | `caddy-tls.prod` (empty)    |
 | `ANTHIVE_AUTH_SNIPPET`           | `caddy-auth.dev`            | `caddy-auth.prod` (empty)   |
 | `ANTHIVE_HTTP_REDIRECT_SNIPPET`  | `caddy-http-redirect.dev`   | `caddy-http-redirect.prod` (empty) |
@@ -279,18 +601,24 @@ The prod-mode env-var split that drives `config/Caddyfile`:
 `ant-supervisor --prod` sets all of them. Without `--prod` the dev
 defaults apply and behaviour is unchanged.
 
-Copy the slim nginx vhost:
+Copy the example vhost that fits (login through Authelia, or public
+without a login) and fill in its `<PLACEHOLDERS>` (host name, certificate
+paths, the Caddy port, the Authelia port):
 
 ```bash
-sudo cp config/nginx-intern-anthive.conf \
-        /etc/nginx/sites-available/anthive.conf
-sudo ln -sf /etc/nginx/sites-available/anthive.conf \
-            /etc/nginx/sites-enabled/anthive.conf
+sudo cp config/examples/nginx-vhost.authelia.conf.example \
+        /etc/nginx/conf.d/anthive.conf
+# public site without a login:
+# sudo cp config/examples/nginx-vhost.public.conf.example /etc/nginx/conf.d/anthive.conf
+sudoedit /etc/nginx/conf.d/anthive.conf
 ```
 
-Adjust cert paths and the `server_name` at the top of the file. If a
-sprawling per-path anthive vhost existed before this deploy, remove it
-now. The new slim vhost replaces it entirely.
+Keep the `Remote-*` and `X-Remote-*` lines exactly as the example has
+them: Caddy in prod mode trusts the `Remote-*` headers nginx sends (see
+[Upgrading a host install to 2.45](#upgrading-a-host-install-to-245), step
+a). If a sprawling per-path anthive vhost existed before this deploy,
+remove it now. The example replaces it entirely. Keep the filled-in copy in
+your private server-config repo, not in anthive4.
 
 Test and reload:
 
@@ -342,6 +670,9 @@ Key headers the app depends on, set by the proxy after Authelia says
 - `Remote-Name` (display name)
 - `Remote-Email`
 - `Remote-Groups` (comma-separated; `admins` gates the admin editors)
+
+These four come only from the proxy. `X-Remote-User` and
+`X-Remote-Groups` are no identity since 2.45.
 
 The web UI's topbar reads these to render the signed-in user and the
 sign-out action. Un-proxied direct access to `:8081` shows nothing there,
@@ -416,10 +747,12 @@ server {
 }
 ```
 
-Also make sure every gated nginx location **overwrites** `Remote-*` from
-the `auth_request` response (`auth_request_set` + `proxy_set_header`) so a
-client can never supply its own; `caddy-auth.prod` trusts whatever nginx
-sends.
+`config/examples/nginx-vhost.authelia.conf.example` contains this
+location and the log masking. Also make sure every gated nginx location
+**overwrites** `Remote-*` from the `auth_request` response
+(`auth_request_set` + `proxy_set_header`) so a client can never supply its
+own; `caddy-auth.prod` trusts whatever nginx sends. The exact lines are in
+[Upgrading a host install to 2.45](#upgrading-a-host-install-to-245), step a.
 
 Set `mcp.public_base_url` in `anthive.yaml` to the public origin (for
 example `https://anthive.example.org`) so the web UI shows the right link
@@ -482,7 +815,9 @@ For the "Caddy alone, no nginx" shape, drop `--prod` from `ExecStart`.
 Caddy then listens on `:8501` with `tls internal` and its own auth.
 
 Nginx has its own systemd unit already. Just make sure the anthive vhost
-is in `/etc/nginx/sites-enabled/`.
+is in `/etc/nginx/conf.d/` (or `sites-enabled/` on hosts that use that
+layout). `config/examples/anthive-instance.service.example` is a fuller
+unit template for one instance among several on a host.
 
 For hosts that need per-instance nginx routing (the legacy shape rather
 than the thin shim), `doc/NEW_INSTANCE.md` remains the reference. Don't
@@ -492,7 +827,7 @@ Rollback if something goes wrong:
 
 ```bash
 sudo systemctl stop anthive.service
-sudo rm /etc/nginx/sites-enabled/anthive.conf
+sudo rm /etc/nginx/conf.d/anthive.conf     # or wherever the vhost lives
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
@@ -839,7 +1174,8 @@ plus `ant-sync push` cycle), the derivative catches up in two steps.
 
    ```bash
    ./bin/ops/ant-supervisor restart api
-   # or trigger a rescan without restart:
+   # or trigger a rescan without restart (on the host, ant-serve's own
+   # port; through the proxy this needs an admin account):
    curl -X POST http://127.0.0.1:8080/admin/rescan
    ```
 
@@ -904,6 +1240,11 @@ curl -s http://localhost:8080/api/health
 curl -s http://localhost:8080/databases | python3 -c \
     'import json, sys; d = json.load(sys.stdin); print(f"{d[\"total\"]} datasets")'
 ```
+
+A call from the host itself counts as a maintenance tool and sees every dataset,
+internal ones included; the anonymous and signed-in checks are in
+[Upgrading a host install to 2.45](#upgrading-a-host-install-to-245),
+step e.
 
 Through the public vhost:
 
@@ -976,8 +1317,13 @@ the browser path (cookie only) for exactly this reason.
 
 - `config/Caddyfile` is the single source of path routing on dev and prod.
 - `config/caddy-{tls,auth,http-redirect}.{dev,prod}` are env-toggled snippets.
-- `config/nginx-intern-anthive.conf` is the drop-in slim prod vhost.
-- `config/nginx.conf` is the local dev variant of the nginx shim.
+- `config/examples/nginx-vhost.authelia.conf.example` and
+  `config/examples/nginx-vhost.public.conf.example` are the nginx vhosts
+  for a host install (login through Authelia, or public).
+- `config/examples/anthive-instance.service.example` is the systemd unit
+  template.
+- `config/nginx.conf` is the local dev variant of the nginx shim
+  (`make serve-nginx`, no login, drops every identity header).
 - `doc/HANDOFF_authelia.md` covers Authelia end-to-end.
 - `doc/NEW_INSTANCE.md` is the legacy per-instance recipe (nginx holds
   the routing; kept for hosts already on that pattern).
