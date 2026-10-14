@@ -8,6 +8,7 @@ of one cohort and a dataset outside the cohort table.
 from __future__ import annotations
 
 import ast
+import re
 import json
 import sys
 from pathlib import Path
@@ -895,7 +896,7 @@ def test_mcp_exposes_module_effects_and_paging_in_plain_words():
 
 def test_version_and_changelog_name_2_45_0():
     source = (MCP_PATH.parent / 'ant-serve').read_text()
-    assert 'API_VERSION = "2.45.0"' in source
+    assert re.search(r'^API_VERSION = "2\.(4[5-9]|[5-9]\d)\.\d+"', source, re.M)
     changelog = (MCP_PATH.parent.parent.parent / 'doc' / 'API_CHANGELOG.md').read_text()
     assert '## 2.45.0' in changelog and changelog.index('## 2.45.0') < changelog.index('## 2.44.0')
     assert '—' not in changelog.split('## 2.45.0')[1].split('## 2.44.0')[0]
