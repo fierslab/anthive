@@ -33,14 +33,18 @@ This writes `__incoming/<data_project>/microglia.h5ad`, the collapsed sidecar `m
   them. Without a seed the route writes a minimal `.md` from the sidecar, which usually fails
   `meta.required_keys` (no description).
 - **A new group** needs an `index.md` (group, `group_id`, doi or paper title, year, authors, default
-  dataset). Upload it with `--static index.md`, or the route builds one from the sidecar keys `doi`, `pmid`,
-  `year`, `journal`, `paper_title` and `authors`. For an existing group the store's `index.md` is used.
-- **Access.** `access=internal` (login only) is the default and is set, with a caveat, when the sidecar
-  says nothing. `access=public` is held for an admin. Data with ROSMAP-derived values stays internal.
+  dataset). Upload it with `--static index.md` (or `--static <basename>.index.md` when several datasets of the
+  project are deposited together), or the route builds one from the sidecar keys `doi`, `pmid`, `year`,
+  `journal`, `paper_title` and `authors`. For an existing group the store's `index.md` is used.
+- **File and folder names** may hold letters, digits, `.`, `_` and `-` and must not start with `.` or `_`.
+  Anything else is reported as malformed and left alone.
+- **Access.** `access=internal` (login only) is the default for a new dataset and is set, with a caveat,
+  when the sidecar says nothing. `access=public` is always held for an admin, also for updates of public data.
+  Data with ROSMAP-derived values stays internal.
 - **Licence and consent.** Set `license=` (an SPDX id such as `CC-BY-4.0`, or `in-house`) and `data_use=open`
   or `data_use=controlled`. Without them the deposit is held (`licence_unknown`, `data_use_unknown`).
 - **Who deposited.** Optional `depositor=` and `depositor_email=` in the sidecar become the author of the
-  store commit.
+  store commit (a plain name and a valid e-mail address; anything else is recorded in the changelog instead).
 - **DE tables** that come with the dataset (`mus s3 upload` of a `de/` folder whose sidecars name the dataset
   by `de_dataset_id` or `de_dataset_h5ad`) are imported after the dataset is live. DE tables for a dataset
   that is already published still go through `ant-ingest` by hand.
@@ -48,22 +52,25 @@ This writes `__incoming/<data_project>/microglia.h5ad`, the collapsed sidecar `m
 ### What happens
 
 `ant ingest-watch` lists `__incoming/` every 5 minutes. An upload counts as complete when the h5ad, its
-sidecar and the project's static and DE files kept the same ETag and size over two polls (or are older than
-15 minutes). Then, one dataset at a time and at low priority:
+sidecar and the project's static and DE files were identical in two consecutive listings and the newest is
+at least 2 minutes old. Then, one dataset at a time and at low priority:
 
 1. pull into the work dir and compare the h5ad with the sidecar's `sha256`;
 2. write the catalogue `.md` (new dataset: version 1.0.0 and a first changelog entry; existing dataset: see
    "Updating a dataset");
 3. `ant-convert`, then `ant-ingest-check` (the checks below);
 4. errors stop here (`failed`), held reasons stop here (`held`), warnings pass;
-5. place the files in the store, rescan the local ant-serve, push the h5ad, sidecar, duckdb and layer files
-   to the catalog on S3;
+5. place the files in the store (crash-safe: staged next to their targets, then renamed with the `.md`
+   last), rescan the local ant-serve and check that it serves the new version, push the h5ad, sidecar,
+   duckdb and layer files to the catalog on S3;
 6. post steps: geneset scores, gene stats, module variability, facet tests (uncounted until an admin adds
    the dataset to the cohort table), the overlap index, the catalog manifest; DE tables; a git commit of
    the `.md`, `.h5ad.mus` and `index.md` in the store repository (not pushed unless
    `ingest_watch.store_git_push: true`);
-7. delete the objects this dataset consumed from `__incoming/`, after checking that the dataset is served and
+7. delete the objects this dataset used from `__incoming/`, after checking that the new version is served and
    that its catalog copy on S3 has the right size and sha256 (`ingest_watch.delete_incoming_after_ingest`).
+   Files that were not used stay. Static files of the project stay as long as another dataset of the project
+   is still waiting in `__incoming/` (held, failed, needs_decision or not yet processed).
 
 A failing post step is a warning: the dataset is already live. Other sites get the dataset the usual way,
 from S3: `ant sync pull` (container sites: `ant-stack ingest -- ant sync pull --include-duckdb '<Group>/*'`),
@@ -89,9 +96,24 @@ needs_decision send a JSON message.
 | `stable` | complete, queued (or waiting for a retry after an S3 error) | wait |
 | `pulled`, `checked` | being processed | wait |
 | `live` | published | review the dataset page; `served` and `catalog_verified` in `--json` say whether the incoming objects could be deleted |
-| `held` | clean, but an admin must decide (`public_access`, `licence_unknown`, `data_use_unknown`, `controlled_access`, `donor_overlap`) | read the report; fix the sidecar and upload it again, or publish by hand after review |
+| `held` | clean, but an admin must decide (`public_access`, `licence_unknown`, `data_use_unknown`, `controlled_access`, `donor_overlap`) | read the report; fix the sidecar and upload it again, or approve it (below) |
 | `failed` | errors in the checks, a sha256 mismatch, a convert failure | read the report, fix, upload again |
-| `needs_decision` | the store holds something the route cannot reconcile | see below |
+| `needs_decision` | the store, S3 or the update conflicts in a way the route does not resolve | see below |
+| `rejected` | an admin rejected it | remove the deposit from S3 by hand |
+
+Interrupted work (S3 errors, a killed tool, too little disk space, the server restarting, a stop of the
+service) is not a state of its own: the item stays `stable` and is retried after 2, 4, 8 ... minutes.
+
+### Approving or rejecting a held deposit
+
+```bash
+ant ingest-watch approve __incoming/<Group>/<basename>.h5ad --by "Your Name" --note "licence checked"
+ant ingest-watch reject  __incoming/<Group>/<basename>.h5ad --by "Your Name" --note "wrong cohort"
+```
+
+`approve` lets the item through the held reasons it has now (errors still block) and the next poll publishes
+it; the dataset gets a caveat naming who approved it and why. A new upload of the same item voids the
+approval. `reject` marks it final; nothing is published or deleted.
 
 A deposit in a final state is looked at again only when its h5ad or sidecar changes (new ETag). Uploading
 a corrected sidecar is enough to retry a held or failed deposit.
@@ -99,29 +121,44 @@ a corrected sidecar is enough to retry a held or failed deposit.
 ### Resolving needs_decision
 
 The route stops when the store has an h5ad without its `.md`, a `.md` without its h5ad (a dataset that only
-lives on S3, or a retired one), or a `.md` it cannot edit with a verified minimal change. Look at the store
-folder named in the status note and decide by hand:
+lives on S3, or a retired one), archived versions without a current `.md`, staged files without a journal, a
+catalog h5ad on S3 for a dataset that is not in the local store, a static file that differs from the store
+copy, an update that changes `access`, `data_use` or `license`, an update marker that does not match, or a
+`.md` it cannot edit with a verified minimal change. Read the status note and decide by hand:
 
 - the store files are leftovers: move them to an underscore folder (`<Group>/_backup_<date>/`) and upload the
   sidecar again (a new ETag) so the watcher retries;
 - the dataset exists on S3 only: `ant sync pull '<Group>/<basename>*'` first, then re-upload the sidecar;
 - the `.md` is unusual: make the change by hand (version bump, changelog entry, caveat) and run
-  `ant-ingest` for that project.
+  `ant-ingest` for that project;
+- a static file differs: replace one of the two copies, or rename the deposited file;
+- access, data_use or license change: edit the store `.h5ad.mus` by hand (with a caveat and a version bump),
+  then upload the sidecar again.
 
 ### Updating a dataset
 
-Upload again under the same `<data_project>/<basename>`. The same checks run. When they are clean:
+Upload again under the same `<data_project>/<basename>`. To make sure the upload lands on the dataset you
+mean, add `update_of=<db_id>` or `previous_sha256=<sha256 of the published h5ad>` to the sidecar: a mismatch
+stops the item (`needs_decision`). With `ingest_watch.require_update_marker: true` an update without either
+stops too; this protects against two depositors who pick the same group and file name. The same checks run.
+When they are clean:
 
 - a different h5ad (another sha256) becomes a new minor version (1.0.0 to 1.1.0), with a changelog entry
   naming the previous sha256 and what changed (cells, genes, obs columns, sidecar keys);
-- the same h5ad with changed sidecar keys becomes a patch version (1.0.0 to 1.0.1); the uploaded sidecar wins
-  for every key it sets, keys only in the store's sidecar stay;
-- an identical upload changes nothing.
+- the same h5ad with new sidecar keys, overridden keys or new caveats in the deposited `<basename>.md`
+  becomes a patch version (1.0.0 to 1.0.1);
+- an identical upload changes nothing (new static files are still placed).
+
+Curated values win: a sidecar key that the store already has with another value is kept, and the changelog
+says what the deposit wanted. To replace it, add `override_<key>=true` next to the key in the sidecar. Changes of
+`access`, `data_use` and `license` are never applied automatically. From a deposited `<basename>.md` only new
+caveats are applied; if it differs in other keys it stays in `__incoming/` with a warning.
 
 Caveats, curation fields and the facet mapping of the old `.md` stay as they are; the route appends one caveat
-saying which version was replaced. The served dataset is swapped under `/admin/release` and `/admin/restore`.
-The previous version is kept in `<Group>/_versions/<basename>/<version>/` (h5ad, `.md`, `.h5ad.mus`, the old
-scores) and on S3 under `<Group>/_versions/<basename>/<version>/`. To go back, copy those files over the
+saying which version was replaced. The served dataset is swapped under `/admin/release` and `/admin/restore`, through a journal: if the
+process dies in the middle, the next start finishes or undoes the swap before anything else. The previous
+version is kept in `<Group>/_versions/<basename>/<version>/` (hard links to the h5ad, `.md`, `.h5ad.mus` and old
+scores, so no extra space while they are unchanged) and on S3 under `<Group>/_versions/<basename>/<version>/`. To go back, copy those files over the
 current ones, bump the version with a changelog entry, convert and rescan.
 
 ### Purging old versions
@@ -155,6 +192,9 @@ ant ingest prune
 ```bash
 make ingest-watch            # foreground, needs ingest_watch.enabled: true in anthive.yaml
 make ingest-watch-once       # one poll
+make ingest-watch-status
+# state, work and tmp dirs go to INGEST_WATCH_DIR (default ../anthive4_state); the watcher refuses dirs
+# inside the checkout unless ingest_watch.allow_repo_dirs is true
 ant ingest-watch --once --store /scratch/store --prefix __incoming_test/ \
     --catalog-prefix __ingest_test_catalog/ --api-url http://127.0.0.1:18850   # a test against a scratch store
 ```
@@ -162,7 +202,11 @@ ant ingest-watch --once --store /scratch/store --prefix __incoming_test/ \
 On a server it runs as its own systemd unit (`config/examples/anthive-ingest-watch.service.example`), never
 under `ant-supervisor`. It reaches the local ant-serve over HTTP only, keeps working while ant-serve restarts
 (rescans retry with backoff, an unserved item is rescanned on the next poll) and takes the per-dataset writer
-lock only for the seconds of a swap. A file lock in the state dir stops two watchers from running at once.
+lock only for the seconds of a swap. A file lock in the state dir stops two watchers, or a watcher and
+`ant-ingest`, from running at once. Stopping the service kills running tools (their item is retried); the
+watcher never starts a swap after the stop signal. Work dirs of live items are removed at once, those of held
+and failed items after `work_ttl_days` (14). A pull waits while less than 2x the h5ad size plus `min_free_gb`
+(50) is free.
 Settings are in the `ingest_watch:` block of `anthive.default.yaml` (env `ANTHIVE_INGEST_WATCH_<KEY>`).
 `ant-score-fleet` waits while the host is busy; `post_step_timeout_seconds` (default 6 hours) stops a step
 that waits too long, and it is then a warning.
