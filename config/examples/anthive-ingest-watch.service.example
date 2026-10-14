@@ -1,0 +1,49 @@
+# EXAMPLE: systemd unit for the S3 watch route (bin/ingest/ant-ingest-watch).
+# It runs on its own, next to the serving stack, never as a child of it:
+# it polls S3 for `mus s3 upload` deposits, checks and publishes them into
+# the local store, and reaches the local ant-serve over HTTP only (rescan,
+# release/restore). A restart of ant-serve does not stop it (rescans retry
+# with backoff).
+#
+#   sudo cp anthive-ingest-watch.service.example /etc/systemd/system/anthive-ingest-watch.service
+#   (fill the <PLACEHOLDERS>; set ingest_watch.enabled: true in anthive.yaml)
+#   sudo systemctl daemon-reload && sudo systemctl enable --now anthive-ingest-watch
+#   journalctl -u anthive-ingest-watch -f          # the log
+#   <REPO_PATH>/bin/ant ingest-watch status        # items and their states
+#
+# Keep the filled-in copy in your private server-config repo, NOT in anthive4.
+
+[Unit]
+Description=Anthive S3 ingest watcher (<HOSTNAME>)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<USER>
+WorkingDirectory=<REPO_PATH>
+# uv must be on PATH (the tools are `uv run --script`); HOME holds the uv cache.
+Environment=HOME=<HOME>
+Environment=PATH=<HOME>/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Optional: a config outside the repo (paths, S3 keys, ingest_watch block).
+# Environment=ANTHIVE_CONFIG=/etc/anthive/anthive.yaml
+ExecStart=<REPO_PATH>/bin/ingest/ant-ingest-watch
+# Low priority: it shares the host with the server. The watcher also sets
+# nice 19 / ionice idle on itself (ingest_watch.low_priority).
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+# Caps for the whole cgroup (convert, ant-ingest-check, the post steps). Size
+# MemoryMax for the largest h5ad you expect: ant-convert holds a dataset in RAM.
+CPUQuota=400%
+MemoryHigh=40G
+MemoryMax=48G
+# SIGTERM: the current poll stops between steps; an item interrupted mid-way
+# is picked up again on the next start (its work dir is rebuilt).
+KillMode=control-group
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

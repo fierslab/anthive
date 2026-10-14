@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop dev-jupyter refresh-viewer symlink sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm docker-build docker-run docker-smoketest docker-clean lock images sif push-images ship stack-check
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop dev-jupyter refresh-viewer symlink sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry ingest-watch ingest-watch-once ingest-watch-status manifest cache-warm docker-build docker-run docker-smoketest docker-clean lock images sif push-images ship stack-check
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -480,6 +480,26 @@ ingest-dry:
 	@./bin/ingest/ant-ingest --data-folder ./data/h5adstore --dry-run $(if $(FILTER),--filter $(FILTER),)
 	@echo ""
 	@echo "(ingest-dry: build-stale step skipped — run 'make ingest' for the real pass)"
+
+# ── S3 watch route (doc/DATASET_INGESTION.md, "Depositing with mus") ────────
+# ingest-watch: run bin/ingest/ant-ingest-watch in the foreground (dev). It
+#   polls S3 ingest_watch.prefix (default __incoming/) every
+#   ingest_watch.interval_seconds and publishes clean deposits into the
+#   configured store. Needs ingest_watch.enabled: true in anthive.yaml; use
+#   `make ingest-watch-once` for one poll. On a server, run it as its own
+#   systemd unit (config/examples/anthive-ingest-watch.service.example),
+#   never under ant-supervisor.
+#   in:  S3 deposits, anthive.yaml; out: store files, <ingest_state_dir>/ingest_watch.*
+ingest-watch:
+	./bin/ingest/ant-ingest-watch
+
+# ingest-watch-once: one poll, then exit.
+ingest-watch-once:
+	./bin/ingest/ant-ingest-watch --once
+
+# ingest-watch-status: the items the watcher knows and their states.
+ingest-watch-status:
+	./bin/ingest/ant-ingest-watch status
 
 # ── Gene-atlas cache warm-up ────────────────────────────────────────────────
 # Pre-populate tmp/gene_stats_cache.db by firing /api/gene_stats_all calls

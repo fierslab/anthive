@@ -1,0 +1,229 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "boto3",
+#   "h5py>=3.0.0",
+#   "numpy>=1.24.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-ingest-watch: poll S3 for `mus s3 upload` deposits and publish the clean ones.
+
+Every ``interval_seconds`` (default 300) it lists ``ingest_watch.prefix``
+(default ``__incoming/``). An h5ad with its ``.h5ad.mus`` whose objects kept
+their ETag and size over two polls (or are older than ``settle_seconds``) is
+processed, one at a time, at low priority: pull, sha256 check, catalogue
+``.md`` (new dataset: filled non-destructively at version 1.0.0; existing
+dataset: a new minor or patch version, the previous one archived under
+``_versions/``), ``ant-convert`` in the work dir, ``ant-ingest-check`` (errors
+and held reasons block publication), atomic placement into the store, rescan,
+catalog push to S3, post steps, store git commit, final rescan. After a
+verified publication the consumed incoming objects are deleted (only those
+keys, only when their ETag is unchanged; ``delete_incoming_after_ingest``).
+
+State: ``<ingest_state_dir>/ingest_watch.sqlite`` and
+``ingest_watch_status.json``; reports under ``<ingest_state_dir>/reports``;
+work files under ``ingest_work_dir``. Nothing is written under the repo.
+
+It runs as its own process (``config/examples/anthive-ingest-watch.service.example``,
+``make ingest-watch`` in the foreground), never inside the serving stack, and
+talks to the local ant-serve over HTTP only.
+
+Usage:
+    ant ingest-watch                       # loop (needs ingest_watch.enabled: true)
+    ant ingest-watch --once                # one poll, then exit
+    ant ingest-watch status [--json]       # items and their states
+    ant ingest-watch --once --store /scratch/store --prefix __incoming_test/ \\
+        --catalog-prefix __ingest_test_catalog/ --api-url http://127.0.0.1:18850
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR.parent.parent / 'lib'))
+
+import config  # noqa: E402
+import ingest_watch  # noqa: E402
+from ingest_pipeline import ApiClient, Pipeline, PipelineConfig, SubprocessRunner, TransientError  # noqa: E402
+
+_stop = False
+
+
+def _handle_stop(signum, frame) -> None:  # noqa: ANN001
+    global _stop
+    _stop = True
+
+
+def s3_client(s3_cfg: dict):
+    """boto3 client from the ``s3:`` block of anthive.yaml."""
+    import boto3  # noqa: PLC0415
+    from botocore.config import Config as BotoConfig  # noqa: PLC0415
+
+    endpoint = s3_cfg.get('endpoint')
+    return boto3.client(
+        's3', endpoint_url=f'https://{endpoint}' if endpoint and '://' not in endpoint else endpoint,
+        region_name=s3_cfg.get('region', 'us-east-1'), aws_access_key_id=s3_cfg.get('access_key_id'),
+        aws_secret_access_key=s3_cfg.get('secret_access_key'),
+        config=BotoConfig(retries={'max_attempts': 20, 'mode': 'adaptive'}, connect_timeout=30, read_timeout=300))
+
+
+def lower_priority() -> None:
+    """nice 19 and idle IO class for this process and its children."""
+    try:
+        os.nice(19 - os.nice(0))
+    except OSError:
+        pass
+    if shutil.which('ionice'):
+        subprocess.run(['ionice', '-c', '3', '-p', str(os.getpid())], check=False, capture_output=True)
+
+
+def log(message: str) -> None:
+    print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} {message}', flush=True)
+
+
+def build(args: argparse.Namespace):
+    """Settings, state db, watcher for the given overrides."""
+    cfg = config.get_config()
+    settings = config.get_ingest_watch_settings(cfg)
+    if args.prefix:
+        settings['prefix'] = args.prefix.strip('/') + '/'
+    if args.catalog_prefix is not None:
+        settings['catalog_prefix'] = (args.catalog_prefix.strip('/') + '/') if args.catalog_prefix.strip('/') else ''
+    if args.settle_seconds is not None:
+        settings['settle_seconds'] = args.settle_seconds
+    if args.post_steps is not None:
+        settings['post_steps'] = [step for step in args.post_steps.split(',') if step]
+    if args.no_delete:
+        settings['delete_incoming_after_ingest'] = False
+    if args.no_git:
+        settings['store_git_commit'] = False
+    store_root = Path(args.store).resolve() if args.store else config.get_data_folder(cfg).resolve()
+    state_dir = config.get_ingest_state_dir(cfg)
+    work_root = config.get_ingest_work_dir(cfg) / 'watch'
+    for runtime_dir, label in ((state_dir, 'ingest_state_dir'), (work_root, 'ingest_work_dir')):
+        if store_root == runtime_dir.resolve() or store_root in runtime_dir.resolve().parents:
+            sys.exit(f'ERROR: {label} {runtime_dir} lies inside the store {store_root}')
+    s3_cfg = cfg.get('s3') or {}
+    if not s3_cfg.get('bucket'):
+        sys.exit('ERROR: no s3.bucket in anthive.yaml')
+    api_url = args.api_url or settings.get('api_url') or config.get_api_url(cfg)
+    client = s3_client(s3_cfg)
+    runner = SubprocessRunner(log_path=state_dir / 'logs' / f'ingest_watch_{time.strftime("%Y%m%d")}.log')
+    pipeline = Pipeline(
+        PipelineConfig(store_root=store_root, work_root=work_root, reports_root=state_dir / 'reports',
+                       bucket=s3_cfg['bucket'], catalog_prefix=settings['catalog_prefix'],
+                       post_steps=settings['post_steps'],
+                       post_step_timeout=settings['post_step_timeout_seconds'], store_git_commit=settings['store_git_commit'],
+                       store_git_push=settings['store_git_push'], git_identity=settings['git_identity'],
+                       route='s3-watch', state_dir=state_dir, s3_endpoint=s3_cfg.get('endpoint')),
+        client, runner, ApiClient(api_url, config.internal_auth_headers()), log=log)
+    db = ingest_watch.StateDB(state_dir / ingest_watch.DB_FILE)
+    watcher = ingest_watch.Watcher(settings, db, client, s3_cfg['bucket'], pipeline, state_dir, log=log,
+                                   max_items=args.max_items)
+    return settings, state_dir, db, watcher, store_root
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    state_dir = config.get_ingest_state_dir()
+    db_path = state_dir / ingest_watch.DB_FILE
+    if not db_path.exists():
+        print(f'no watch state at {db_path}')
+        return 0
+    db = ingest_watch.StateDB(db_path)
+    rows = ingest_watch.status_rows(db)
+    if args.json:
+        print(json.dumps({'items': rows, 'deletions': db.deletions(), 'versions': db.versions()}, indent=1,
+                         default=str))
+    else:
+        print(ingest_watch.render_status_table(rows))
+        deletions = db.deletions()
+        if deletions:
+            print(f'\n{len(deletions)} incoming key(s) handled after ingest; last: '
+                  f'{deletions[-1]["outcome"]} {deletions[-1]["s3_key"]}')
+        print(f'\nstatus file: {state_dir / ingest_watch.STATUS_FILE}')
+    db.close()
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    settings, state_dir, db, watcher, store_root = build(args)
+    if not args.once and not settings['enabled']:
+        print('ingest_watch.enabled is false: refusing to loop (use --once for a single poll)', file=sys.stderr)
+        return 2
+    if settings.get('low_priority', True):
+        lower_priority()
+    signal.signal(signal.SIGTERM, _handle_stop)
+    signal.signal(signal.SIGINT, _handle_stop)
+    log(f'watching s3 prefix {settings["prefix"]} -> store {store_root} '
+        f'(catalog prefix {settings["catalog_prefix"] or "<root>"}, every {settings["interval_seconds"]} s, '
+        f'settle {settings["settle_seconds"]} s, delete after ingest: {settings["delete_incoming_after_ingest"]})')
+    backoff = 0
+    exit_code = 0
+    while True:
+        started = time.time()
+        try:
+            with ingest_watch.WatchLock(state_dir):
+                counts = watcher.poll()
+                ingest_watch.write_status(state_dir, db, {'last_poll': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                                                          'last_counts': counts, 'prefix': settings['prefix']})
+            if counts:
+                log(f'poll done: {counts}')
+            backoff = 0
+            if args.once and any(state in counts for state in ('failed', 'held', 'needs_decision')):
+                exit_code = 1
+        except ingest_watch.LockBusy as exc:
+            log(str(exc))
+            if args.once:
+                return 3
+        except TransientError as exc:
+            backoff = min(backoff + 1, 6)
+            log(f'S3 error, backing off: {exc}')
+            if args.once:
+                return 2
+        if args.once or _stop:
+            break
+        wait = settings['interval_seconds'] * (2 ** backoff if backoff else 1)
+        wait = min(wait, 3600) - (time.time() - started)
+        deadline = time.time() + max(5.0, wait)
+        while time.time() < deadline and not _stop:
+            time.sleep(1)
+        if _stop:
+            break
+    db.close()
+    return exit_code
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0], epilog=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('command', nargs='?', choices=('run', 'status'), default='run')
+    parser.add_argument('--once', action='store_true', help='one poll, then exit')
+    parser.add_argument('--json', action='store_true', help='status: JSON output')
+    parser.add_argument('--store', help='h5adstore root (default: configured store)')
+    parser.add_argument('--prefix', help='S3 prefix to watch (default ingest_watch.prefix)')
+    parser.add_argument('--catalog-prefix', help="prefix of the catalog push ('' = the root)")
+    parser.add_argument('--api-url', help='local ant-serve (default ingest_watch.api_url or api_url)')
+    parser.add_argument('--settle-seconds', type=float, help='override ingest_watch.settle_seconds')
+    parser.add_argument('--post-steps', help='comma separated post steps (empty string: none)')
+    parser.add_argument('--max-items', type=int, help='process at most this many items per poll')
+    parser.add_argument('--no-delete', action='store_true', help='keep the incoming objects after ingest')
+    parser.add_argument('--no-git', action='store_true', help='no store git commit')
+    args = parser.parse_args()
+    if args.command == 'status':
+        return cmd_status(args)
+    config.require_primary(config.get_config(), tool='ant-ingest-watch')
+    return cmd_run(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
