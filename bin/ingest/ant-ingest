@@ -83,7 +83,9 @@ from ingest_pipeline import (                                       # noqa: E402
     TransientError,
     de_ingest_command,
     download as _pipeline_download,
+    head_etag,
     plan_items,
+    slug as ingest_slug,
 )
 from sidecar_merge import Conflict                                  # noqa: E402
 
@@ -152,6 +154,7 @@ class DatasetResult:
     staging_files: List[str] = field(default_factory=list)   # paths relative to staging root
     promoted_files: List[str] = field(default_factory=list)  # absolute catalog paths
     s3_incoming_keys: List[str] = field(default_factory=list)
+    s3_incoming_etags: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -391,7 +394,8 @@ def _process_dataset(item, pipeline: Pipeline, args: argparse.Namespace) -> Data
     if outcome.state == 'live':
         _ok(f'{outcome.db_id} {outcome.kind} {outcome.version}')
         result.s3_incoming_keys = sorted(outcome.consumed)
-        result.staging_files = [str(pipeline.config.work_root)]
+        result.s3_incoming_etags = dict(outcome.consumed)
+        result.staging_files = [str(pipeline.config.work_root / ingest_slug(item.key))]
         result.promoted_files = [outcome.store_h5ad] if outcome.store_h5ad else []
     else:
         _err(f'{outcome.state}: {outcome.detail}')
@@ -436,6 +440,8 @@ def _catalog_orphans(client, bucket: str, data_folder: Path) -> List[str]:
             key = obj['Key']
             if key.startswith(INCOMING_PREFIX) or key.startswith('__'):
                 continue            # incoming and test prefixes (__incoming_test/, __ingest_test_catalog/)
+            if '/_versions/' in key or key.startswith('_versions/'):
+                continue            # archived versions: removed only by `ant-ingest purge`
             if any(key.startswith(p) for p in _CATALOG_NONDATA_PREFIXES):
                 continue
             local_path = data_folder / key
@@ -491,6 +497,7 @@ def _append_to_ledger(data_folder: Path, results: List[DatasetResult]) -> None:
             'basename': result.plan.basename,
             'staging_files': result.staging_files,
             's3_incoming_keys': result.s3_incoming_keys,
+            's3_incoming_etags': result.s3_incoming_etags,
             'recorded_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         })
     _save_ledger(data_folder, ledger)
@@ -967,10 +974,13 @@ def cmd_run(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
         PipelineConfig(store_root=data_folder, work_root=_work_root(), reports_root=state_dir / 'reports',
                        bucket=bucket, catalog_prefix='', post_steps=args.post_steps,
                        store_git_commit=args.git_commit, route='manual', state_dir=state_dir,
-                       s3_endpoint=s3_cfg.get('endpoint')),
+                       s3_endpoint=s3_cfg.get('endpoint'),
+                       min_free_gb=anthive_config.get_ingest_watch_settings()['min_free_gb'],
+                       require_update_marker=anthive_config.get_ingest_watch_settings()['require_update_marker']),
         client, SubprocessRunner(log_path=state_dir / 'logs' / f'ant_ingest_{time.strftime("%Y%m%d")}.log'),
         ApiClient(anthive_config.get_api_url(), anthive_config.internal_auth_headers(), retry_delays=(2, 5, 10)),
         log=lambda message: print(_dim(f'  {message}')))
+    pipeline.recover()
     results: List[DatasetResult] = []
     consumed_by_pipeline: set = set()
     for item in items:
@@ -1027,12 +1037,14 @@ def cmd_prune(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
 
     staging_files: List[Path] = []
     incoming_keys: List[str] = []
+    expected_etags: Dict[str, str] = {}
     for entry in datasets:
         for path_str in entry.get('staging_files', []):
             path = Path(path_str)
             if path.exists():
                 staging_files.append(path)
         incoming_keys.extend(entry.get('s3_incoming_keys', []))
+        expected_etags.update(entry.get('s3_incoming_etags') or {})
 
     orphan_keys: List[str] = []
     if args.include_catalog_orphans:
@@ -1071,7 +1083,7 @@ def cmd_prune(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
         try:
             if path.is_dir():
                 resolved = path.resolve()
-                if resolved == work_root or work_root in resolved.parents:
+                if work_root in resolved.parents:          # an item's work dir, never the work root itself
                     shutil.rmtree(path)
                     deleted_local += 1
             else:
@@ -1087,7 +1099,11 @@ def cmd_prune(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
             if sub.is_dir() and not any(sub.iterdir()):
                 sub.rmdir()
 
-    deleted_remote = _bulk_delete(client, bucket, incoming_keys + orphan_keys)
+    changed = [key for key, etag in expected_etags.items()
+               if key in incoming_keys and head_etag(client, bucket, key) not in (None, etag)]
+    for key in changed:
+        _warn(f'kept {key}: its ETag changed since it was ingested (a newer upload)')
+    deleted_remote = _bulk_delete(client, bucket, [key for key in incoming_keys if key not in changed] + orphan_keys)
 
     # Clear processed entries from the ledger.
     if not args.include_catalog_orphans:
@@ -1253,11 +1269,17 @@ def main() -> int:
         _err(f'data folder not found: {data_folder}')
         return 2
 
-    if args.command == 'prune':
-        return cmd_prune(args, cfg['s3'], data_folder)
-    if args.command == 'purge':
-        return cmd_purge(args, cfg['s3'], data_folder)
-    return cmd_run(args, cfg['s3'], data_folder)
+    import ingest_watch
+    try:
+        with ingest_watch.WatchLock(anthive_config.get_ingest_state_dir(cfg)):   # never beside a watcher run
+            if args.command == 'prune':
+                return cmd_prune(args, cfg['s3'], data_folder)
+            if args.command == 'purge':
+                return cmd_purge(args, cfg['s3'], data_folder)
+            return cmd_run(args, cfg['s3'], data_folder)
+    except ingest_watch.LockBusy as exc:
+        _err(f'{exc}; try again when it has finished')
+        return 3
 
 
 if __name__ == '__main__':

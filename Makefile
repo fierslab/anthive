@@ -489,17 +489,25 @@ ingest-dry:
 #   `make ingest-watch-once` for one poll. On a server, run it as its own
 #   systemd unit (config/examples/anthive-ingest-watch.service.example),
 #   never under ant-supervisor.
-#   in:  S3 deposits, anthive.yaml; out: store files, <ingest_state_dir>/ingest_watch.*
+#   Its runtime dirs must lie outside the checkout: INGEST_WATCH_DIR (default
+#   ../anthive4_state next to the repo) holds the state, the work files and
+#   the tmp dir of the tools it runs.
+#   in:  S3 deposits, anthive.yaml; out: store files, $(INGEST_WATCH_DIR)/ingest/*
+INGEST_WATCH_DIR ?= $(abspath $(CURDIR)/../anthive4_state)
+INGEST_WATCH_ENV = ANTHIVE_INGEST_STATE_DIR=$(INGEST_WATCH_DIR)/ingest \
+                   ANTHIVE_INGEST_WORK_DIR=$(INGEST_WATCH_DIR)/ingest_work \
+                   ANTHIVE_TMP_DIR=$(INGEST_WATCH_DIR)/tmp
 ingest-watch:
-	./bin/ingest/ant-ingest-watch
+	$(INGEST_WATCH_ENV) ./bin/ingest/ant-ingest-watch
 
 # ingest-watch-once: one poll, then exit.
 ingest-watch-once:
-	./bin/ingest/ant-ingest-watch --once
+	$(INGEST_WATCH_ENV) ./bin/ingest/ant-ingest-watch --once
 
 # ingest-watch-status: the items the watcher knows and their states.
+ingest-watch-status: the items the watcher knows and their states.
 ingest-watch-status:
-	./bin/ingest/ant-ingest-watch status
+	$(INGEST_WATCH_ENV) ./bin/ingest/ant-ingest-watch status
 
 # ── Gene-atlas cache warm-up ────────────────────────────────────────────────
 # Pre-populate tmp/gene_stats_cache.db by firing /api/gene_stats_all calls

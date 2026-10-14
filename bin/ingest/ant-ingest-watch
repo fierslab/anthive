@@ -34,6 +34,8 @@ Usage:
     ant ingest-watch                       # loop (needs ingest_watch.enabled: true)
     ant ingest-watch --once                # one poll, then exit
     ant ingest-watch status [--json]       # items and their states
+    ant ingest-watch approve <key|db_id> --by NAME [--note TEXT]   # publish a held item after review
+    ant ingest-watch reject <key|db_id> --by NAME [--note TEXT]
     ant ingest-watch --once --store /scratch/store --prefix __incoming_test/ \\
         --catalog-prefix __ingest_test_catalog/ --api-url http://127.0.0.1:18850
 """
@@ -113,6 +115,13 @@ def build(args: argparse.Namespace):
     for runtime_dir, label in ((state_dir, 'ingest_state_dir'), (work_root, 'ingest_work_dir')):
         if store_root == runtime_dir.resolve() or store_root in runtime_dir.resolve().parents:
             sys.exit(f'ERROR: {label} {runtime_dir} lies inside the store {store_root}')
+    problems = ingest_watch.repo_dir_problems(
+        {'ingest_state_dir': state_dir, 'ingest_work_dir': work_root, 'tmp_dir': config.get_tmp_dir(cfg)},
+        SCRIPT_DIR.parent.parent)
+    if problems and not settings['allow_repo_dirs']:
+        sys.exit('ERROR: ' + '; '.join(problems) + '.\nSet ANTHIVE_INGEST_STATE_DIR, ANTHIVE_INGEST_WORK_DIR and '
+                 'ANTHIVE_TMP_DIR (or state_dir / tmp_dir in anthive.yaml) outside the checkout, as '
+                 '`make ingest-watch` does, or set ingest_watch.allow_repo_dirs: true.')
     s3_cfg = cfg.get('s3') or {}
     if not s3_cfg.get('bucket'):
         sys.exit('ERROR: no s3.bucket in anthive.yaml')
@@ -123,14 +132,43 @@ def build(args: argparse.Namespace):
         PipelineConfig(store_root=store_root, work_root=work_root, reports_root=state_dir / 'reports',
                        bucket=s3_cfg['bucket'], catalog_prefix=settings['catalog_prefix'],
                        post_steps=settings['post_steps'],
-                       post_step_timeout=settings['post_step_timeout_seconds'], store_git_commit=settings['store_git_commit'],
+                       post_step_timeout=settings['post_step_timeout_seconds'],
+                       store_git_commit=settings['store_git_commit'],
                        store_git_push=settings['store_git_push'], git_identity=settings['git_identity'],
-                       route='s3-watch', state_dir=state_dir, s3_endpoint=s3_cfg.get('endpoint')),
-        client, runner, ApiClient(api_url, config.internal_auth_headers()), log=log)
+                       route='s3-watch', state_dir=state_dir, s3_endpoint=s3_cfg.get('endpoint'),
+                       min_free_gb=settings['min_free_gb'],
+                       require_update_marker=settings['require_update_marker']),
+        client, runner, ApiClient(api_url, config.internal_auth_headers()), log=log,
+        stop_requested=lambda: _stop)
     db = ingest_watch.StateDB(state_dir / ingest_watch.DB_FILE)
     watcher = ingest_watch.Watcher(settings, db, client, s3_cfg['bucket'], pipeline, state_dir, log=log,
-                                   max_items=args.max_items)
+                                   max_items=args.max_items, stop_requested=lambda: _stop)
     return settings, state_dir, db, watcher, store_root
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """approve / reject one item (an explicit admin action, recorded with the name given)."""
+    if not args.item or not args.by:
+        print(f'usage: ant-ingest-watch {args.command} <item key or db id> --by <name> [--note TEXT]',
+              file=sys.stderr)
+        return 2
+    state_dir = config.get_ingest_state_dir()
+    db = ingest_watch.StateDB(state_dir / ingest_watch.DB_FILE)
+    try:
+        with ingest_watch.WatchLock(state_dir):
+            if args.command == 'approve':
+                approval = ingest_watch.approve(db, args.item, args.by, args.note or '')
+                print(f'approved for {", ".join(approval["reasons"]) or "no held reason"}; the next poll publishes it '
+                      f'(the caveat names {approval["by"]})')
+            else:
+                ingest_watch.reject(db, args.item, args.by, args.note or '')
+                print('rejected; nothing is published or deleted. Remove the deposit from S3 by hand when done.')
+    except (ValueError, ingest_watch.LockBusy) as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 1
+    finally:
+        db.close()
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -206,7 +244,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0], epilog=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', nargs='?', choices=('run', 'status'), default='run')
+    parser.add_argument('command', nargs='?', choices=('run', 'status', 'approve', 'reject'), default='run')
+    parser.add_argument('item', nargs='?', help='approve / reject: the item key (or db id)')
+    parser.add_argument('--by', help='approve / reject: who decided (recorded in the caveat and the state)')
+    parser.add_argument('--note', help='approve / reject: a short reason')
     parser.add_argument('--once', action='store_true', help='one poll, then exit')
     parser.add_argument('--json', action='store_true', help='status: JSON output')
     parser.add_argument('--store', help='h5adstore root (default: configured store)')
@@ -221,6 +262,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == 'status':
         return cmd_status(args)
+    if args.command in ('approve', 'reject'):
+        return cmd_review(args)
     config.require_primary(config.get_config(), tool='ant-ingest-watch')
     return cmd_run(args)
 

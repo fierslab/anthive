@@ -27,6 +27,10 @@ Environment=HOME=<HOME>
 Environment=PATH=<HOME>/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Optional: a config outside the repo (paths, S3 keys, ingest_watch block).
 # Environment=ANTHIVE_CONFIG=/etc/anthive/anthive.yaml
+# Runtime dirs outside the checkout (the watcher refuses dirs inside it).
+Environment=ANTHIVE_INGEST_STATE_DIR=<STATE_PATH>/ingest
+Environment=ANTHIVE_INGEST_WORK_DIR=<STATE_PATH>/ingest_work
+Environment=ANTHIVE_TMP_DIR=<STATE_PATH>/tmp
 ExecStart=<REPO_PATH>/bin/ingest/ant-ingest-watch
 # Low priority: it shares the host with the server. The watcher also sets
 # nice 19 / ionice idle on itself (ingest_watch.low_priority).
@@ -38,10 +42,15 @@ CPUSchedulingPolicy=batch
 CPUQuota=400%
 MemoryHigh=40G
 MemoryMax=48G
-# SIGTERM: the current poll stops between steps; an item interrupted mid-way
-# is picked up again on the next start (its work dir is rebuilt).
+# Stopping: systemd sends SIGTERM to every process of the unit. Running tools
+# (ant-convert, ant-ingest-check, post steps) die at once and their item is
+# retried on the next start; the watcher itself finishes the step it is in,
+# never starts a store swap after the signal, and a swap already committing
+# is completed (or finished from its journal on the next start). 600 s covers
+# a swap or catalog push of a large dataset; after that systemd kills it and
+# the journal is rolled forward or back on the next start.
 KillMode=control-group
-TimeoutStopSec=120
+TimeoutStopSec=600
 Restart=on-failure
 RestartSec=60
 
