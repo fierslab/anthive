@@ -2442,11 +2442,15 @@ document.addEventListener('DOMContentLoaded', function() {
             if (a) trackClick(a.getAttribute('href'));
         });
 
+    })();
+    {% endif %}
         // ── Downloads: raw AnnData + per-collection static files.
         //    The server-side /files endpoint only returns those two kinds
         //    (duckdb / scores / mus are locked down on the API side, not
         //    filtered here). The tab is always shown; it is greyed (.tab-empty) when nothing is listed and there are no paper PDFs.
+        // Always started, whatever the dataset has (also without annotation columns or gene set scores).
         (function loadFiles() {
+            var apiBase = '/api/databases/' + {{ db_id|tojson }}.split('/').map(encodeURIComponent).join('/');
             var box = document.getElementById('ds-files');
             var tabBtn = document.getElementById('tab-btn-downloads');
             if (!box) return;
@@ -2523,8 +2527,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (window.antTabLoading) window.antTabLoading.done('downloads');
                 });
         })();
-    })();
-    {% endif %}
 });
 </script>
 {% endblock %}

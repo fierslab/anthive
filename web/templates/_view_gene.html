@@ -313,7 +313,7 @@
       var cohort = u.cohort_label && u.cohort_label !== 'None' ? u.cohort_label.replace(/^Xenograft:\s*/, '') : 'unassigned';
       return { name: cohort, title: u.title || u.db_id, sub: withNotes('<a href="/browse/' + V.esc(u.db_id) + '">' + V.esc(u.db_id) + '</a>', notes), stats: V.pointStats(u, facet), est: u.logFC, descriptive: !replicate,
                lo: replicate ? u.ci_low : null, hi: replicate ? u.ci_high : null, q: replicate ? u.q_value : null, sig: replicate && u.q_value != null && u.q_value < 0.05,
-               counted: !!u.counted, anchor: !!u.anchor, reason: u.not_counted_reason, inflated: !!u.inflated, db_id: u.db_id };
+               counted: !!u.counted, anchor: !!u.anchor, reason: u.not_counted_reason, inflated: !!u.inflated, db_id: u.db_id, cell_type: u.cell_type };
     }).sort(function (a, b) { return (b.counted - a.counted) || (b.anchor - a.anchor) || ((b.n || 0) - (a.n || 0)); }).map(function (row, index, all) {
       // strata of one cohort (lines, timepoints) share one vote: the first counted row of a cohort stands for it
       if (!row.counted) return row;
@@ -329,7 +329,7 @@
     var name = (entry.cohort_display || entry.cohort_label || 'unassigned').replace(/^Xenograft:\s*/, '');
     return { name: name, title: point.title || point.db_id, sub: withNotes('<a href="/browse/' + V.esc(point.db_id) + '">' + V.esc(point.db_id) + '</a>', notes), stats: V.pointStats(point, facet, entry), est: point.logFC, descriptive: !replicate,
              lo: replicate ? point.ci_low : null, hi: replicate ? point.ci_high : null, q: replicate ? point.q_value : null, sig: replicate && point.q_value != null && point.q_value < 0.05,
-             counted: isAnchor && !!(point.anchor_counted != null ? point.anchor_counted : entry.counted), anchor: isAnchor, reason: point.not_counted_reason, inflated: !!point.inflated, db_id: point.db_id };
+             counted: isAnchor && !!(point.anchor_counted != null ? point.anchor_counted : entry.counted), anchor: isAnchor, reason: point.not_counted_reason, inflated: !!point.inflated, db_id: point.db_id, cell_type: point.cell_type };
   }
   function forestRowsFromServed(forest, facet) {
     var rows = [];
@@ -344,7 +344,12 @@
   function detailHtml(block, row, group, cell, card) {
     var title = V.esc(GENE) + ', ' + V.esc(row.label) + ', ' + V.esc(V.plain(group));
     var rows = card.rows || unitRows(card.units || [], group, block.scope, row.facet);
-    return '<div class="vw-detail"><div class="dc-title">' + title + '</div>' + (cell ? V.unitsTable(rows, EFFECT) : '<div class="dc-line">This facet was not tested in this cell type group (too few cohorts or too few replicates).</div>') + '</div>';
+    // each dataset row links its per donor plot page (that dataset, its own stratum label)
+    var effect = Object.assign({}, EFFECT, { donorLink: function (r) {
+      if (!r.db_id || !r.cell_type || /^pool:/.test(r.db_id)) return null;
+      return '/browse/' + r.db_id + '/plot/donor?facet=' + enc(row.facet) + '&cell_type=' + enc(r.cell_type) + '&gene=' + enc(GENE);
+    } });
+    return '<div class="vw-detail"><div class="dc-title">' + title + '</div>' + (cell ? V.unitsTable(rows, effect) : '<div class="dc-line">This facet was not tested in this cell type group (too few cohorts or too few replicates).</div>') + '</div>';
   }
   function detail(block, row, group, cell) {
     if (!cell) return Promise.resolve(detailHtml(block, row, group, null, {}));

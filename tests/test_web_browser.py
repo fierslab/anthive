@@ -7868,7 +7868,7 @@ def test_module_view_peer_bar_shows_percentage_and_has_no_em_dash(client):
     html = client.get("/genesets/StudyX/Exp1").text
     assert "'<span class=\"vw-bar-val\">' + Math.round(pos * 100) + '%</span>'" in html
     assert "The dot is" not in html and "red, amber and green" not in html
-    assert "it is a position on that range, not a percentile" in html
+    assert "the percentile among them" in html and "ties counting half" in html
     template = (Path(browser.__file__).parent / "templates" / "_module_view.html").read_text(encoding="utf-8")
     assert "\u2014" not in template
 
@@ -8386,5 +8386,24 @@ def test_up_is_warm_and_down_is_cool_from_one_token_pair():
 
 def test_tab_bar_stays_compact():
     base = (Path(browser.__file__).parent / "templates" / "base.html").read_text(encoding="utf-8", errors="replace")
-    assert "padding: 6px 10px; font-size: 12px;" in base                       # tab buttons
-    assert "min-width: 14px; padding: 0 3px; margin-left: 3px;" in base         # badges
+    assert "padding: 6px 8px; font-size: 12px;" in base                        # tab buttons
+    assert "min-width: 12px; padding: 0 3px; margin-left: 2px;" in base         # badges
+
+
+def test_downloads_load_on_a_dataset_without_columns_or_scores(client, monkeypatch):
+    def bare(api_url, path, **kwargs):
+        result = _fake_api_get(api_url, path)
+        if path.endswith("/info") and isinstance(result, dict):
+            result = dict(result, obs={"categorical": [], "numerical": []})
+        return result
+    monkeypatch.setattr(browser, "_api_get", bare)
+    html = client.get("/browse/GroupA/ds1").text
+    script = html.split("(function loadFiles()")[1].split("})();")[0]
+    assert "/files" in script and "var apiBase = '/api/databases/'" in script
+    assert "tab-empty" in script and "Nothing to download for this dataset." in script
+
+
+def test_peer_position_is_a_percentile_with_ties_half(client):
+    html = client.get("/genesets/StudyX/Exp1").text
+    core = html.split("function positionOf")[1].split("function comparePosition")[0]
+    assert "countBelow(g.values, r.value)" in core and "0.5 * Math.max(0, equal - 1)" in core and "/ others" in core

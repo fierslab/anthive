@@ -282,7 +282,7 @@ Optional mv_ctx keys:
         <th class="mv-th-tag" data-sortcol="tag">obs column</th>
         <th data-sortcol="method">method</th>
         <th data-sortcol="value" style="text-align:right">per-cell association (descriptive) <span class="info" data-glossary="per-cell-association" onclick="event.stopPropagation()" title="Computed over cells, not donors; it shows where a score differs, not a tested effect.">ⓘ</span></th>
-        <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" onclick="event.stopPropagation()" title="Peers are the other gene sets scored with the same method on the same dataset and annotation column. The bar and the percentage place this row's value between the lowest (0%) and the highest (100%) value among its peers; it is a position on that range, not a percentile. Rows with fewer than 4 peers have no bar and sort last. Click to sort by this column.">ⓘ</span></th>
+        <th class="mv-pos mv-sort-desc" data-sortcol="position">vs peer modules <span class="info" onclick="event.stopPropagation()" title="Peers are the other gene sets scored with the same method on the same dataset and annotation column. The bar and the percentage are the percentile among them: the share of the peers with a lower value, ties counting half (the same rule as the rank column). Rows with fewer than 4 peers have no bar and sort last. Click to sort by this column.">ⓘ</span></th>
         <th style="text-align:center;cursor:default">plots</th>
       </tr></thead>
       <tbody class="mv-rows"></tbody>
@@ -721,24 +721,35 @@ Optional mv_ctx keys:
 
   var ALL_ROWS = [];      // raw fetched rows
   var SKIPPED = {};       // db_id -> why the dataset has no per-cell statistics (bulk and the like)
-  var PEER_INDEX = {};    // peerKey → {min, max, n}
+  var PEER_INDEX = {};    // peerKey → {min, max, n, values (sorted)}
 
   function computePeerIndex(rows) {
     var idx = {};
     rows.forEach(function (r) {
       var k = peerKey(r);
-      var g = idx[k] || (idx[k] = { min: Infinity, max: -Infinity, n: 0 });
-      g.min = Math.min(g.min, r.value); g.max = Math.max(g.max, r.value); g.n++;
+      var g = idx[k] || (idx[k] = { min: Infinity, max: -Infinity, n: 0, values: [] });
+      g.min = Math.min(g.min, r.value); g.max = Math.max(g.max, r.value); g.n++; g.values.push(r.value);
     });
+    Object.keys(idx).forEach(function (k) { idx[k].values.sort(function (a, b) { return a - b; }); });
     return idx;
+  }
+  function countBelow(values, x) {   // number of values strictly below x (values sorted)
+    var lo = 0, hi = values.length;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (values[mid] < x) lo = mid + 1; else hi = mid; }
+    return lo;
   }
   var MIN_PEERS = 4;      // fewer peer modules than this: no position dot
   function hasPeers(r, idx) {
     var g = idx[peerKey(r)]; return !!g && g.n >= MIN_PEERS;
   }
+  // percentile among the peer modules: the share of the other peers with a lower value, ties counting half
+  // (the same rule as the rank column of the Gene sets tab)
   function positionOf(r, idx) {
-    var g = idx[peerKey(r)]; if (!g) return 0.5;
-    var span = g.max - g.min; return span ? (r.value - g.min) / span : 0.5;
+    var g = idx[peerKey(r)]; if (!g || g.n < 2) return 0.5;
+    var below = countBelow(g.values, r.value);
+    var equal = countBelow(g.values, r.value + 1e-12 * Math.max(1, Math.abs(r.value))) - below;
+    var others = g.n - 1;
+    return (below + 0.5 * Math.max(0, equal - 1)) / others;
   }
   /** Sort by peer position; rows without enough peers always go last. */
   function comparePosition(a, b, mul) {

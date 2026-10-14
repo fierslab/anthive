@@ -720,3 +720,10 @@ def test_expression_table_has_a_phone_layout():
     template = (_WEB_DIR / "templates" / "_view_expression.html").read_text(encoding="utf-8")
     phone = template.split("@media (max-width: 560px)")[1].split("</style>")[0]
     assert "table-layout: auto" in phone and "col.x-std" in phone and "white-space: normal" in phone
+
+
+def test_gene_matrix_arrows_use_the_effect_ink_and_rows_link_the_donor_page(client):
+    text = client.get("/genes/PTPRG").text
+    assert '<span class="vw-ar up">&#9650;</span>' in text and ".vw-ar.up { color: var(--effect-up-ink); }" in text
+    assert "donorLink: function (r)" in text and "/plot/donor?facet=" in text and "r.cell_type" in text
+    assert "effect.donorLink ? effect.donorLink(row) : null" in text
