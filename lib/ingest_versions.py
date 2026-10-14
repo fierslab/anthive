@@ -1,7 +1,7 @@
 """Previous versions of a dataset: archive on update, list, purge.
 
 When an upload replaces a dataset that is already published, the source
-files of the version being replaced move to
+files of the version being replaced are hard-linked (never moved) into
 ``<store>/<group>[/<sub>]/_versions/<basename>/<version>/`` and the catalog
 copies on S3 are copied to the matching key
 ``<catalog_prefix><group>[/<sub>]/_versions/<basename>/<version>/<file>``.
@@ -55,41 +55,50 @@ def version_s3_prefix(catalog_prefix: str, rel_dir: str, basename: str, version:
     return f'{catalog_prefix}{rel_dir.strip("/")}/{VERSIONS_DIR}/{basename}/{version}/'
 
 
-def archive_local(dataset_dir: Path, basename: str, version: str, data_changed: bool = True) -> List[Path]:
-    """Move (and copy) the current version's source files into its version folder.
+def archive_plan(dataset_dir: Path, basename: str, version: str,
+                 data_changed: bool = True) -> Tuple[List[Tuple[Path, Path]], List[Path]]:
+    """What archiving the current version means, without touching anything.
 
-    With ``data_changed`` false (a metadata-only update) the h5ad and the scores
-    stay where they are and the version folder gets a hard link (or copy) of
-    them; only the ``.md`` and ``.h5ad.mus`` move.
-
-    Returns the files now in the version folder. Refuses (FileExistsError) when
-    the folder already holds files, so an archived version is never overwritten.
+    Returns ``(links, remove_after)``: ``(current file, file in the version
+    folder)`` pairs to hard-link (the current files stay in place until the
+    swap commits), and the current files to remove once the new version is
+    in place (the old ``.scores.parquet`` when the data changed: those are
+    scores of the old cells). Raises FileExistsError when the version folder
+    already holds files, so an archived version is never overwritten.
     """
     target = version_dir(dataset_dir, basename, version)
     if target.exists() and any(target.iterdir()):
         raise FileExistsError(f'{target} already exists; refusing to overwrite an archived version')
-    target.mkdir(parents=True, exist_ok=True)
-    archived: List[Path] = []
-    for suffix in ARCHIVED_SUFFIXES:
-        source = dataset_dir / f'{basename}{suffix}'
-        if not source.exists():
-            continue
-        destination = target / source.name
-        if data_changed or suffix in ('.md', '.h5ad.mus'):
-            source.rename(destination)
-        else:
-            try:
-                os.link(source, destination)
-            except OSError:
-                shutil.copy2(source, destination)
-        archived.append(destination)
-    for suffix in COPIED_SUFFIXES:
+    links: List[Tuple[Path, Path]] = []
+    remove_after: List[Path] = []
+    for suffix in ARCHIVED_SUFFIXES + COPIED_SUFFIXES:
         source = dataset_dir / f'{basename}{suffix}'
         if source.exists():
-            destination = target / source.name
-            shutil.copy2(source, destination)
-            archived.append(destination)
-    return archived
+            links.append((source, target / source.name))
+            if suffix == '.scores.parquet' and data_changed:
+                remove_after.append(source)
+    return links, remove_after
+
+
+def link_or_copy(source: Path, destination: Path) -> None:
+    """Hard link (same file system, no extra space), else copy."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
+def archive_local(dataset_dir: Path, basename: str, version: str, data_changed: bool = True) -> List[Path]:
+    """Link the current version's source files into its version folder (nothing is moved).
+
+    Convenience wrapper over :func:`archive_plan` for callers without a swap
+    journal; the pipeline applies the plan through its journal instead.
+    """
+    links, _ = archive_plan(dataset_dir, basename, version, data_changed)
+    for source, destination in links:
+        link_or_copy(source, destination)
+    return [destination for _, destination in links]
 
 
 def archive_s3(s3: Any, bucket: str, catalog_prefix: str, rel_dir: str, basename: str, version: str,
@@ -113,11 +122,13 @@ def archive_s3(s3: Any, bucket: str, catalog_prefix: str, rel_dir: str, basename
         target_key = prefix + name
         try:
             s3.head_object(Bucket=bucket, Key=source_key)
+            on_s3 = True
+        except Exception:  # noqa: BLE001 - absent on S3: fall back to the local copy
+            on_s3 = False
+        if on_s3:                                    # a failing copy raises: the caller retries later
             s3.copy({'Bucket': bucket, 'Key': source_key}, bucket, target_key)
             written.append(target_key)
             continue
-        except Exception:  # noqa: BLE001 - absent on S3: fall back to the local copy
-            pass
         if name in by_name:
             s3.upload_file(str(by_name[name]), bucket, target_key)
             written.append(target_key)

@@ -468,7 +468,7 @@ def get_ingest_work_dir(cfg: Optional[Dict[str, Any]] = None, create: bool = Tru
 INGEST_WATCH_DEFAULTS: Dict[str, Any] = {
     'enabled': False,
     'interval_seconds': 300,
-    'settle_seconds': 900,
+    'settle_seconds': 120,
     'prefix': '__incoming/',
     'catalog_prefix': '',
     'post_steps': ['score', 'gene_stats', 'module_variability', 'facet_test', 'facet_test_modules',
@@ -480,6 +480,10 @@ INGEST_WATCH_DEFAULTS: Dict[str, Any] = {
     'delete_incoming_after_ingest': True,
     'api_url': '',
     'low_priority': True,
+    'require_update_marker': False,
+    'min_free_gb': 50,
+    'work_ttl_days': 14,
+    'allow_repo_dirs': False,
     'notify': {'on': ['live', 'held', 'failed', 'needs_decision'], 'webhook_url': '', 'email_to': '',
                'email_from': 'anthive-ingest@localhost', 'smtp_host': '', 'smtp_port': 25},
 }

@@ -40,8 +40,8 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tupl
 
 from ingest_pipeline import Item, Outcome, Pipeline, TransientError, delete_consumed, plan_items
 
-STATES = ('seen', 'stable', 'pulled', 'checked', 'live', 'held', 'failed', 'needs_decision')
-FINAL_STATES = ('live', 'held', 'failed', 'needs_decision')
+STATES = ('seen', 'stable', 'pulled', 'checked', 'live', 'held', 'failed', 'needs_decision', 'rejected')
+FINAL_STATES = ('live', 'held', 'failed', 'needs_decision', 'rejected')
 MAX_ITEM_ATTEMPTS = 8
 STATUS_FILE = 'ingest_watch_status.json'
 LOCK_FILE = 'ingest_watch.lock'
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS items (
     db_id TEXT, kind TEXT, version TEXT, report_path TEXT, log_path TEXT, error TEXT,
     warnings TEXT, held_reasons TEXT, consumed TEXT, served INTEGER DEFAULT 0,
     catalog_verified INTEGER DEFAULT 0, deleted INTEGER DEFAULT 0, git_commit TEXT, timings TEXT,
-    updated REAL
+    updated REAL, sha256 TEXT, approval TEXT, shared_keys TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT, ts REAL, state TEXT, detail TEXT
@@ -115,6 +115,10 @@ class StateDB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.executescript(SCHEMA)
+        columns = {row[1] for row in self.conn.execute('PRAGMA table_info(items)')}
+        for column in ('sha256', 'approval', 'shared_keys'):
+            if column not in columns:                  # state files written before 2026-10-14
+                self.conn.execute(f'ALTER TABLE items ADD COLUMN {column} TEXT')
         self.conn.commit()
 
     def close(self) -> None:
@@ -183,11 +187,12 @@ class StateDB:
 def observe(db: StateDB, items: Sequence[Item], now: float, settle_seconds: float) -> List[Item]:
     """Record one poll; return the items that are ready to process (oldest first).
 
-    An item becomes ready when its h5ad and sidecar exist and either its
-    settle signature (ETag + size of every object it may consume) was the
-    same on the previous poll, or its newest object is older than
-    ``settle_seconds``. A final row comes back only when the h5ad or the
-    sidecar changed (``content_signature``).
+    An item becomes ready when its h5ad and sidecar exist, its settle
+    signature (ETag + size of every object it may consume, the project's
+    static, seed and DE keys included) was identical on the previous listing,
+    and its newest object is at least ``settle_seconds`` old. The first listing
+    of an item never makes it ready. A final row comes back only when the h5ad
+    or the sidecar changed (``content_signature``), or after ``approve``.
     """
     ready: List[Item] = []
     for item in items:
@@ -199,34 +204,85 @@ def observe(db: StateDB, items: Sequence[Item], now: float, settle_seconds: floa
         if row is None:
             db.transition(item.key, 'seen', 'first listed', first_seen=now, content_signature=content,
                           settle_signature=settle, polls_unchanged=0, attempts=0, next_attempt=0, **base)
-            row = db.get(item.key)
-        elif row['state'] in FINAL_STATES:
+            if item.mus is None:
+                db.upsert(item.key, error=f'waiting for {item.key}.mus')
+            continue
+        if row['state'] in FINAL_STATES:
             if row['processed_signature'] == content:
                 continue
             db.transition(item.key, 'seen', 'new upload (ETag or size changed)', content_signature=content,
                           settle_signature=settle, polls_unchanged=0, attempts=0, next_attempt=0, error=None,
                           warnings=None, consumed=None, served=0, catalog_verified=0, deleted=0, db_id=None,
                           kind=None, version=None, report_path=None, held_reasons=None, git_commit=None,
-                          timings=None, **base)
-            row = db.get(item.key)
-        elif row['settle_signature'] != settle:
+                          timings=None, approval=None, shared_keys=None, sha256=None, **base)
+            continue
+        if row['settle_signature'] != settle or row['content_signature'] != content:
+            if row['content_signature'] != content and row['approval']:
+                db.event(item.key, row['state'], 'upload changed: the approval no longer applies')
             db.upsert(item.key, content_signature=content, settle_signature=settle, polls_unchanged=0,
-                      state='seen' if row['state'] == 'stable' else row['state'], **base)
-            row = db.get(item.key)
-        else:
-            db.upsert(item.key, polls_unchanged=int(row['polls_unchanged'] or 0) + 1, **base)
-            row = db.get(item.key)
+                      state='seen' if row['state'] == 'stable' else row['state'],
+                      approval=None if row['content_signature'] != content else row['approval'], **base)
+            continue
+        db.upsert(item.key, polls_unchanged=int(row['polls_unchanged'] or 0) + 1, **base)
         if item.mus is None:
             db.upsert(item.key, error=f'waiting for {item.key}.mus')
             continue
-        old_enough = now - item.newest_modified() >= settle_seconds
-        if int(row['polls_unchanged'] or 0) >= 1 or old_enough:
-            if row['state'] != 'stable':
-                db.transition(item.key, 'stable', 'upload complete' + (' (settle time)' if old_enough else ''),
-                              error=None)
-            if float(row['next_attempt'] or 0) <= now:
-                ready.append(item)
+        if now - item.newest_modified() < settle_seconds:
+            continue
+        if row['state'] != 'stable':
+            db.transition(item.key, 'stable', 'upload complete (two identical listings)', error=None)
+        if float(row['next_attempt'] or 0) <= now:
+            ready.append(item)
     return sorted(ready, key=lambda entry: entry.newest_modified())
+
+
+def approve(db: StateDB, key_or_db_id: str, by: str, note: str = '') -> Dict[str, Any]:
+    """Mark a held item for publication by the next poll, past the held reasons it has now.
+
+    Raises:
+        ValueError: no such item, the item is not held, or ``by`` is empty.
+    """
+    row = _find(db, key_or_db_id)
+    if not by.strip():
+        raise ValueError('approve needs --by <name>')
+    if row['state'] != 'held':
+        raise ValueError(f'{row["key"]} is {row["state"]}, not held')
+    approval = {'by': by.strip(), 'reasons': json.loads(row['held_reasons'] or '[]'), 'note': note.strip(),
+                'date': time.strftime('%Y-%m-%d'), 'signature': row['content_signature']}
+    db.transition(row['key'], 'stable', f'approved by {by} for {", ".join(approval["reasons"])}',
+                  approval=json.dumps(approval), polls_unchanged=1, next_attempt=0)
+    return approval
+
+
+def reject(db: StateDB, key_or_db_id: str, by: str, note: str = '') -> None:
+    """Mark a held, failed or needs_decision item as rejected (final; nothing is published or deleted)."""
+    row = _find(db, key_or_db_id)
+    if row['state'] not in ('held', 'failed', 'needs_decision'):
+        raise ValueError(f'{row["key"]} is {row["state"]}; only held, failed or needs_decision items are rejected')
+    db.transition(row['key'], 'rejected', f'rejected by {by}' + (f': {note}' if note else ''),
+                  error=f'rejected by {by}' + (f': {note}' if note else ''))
+
+
+def _find(db: StateDB, key_or_db_id: str) -> Dict[str, Any]:
+    row = db.get(key_or_db_id)
+    if row is None:
+        matches = [entry for entry in db.items() if (entry['db_id'] or '').upper() == key_or_db_id.upper()
+                   or entry['key'].endswith('/' + key_or_db_id)]
+        if len(matches) != 1:
+            raise ValueError(f'{key_or_db_id}: {len(matches)} matching items (give the full key)')
+        row = matches[0]
+    return row
+
+
+def repo_dir_problems(paths: Dict[str, Path], repo_root: Path) -> List[str]:
+    """Runtime directories that lie inside the repository checkout (runtime writes belong outside it)."""
+    root = Path(repo_root).resolve()
+    problems = []
+    for label, path in paths.items():
+        resolved = Path(path).resolve()
+        if resolved == root or root in resolved.parents:
+            problems.append(f'{label} {resolved} is inside the repository {root}')
+    return problems
 
 
 # ── notifications ────────────────────────────────────────────────────────────
@@ -306,11 +362,11 @@ def render_status_table(rows: Sequence[Dict[str, Any]]) -> str:
 # ── one poll ─────────────────────────────────────────────────────────────────
 
 class Watcher:
-    """One poll of the prefix: list, settle, process ready items one at a time, delete what was consumed."""
+    """One poll of the prefix: recover swaps, list, settle, process ready items one at a time, delete what was consumed."""
 
     def __init__(self, settings: Dict[str, Any], db: StateDB, s3: Any, bucket: str, pipeline: Pipeline,
                  state_dir: Path, log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
-                 max_items: Optional[int] = None):
+                 max_items: Optional[int] = None, stop_requested: Callable[[], bool] = lambda: False):
         self.settings = settings
         self.db = db
         self.s3 = s3
@@ -320,6 +376,7 @@ class Watcher:
         self.log = log
         self.clock = clock
         self.max_items = max_items
+        self.stop_requested = stop_requested
 
     def list_prefix(self) -> List[Dict[str, Any]]:
         """Every object under the prefix (raises TransientError on an S3 error)."""
@@ -333,8 +390,10 @@ class Watcher:
         return objects
 
     def poll(self) -> Dict[str, int]:
-        """List, settle and process. Returns counts per outcome of this poll."""
+        """Recover, list, settle and process. Returns counts per outcome of this poll."""
         counts: Dict[str, int] = {}
+        for message in self.pipeline.recover():
+            self.db.event('-', 'recovery', message)
         objects = self.list_prefix()
         items, malformed = plan_items(objects, self.settings['prefix'])
         for message in malformed:
@@ -342,28 +401,35 @@ class Watcher:
         ready = observe(self.db, items, self.clock(), float(self.settings['settle_seconds']))
         self.retry_unverified(items)
         for index, item in enumerate(ready):
+            if self.stop_requested():
+                self.log('stop requested: leaving the remaining items for the next run')
+                break
             if self.max_items is not None and index >= self.max_items:
                 break
-            state = self.process(item)
+            state = self.process(item, items)
             counts[state] = counts.get(state, 0) + 1
+        self.prune_work_dirs()
         return counts
 
-    def process(self, item: Item) -> str:
+    def process(self, item: Item, listed: Sequence[Item] = ()) -> str:
         """Run the pipeline for one ready item and record the outcome."""
         key = item.key
         row = self.db.get(key) or {}
-        self.db.transition(key, 'pulled', 'processing started')
+        approval = json.loads(row['approval']) if row.get('approval') else None
+        if approval and approval.get('signature') != item.content_signature():
+            approval = None
+        self.db.transition(key, 'pulled', 'processing started' + (' (approved)' if approval else ''))
         self.log(f'processing {item.display}')
         try:
-            outcome = self.pipeline.process(item)
+            outcome = self.pipeline.process(item, approval=approval)
         except TransientError as exc:
-            attempts = int(row.get('attempts') or 0) + 1
+            attempts = int(row.get('attempts') or 0) + (0 if self.stop_requested() else 1)
             if attempts >= MAX_ITEM_ATTEMPTS:
                 self.db.transition(key, 'failed', f'gave up after {attempts} attempts: {exc}', attempts=attempts,
                                    error=str(exc), processed_signature=item.content_signature())
                 self._notify(key)
                 return 'failed'
-            delay = min(3600, 60 * 2 ** attempts)
+            delay = 0 if self.stop_requested() else min(3600, 60 * 2 ** attempts)
             self.db.transition(key, 'stable', f'retry in {delay} s: {exc}', attempts=attempts,
                                next_attempt=self.clock() + delay, error=str(exc))
             return 'retry'
@@ -372,13 +438,13 @@ class Watcher:
                                processed_signature=item.content_signature())
             self._notify(key)
             return 'failed'
-        self.record(item, outcome)
+        self.record(item, outcome, approval)
         if outcome.state == 'live':
-            self.delete_if_verified(item, outcome)
+            self.delete_if_verified(item, outcome, listed)
         self._notify(key)
         return outcome.state
 
-    def record(self, item: Item, outcome: Outcome) -> None:
+    def record(self, item: Item, outcome: Outcome, approval: Optional[Dict[str, Any]] = None) -> None:
         if outcome.state in ('live', 'held'):
             self.db.event(item.key, 'checked', f'ant-ingest-check report {outcome.report_path}')
         live = outcome.state == 'live'
@@ -387,13 +453,14 @@ class Watcher:
             item.key, outcome.state, detail, processed_signature=item.content_signature(),
             db_id=outcome.db_id, kind=outcome.kind, version=outcome.version if live else None,
             report_path=outcome.report_path,
-            error=None if outcome.state == 'live' else outcome.detail,
+            error=None if live else outcome.detail,
             warnings=json.dumps(outcome.warnings), held_reasons=json.dumps(outcome.held_reasons),
             consumed=json.dumps(outcome.consumed), served=int(outcome.served),
             catalog_verified=int(outcome.catalog_verified), git_commit=outcome.git_commit,
-            timings=json.dumps(outcome.timings), attempts=0, next_attempt=0,
+            timings=json.dumps(outcome.timings), attempts=0, next_attempt=0, sha256=outcome.sha256,
+            shared_keys=json.dumps(outcome.shared_keys), approval=json.dumps(approval) if approval else None,
             log_path=str(getattr(self.pipeline.runner, 'log_path', '') or ''))
-        if outcome.state == 'live' and outcome.kind in ('new', 'update_minor', 'update_patch'):
+        if live and outcome.kind in ('new', 'update_minor', 'update_patch'):
             self.db.record_version(outcome.db_id or '', item.display, 'current', outcome.version or '',
                                    outcome.sha256 or '', outcome.store_h5ad or '')
             if outcome.previous_version and outcome.kind != 'new':
@@ -401,7 +468,18 @@ class Watcher:
                 self.db.record_version(outcome.db_id or '', item.display, 'archived', outcome.previous_version,
                                        outcome.previous_sha256 or '', location)
 
-    def delete_if_verified(self, item: Item, outcome: Outcome) -> None:
+    def _pending_siblings(self, item: Item, listed: Sequence[Item]) -> List[str]:
+        """Other items of the same project still in incoming and not live with their keys deleted."""
+        pending = []
+        for other in listed:
+            if other is item or other.data_project != item.data_project:
+                continue
+            row = self.db.get(other.key)
+            if row is None or row['state'] != 'live' or not row['deleted']:
+                pending.append(other.key)
+        return pending
+
+    def delete_if_verified(self, item: Item, outcome: Outcome, listed: Sequence[Item] = ()) -> None:
         """Delete the consumed incoming keys of a live, served, verified item (when enabled)."""
         if not self.settings.get('delete_incoming_after_ingest'):
             return
@@ -412,40 +490,75 @@ class Watcher:
         if outcome.store_h5ad and not Path(outcome.store_h5ad).exists():
             self.db.event(item.key, 'live', 'incoming objects kept: the store copy is missing')
             return
+        pending = self._pending_siblings(item, listed)
+        keep = {key: 'shared_with_pending_sibling' for key in outcome.shared_keys} if pending else {}
 
         def record(s3_key: str, etag: str, result: str) -> None:
             self.db.record_deletion(item.key, s3_key, etag, result)
             self.log(f'incoming {result}: {s3_key} ({etag})')
 
-        deleted, skipped = delete_consumed(self.s3, self.bucket, self.settings['prefix'], outcome.consumed, record)
-        self.db.upsert(item.key, deleted=int(bool(deleted) and not skipped))
-        self.db.event(item.key, 'live', f'incoming: {len(deleted)} deleted, {len(skipped)} kept')
+        deleted, skipped = delete_consumed(self.s3, self.bucket, self.settings['prefix'], outcome.consumed, record,
+                                           keep=keep)
+        own_keys = [key for key in outcome.consumed if key not in keep]
+        self.db.upsert(item.key, deleted=int(bool(deleted) and set(own_keys) <= set(deleted)))
+        self.db.event(item.key, 'live', f'incoming: {len(deleted)} deleted, {len(skipped)} kept'
+                                        + (f' (shared static kept for {len(pending)} pending sibling(s))'
+                                           if keep else ''))
 
     def retry_unverified(self, items: Sequence[Item]) -> None:
-        """Live rows whose rescan or catalog check failed: try the rescan again, then delete when verified."""
+        """Live rows whose rescan, served check or catalog push failed: retry, then delete when verified.
+
+        At most one rescan per poll for all rows together.
+        """
         if not self.settings.get('delete_incoming_after_ingest'):
             return
         listed = {item.key: item for item in items}
-        for row in self.db.items():
-            if row['state'] != 'live' or row['deleted'] or row['key'] not in listed:
-                continue
-            if row['processed_signature'] != listed[row['key']].content_signature():
-                continue
-            if row['served'] and row['catalog_verified']:
-                continue
-            if not row['catalog_verified']:
-                continue                       # needs a person (or the next upload): the catalog copy is wrong
+        candidates = [row for row in self.db.items()
+                      if row['state'] == 'live' and not row['deleted'] and row['key'] in listed
+                      and row['processed_signature'] == listed[row['key']].content_signature()
+                      and not (row['served'] and row['catalog_verified'])]
+        if not candidates:
+            return
+        rescan_result: Optional[Dict[str, Any]] = None
+        if any(not row['served'] for row in candidates):
             try:
-                result = self.pipeline.api.rescan()
+                rescan_result = self.pipeline.api.rescan()
             except TransientError:
-                continue
-            from ingest_pipeline import served_ids  # noqa: PLC0415
-
-            if row['db_id'] in served_ids(result):
-                self.db.upsert(row['key'], served=1)
+                rescan_result = None
+        for row in candidates:
+            item = listed[row['key']]
+            served, verified = bool(row['served']), bool(row['catalog_verified'])
+            warnings: List[str] = []
+            if not verified and self.pipeline.config.push_catalog:
+                verified, warnings = self.pipeline.repush(item, row['kind'] or 'new', row['sha256'] or '')
+            if not served and rescan_result is not None:
+                served = self.pipeline.verify_served(row['db_id'], row['sha256'], row['version'], rescan_result,
+                                                     warnings)
+            self.db.upsert(row['key'], served=int(served), catalog_verified=int(verified))
+            if warnings:
+                self.db.event(row['key'], 'live', 'retry: ' + '; '.join(warnings)[:1000])
+            if served and verified:
                 outcome = Outcome(state='live', served=True, catalog_verified=True, db_id=row['db_id'],
-                                  consumed=json.loads(row['consumed'] or '{}'))
-                self.delete_if_verified(listed[row['key']], outcome)
+                                  consumed=json.loads(row['consumed'] or '{}'),
+                                  shared_keys=json.loads(row['shared_keys'] or '[]'))
+                self.delete_if_verified(item, outcome, items)
+
+    def prune_work_dirs(self) -> None:
+        """Remove work dirs of finished items older than ``work_ttl_days`` (held and failed ones are kept that long)."""
+        ttl_days = float(self.settings.get('work_ttl_days', 14))
+        work_root = self.pipeline.config.work_root
+        if not work_root.is_dir():
+            return
+        from ingest_pipeline import slug  # noqa: PLC0415
+
+        active = {slug(row['key']) for row in self.db.items() if row['state'] in ('seen', 'stable', 'pulled', 'checked')}
+        cutoff = self.clock() - ttl_days * 86400
+        for entry in work_root.iterdir():
+            if entry.is_dir() and entry.name not in active and entry.stat().st_mtime < cutoff:
+                import shutil  # noqa: PLC0415
+
+                shutil.rmtree(entry, ignore_errors=True)
+                self.db.event('-', 'cleanup', f'removed work dir {entry.name} (older than {ttl_days:g} days)')
 
     def _notify(self, key: str) -> None:
         row = self.db.get(key)

@@ -18,9 +18,10 @@ jobs:
   minimal edits of :mod:`md_edit`, so caveats, curation fields and facet
   mappings stay as they are.
 
-:func:`merge_sidecar_incoming_wins` merges an updated ``.h5ad.mus``: the
-upload wins for every key it sets, local-only keys stay, and every changed
-key is reported for the changelog.
+:func:`merge_sidecar_store_wins` merges an updated ``.h5ad.mus``: curated
+store values win unless the deposit sets ``override_<key>=true``, new keys
+are adopted, conflicts are reported for the changelog, and a change of
+``access``, ``data_use`` or ``license`` is reported for a person to decide.
 
 Nothing here talks to S3 or the server; nothing writes outside the paths the
 caller names.
@@ -28,6 +29,7 @@ caller names.
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
@@ -241,15 +243,17 @@ def unique_file_id(basename: str, group_id: Optional[str], taken_db_ids: Set[str
     """A 3-character dataset id for ``basename`` that is free in its group, or None."""
     from md_check import generate_file_id  # noqa: PLC0415
 
+    taken = {db_id.upper() for db_id in taken_db_ids}
+    group = (group_id or '').upper()
     candidate = generate_file_id(basename)
-    if not group_id or f'{group_id}/{candidate}' not in taken_db_ids:
+    if not group_id or f'{group}/{candidate.upper()}' not in taken:
         return candidate
     letters = [char for char in basename.upper() if char.isalnum()]
     for first in letters[:1] or ['X']:
         for second in letters + list('ABCDEFGHIJKLMNOPQRSTUVWXYZ'):
             for third in letters + list('0123456789'):
                 candidate = f'{first}{second}{third}'
-                if f'{group_id}/{candidate}' not in taken_db_ids:
+                if f'{group}/{candidate}' not in taken:
                     return candidate
     return None
 
@@ -338,7 +342,7 @@ def build_index_md(sidecar: Dict[str, Any], group: str, taken_group_ids: Set[str
     from md_check import generate_group_id  # noqa: PLC0415
 
     group_id = generate_group_id(group)
-    if group_id in taken_group_ids:
+    if group_id.upper() in {taken.upper() for taken in taken_group_ids}:
         group_id = None
     meta: Dict[str, Any] = {'group': group}
     if group_id:
@@ -355,57 +359,128 @@ def build_index_md(sidecar: Dict[str, Any], group: str, taken_group_ids: Set[str
     return meta, body
 
 
+_NAME_RE = re.compile(r"^[^\W\d_][\w .,'-]{0,79}$")
+_EMAIL_RE = re.compile(r'^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$')
+
+
 def depositor_of(sidecar: Dict[str, Any]) -> Optional[str]:
-    """``Name <email>`` (or whichever part is present) from the sidecar, else None."""
+    """``Name <email>`` usable as a git author, from ``depositor`` / ``depositor_email``; None when absent or invalid.
+
+    The name may hold letters, spaces and ``.,'-``; the e-mail must look like
+    one. Anything else is refused (see :func:`depositor_note`), so a sidecar
+    cannot smuggle options or odd bytes into a git command.
+    """
     name = str(sidecar.get('depositor') or '').strip()
     email = str(sidecar.get('depositor_email') or '').strip()
-    if name and email:
-        return f'{name} <{email}>'
-    if email:
-        return f'{email.split("@")[0]} <{email}>'
-    if name and '<' in name and '>' in name:
-        return name
-    return None
+    if not email or not _EMAIL_RE.match(email):
+        return None
+    if not name:
+        name = email.split('@')[0]
+    if not _NAME_RE.match(name):
+        return None
+    return f'{name} <{email}>'
+
+
+def depositor_note(sidecar: Dict[str, Any]) -> Optional[str]:
+    """Changelog line for a depositor that is stated but not usable as a git author."""
+    raw = ' '.join(str(sidecar.get(key) or '') for key in DEPOSITOR_KEYS).strip()
+    if not raw or depositor_of(sidecar):
+        return None
+    cleaned = ''.join(char for char in raw if char.isprintable())[:120]
+    return f'Depositor as stated in the sidecar (not used as the git author): {cleaned!r}.'
 
 
 # ── sidecar merge for updates ────────────────────────────────────────────────
 
-def merge_sidecar_incoming_wins(local_text: str, incoming_text: str) -> Tuple[str, List[Tuple[str, str, str]]]:
-    """Merge an updated ``.h5ad.mus`` into the store's: the upload wins for every key it sets.
+#: Keys whose change on an update always needs a person (consent and publication terms).
+GUARDED_SIDECAR_KEYS = ('access', 'data_use', 'license')
+OVERRIDE_PREFIX = 'override_'
 
-    Local-only keys and the local file's comments stay. Returns the merged
-    text and the changed annotation keys as ``(key, old, new)`` (machine keys
-    such as ``s3_*`` and ``mtime`` are not reported; ``old`` is empty for a
-    new key).
+
+@dataclass
+class SidecarMerge:
+    """Result of :func:`merge_sidecar_store_wins`."""
+    text: str
+    adopted: List[Tuple[str, str, str]] = field(default_factory=list)       # (key, '', new)
+    overridden: List[Tuple[str, str, str]] = field(default_factory=list)    # (key, old, new)
+    conflicts: List[Tuple[str, str, str]] = field(default_factory=list)     # (key, store, deposit): store kept
+    guarded: List[Tuple[str, str, str]] = field(default_factory=list)       # access / data_use / license changes
+
+    @property
+    def changes(self) -> List[Tuple[str, str, str]]:
+        return self.adopted + self.overridden
+
+
+def _pairs(text: str) -> Dict[str, str]:
+    return {key: value for kind, key, value in parse_lines(text) if kind == 'pair'}
+
+
+def merge_sidecar_store_wins(store_text: str, incoming_text: str) -> SidecarMerge:
+    """Merge an updated ``.h5ad.mus`` into the store's, protecting curated values.
+
+    * a key only in the deposit is adopted;
+    * a key in both with another value keeps the **store** value (a conflict,
+      recorded) unless the deposit also sets ``override_<key>=true``;
+    * machine keys (``s3_*``, ``sha256``, ...) follow the deposit;
+    * ``access``, ``data_use`` and ``license`` changes are reported in
+      ``guarded``: the caller stops the item for a person, override or not;
+    * ``override_*`` lines are not written.
     """
-    local_rows = parse_lines(local_text)
-    incoming_pairs: Dict[str, str] = {}
-    for kind, key, value in parse_lines(incoming_text):
-        if kind == 'pair':
-            incoming_pairs[key] = value
-    changed: List[Tuple[str, str, str]] = []
+    incoming = _pairs(incoming_text)
+    overrides = {key[len(OVERRIDE_PREFIX):] for key, value in incoming.items()
+                 if key.startswith(OVERRIDE_PREFIX) and value.strip().lower() in ('true', '1', 'yes')}
+    result = SidecarMerge(text='')
     out_lines: List[str] = []
     written: Set[str] = set()
-    for kind, key, raw in local_rows:
+    for kind, key, raw in parse_lines(store_text):
         if kind != 'pair':
             out_lines.append(raw)
             continue
         if key in written:
             continue
         written.add(key)
-        value = incoming_pairs.get(key, raw)
-        if key in incoming_pairs and raw.strip() != value.strip() and key not in UNREPORTED_SIDECAR_KEYS:
-            changed.append((key, raw.strip(), value.strip()))
+        value = raw
+        if key in incoming and incoming[key].strip() != raw.strip():
+            old, new = raw.strip(), incoming[key].strip()
+            if key in GUARDED_SIDECAR_KEYS:
+                result.guarded.append((key, old, new))
+            elif key in UNREPORTED_SIDECAR_KEYS:
+                value = incoming[key]
+            elif key in overrides:
+                value = incoming[key]
+                result.overridden.append((key, old, new))
+            else:
+                result.conflicts.append((key, old, new))
         out_lines.append(f'{key}={value}')
-    new_keys = sorted(key for key in incoming_pairs if key not in written)
+    new_keys = sorted(key for key in incoming if key not in written and not key.startswith(OVERRIDE_PREFIX))
     if new_keys and out_lines and out_lines[-1].strip():
         out_lines.append('')
     for key in new_keys:
-        out_lines.append(f'{key}={incoming_pairs[key]}')
-        if key not in UNREPORTED_SIDECAR_KEYS:
-            changed.append((key, '', incoming_pairs[key].strip()))
+        out_lines.append(f'{key}={incoming[key]}')
+        if key in GUARDED_SIDECAR_KEYS:
+            result.guarded.append((key, '', incoming[key].strip()))
+        elif key not in UNREPORTED_SIDECAR_KEYS:
+            result.adopted.append((key, '', incoming[key].strip()))
     text = '\n'.join(out_lines)
-    return (text if text.endswith('\n') else text + '\n'), changed
+    result.text = text if text.endswith('\n') else text + '\n'
+    return result
+
+
+def seed_md_delta(seed_meta: Dict[str, Any], store_meta: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """What a deposited ``<basename>.md`` seed adds to a dataset that is already published.
+
+    Returns ``(new caveats, conflicting keys)``: caveats whose message is not in
+    the store yet (applied non-destructively), and other keys whose value
+    differs from the store (not applied: a person edits them).
+    """
+    managed = {'version', 'changelog', 'sha256', 'n_obs', 'n_vars', 'layer_stats', 'ingest', 'updated', 'date',
+               'caveats'}
+    known = {str(caveat.get('message')) for caveat in (store_meta.get('caveats') or []) if isinstance(caveat, dict)}
+    new_caveats = [caveat for caveat in (seed_meta.get('caveats') or [])
+                   if isinstance(caveat, dict) and caveat.get('message') and str(caveat['message']) not in known]
+    conflicts = sorted(key for key, value in seed_meta.items()
+                       if key not in managed and store_meta.get(key) != value)
+    return new_caveats, conflicts
 
 
 # ── updates of an existing dataset ───────────────────────────────────────────
@@ -425,14 +500,15 @@ def _short(values: Sequence[str], limit: int = 8) -> str:
 
 
 def plan_update(old_meta: Dict[str, Any], old_profile: Optional[H5adProfile], new_profile: Optional[H5adProfile],
-                old_sha: str, new_sha: str, sidecar_changes: List[Tuple[str, str, str]]) -> UpdatePlan:
+                old_sha: str, new_sha: str, sidecar_changes: List[Tuple[str, str, str]],
+                extra_changes: Sequence[str] = (), notes: Sequence[str] = ()) -> UpdatePlan:
     """Version bump and changelog lines for an upload to an existing dataset path.
 
     ``minor`` when the h5ad hash differs, ``patch`` when only sidecar keys
     changed, ``None`` when the upload is identical to what is published.
     """
     changes: List[str] = []
-    data_changed = bool(old_sha) and old_sha != new_sha or not old_sha
+    data_changed = (not old_sha) or old_sha != new_sha
     if data_changed:
         changes.append(f'New data from an S3 deposit: h5ad sha256 {old_sha[:12] or "unknown"} -> {new_sha[:12]}.')
         if old_profile and new_profile:
@@ -452,18 +528,21 @@ def plan_update(old_meta: Dict[str, Any], old_profile: Optional[H5adProfile], ne
             changes.append(f'Cells: {old_meta.get("n_obs")} -> {new_profile.n_obs}.')
     for key, old_value, new_value in sidecar_changes:
         if old_value:
-            changes.append(f'Sidecar {key}: {old_value!r} -> {new_value!r} (the deposit wins).')
+            changes.append(f'Sidecar {key}: {old_value!r} -> {new_value!r} (override in the deposit).')
         else:
             changes.append(f'Sidecar {key} added: {new_value!r}.')
-    if not data_changed and not sidecar_changes:
+    changes.extend(extra_changes)
+    if not data_changed and not sidecar_changes and not extra_changes:
         return UpdatePlan(None, [], None, [])
+    changes.extend(notes)
     return UpdatePlan('minor' if data_changed else 'patch', changes, old_sha if data_changed else None,
                       sidecar_changes)
 
 
 def update_md_text(old_text: str, plan: UpdatePlan, new_sha: str, new_profile: Optional[H5adProfile],
                    today: str, caveat: Optional[Dict[str, Any]] = None,
-                   ingest: Optional[Dict[str, Any]] = None) -> str:
+                   ingest: Optional[Dict[str, Any]] = None,
+                   extra_caveats: Sequence[Dict[str, Any]] = ()) -> str:
     """Apply an :class:`UpdatePlan` to the store's ``.md`` text with verified minimal edits.
 
     Only ``sha256``, ``n_obs``, ``n_vars``, ``layer_stats`` (when the old
@@ -488,10 +567,10 @@ def update_md_text(old_text: str, plan: UpdatePlan, new_sha: str, new_profile: O
             operations.append(md_edit.set_top('layer_stats', new_profile.layer_stats))
     if ingest is not None:
         operations.append(md_edit.set_top('ingest', ingest))
-    if caveat is not None:
-        operations.append(md_edit.append_top('caveats', caveat))
+    for item in list(extra_caveats) + ([caveat] if caveat is not None else []):
+        operations.append(md_edit.append_top('caveats', item))
     if not old_meta.get('version'):
-        operations.append(md_edit.set_top('version', '1.0.0'))
+        operations.append(md_edit.set_top('version', '0.0.0'))     # archived as 0.0.0, bumped from there
     operations.append(md_edit.bump_version(plan.changes, today, part=plan.part,
                                            previous_sha256=plan.previous_sha256))
     return md_edit.apply_edits(old_text, operations)

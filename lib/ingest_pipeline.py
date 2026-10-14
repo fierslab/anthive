@@ -8,20 +8,29 @@ The deposit layout is the one ``mus s3 upload`` writes (mus
     <prefix><data_project>/static/<file>                          --static FILE
     <prefix><data_project>/de/<folder>/<file>(.mus)               DE tables
 
-An :class:`Item` is one h5ad with its sidecar. :class:`Pipeline` runs, for one
-item: pull (ETag pinned), sha256 against the sidecar, catalogue ``.md``
-(filled for a new dataset, version bump for an update), ``ant-convert`` in
-the work dir, ``ant-ingest-check`` (errors and held reasons block), atomic
-placement into the store (an update archives the previous version and swaps
-under ``/admin/release`` + ``/admin/restore``), rescan, push of the catalog
-copy (verified by HEAD), the post steps, a store git commit and a final
-rescan. Anything before placement that fails blocks publication; anything
-after it is a warning.
+Every key segment must match :data:`SEGMENT_RE` (no ``..``, no leading ``_``
+or ``.``, ASCII); anything else is reported as malformed and never pulled,
+placed or deleted, and every write into the store is checked to stay inside
+its group folder (:func:`ensure_inside`).
 
-:func:`delete_consumed` is the only function that deletes on S3, and only
-the exact keys an item consumed, each when its ETag is still the pulled one.
-It never takes a prefix. The legacy h5ad checker and its umbrella wrapper,
-which rewrite ``.md`` files, are never called (``tests/test_ingest_watch_*``).
+An :class:`Item` is one h5ad with its sidecar. :class:`Pipeline` runs, for one
+item: pull (ETag pinned, kept across retries), sha256 against the sidecar,
+catalogue ``.md`` (filled for a new dataset, version bump for an update),
+``ant-convert`` in the work dir, ``ant-ingest-check`` (errors and held reasons
+block; ``access=public`` is always held for an admin), placement into the store
+through a :class:`SwapJournal` (staged hidden siblings, hard links into
+``_versions/``, renames with the ``.md`` last; an interrupted swap is rolled
+forward or back by :func:`recover_swaps` before anything else runs), rescan
+and a served check of the new sha256 and version, push of the catalog copy
+(verified by HEAD), the post steps, a store git commit and a final rescan.
+Anything before placement that fails blocks publication; anything after it is
+a warning.
+
+Only what was actually placed or applied is "consumed". :func:`delete_consumed`
+is the only function that deletes on S3: the exact consumed keys, each with a
+conditional ``DeleteObject`` (``IfMatch``) or, where the store does not support
+it, a HEAD immediately before. It never takes a prefix. The legacy h5ad checker
+and its umbrella wrapper, which rewrite ``.md`` files, are never called.
 """
 from __future__ import annotations
 
@@ -29,16 +38,19 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
+import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 import ingest_md_fill as md_fill
 import ingest_versions
@@ -50,6 +62,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BIN = REPO_ROOT / 'bin'
 POST_STEPS = ('score', 'gene_stats', 'module_variability', 'facet_test', 'facet_test_modules',
               'ingest_index', 'manifest')
+#: One key segment (data project, subfolder, file name, DE folder).
+SEGMENT_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]*$')
+#: Child exit codes that mean "interrupted", not "the dataset is wrong": retried later.
+TRANSIENT_EXIT_CODES = {124, 127, 137, 143}
+UPDATE_MARKER_KEYS = ('update_of', 'previous_sha256')
 
 MULTIPART_THRESHOLD = 256 * 1024 ** 2
 RESUMABLE_THRESHOLD = 1 * 1024 ** 3
@@ -59,7 +76,7 @@ RESUMABLE_RETRIES = 15
 
 
 class TransientError(RuntimeError):
-    """A failure worth retrying later (S3 hiccup, object changed during the pull)."""
+    """A failure worth retrying later (S3 hiccup, object changed, server down, stop requested)."""
 
 
 class Blocked(RuntimeError):
@@ -71,6 +88,23 @@ class Blocked(RuntimeError):
         self.state = state
         self.report_path = report_path
         self.held_reasons = held_reasons or []
+
+
+# ── key validation ───────────────────────────────────────────────────────────
+
+def valid_segment(segment: str) -> bool:
+    """True for a safe key segment: ASCII letters, digits, ``._-``, not starting with ``.`` or ``_``."""
+    return (bool(segment) and segment not in ('.', '..') and unicodedata.normalize('NFC', segment) == segment
+            and bool(SEGMENT_RE.match(segment)))
+
+
+def ensure_inside(target: Path, root: Path) -> Path:
+    """``target`` resolved; raises ValueError unless it lies inside ``root``."""
+    resolved_root = Path(root).resolve()
+    resolved = Path(target).resolve()
+    if resolved != resolved_root and resolved_root not in resolved.parents:
+        raise ValueError(f'refusing to write {resolved}: outside {resolved_root}')
+    return resolved
 
 
 # ── the deposit: objects and items ───────────────────────────────────────────
@@ -88,6 +122,10 @@ class ObjInfo:
         modified = obj.get('LastModified')
         stamp = modified.timestamp() if hasattr(modified, 'timestamp') else float(modified or 0)
         return cls(obj['Key'], str(obj.get('ETag', '')).strip('"'), int(obj.get('Size', 0)), stamp)
+
+    @property
+    def name(self) -> str:
+        return self.key.rsplit('/', 1)[-1]
 
 
 @dataclass
@@ -123,7 +161,7 @@ class Item:
         return json.dumps(parts)
 
     def settle_signature(self) -> str:
-        """Everything the item may consume; must stay unchanged across two polls."""
+        """Everything the item may consume (static, seeds, DE of the project); stable over two listings."""
         objs = [self.h5ad] + ([self.mus] if self.mus else []) + self.static + self.de
         return json.dumps(sorted((obj.key, obj.etag, obj.size) for obj in objs))
 
@@ -131,30 +169,59 @@ class Item:
         objs = [self.h5ad] + ([self.mus] if self.mus else []) + self.static + self.de
         return max(obj.last_modified for obj in objs)
 
-    def seed_names(self) -> Tuple[str, str]:
-        """Names of the catalogue seeds a deposit may carry as ``--static`` files."""
-        return f'{self.basename}.md', 'index.md'
+    @property
+    def md_seed_name(self) -> str:
+        return f'{self.basename}.md'
 
-    def static_to_consume(self) -> List[ObjInfo]:
-        """Static files this item uses: all but the ``.md`` seeds of other items in the project."""
-        others = {f'{name}.md' for name in self.other_basenames}
-        return [obj for obj in self.static if obj.key.rsplit('/', 1)[-1] not in others]
+    def own_static_names(self) -> Set[str]:
+        """Static names that belong to this item only: its ``.md`` seed and its ``<basename>.index.md``."""
+        return {self.md_seed_name, f'{self.basename}.index.md'}
+
+    def static_for_item(self) -> List[ObjInfo]:
+        """Static files this item may use: all but the seeds of the other items of the project."""
+        others = set()
+        for name in self.other_basenames:
+            others |= {f'{name}.md', f'{name}.index.md'}
+        return [obj for obj in self.static if obj.name not in others]
+
+    def index_seed(self) -> Optional[ObjInfo]:
+        """``static/<basename>.index.md``, else ``static/index.md`` when no other item has its own index seed."""
+        by_name = {obj.name: obj for obj in self.static}
+        if f'{self.basename}.index.md' in by_name:
+            return by_name[f'{self.basename}.index.md']
+        if any(f'{name}.index.md' in by_name for name in self.other_basenames):
+            return None
+        return by_name.get('index.md')
 
 
 def plan_items(objects: Sequence[Dict[str, Any]], prefix: str) -> Tuple[List[Item], List[str]]:
-    """Group a listing of ``prefix`` into items. Returns ``(items, malformed messages)``."""
-    infos = {obj['Key']: ObjInfo.from_listing(obj) for obj in objects}
-    items: List[Item] = []
+    """Group a listing of ``prefix`` into items. Returns ``(items, malformed messages)``.
+
+    A key with an unsafe segment is malformed: it is reported and never
+    processed, placed or deleted.
+    """
+    infos: Dict[str, ObjInfo] = {}
     malformed: List[str] = []
+    for obj in objects:
+        key = obj['Key']
+        if not key.startswith(prefix):
+            continue
+        parts = key[len(prefix):].split('/')
+        if not all(valid_segment(part) for part in parts):
+            malformed.append(f'{key}: unsafe key segment (allowed: letters, digits, ._-, not starting with . or _)')
+            continue
+        infos[key] = ObjInfo.from_listing(obj)
+    items: List[Item] = []
     static_by_project: Dict[str, List[ObjInfo]] = {}
     de_by_project: Dict[str, List[ObjInfo]] = {}
     for key in sorted(infos):
-        rest = key[len(prefix):]
-        parts = rest.split('/')
-        if len(parts) >= 3 and parts[1] == 'static':
+        parts = key[len(prefix):].split('/')
+        if len(parts) == 3 and parts[1] == 'static':
             static_by_project.setdefault(parts[0], []).append(infos[key])
-        elif len(parts) >= 4 and parts[1] == 'de':
+        elif len(parts) == 4 and parts[1] == 'de':
             de_by_project.setdefault(parts[0], []).append(infos[key])
+        elif len(parts) >= 3 and parts[1] in ('static', 'de'):
+            malformed.append(f'{key}: expected {prefix}<data_project>/static/<file> or .../de/<folder>/<file>')
     for key in sorted(infos):
         if not key.endswith(H5AD_SUFFIX):
             continue
@@ -166,12 +233,12 @@ def plan_items(objects: Sequence[Dict[str, Any]], prefix: str) -> Tuple[List[Ite
         else:
             malformed.append(f'{key}: expected {prefix}<data_project>/[<subfolder>/]<file>.h5ad')
             continue
-        if not data_project or data_project.startswith(('_', '.')):
-            malformed.append(f'{key}: data project {data_project!r} is not allowed')
+        basename = filename[:-len(H5AD_SUFFIX)]
+        if not valid_segment(basename):
+            malformed.append(f'{key}: unsafe dataset name {basename!r}')
             continue
-        items.append(Item(prefix, data_project, subfolder, filename[:-len(H5AD_SUFFIX)], infos[key],
-                          infos.get(key + '.mus'), static_by_project.get(data_project, []),
-                          de_by_project.get(data_project, [])))
+        items.append(Item(prefix, data_project, subfolder, basename, infos[key], infos.get(key + '.mus'),
+                          static_by_project.get(data_project, []), de_by_project.get(data_project, [])))
     for key in sorted(infos):
         parts = key[len(prefix):].split('/')
         if key.endswith(MUS_SUFFIX) and key[:-len('.mus')] not in infos and 'de' not in parts[1:2]:
@@ -273,6 +340,14 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def md5_file(path: Path) -> str:
+    digest = hashlib.md5()  # noqa: S324 - compared with a single-part S3 ETag, not for security
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(2 ** 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def parse_sidecar_text(text: str) -> Dict[str, str]:
     """KEY=VALUE pairs of a sidecar (last occurrence wins, comments skipped)."""
     pairs: Dict[str, str] = {}
@@ -293,8 +368,14 @@ def head_etag(s3: Any, bucket: str, key: str) -> Optional[str]:
         return None
 
 
+def _error_code(exc: BaseException) -> str:
+    response = getattr(exc, 'response', None) or {}
+    return str((response.get('Error') or {}).get('Code') or type(exc).__name__)
+
+
 def delete_consumed(s3: Any, bucket: str, prefix: str, consumed: Dict[str, str],
-                    record: Optional[Callable[[str, str, str], None]] = None) -> Tuple[List[str], List[str]]:
+                    record: Optional[Callable[[str, str, str], None]] = None,
+                    keep: Optional[Dict[str, str]] = None) -> Tuple[List[str], List[str]]:
     """Delete the exact incoming keys an item consumed, each only if its ETag is unchanged.
 
     Args:
@@ -302,38 +383,57 @@ def delete_consumed(s3: Any, bucket: str, prefix: str, consumed: Dict[str, str],
         consumed: ``{key: etag at pull time}``.
         record: Called as ``record(key, etag, outcome)`` with outcome
             ``deleted`` or ``skipped:<reason>``.
+        keep: ``{key: reason}`` of consumed keys that must stay this time
+            (shared static files while a sibling item is pending).
 
     Returns:
-        ``(deleted keys, skipped keys)``. Keys are deleted one at a time with
-        ``DeleteObject``; there is no prefix or batch delete.
+        ``(deleted keys, skipped keys)``. One conditional ``DeleteObject``
+        (``IfMatch``) per key; where the store refuses the condition, a HEAD
+        right before the delete. No prefix or batch delete.
     """
     deleted: List[str] = []
     skipped: List[str] = []
+    keep = keep or {}
     for key, etag in sorted(consumed.items()):
-        if not prefix or not key.startswith(prefix) or key.endswith('/') or key == prefix:
+        parts = key[len(prefix):].split('/') if prefix and key.startswith(prefix) else []
+        if not parts or not all(valid_segment(part) for part in parts):
             raise ValueError(f'refusing to delete {key!r}: not an object under {prefix!r}')
-        current = head_etag(s3, bucket, key)
-        if current is None:
+        if key in keep:
             skipped.append(key)
             if record:
-                record(key, etag, 'skipped:absent')
+                record(key, etag, f'skipped:{keep[key]}')
             continue
-        if current != etag:
-            skipped.append(key)
-            if record:
-                record(key, etag, f'skipped:etag_changed:{current}')
-            continue
-        s3.delete_object(Bucket=bucket, Key=key)
-        deleted.append(key)
+        outcome = _delete_if_match(s3, bucket, key, etag)
+        (deleted if outcome == 'deleted' else skipped).append(key)
         if record:
-            record(key, etag, 'deleted')
+            record(key, etag, outcome)
     return deleted, skipped
+
+
+def _delete_if_match(s3: Any, bucket: str, key: str, etag: str) -> str:
+    try:
+        s3.delete_object(Bucket=bucket, Key=key, IfMatch=f'"{etag}"')
+        return 'deleted'
+    except Exception as exc:  # noqa: BLE001 - decide below whether the condition is unsupported
+        code = _error_code(exc)
+        if code in ('PreconditionFailed', '412'):
+            current = head_etag(s3, bucket, key)
+            return 'skipped:absent' if current is None else f'skipped:etag_changed:{current}'
+        if code in ('NoSuchKey', '404'):
+            return 'skipped:absent'
+    current = head_etag(s3, bucket, key)       # condition not supported: HEAD right before the delete
+    if current is None:
+        return 'skipped:absent'
+    if current != etag:
+        return f'skipped:etag_changed:{current}'
+    s3.delete_object(Bucket=bucket, Key=key)
+    return 'deleted'
 
 
 # ── subprocesses and the server ──────────────────────────────────────────────
 
 class SubprocessRunner:
-    """Runs the ``ant-*`` tools; output goes to one log file per item."""
+    """Runs the ``ant-*`` tools; output goes to one log file per day."""
 
     def __init__(self, log_path: Optional[Path] = None, env: Optional[Dict[str, str]] = None):
         self.log_path = log_path
@@ -341,7 +441,7 @@ class SubprocessRunner:
 
     def run(self, label: str, cmd: Sequence[str], cwd: Optional[Path] = None,
             timeout: Optional[float] = None) -> Tuple[int, str]:
-        """Run ``cmd``; returns ``(exit code, last 30 lines of output)``. Exit 127: not found."""
+        """Run ``cmd``; returns ``(exit code, last 30 lines of output)``. 127: not found, 124: timeout."""
         environment = {**os.environ, **(self.env or {})}
         started = time.time()
         try:
@@ -360,8 +460,13 @@ class SubprocessRunner:
         return code, '\n'.join(output.strip().splitlines()[-30:])
 
 
+def transient_exit(code: int) -> bool:
+    """A child that was killed, timed out or not found: retry, do not blame the dataset."""
+    return code < 0 or code in TRANSIENT_EXIT_CODES
+
+
 class ApiClient:
-    """Local ant-serve admin calls (loopback local tool, or the internal secret header)."""
+    """Local ant-serve calls (loopback local tool, or the internal secret header)."""
 
     def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None,
                  retry_delays: Sequence[float] = (5, 10, 20, 40, 60, 60, 60)):
@@ -369,9 +474,9 @@ class ApiClient:
         self.headers = headers or {}
         self.retry_delays = list(retry_delays)
 
-    def _post(self, path: str, timeout: float = 600) -> Dict[str, Any]:
-        request = urllib.request.Request(self.base_url + path, data=b'{}', method='POST',
-                                         headers={'Content-Type': 'application/json', **self.headers})
+    def _request(self, path: str, method: str = 'POST', timeout: float = 600) -> Dict[str, Any]:
+        request = urllib.request.Request(self.base_url + path, data=b'{}' if method == 'POST' else None,
+                                         method=method, headers={'Content-Type': 'application/json', **self.headers})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read() or b'{}')
 
@@ -382,7 +487,7 @@ class ApiClient:
             if delay:
                 time.sleep(delay)
             try:
-                return self._post(path)
+                return self._request(path)
             except (urllib.error.URLError, OSError, ValueError) as exc:
                 last_error = exc
         raise TransientError(f'POST {path} failed: {last_error}')
@@ -395,6 +500,13 @@ class ApiClient:
 
     def restore(self, db_id: str) -> Dict[str, Any]:
         return self.post_with_retry(f'/admin/restore/{db_id}')
+
+    def info(self, db_id: str) -> Dict[str, Any]:
+        """``GET /databases/{db_id}/info`` (version and sha256 of the served dataset)."""
+        try:
+            return self._request(f'/databases/{urllib.parse.quote(db_id)}/info', method='GET', timeout=60)
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise TransientError(f'GET info of {db_id} failed: {exc}') from exc
 
 
 def served_ids(rescan_result: Dict[str, Any]) -> List[str]:
@@ -441,6 +553,122 @@ def place_file(source: Path, target: Path) -> None:
     os.replace(partial, target)
 
 
+# ── swap journal ─────────────────────────────────────────────────────────────
+
+class SwapJournal:
+    """Crash-safe placement of a dataset version into the store.
+
+    1. ``stage``: copy each new file next to its target as a hidden sibling
+       (``.<name>.ingest-new``); ``link``: hard-link a current file into the
+       version folder. Nothing visible changes.
+    2. ``commit``: mark the journal ``committing``, rename every hidden sibling
+       over its target (the ``.md`` last), remove the files listed for removal,
+       delete the journal.
+    3. :func:`recover_swaps` (run before any item is processed): a journal in
+       ``staged`` is rolled back (hidden files and links removed); one in
+       ``committing`` is rolled forward.
+    """
+
+    def __init__(self, journal_dir: Path, name: str, root: Path, meta: Optional[Dict[str, Any]] = None):
+        self.path = Path(journal_dir) / f'{name}.json'
+        self.root = Path(root)
+        self.data: Dict[str, Any] = {'phase': 'staged', 'root': str(root), 'entries': [], 'created': [],
+                                     'remove': [], 'meta': meta or {}, 'started': _now_iso()}
+
+    @classmethod
+    def load(cls, path: Path) -> 'SwapJournal':
+        data = json.loads(Path(path).read_text())
+        journal = cls(Path(path).parent, Path(path).stem, Path(data['root']))
+        journal.data = data
+        return journal
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        partial = self.path.with_suffix('.json.partial')
+        partial.write_text(json.dumps(self.data, indent=1))
+        os.replace(partial, self.path)
+
+    def stage(self, source: Path, target: Path) -> None:
+        ensure_inside(target.parent, self.root)
+        hidden = target.with_name(f'.{target.name}.ingest-new')
+        self.data['entries'].append({'hidden': str(hidden), 'final': str(target)})
+        self._save()
+        place_file(source, hidden)
+
+    def link(self, source: Path, destination: Path) -> None:
+        ensure_inside(destination.parent, self.root)
+        self.data['created'].append(str(destination))
+        self._save()
+        ingest_versions.link_or_copy(source, destination)
+
+    def remove_after(self, path: Path) -> None:
+        ensure_inside(path, self.root)
+        self.data['remove'].append(str(path))
+
+    def commit(self) -> None:
+        self.data['phase'] = 'committing'
+        self._save()
+        entries = sorted(self.data['entries'], key=lambda entry: entry['final'].endswith('.md'))
+        # Test hook for the end-to-end check of crash recovery: a pause after each rename, so a
+        # process can be killed in the middle of a commit. Unset in normal operation.
+        pause = float(os.environ.get('ANTHIVE_INGEST_SWAP_PAUSE_SECONDS', '0') or 0)
+        for entry in entries:
+            hidden, final = Path(entry['hidden']), Path(entry['final'])
+            if hidden.exists():
+                final.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(hidden, final)
+                if pause:
+                    time.sleep(pause)
+        for path in self.data['remove']:
+            Path(path).unlink(missing_ok=True)
+        self.path.unlink(missing_ok=True)
+
+    def rollback(self) -> None:
+        for entry in self.data['entries']:
+            Path(entry['hidden']).unlink(missing_ok=True)
+        for path in reversed(self.data['created']):
+            created = Path(path)
+            created.unlink(missing_ok=True)
+            for parent in (created.parent, created.parent.parent, created.parent.parent.parent):
+                try:
+                    if parent.name and parent.is_dir() and not any(parent.iterdir()):
+                        parent.rmdir()
+                except OSError:
+                    break
+        self.path.unlink(missing_ok=True)
+
+
+def recover_swaps(journal_dir: Path, log: Callable[[str], None] = print,
+                  restore: Optional[Callable[[str], Any]] = None) -> List[str]:
+    """Finish or undo every interrupted swap. Returns one message per journal.
+
+    ``restore(db_id)`` is called for a swap that had released its dataset in
+    ant-serve, so a crash between release and restore does not leave it offline.
+    """
+    messages: List[str] = []
+    folder = Path(journal_dir)
+    if not folder.is_dir():
+        return messages
+    for path in sorted(folder.glob('*.json')):
+        journal = SwapJournal.load(path)
+        if journal.data.get('phase') == 'committing':
+            journal.commit()
+            message = f'swap {path.stem}: rolled forward'
+        else:
+            journal.rollback()
+            message = f'swap {path.stem}: rolled back'
+        db_id = (journal.data.get('meta') or {}).get('released')
+        if db_id and restore is not None:
+            try:
+                restore(db_id)
+                message += f', {db_id} restored in ant-serve'
+            except Exception as exc:  # noqa: BLE001 - the server may be down; it reopens on its next start
+                message += f', restore of {db_id} failed ({exc})'
+        log(message)
+        messages.append(message)
+    return messages
+
+
 # ── the pipeline ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -460,6 +688,12 @@ class PipelineConfig:
     push_catalog: bool = True
     state_dir: Optional[Path] = None
     s3_endpoint: Optional[str] = None
+    min_free_gb: float = 50.0
+    require_update_marker: bool = False
+
+    @property
+    def journal_dir(self) -> Path:
+        return (self.state_dir or self.work_root) / 'swaps'
 
 
 @dataclass
@@ -475,6 +709,7 @@ class Outcome:
     previous_sha256: Optional[str] = None
     warnings: List[str] = field(default_factory=list)
     consumed: Dict[str, str] = field(default_factory=dict)
+    shared_keys: List[str] = field(default_factory=list)
     report_path: Optional[str] = None
     held_reasons: List[str] = field(default_factory=list)
     served: bool = False
@@ -496,20 +731,26 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
-def _slug(key: str) -> str:
+def slug(key: str) -> str:
+    """Work-dir and journal name of an item key."""
     return hashlib.sha1(key.encode()).hexdigest()[:12] + '_' + key.rsplit('/', 1)[-1].replace('.', '_')[:40]
+
+
+def _norm(value: Any) -> str:
+    return str(value or '').strip().lower()
 
 
 class Pipeline:
     """Runs one :class:`Item` from the deposit to the served store."""
 
     def __init__(self, config: PipelineConfig, s3: Any, runner: Any, api: Any,
-                 log: Callable[[str], None] = print):
+                 log: Callable[[str], None] = print, stop_requested: Callable[[], bool] = lambda: False):
         self.config = config
         self.s3 = s3
         self.runner = runner
         self.api = api
         self.log = log
+        self.stop_requested = stop_requested
 
     # helpers --------------------------------------------------------------
 
@@ -519,8 +760,19 @@ class Pipeline:
     def _timed(self, outcome: Outcome, label: str, started: float) -> None:
         outcome.timings[label] = round(time.time() - started, 1)
 
-    def _pull(self, obj: ObjInfo, dest: Path) -> None:
-        """Download one object, pinned to the ETag of the listing."""
+    def _checkpoint(self, step: str) -> None:
+        if self.stop_requested():
+            raise TransientError(f'stop requested before {step}')
+
+    def recover(self) -> List[str]:
+        """Roll interrupted swaps forward or back; call before processing any item."""
+        return recover_swaps(self.config.journal_dir, self.log, restore=self.api.restore)
+
+    def _pull(self, obj: ObjInfo, dest: Path, manifest: Optional[Dict[str, str]] = None) -> None:
+        """Download one object, pinned to the ETag of the listing; reuse a complete earlier pull."""
+        if manifest is not None and manifest.get(obj.key) == obj.etag and dest.exists() \
+                and dest.stat().st_size == obj.size:
+            return
         before = head_etag(self.s3, self.config.bucket, obj.key)
         if before != obj.etag:
             raise TransientError(f'{obj.key} changed since it was listed (ETag {before} != {obj.etag})')
@@ -535,66 +787,139 @@ class Pipeline:
             raise TransientError(f'{obj.key} changed during the pull')
         if dest.stat().st_size != obj.size:
             raise TransientError(f'{obj.key}: pulled {dest.stat().st_size} bytes, listed {obj.size}')
+        if manifest is not None:
+            manifest[obj.key] = obj.etag
 
-    def _db_id(self, store_dir_index: Path, md_meta: Dict[str, Any]) -> Optional[str]:
+    def _check_free_space(self, size: int) -> None:
+        needed = 2 * size + self.config.min_free_gb * 1e9
+        free = shutil.disk_usage(self.config.work_root).free
+        if free < needed:
+            raise TransientError(f'only {free / 1e9:.1f} GB free under {self.config.work_root}, need '
+                                 f'{needed / 1e9:.1f} GB (2x the h5ad + {self.config.min_free_gb:g} GB)')
+
+    def _db_id(self, index_path: Path, md_meta: Dict[str, Any]) -> Optional[str]:
         from metadata import parse_md_file  # noqa: PLC0415
 
-        index_meta = parse_md_file(store_dir_index)[0] if store_dir_index.exists() else {}
+        index_meta = parse_md_file(index_path)[0] if index_path.exists() else {}
         group_id = md_meta.get('group_id') or index_meta.get('group_id')
         return f'{group_id}/{md_meta["id"]}' if group_id and md_meta.get('id') else None
 
+    def _catalog_key(self, item: Item, name: str) -> str:
+        return f'{self.config.catalog_prefix}{item.rel_dir}/{name}'
+
     # main -----------------------------------------------------------------
 
-    def process(self, item: Item) -> Outcome:
-        """Run every step for ``item``. Raises :class:`TransientError` for a retry later."""
+    def process(self, item: Item, approval: Optional[Dict[str, Any]] = None) -> Outcome:
+        """Run every step for ``item``. Raises :class:`TransientError` for a retry later.
+
+        ``approval`` (``{'by', 'reasons', 'date'}``, from ``ant-ingest-watch
+        approve``) lets an item through the held reasons it names; errors
+        still block.
+        """
         outcome = Outcome()
         try:
-            self._process(item, outcome)
+            self._process(item, outcome, approval)
         except Blocked as blocked:
             outcome.state = blocked.state
             outcome.detail = str(blocked)
             outcome.report_path = blocked.report_path or outcome.report_path
             outcome.held_reasons = blocked.held_reasons
+            outcome.consumed = {}
+            outcome.shared_keys = []
         return outcome
 
-    def _process(self, item: Item, outcome: Outcome) -> None:
+    def _prepare_work(self, item: Item) -> Tuple[Path, Dict[str, str]]:
+        """The item's work dir: keeps earlier pulls whose ETag is unchanged, rebuilds the staging."""
+        work = self.config.work_root / slug(item.key)
+        pulled = work / '_pull'
+        manifest_path = work / 'pulled.json'
+        manifest: Dict[str, str] = {}
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except ValueError:
+                manifest = {}
+        current = {obj.key: obj.etag for obj in [item.h5ad, item.mus] + item.static + item.de if obj}
+        manifest = {key: etag for key, etag in manifest.items() if current.get(key) == etag}
+        if work.exists():
+            for entry in work.iterdir():
+                if entry.name in ('_pull', 'pulled.json'):
+                    continue
+                shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+        if pulled.exists():
+            wanted = {hashlib.sha1(key.encode()).hexdigest() for key in manifest}
+            in_progress = {hashlib.sha1(obj.key.encode()).hexdigest() for obj in [item.h5ad] if obj}
+            for entry in pulled.iterdir():
+                stem = entry.name.split('.')[0]
+                if stem not in wanted and stem not in in_progress:
+                    entry.unlink()
+        pulled.mkdir(parents=True, exist_ok=True)
+        return work, manifest
+
+    def _pull_cached(self, obj: ObjInfo, work: Path, manifest: Dict[str, str]) -> Path:
+        dest = work / '_pull' / (hashlib.sha1(obj.key.encode()).hexdigest() + '.bin')
+        self._pull(obj, dest, manifest)
+        (work / 'pulled.json').write_text(json.dumps(manifest))
+        return dest
+
+    def _process(self, item: Item, outcome: Outcome, approval: Optional[Dict[str, Any]]) -> None:
         from metadata import parse_md_file, write_md_file  # noqa: PLC0415
 
         cfg = self.config
         today = md_fill.today_iso()
         if item.mus is None:
             raise Blocked('failed', f'no sidecar {item.key}.mus')
-        work = cfg.work_root / _slug(item.key)
-        if work.exists():
-            shutil.rmtree(work)
-        group_dir = work / item.data_project          # the staging group folder ant-ingest-check reads
-        group_dir.mkdir(parents=True)
-        reports = cfg.reports_root / _slug(item.key)
+        store_group = cfg.store_root / item.data_project
+        store_dir = cfg.store_root / item.rel_dir
+        ensure_inside(store_dir, cfg.store_root)
+        store_h5ad = store_dir / f'{item.basename}{H5AD_SUFFIX}'
+        store_md = store_dir / f'{item.basename}.md'
+        store_mus = store_dir / f'{item.basename}{MUS_SUFFIX}'
+        store_index = store_group / 'index.md'
+        outcome.store_h5ad = str(store_h5ad)
+
+        # 0. store states the route cannot reconcile, before any download
+        versions_dir = store_dir / ingest_versions.VERSIONS_DIR / item.basename
+        if store_h5ad.exists() and not store_md.exists():
+            raise Blocked('needs_decision', f'{store_h5ad} exists without a .md; decide by hand what it is')
+        if store_md.exists() and not store_h5ad.exists():
+            raise Blocked('needs_decision', f'{store_md} exists without its h5ad (S3-only or retired dataset?)')
+        if versions_dir.exists() and not store_md.exists():
+            raise Blocked('needs_decision', f'{versions_dir} holds archived versions but there is no current '
+                                            f'{store_md.name}: an interrupted update? Restore by hand')
+        hidden = sorted(store_dir.glob(f'.{item.basename}*.ingest-new')) if store_dir.exists() else []
+        if hidden:
+            raise Blocked('needs_decision', f'staged files without a swap journal in {store_dir}: '
+                                            f'{", ".join(path.name for path in hidden[:3])}')
+        is_update = store_h5ad.exists()
+        if not is_update and cfg.push_catalog:
+            catalog_h5ad = self._catalog_key(item, f'{item.basename}{H5AD_SUFFIX}')
+            if head_etag(self.s3, cfg.bucket, catalog_h5ad) is not None:
+                raise Blocked('needs_decision', f'{catalog_h5ad} exists on S3 but there is no local dataset: '
+                                                f'pull it (ant sync pull) or retire it before depositing again')
+
+        # 1. pull, pinned to the listed ETags, kept across retries
+        self._checkpoint('the pull')
+        started = time.time()
+        work, manifest = self._prepare_work(item)
+        group_dir = work / item.data_project              # the staging group folder ant-ingest-check reads
+        group_dir.mkdir(parents=True, exist_ok=True)
+        reports = cfg.reports_root / slug(item.key)
         reports.mkdir(parents=True, exist_ok=True)
         staged_h5ad = group_dir / f'{item.basename}{H5AD_SUFFIX}'
         staged_mus = group_dir / f'{item.basename}{MUS_SUFFIX}'
         staged_md = group_dir / f'{item.basename}.md'
-
-        # 1. pull, pinned to the listed ETags
-        started = time.time()
+        if manifest.get(item.h5ad.key) != item.h5ad.etag:
+            self._check_free_space(item.h5ad.size)
         self.log(f'pull {item.mus.key}, {item.h5ad.key} ({item.h5ad.size / 1e6:.1f} MB)')
-        self._pull(item.mus, staged_mus)
-        self._pull(item.h5ad, staged_h5ad)
-        outcome.consumed[item.h5ad.key] = item.h5ad.etag
-        outcome.consumed[item.mus.key] = item.mus.etag
-        static_dir = work / '_static'
-        seeds: Dict[str, Path] = {}
-        md_seed_name, index_seed_name = item.seed_names()
-        for obj in item.static_to_consume():
-            name = obj.key.rsplit('/', 1)[-1]
-            dest = static_dir / name
-            self._pull(obj, dest)
-            outcome.consumed[obj.key] = obj.etag
-            if name in (md_seed_name, index_seed_name):
-                seeds[name] = dest
+        shutil.copy2(self._pull_cached(item.mus, work, manifest), staged_mus)
+        ingest_versions.link_or_copy(self._pull_cached(item.h5ad, work, manifest), staged_h5ad)
+        static_files: Dict[str, Tuple[ObjInfo, Path]] = {}
+        for obj in item.static_for_item():
+            static_files[obj.name] = (obj, self._pull_cached(obj, work, manifest))
         self._timed(outcome, 'pull', started)
 
-        # 2. sha256 against the sidecar
+        # 2. sha256 and update markers against the sidecar
         started = time.time()
         sidecar_text = staged_mus.read_text(encoding='utf-8', errors='replace')
         sidecar = parse_sidecar_text(sidecar_text)
@@ -612,42 +937,68 @@ class Pipeline:
         import mus  # noqa: PLC0415
 
         annotation = mus.parse_mus_file(staged_mus)
-        curation_notes: List[Tuple[str, str]] = []
-        if not annotation.get('access'):
-            with open(staged_mus, 'a', encoding='utf-8') as handle:
-                handle.write(('' if sidecar_text.endswith('\n') else '\n') + 'access=internal\n')
-            annotation['access'] = 'internal'
-            curation_notes.append(('access_default', 'The deposit did not state access; the ingestion route set '
-                                                     'access=internal (login only), the default for new datasets.'))
+        depositor = md_fill.depositor_of(sidecar)
+        ingest = md_fill.ingest_block(cfg.route, item.h5ad.key, item.h5ad.etag, depositor, today)
+        notes = [note for note in [md_fill.depositor_note(sidecar)] if note]
+        approval_caveat = None
+        if approval:
+            approval_caveat = md_fill.curation_caveat(
+                f'Published after review by {approval.get("by")} on {approval.get("date", today)} '
+                f'(held reasons approved: {", ".join(approval.get("reasons") or []) or "none"})'
+                + (f': {approval["note"]}' if approval.get('note') else '.'), 'admin_approval', today)
+            notes.append(f'Caveat: {approval_caveat["message"]}')
 
-        # 3. new dataset or update
-        store_dir = cfg.store_root / item.rel_dir
-        group_store_dir = cfg.store_root / item.data_project
-        store_h5ad = store_dir / f'{item.basename}{H5AD_SUFFIX}'
-        store_md = store_dir / f'{item.basename}.md'
-        store_mus = store_dir / f'{item.basename}{MUS_SUFFIX}'
-        store_index = group_store_dir / 'index.md'
-        outcome.store_h5ad = str(store_h5ad)
-        if store_h5ad.exists() and not store_md.exists():
-            raise Blocked('needs_decision', f'{store_h5ad} exists without a .md; decide by hand what it is')
-        if store_md.exists() and not store_h5ad.exists():
-            raise Blocked('needs_decision', f'{store_md} exists without its h5ad (S3-only or retired dataset?); '
-                                            f'decide by hand')
-        is_update = store_h5ad.exists()
-        ingest = md_fill.ingest_block(cfg.route, item.h5ad.key, item.h5ad.etag, md_fill.depositor_of(sidecar), today)
+        # 3. static files: placed only when new or identical; a differing file needs a person
+        md_seed = static_files.get(item.md_seed_name)
+        index_obj = item.index_seed()
+        index_seed = static_files.get(index_obj.name) if index_obj else None
+        seed_names = {item.md_seed_name} | ({index_obj.name} if index_obj else set())
+        plain_static = {name: pair for name, pair in static_files.items()
+                        if name not in seed_names and name not in item.own_static_names()
+                        and not name.endswith('.index.md') and name != 'index.md'}
+        for name, (obj, path) in plain_static.items():
+            target = store_group / 'static' / name
+            if target.exists() and sha256_file(target) != sha256_file(path):
+                raise Blocked('needs_decision', f'static file {name} differs from {target}; replace one of them '
+                                                f'by hand (the deposit stays in incoming)')
 
+        # 4. catalogue .md: new dataset or update
         started = time.time()
         old_sha = sha256_file(store_h5ad) if is_update else ''
-        # layer statistics stream the whole matrix: only when the data is new
+        outcome.previous_sha256 = old_sha or None
         new_profile = md_fill.profile_h5ad(staged_h5ad, with_layer_stats=not is_update or old_sha != actual)
+        index_placed = False                         # a new group's index.md is staged for placement
+        index_consumed = False                       # the deposited index seed was used or equals the store
+        seed_md_applied = False
+
+        def index_seed_matches_store() -> bool:
+            if not index_seed or not store_index.exists():
+                return False
+            if parse_md_file(index_seed[1])[0] == parse_md_file(store_index)[0]:
+                return True
+            outcome.warnings.append(f'{index_obj.name} in the deposit differs from the store index.md: '
+                                    f'not applied, left in incoming')
+            return False
         if not is_update:
-            seed_meta, seed_body = (parse_md_file(seeds[md_seed_name]) if md_seed_name in seeds else ({}, ''))
-            index_meta: Dict[str, Any]
+            if any(sidecar.get(key) for key in UPDATE_MARKER_KEYS):
+                raise Blocked('needs_decision', f'the sidecar declares an update ({", ".join(k for k in UPDATE_MARKER_KEYS if sidecar.get(k))}) '
+                                                f'but {store_md} does not exist')
+            curation_notes: List[Tuple[str, str]] = []
+            if not annotation.get('access'):
+                with open(staged_mus, 'a', encoding='utf-8') as handle:
+                    handle.write(('' if sidecar_text.endswith('\n') else '\n') + 'access=internal\n')
+                annotation['access'] = 'internal'
+                curation_notes.append(('access_default', 'The deposit did not state access; the ingestion route '
+                                                         'set access=internal (login only), the default for new '
+                                                         'datasets.'))
+            seed_meta, seed_body = parse_md_file(md_seed[1]) if md_seed else ({}, '')
             if store_index.exists():
                 index_meta = parse_md_file(store_index)[0]
+                index_consumed = index_seed_matches_store()
             else:
-                if index_seed_name in seeds:
-                    index_meta, index_body = parse_md_file(seeds[index_seed_name])
+                index_consumed = index_seed is not None
+                if index_seed:
+                    index_meta, index_body = parse_md_file(index_seed[1])
                 else:
                     from md_check import collect_db_ids  # noqa: PLC0415
 
@@ -656,6 +1007,7 @@ class Pipeline:
                                                                     item.basename)
                 index_meta.setdefault('group', item.data_project)
                 write_md_file(group_dir / 'index.md', index_meta, index_body)
+                index_placed = True
             from md_check import collect_db_ids  # noqa: PLC0415
 
             meta, filled = md_fill.fill_catalog_fields(seed_meta, new_profile, actual, annotation, item.basename,
@@ -664,37 +1016,79 @@ class Pipeline:
             for topic, message in curation_notes:
                 meta.setdefault('caveats', []).append(md_fill.curation_caveat(message, topic, today))
                 meta['changelog'][-1]['changes'].append(f'Caveat: {message}')
+            if approval_caveat:
+                meta.setdefault('caveats', []).append(approval_caveat)
+            meta['changelog'][-1]['changes'].extend(note for note in notes)
             body = seed_body or f'# {meta.get("title", item.basename)}\n\n{meta.get("description", "")}\n'
             write_md_file(staged_md, meta, body)
+            seed_md_applied = md_seed is not None
             outcome.kind = 'new'
             outcome.version = str(meta.get('version'))
-            outcome.db_id = self._db_id(group_dir / 'index.md' if not store_index.exists() else store_index, meta)
+            outcome.db_id = self._db_id(store_index if store_index.exists() else group_dir / 'index.md', meta)
             self.log(f'new dataset {item.display} ({outcome.db_id}), filled {", ".join(filled)}')
         else:
             old_text = store_md.read_text(encoding='utf-8')
             old_meta = parse_md_file(store_md)[0]
-            outcome.previous_sha256 = old_sha
-            outcome.previous_version = str(old_meta.get('version') or '')
-            merged_mus, sidecar_changes = md_fill.merge_sidecar_incoming_wins(
+            index_consumed = index_seed_matches_store()
+            outcome.previous_version = str(old_meta.get('version') or '0.0.0')
+            outcome.db_id = self._db_id(store_index, old_meta)
+            update_of = sidecar.get('update_of', '').strip()
+            if update_of and update_of.upper() != (outcome.db_id or '').upper():
+                raise Blocked('needs_decision', f'the sidecar says update_of={update_of} but {store_md} is '
+                                                f'{outcome.db_id}: a name collision? Rename one of them')
+            previous = sidecar.get('previous_sha256', '').strip()
+            if previous and previous != old_sha:
+                raise Blocked('needs_decision', f'the sidecar says previous_sha256={previous[:12]} but the store '
+                                                f'h5ad is {old_sha[:12]}: not an update of this dataset?')
+            if cfg.require_update_marker and not (update_of or previous):
+                raise Blocked('needs_decision', f'{outcome.db_id} exists; an update needs update_of= or '
+                                                f'previous_sha256= in the sidecar (ingest_watch.require_update_marker)')
+            merge = md_fill.merge_sidecar_store_wins(
                 store_mus.read_text(encoding='utf-8') if store_mus.exists() else '', staged_mus.read_text())
-            staged_mus.write_text(merged_mus)
+            if merge.guarded:
+                changed = ', '.join(f'{key}: {old or "-"} -> {new}' for key, old, new in merge.guarded)
+                raise Blocked('needs_decision', f'the update changes {changed}; access, data_use and license '
+                                                f'are changed by hand')
+            staged_mus.write_text(merge.text)
+            for key, store_value, deposit_value in merge.conflicts:
+                notes.append(f'Sidecar {key}: kept the curated {store_value!r}; the deposit said {deposit_value!r} '
+                             f'(set override_{key}=true to replace it).')
+            extra_changes: List[str] = []
+            extra_caveats: List[Dict[str, Any]] = []
+            if md_seed:
+                seed_meta = parse_md_file(md_seed[1])[0]
+                new_caveats, seed_conflicts = md_fill.seed_md_delta(seed_meta, old_meta)
+                extra_caveats.extend(new_caveats)
+                extra_changes.extend(f'Caveat from the deposited {item.md_seed_name}: {caveat["message"]}'
+                                     for caveat in new_caveats)
+                if seed_conflicts:
+                    outcome.warnings.append(f'{item.md_seed_name} in the deposit differs from the store in '
+                                            f'{", ".join(seed_conflicts)}: not applied, left in incoming')
+                else:
+                    seed_md_applied = True
             data_changed = old_sha != actual
             old_profile = md_fill.profile_h5ad(store_h5ad, with_layer_stats=False) if data_changed else None
-            plan = md_fill.plan_update(old_meta, old_profile, new_profile, old_sha, actual, sidecar_changes)
-            outcome.db_id = self._db_id(store_index, old_meta)
+            plan = md_fill.plan_update(old_meta, old_profile, new_profile, old_sha, actual, merge.changes,
+                                       extra_changes=extra_changes, notes=notes)
             if plan.part is None:
+                if approval_caveat:
+                    outcome.warnings.append('approval recorded, but the upload changes nothing')
                 outcome.kind = 'unchanged'
                 outcome.version = outcome.previous_version
                 self._timed(outcome, 'catalogue', started)
-                self._publish_unchanged(item, outcome, store_h5ad, actual)
+                self._publish_unchanged(item, outcome, store_dir, actual, plain_static, store_group,
+                                        md_seed if seed_md_applied else None,
+                                        index_seed if index_consumed else None)
                 return
             caveat = md_fill.curation_caveat(
-                f'Version {outcome.previous_version or "?"} was replaced by a deposit on {today} '
+                f'Version {outcome.previous_version} was replaced by a deposit on {today} '
                 f'({"new data" if data_changed else "metadata only"}): ' + ' '.join(plan.changes[:4]),
                 'dataset_update', today)
+            if approval_caveat:
+                extra_caveats.append(approval_caveat)
             try:
                 new_text = md_fill.update_md_text(old_text, plan, actual, new_profile, today, caveat=caveat,
-                                                  ingest=ingest)
+                                                  ingest=ingest, extra_caveats=extra_caveats)
             except Exception as exc:  # noqa: BLE001 - md_edit refuses an edit it cannot verify
                 raise Blocked('needs_decision', f'the store .md cannot be edited safely ({exc}); update it by hand')
             staged_md.write_text(new_text)
@@ -707,16 +1101,20 @@ class Pipeline:
                      f'({outcome.kind})')
         self._timed(outcome, 'catalogue', started)
 
-        # 4. convert in the work dir (not for a metadata-only update)
+        # 5. convert in the work dir (not for a metadata-only update)
         staged_duckdb = group_dir / f'{item.basename}.duckdb'
         if outcome.kind != 'update_patch':
+            self._checkpoint('the convert')
             started = time.time()
             code, tail = self.runner.run('ant-convert', [self._tool('ingest', 'ant-convert'), staged_h5ad], cwd=work)
             self._timed(outcome, 'convert', started)
+            if transient_exit(code) or self.stop_requested():
+                raise TransientError(f'ant-convert interrupted (exit {code})')
             if code != 0 or not staged_duckdb.exists():
                 raise Blocked('failed', f'ant-convert failed (exit {code}): {tail[-1500:]}')
 
-        # 5. ant-ingest-check (read-only); errors and held reasons block
+        # 6. ant-ingest-check (read-only); errors and held reasons block
+        self._checkpoint('ant-ingest-check')
         started = time.time()
         report_json = reports / f'{time.strftime("%Y%m%dT%H%M%S")}.json'
         report_md = report_json.with_suffix('.md')
@@ -728,101 +1126,157 @@ class Pipeline:
         code, tail = self.runner.run('ant-ingest-check', cmd, cwd=work)
         self._timed(outcome, 'ingest_check', started)
         outcome.report_path = str(report_json)
+        if transient_exit(code) or (not report_json.exists() and self.stop_requested()):
+            raise TransientError(f'ant-ingest-check interrupted (exit {code})')
         if code == 2 or not report_json.exists():
             raise Blocked('failed', f'ant-ingest-check could not run (exit {code}): {tail[-1500:]}', str(report_json))
         report = json.loads(report_json.read_text())
-        errors = [entry for entry in report.get('checks', report.get('results', []))
-                  if isinstance(entry, dict) and entry.get('status') == 'fail']
+        checks = [entry for entry in report.get('checks', []) if isinstance(entry, dict)]
         if report.get('result') == 'fail':
-            names = ', '.join(entry.get('id', '?') for entry in errors) or 'see report'
-            raise Blocked('failed', f'ant-ingest-check found errors: {names}', str(report_json))
-        if report.get('publish') == 'held':
-            reasons = list(report.get('held_reasons') or [])
-            raise Blocked('held', f'held for an admin: {", ".join(reasons)}', str(report_json), reasons)
-        warnings = [entry.get('id', '?') for entry in report.get('checks', report.get('results', []))
-                    if isinstance(entry, dict) and entry.get('status') == 'warn']
+            names = ', '.join(entry.get('id', '?') for entry in checks if entry.get('status') == 'fail')
+            raise Blocked('failed', f'ant-ingest-check found errors: {names or "see report"}', str(report_json))
+        held = list(report.get('held_reasons') or []) if report.get('publish') == 'held' else []
+        effective_access = _norm(parse_sidecar_text(staged_mus.read_text()).get('access'))
+        if effective_access == 'public' and 'public_access' not in held:
+            held.append('public_access')            # the watch route always holds public data for an admin
+        approved = set((approval or {}).get('reasons') or [])
+        unapproved = [reason for reason in held if reason not in approved]
+        if unapproved:
+            raise Blocked('held', f'held for an admin: {", ".join(unapproved)}', str(report_json), unapproved)
+        warnings = [entry.get('id', '?') for entry in checks if entry.get('status') == 'warn']
         if warnings:
             outcome.warnings.append(f'ingest-check warnings: {", ".join(warnings)}')
         if not outcome.db_id:
             outcome.db_id = (report.get('dataset') or {}).get('db_id')
         self.log(f'ant-ingest-check passed ({len(warnings)} warnings); publishing {outcome.db_id}')
 
-        # 6. publish: place into the store (update: archive + swap under release/restore)
+        # 7. publish through the swap journal (update: archive S3 first, release, swap, restore)
+        self._checkpoint('the swap')
         started = time.time()
         if is_update:
             self._swap_update(item, outcome, group_dir, store_dir, data_changed=outcome.kind == 'update_minor')
         else:
-            self._place_new(item, group_dir, store_dir, group_store_dir)
-        self._promote_static(item, outcome, static_dir, group_store_dir, seeds)
+            self._swap_new(item, outcome, group_dir, store_dir, store_group, place_index=index_placed)
+        placed_static = self._promote_static(plain_static, store_group, outcome)
         self._timed(outcome, 'publish', started)
         outcome.state = 'live'
         outcome.detail = f'{outcome.kind} {outcome.version}'
         self.log(f'placed in {store_dir} ({outcome.kind} {outcome.version})')
 
-        # 7. rescan and check it is served
+        # what was consumed: only what was placed or applied
+        outcome.consumed[item.h5ad.key] = item.h5ad.etag
+        outcome.consumed[item.mus.key] = item.mus.etag
+        for name in placed_static:
+            obj = plain_static[name][0]
+            outcome.consumed[obj.key] = obj.etag
+            outcome.shared_keys.append(obj.key)
+        if md_seed and seed_md_applied:
+            outcome.consumed[md_seed[0].key] = md_seed[0].etag
+        if index_seed and index_consumed:
+            outcome.consumed[index_seed[0].key] = index_seed[0].etag
+            if index_seed[0].name == 'index.md':
+                outcome.shared_keys.append(index_seed[0].key)
+
+        # 8. rescan and check that the new version is served
         self._rescan_and_verify(outcome)
 
-        # 8. catalog copy on S3 (verified by HEAD)
+        # 9. catalog copy on S3 (verified by HEAD)
         if cfg.push_catalog:
             started = time.time()
             self._push_catalog(item, outcome, store_dir, include_h5ad=outcome.kind != 'update_patch')
             self._timed(outcome, 'push', started)
             self.log(f'catalog push: {len(outcome.catalog_keys)} object(s), verified {outcome.catalog_verified}')
 
-        # 9. post steps, DE, derived push, git, final rescan: warnings only
+        # 10. post steps, DE, derived push, git, final rescan: warnings only
         self._post(item, outcome, store_dir, work)
+        shutil.rmtree(work, ignore_errors=True)
 
     # publication ----------------------------------------------------------
 
     def _staged_files(self, group_dir: Path, basename: str) -> List[Path]:
-        """Files of the staged dataset in placement order (.md and .duckdb last)."""
+        """Files of the staged dataset (the journal renames the ``.md`` last)."""
         files = sorted(group_dir.glob(f'{basename}.layer.*.parquet'))
-        for suffix in ('.de.parquet', H5AD_SUFFIX, MUS_SUFFIX, '.md', '.duckdb'):
+        for suffix in ('.de.parquet', H5AD_SUFFIX, MUS_SUFFIX, '.duckdb', '.md'):
             path = group_dir / f'{basename}{suffix}'
             if path.exists():
                 files.append(path)
         return files
 
-    def _place_new(self, item: Item, group_dir: Path, store_dir: Path, group_store_dir: Path) -> None:
+    def _swap_new(self, item: Item, outcome: Outcome, group_dir: Path, store_dir: Path, store_group: Path,
+                  place_index: bool) -> None:
+        cfg = self.config
         store_dir.mkdir(parents=True, exist_ok=True)
+        journal = SwapJournal(cfg.journal_dir, slug(item.key), store_group,
+                              {'item': item.key, 'kind': 'new', 'version': outcome.version})
         staged_index = group_dir / 'index.md'
-        if staged_index.exists() and not (group_store_dir / 'index.md').exists():
-            place_file(staged_index, group_store_dir / 'index.md')
-        for path in self._staged_files(group_dir, item.basename):
-            place_file(path, store_dir / path.name)
+        try:
+            if place_index and staged_index.exists() and not (store_group / 'index.md').exists():
+                journal.stage(staged_index, store_group / 'index.md')
+            for path in self._staged_files(group_dir, item.basename):
+                journal.stage(path, store_dir / path.name)
+        except OSError as exc:
+            journal.rollback()
+            raise TransientError(f'staging into the store failed ({exc}); rolled back') from exc
+        if self.stop_requested():
+            journal.rollback()
+            raise TransientError('stop requested before the commit; rolled back')
+        self._commit(journal)
+
+    def _commit(self, journal: 'SwapJournal') -> None:
+        try:
+            journal.commit()
+        except OSError as exc:      # the journal stays in "committing": the next run rolls it forward
+            raise TransientError(f'commit of the swap failed ({exc}); it is finished on the next run') from exc
 
     def _swap_update(self, item: Item, outcome: Outcome, group_dir: Path, store_dir: Path,
                      data_changed: bool) -> None:
         cfg = self.config
         db_id = outcome.db_id
-        store_duckdb = store_dir / f'{item.basename}.duckdb'
+        version = outcome.previous_version or '0.0.0'
+        try:
+            links, remove_after = ingest_versions.archive_plan(store_dir, item.basename, version, data_changed)
+        except FileExistsError as exc:
+            raise Blocked('needs_decision', str(exc))
+        if cfg.push_catalog:                        # S3 copy of the old version first: nothing changed yet
+            try:
+                current = [store_dir / f'{item.basename}{suffix}' for suffix in ('.md', MUS_SUFFIX, H5AD_SUFFIX)]
+                outcome.archived_s3 = ingest_versions.archive_s3(
+                    self.s3, cfg.bucket, cfg.catalog_prefix, item.rel_dir, item.basename, version,
+                    [path for path in current if path.exists()], include_h5ad=data_changed)
+            except Exception as exc:  # noqa: BLE001
+                raise TransientError(f'S3 copy of version {version} failed ({exc}); nothing was changed') from exc
         released = False
         if data_changed and db_id:
-            try:
-                self.api.release(db_id)
-                released = True
-            except TransientError as exc:
-                outcome.warnings.append(f'release of {db_id} failed ({exc}); swapping anyway')
+            self.api.release(db_id)                 # TransientError: no swap, retried later
+            released = True
+        store_duckdb = store_dir / f'{item.basename}.duckdb'
         try:
             with writer_lock(store_duckdb):
-                archived = ingest_versions.archive_local(store_dir, item.basename, outcome.previous_version or '0.0.0',
-                                                         data_changed=data_changed)
-                outcome.archived_local = [str(path) for path in archived]
-                if cfg.push_catalog:
-                    try:
-                        outcome.archived_s3 = ingest_versions.archive_s3(
-                            self.s3, cfg.bucket, cfg.catalog_prefix, item.rel_dir, item.basename,
-                            outcome.previous_version or '0.0.0', archived, include_h5ad=data_changed)
-                    except Exception as exc:  # noqa: BLE001
-                        outcome.warnings.append(f'S3 copy of version {outcome.previous_version} failed: {exc}')
-                staged = self._staged_files(group_dir, item.basename)
-                new_names = {path.name for path in staged}
-                for path in staged:
-                    place_file(path, store_dir / path.name)
-                if data_changed:
-                    for stale in store_dir.glob(f'{item.basename}.layer.*.parquet'):
-                        if stale.name not in new_names:
-                            stale.unlink()
+                journal = SwapJournal(cfg.journal_dir, slug(item.key), cfg.store_root / item.data_project,
+                                      {'item': item.key, 'kind': outcome.kind, 'from': version,
+                                       'to': outcome.version, 'released': db_id if released else None})
+                try:
+                    for source, destination in links:
+                        journal.link(source, destination)
+                    staged = self._staged_files(group_dir, item.basename)
+                    new_names = {path.name for path in staged}
+                    for path in staged:
+                        journal.stage(path, store_dir / path.name)
+                    for path in remove_after:
+                        journal.remove_after(path)
+                    if data_changed:
+                        for stale in store_dir.glob(f'{item.basename}.layer.*.parquet'):
+                            if stale.name not in new_names:
+                                journal.remove_after(stale)
+                except OSError as exc:
+                    journal.rollback()
+                    raise TransientError(f'staging the update failed ({exc}); rolled back, the published '
+                                         f'version is untouched') from exc
+                if self.stop_requested():
+                    journal.rollback()
+                    raise TransientError('stop requested before the swap; rolled back')
+                self._commit(journal)
+                outcome.archived_local = [str(destination) for _, destination in links]
         finally:
             if released:
                 try:
@@ -834,50 +1288,86 @@ class Pipeline:
     def _record_version(self, outcome: Outcome, item: Item) -> None:
         if self.config.state_dir is None:
             return
-        log_path = self.config.state_dir / 'versions.jsonl'
-        with open(log_path, 'a') as handle:
+        with open(self.config.state_dir / 'versions.jsonl', 'a') as handle:
             handle.write(json.dumps({'ts': _now_iso(), 'db_id': outcome.db_id, 'dataset': item.display,
                                      'archived_version': outcome.previous_version,
                                      'archived_sha256': outcome.previous_sha256, 'current_version': outcome.version,
                                      'current_sha256': outcome.sha256, 'local': outcome.archived_local,
                                      's3': outcome.archived_s3}) + '\n')
 
-    def _promote_static(self, item: Item, outcome: Outcome, static_dir: Path, group_store_dir: Path,
-                        seeds: Dict[str, Path]) -> None:
-        if not static_dir.is_dir():
-            return
-        seed_paths = {path.resolve() for path in seeds.values()}
-        for path in sorted(static_dir.iterdir()):
-            if path.resolve() in seed_paths:
-                continue
-            target = group_store_dir / 'static' / path.name
+    def _promote_static(self, plain_static: Dict[str, Tuple[ObjInfo, Path]], store_group: Path,
+                        outcome: Outcome) -> List[str]:
+        """Place new static files; identical ones count as placed. Returns the names placed or identical."""
+        placed: List[str] = []
+        for name, (_obj, path) in sorted(plain_static.items()):
+            target = store_group / 'static' / name
+            ensure_inside(target, store_group)
             if target.exists():
-                if sha256_file(target) != sha256_file(path):
-                    outcome.warnings.append(f'static file {target} differs from the deposit; kept the store copy')
+                if sha256_file(target) == sha256_file(path):
+                    placed.append(name)
+                else:
+                    outcome.warnings.append(f'static file {name} differs from the store copy: left in incoming')
                 continue
-            place_file(path, target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            partial = target.with_name(f'.{name}.ingest-partial')
+            shutil.copy2(path, partial)
+            os.replace(partial, target)
+            placed.append(name)
+        return placed
 
-    def _publish_unchanged(self, item: Item, outcome: Outcome, store_h5ad: Path, sha: str) -> None:
-        """Identical re-upload: nothing to publish; verify that it is served and on S3."""
+    def _publish_unchanged(self, item: Item, outcome: Outcome, store_dir: Path, sha: str,
+                           plain_static: Dict[str, Tuple[ObjInfo, Path]], store_group: Path,
+                           md_seed: Optional[Tuple[ObjInfo, Path]],
+                           index_seed: Optional[Tuple[ObjInfo, Path]] = None) -> None:
+        """Identical re-upload: nothing new to publish; place new static files, verify serving and S3."""
         outcome.state = 'live'
         outcome.detail = f'unchanged (already live as {outcome.version})'
+        placed = self._promote_static(plain_static, store_group, outcome)
+        outcome.consumed[item.h5ad.key] = item.h5ad.etag
+        outcome.consumed[item.mus.key] = item.mus.etag
+        for name in placed:
+            obj = plain_static[name][0]
+            outcome.consumed[obj.key] = obj.etag
+            outcome.shared_keys.append(obj.key)
+        if md_seed:
+            outcome.consumed[md_seed[0].key] = md_seed[0].etag
+        if index_seed:
+            outcome.consumed[index_seed[0].key] = index_seed[0].etag
+            if index_seed[0].name == 'index.md':
+                outcome.shared_keys.append(index_seed[0].key)
         self._rescan_and_verify(outcome)
         if self.config.push_catalog:
-            outcome.catalog_verified = self._verify_catalog(item, store_h5ad, sha, outcome)
+            outcome.catalog_verified = self._verify_catalog(item, store_dir / f'{item.basename}{H5AD_SUFFIX}', sha,
+                                                            outcome)
+        if self.config.store_git_commit:     # e.g. a swap finished by recovery after a crash, not yet committed
+            self._git_commit(item, outcome, store_dir)
 
     def _rescan_and_verify(self, outcome: Outcome) -> None:
+        """Rescan, then check that the server answers with the new sha256 and version."""
         try:
             result = self.api.rescan()
-            outcome.served = bool(outcome.db_id) and outcome.db_id in served_ids(result)
-            if not outcome.served:
-                outcome.warnings.append(f'{outcome.db_id} is not listed after the rescan')
         except TransientError as exc:
             outcome.warnings.append(f'rescan failed ({exc}); the dataset is placed but not yet served')
+            return
+        outcome.served = self.verify_served(outcome.db_id, outcome.sha256, outcome.version, result, outcome.warnings)
+
+    def verify_served(self, db_id: Optional[str], sha: Optional[str], version: Optional[str],
+                      rescan_result: Dict[str, Any], warnings: List[str]) -> bool:
+        if not db_id or db_id not in served_ids(rescan_result):
+            warnings.append(f'{db_id} is not listed after the rescan')
+            return False
+        try:
+            info = self.api.info(db_id)
+        except TransientError as exc:
+            warnings.append(str(exc))
+            return False
+        if str(info.get('sha256') or '') != str(sha or '') or str(info.get('version') or '') != str(version or ''):
+            warnings.append(f'{db_id} is served as version {info.get("version")} / sha256 '
+                            f'{str(info.get("sha256"))[:12]}, expected {version} / {str(sha)[:12]}')
+            return False
+        return True
 
     # S3 catalog -------------------------------------------------------------
-
-    def _catalog_key(self, item: Item, name: str) -> str:
-        return f'{self.config.catalog_prefix}{item.rel_dir}/{name}'
 
     def _upload(self, path: Path, key: str, sha: Optional[str] = None) -> None:
         metadata = {'original-mtime': str(int(path.stat().st_mtime))}
@@ -890,19 +1380,39 @@ class Pipeline:
         self.s3.upload_file(str(path), self.config.bucket, key, **kwargs)
 
     def _verify_catalog(self, item: Item, store_h5ad: Path, sha: str, outcome: Outcome) -> bool:
-        """HEAD the catalog h5ad: same size and the sha256 we recorded."""
+        """HEAD the catalog h5ad: same size and our sha256 (metadata, else a single-part ETag, else backfilled)."""
         key = self._catalog_key(item, store_h5ad.name)
         try:
             head = self.s3.head_object(Bucket=self.config.bucket, Key=key)
         except Exception as exc:  # noqa: BLE001
             outcome.warnings.append(f'catalog copy {key} not found ({exc})')
             return False
-        size_ok = int(head.get('ContentLength', -1)) == store_h5ad.stat().st_size
-        remote_sha = (head.get('Metadata') or {}).get('sha256')
-        if not size_ok or remote_sha != sha:
-            outcome.warnings.append(f'catalog copy {key} does not match (size ok: {size_ok}, '
-                                    f'sha256 metadata: {remote_sha or "absent"})')
+        if int(head.get('ContentLength', -1)) != store_h5ad.stat().st_size:
+            outcome.warnings.append(f'catalog copy {key} has another size than the store h5ad')
             return False
+        remote_sha = (head.get('Metadata') or {}).get('sha256')
+        if remote_sha:
+            if remote_sha != sha:
+                outcome.warnings.append(f'catalog copy {key} has sha256 {remote_sha[:12]}, expected {sha[:12]}')
+                return False
+            return True
+        etag = str(head.get('ETag', '')).strip('"')
+        if sha256_file(store_h5ad) != sha:
+            outcome.warnings.append(f'the store h5ad does not have the expected sha256 {sha[:12]}')
+            return False
+        if etag and '-' not in etag:
+            if md5_file(store_h5ad) != etag:
+                outcome.warnings.append(f'catalog copy {key} differs from the store h5ad (MD5 ETag)')
+                return False
+        try:                                        # legacy object without metadata: record it now
+            metadata = dict(head.get('Metadata') or {})
+            metadata['sha256'] = sha
+            self.s3.copy_object(Bucket=self.config.bucket, Key=key, CopySource={'Bucket': self.config.bucket, 'Key': key},
+                                Metadata=metadata, MetadataDirective='REPLACE')
+            outcome.warnings.append(f'catalog copy {key} had no sha256 metadata: accepted on size'
+                                    f'{" + MD5" if etag and "-" not in etag else ""} and backfilled')
+        except Exception as exc:  # noqa: BLE001
+            outcome.warnings.append(f'catalog copy {key} accepted on size; sha256 metadata not backfilled ({exc})')
         return True
 
     def _push_catalog(self, item: Item, outcome: Outcome, store_dir: Path, include_h5ad: bool) -> None:
@@ -931,10 +1441,17 @@ class Pipeline:
                     key = self._catalog_key(item, path.name)
                     self._upload(path, key)
                     outcome.catalog_keys.append(key)
-        except Exception as exc:  # noqa: BLE001 - publication already happened
+        except Exception as exc:  # noqa: BLE001 - publication already happened; retried next poll
             outcome.warnings.append(f'push to the catalog failed: {exc}')
             return
         outcome.catalog_verified = self._verify_catalog(item, store_h5ad, outcome.sha256 or '', outcome)
+
+    def repush(self, item: Item, kind: str, sha: str) -> Tuple[bool, List[str]]:
+        """Retry the catalog push of a live item whose push or verification failed."""
+        outcome = Outcome(sha256=sha)
+        store_dir = self.config.store_root / item.rel_dir
+        self._push_catalog(item, outcome, store_dir, include_h5ad=kind != 'update_patch')
+        return outcome.catalog_verified, outcome.warnings
 
     # after publication -----------------------------------------------------
 
@@ -942,10 +1459,8 @@ class Pipeline:
         cfg = self.config
         store = cfg.store_root
         db_id = outcome.db_id
-        if outcome.kind == 'update_patch':
-            steps: List[str] = ['manifest']
-        else:
-            steps = [step for step in cfg.post_steps if step in POST_STEPS]
+        steps: List[str] = ['manifest'] if outcome.kind == 'update_patch' else \
+            [step for step in cfg.post_steps if step in POST_STEPS]
         state_dir = cfg.state_dir or work
         commands = {
             'score': [self._tool('annot', 'ant-score-fleet'), '--h5adstore-root', store, '--only', db_id, 'run',
@@ -963,6 +1478,9 @@ class Pipeline:
         }
         if db_id:
             for step in steps:
+                if self.stop_requested():
+                    outcome.warnings.append(f'stop requested: post steps from {step} on were skipped')
+                    break
                 started = time.time()
                 self.log(f'post step {step}')
                 if step == 'manifest':
@@ -971,11 +1489,13 @@ class Pipeline:
                     code, tail = self.runner.run(f'post:{step}', commands[step], cwd=work,
                                                  timeout=cfg.post_step_timeout)
                     if code != 0:
-                        outcome.warnings.append(f'post step {step} failed (exit {code}): {tail.splitlines()[-1] if tail else ""}')
+                        outcome.warnings.append(f'post step {step} failed (exit {code}): '
+                                                f'{tail.splitlines()[-1] if tail else ""}')
                 self._timed(outcome, f'post:{step}', started)
         else:
             outcome.warnings.append('no db id: post steps skipped')
-        self._ingest_de(item, outcome, store_dir, work)
+        if not self.stop_requested():
+            self._ingest_de(item, outcome, store_dir, work)
         if cfg.push_catalog:
             for suffix in ('.scores.parquet', '.de.parquet'):
                 path = store_dir / f'{item.basename}{suffix}'
@@ -1010,12 +1530,15 @@ class Pipeline:
             return
         file_id = (outcome.db_id or '/').split('/')[-1]
         de_dir = work / '_de'
+        sources_root = self.config.store_root / item.data_project / 'de_sources'
         for obj in data_files:
             mus_obj = by_key.get(obj.key + '.mus')
-            name = obj.key.rsplit('/', 1)[-1]
+            name = obj.name
             if mus_obj is None or not name.endswith(DE_DATA_EXTS):
                 continue
             parent = obj.key.rsplit('/', 2)[-2]
+            if not valid_segment(parent) or not valid_segment(name):
+                continue
             staged_mus = de_dir / parent / (name + '.mus')
             try:
                 self._pull(mus_obj, staged_mus)
@@ -1026,7 +1549,8 @@ class Pipeline:
             if meta.get('de_dataset_id') not in (None, '', file_id) or (
                     not meta.get('de_dataset_id') and meta.get('de_dataset_h5ad') != f'{item.basename}{H5AD_SUFFIX}'):
                 continue
-            source_dir = self.config.store_root / item.data_project / 'de_sources' / parent
+            source_dir = sources_root / parent
+            ensure_inside(source_dir / name, sources_root)
             staged_data = de_dir / parent / name
             try:
                 self._pull(obj, staged_data)
@@ -1056,6 +1580,9 @@ class Pipeline:
         if index_md.exists():
             files.append(index_md)
         rel = [str(path.relative_to(store)) for path in files if path.exists()]
+        code, changed = self.runner.run('git status', ['git', '-C', store, 'status', '--porcelain', '--', *rel])
+        if code == 0 and not changed.strip():
+            return                                   # nothing to commit (an unchanged deposit)
         name, _, email = self.config.git_identity.partition('<')
         committer = ['-c', f'user.name={name.strip()}', '-c', f'user.email={email.rstrip(">").strip()}']
         sidecar_path = store_dir / f'{item.basename}{MUS_SUFFIX}'
@@ -1065,16 +1592,23 @@ class Pipeline:
         code, tail = self.runner.run('git add', ['git', '-C', store, 'add', '--', *rel])
         if code != 0:
             outcome.warnings.append(f'git add failed: {tail}')
+            self.runner.run('git reset', ['git', '-C', store, 'reset', '-q', '--', *rel])
             return
         cmd = ['git', '-C', store, *committer, 'commit', '--only', '-m', message,
                '--author', depositor or self.config.git_identity, '--', *rel]
         code, tail = self.runner.run('git commit', cmd)
         if code != 0:
             outcome.warnings.append(f'git commit failed: {tail}')
+            self.runner.run('git reset', ['git', '-C', store, 'reset', '-q', '--', *rel])
             return
         code, head = self.runner.run('git rev-parse', ['git', '-C', store, 'rev-parse', 'HEAD'])
         outcome.git_commit = head.strip().splitlines()[-1] if code == 0 and head.strip() else None
         if self.config.store_git_push:
+            code, ahead = self.runner.run('git rev-list', ['git', '-C', store, 'rev-list', '--count', '@{u}..HEAD'])
+            if code != 0 or ahead.strip().splitlines()[-1:] != ['1']:
+                outcome.warnings.append(f'store_git_push: not pushed, the store branch has other unpushed commits '
+                                        f'or no upstream ({ahead.strip()[:80]})')
+                return
             code, tail = self.runner.run('git push', ['git', '-C', store, 'push'])
             if code != 0:
                 outcome.warnings.append(f'git push failed: {tail}')

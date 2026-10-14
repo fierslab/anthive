@@ -122,10 +122,11 @@ ingest_watch:
   enabled: false
   # Seconds between two polls of the prefix.
   interval_seconds: 300
-  # An upload counts as complete when its h5ad and .h5ad.mus (and the static/
-  # and de/ files of its project) kept the same ETag and size over two polls,
-  # or when the newest of them is older than this many seconds.
-  settle_seconds: 900
+  # An upload counts as complete when its h5ad and .h5ad.mus and the static/
+  # and de/ files of its project were identical (ETag and size) in two
+  # consecutive listings AND the newest of them is at least this many seconds
+  # old. The first listing never starts processing.
+  settle_seconds: 120
   # S3 prefix that mus writes deposits to.
   prefix: __incoming/
   # Prefix the published files are pushed to ('' = the catalog root, as
@@ -155,6 +156,21 @@ ingest_watch:
   api_url: ''
   # Lower the priority of the pipeline's children (nice 19, ionice idle).
   low_priority: true
+  # An upload for a dataset that is already published becomes a new version.
+  # A sidecar may say which dataset it updates (update_of=<db_id> or
+  # previous_sha256=<sha256 of the published h5ad>); a mismatch always stops the
+  # item for a person. With true, an update WITHOUT one of these keys stops too
+  # (protects against two depositors using the same <group>/<basename>).
+  require_update_marker: false
+  # Free space (GB) to keep under ingest_work_dir besides 2x the h5ad size;
+  # with less the pull waits for the next poll.
+  min_free_gb: 50
+  # Work dirs of held, failed and needs_decision items are kept this many days
+  # (for a look at the staged files), then removed. Live items: removed at once.
+  work_ttl_days: 14
+  # The watcher refuses to run when its state, tmp or work dir lies inside the
+  # repository checkout (runtime writes belong outside it). true allows it.
+  allow_repo_dirs: false
   # Optional notification when an item goes live, is held, fails or needs a
   # decision. webhook_url gets a JSON POST; email needs smtp_host and email_to.
   notify:
