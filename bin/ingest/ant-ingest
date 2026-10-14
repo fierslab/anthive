@@ -1,53 +1,53 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
-# dependencies = ["boto3", "pyyaml"]
+# dependencies = ["boto3", "h5py>=3.0.0", "numpy>=1.24.0", "pyyaml"]
 # ///
 
 """
-ant-ingest — end-to-end ingestion from S3 __incoming/ to the catalog.
+ant-ingest — manual ingestion from S3 __incoming/ to the catalog.
 
-Workflow (default subcommand):
-  1. Scan s3://<bucket>/__incoming/ → group by data_project (+ optional
-     single-segment subfolder).
-  2. For each h5ad in __incoming/, pull it and its `<basename>.h5ad.mus`
-     sidecar into  data/h5adstore/.staging/<dp>/[<sub>/]
-  3. Verify the pulled h5ad's sha256 against `sha256=` in the sidecar.
-     Mismatch → mark dataset failed (refuse to ingest).
-  4. Check the local catalog (data/h5adstore/<dp>/[<sub>/]<basename>.h5ad):
-       absent       → promote staging → catalog
-       same sha     → skip the h5ad copy, proceed to metadata merge
-       different sha→ STOP this dataset (verbose diff; user must resolve)
-  5. Merge the freshly-pulled sidecar with the catalog sidecar via
-     `lib.sidecar_merge` (KEY=VALUE rules; conflicts warn but don't abort
-     — they are recorded in the run report).
-  6. Promote any  __incoming/<dp>/static/<basename>  files to
-     data/h5adstore/<dp>/static/<basename> (sha-compare; identical →
-     ignore, different → warn).
-  7. Run `ant-h5ad-check`, `ant-convert`, `ant-duckdb-check` on the
-     newly-promoted h5ad. Any failure aborts THIS dataset (others continue).
-  8. Push the catalog h5ad + sidecar to s3://<bucket>/<dp>/[<sub>/]
-     (catalog root, NOT __incoming/). On success, re-stamp the sidecar's
-     s3_* block so it reflects the catalog key + new etag/uploaded_at.
-  9. Record the consumed __incoming/ keys + staging files in
-     data/h5adstore/.staging/_pending_prune.json so `ant-ingest prune`
-     can clean them later.
+The h5ad deposits go through the same pipeline as the S3 watch route
+(``lib/ingest_pipeline.py``, ``bin/ingest/ant-ingest-watch``; design:
+``doc/DESIGN_dataset_ingestion.md``, "S3 watch route"), run once by hand:
 
-At end of run, print a per-dataset status table + a "Pending cleanup"
-section with concrete next commands.
+  1. Scan s3://<bucket>/__incoming/ and group it into datasets
+     (``__incoming/<data_project>/[<subfolder>/]<basename>.h5ad`` + ``.h5ad.mus``).
+  2. Pull each h5ad and its sidecar into the work dir
+     (``config.get_ingest_work_dir()/manual``, never inside the store) and verify
+     the sha256 the sidecar declares.
+  3. New dataset: write the catalogue ``.md`` (non-destructive fill: sha256,
+     n_obs, layer stats, obsnum/obscat defaults, version 1.0.0 and a first
+     changelog entry; seeds from ``static/<basename>.md`` / ``static/index.md``).
+     Existing dataset: a new version (minor when the h5ad changed, patch for a
+     sidecar-only change) with a changelog entry; the previous version is kept
+     under ``<group>/_versions/<basename>/<version>/`` and on S3.
+  4. ``ant-convert`` in the work dir, then ``ant-ingest-check`` (JSON report;
+     errors and held reasons block, warnings pass).
+  5. Atomic placement into the store (an update swaps under
+     ``/admin/release`` + ``/admin/restore``), static/ promotion, rescan.
+  6. Push the h5ad, sidecar, duckdb and layer files to the catalog root on
+     S3, re-stamp ``s3_*`` in the sidecar.
+  7. Record the consumed __incoming/ keys in
+     ``<ingest_state_dir>/pending_prune.json`` for ``ant-ingest prune``.
+
+DE-only deposits (``__incoming/<dp>/de/<folder>/<file>`` naming an existing
+dataset) still go through ``ant-de-ingest`` here.
 
 Subcommands:
-  ant-ingest             # default: pull + run end-to-end
-  ant-ingest --dry-run   # show what would happen, no destructive ops
-  ant-ingest --filter <data_project>  # restrict scan to one project
-  ant-ingest prune              # remove staging + S3 __incoming/ keys
-  ant-ingest prune --dry-run    # preview only
+  ant-ingest                         # pull + run end-to-end
+  ant-ingest --dry-run               # show what would happen
+  ant-ingest --filter <data_project> # restrict scan to one project
+  ant-ingest prune [--dry-run]       # remove the work files + S3 __incoming/ keys
+                                     # recorded by past runs
   ant-ingest prune --include-catalog-orphans
-                                # additionally remove S3 catalog files
-                                # that no longer exist locally
+  ant-ingest purge <db_id> [--keep N] [--dry-run] [--yes]
+  ant-ingest purge --all --keep N    # remove archived versions (local + S3)
 
-Non-destructive guarantee: `ant-ingest` (without `prune`) never deletes
-anything on S3. `ant-ingest prune` is the only command that calls S3
-DeleteObject.
+Non-destructive guarantee: the default command never deletes anything on S3.
+``prune`` and ``purge`` are the only commands that call S3 DeleteObject; both
+show what they remove first (``--dry-run``) and ``purge`` asks for
+confirmation. The S3 watch route (``ant ingest-watch``) deletes the consumed
+incoming objects itself after a verified publication.
 """
 from __future__ import annotations
 
@@ -73,18 +73,24 @@ from botocore.exceptions import ClientError
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent.parent
 sys.path.insert(0, str(_REPO_ROOT / 'lib'))
+import config as anthive_config                                     # noqa: E402
 from config import get_config, require_primary                      # noqa: E402
-from sidecar_merge import (                                         # noqa: E402
-    Conflict,
-    merge_sidecars,
-    read_sidecar,
-    restamp_s3_block,
-    write_sidecar_atomic,
+from ingest_pipeline import (                                       # noqa: E402
+    ApiClient,
+    Pipeline,
+    PipelineConfig,
+    SubprocessRunner,
+    TransientError,
+    de_ingest_command,
+    download as _pipeline_download,
+    plan_items,
 )
+from sidecar_merge import Conflict                                  # noqa: E402
 
 INCOMING_PREFIX = '__incoming/'
-STAGING_DIR_REL = '.staging'
-PENDING_PRUNE_FILE = '_pending_prune.json'
+LEGACY_STAGING_DIR_REL = '.staging'          # pre-2026-10-14 staging inside the store
+LEGACY_PENDING_PRUNE_FILE = '_pending_prune.json'
+PENDING_PRUNE_FILE = 'pending_prune.json'
 H5AD_SUFFIX = '.h5ad'
 MUS_SUFFIX = '.h5ad.mus'
 
@@ -228,86 +234,6 @@ def _list_incoming(client, bucket: str, filter_project: Optional[str]) -> List[d
     return objects
 
 
-def _group_into_plans(objects: List[dict]) -> Tuple[List[DatasetPlan], List[str]]:
-    """Group the listing into DatasetPlan units.
-
-    Rules:
-      - Each .h5ad in __incoming/ creates one plan; the matching .h5ad.mus
-        MUST exist or the dataset is reported as malformed.
-      - The relative path between __incoming/<dp>/ and the file decides
-        whether it's at the project root, under a subfolder, or under static/.
-        Depth >1 (beyond a single subfolder) is rejected as malformed.
-
-    Returns (plans, malformed_messages).
-    """
-    by_key: Dict[str, dict] = {obj['Key']: obj for obj in objects}
-    keys = sorted(by_key)
-
-    h5ad_keys = [k for k in keys if k.endswith(H5AD_SUFFIX)]
-    plans: List[DatasetPlan] = []
-    malformed: List[str] = []
-
-    for h5ad_key in h5ad_keys:
-        # __incoming/<dp>/...rest...
-        rest = h5ad_key[len(INCOMING_PREFIX):]
-        parts = rest.split('/')
-        if len(parts) < 2:
-            malformed.append(f'{h5ad_key}: not under __incoming/<data_project>/')
-            continue
-        data_project = parts[0]
-        tail = parts[1:]
-
-        subfolder: Optional[str] = None
-        if len(tail) == 1:
-            filename = tail[0]
-        elif len(tail) == 2 and tail[0] != 'static':
-            subfolder, filename = tail
-        else:
-            malformed.append(
-                f'{h5ad_key}: too deep '
-                f'(expected __incoming/<dp>/[<subfolder>/]<file>.h5ad)'
-            )
-            continue
-
-        if not filename.endswith(H5AD_SUFFIX):
-            continue  # shouldn't happen — already filtered
-        basename = filename[:-len(H5AD_SUFFIX)]
-
-        # Required sidecar key.
-        if subfolder:
-            mus_key = f'{INCOMING_PREFIX}{data_project}/{subfolder}/{filename}.mus'
-        else:
-            mus_key = f'{INCOMING_PREFIX}{data_project}/{filename}.mus'
-        if mus_key not in by_key:
-            malformed.append(
-                f'{h5ad_key}: missing companion sidecar at {mus_key}. '
-                f'Skipping (mus is expected to deposit both atomically).'
-            )
-            continue
-
-        plans.append(DatasetPlan(
-            data_project=data_project,
-            subfolder=subfolder,
-            basename=basename,
-            incoming_h5ad_key=h5ad_key,
-            incoming_mus_key=mus_key,
-        ))
-
-    # Static files are associated with a data_project, not a specific h5ad,
-    # so we just attach them to every plan in that project; promotion is
-    # sha-aware so the same file copied multiple times is a no-op.
-    static_by_project: Dict[str, List[str]] = {}
-    for key in keys:
-        rest = key[len(INCOMING_PREFIX):]
-        parts = rest.split('/')
-        if len(parts) >= 3 and parts[1] == 'static':
-            static_by_project.setdefault(parts[0], []).append(key)
-    for plan in plans:
-        plan.static_keys = static_by_project.get(plan.data_project, [])
-
-    return plans, malformed
-
-
 # DE file extensions we accept (mus deposit gate rejects .parquet).
 _DE_DATA_EXTS = ('.tsv', '.csv', '.tsv.gz', '.csv.gz')
 
@@ -375,150 +301,9 @@ def _group_into_de_plans(objects: List[dict]) -> Tuple[List[DEPlan], List[str]]:
     return plans, malformed
 
 
-# Resumable-download threshold: files larger than this use range-GET chunks
-# with a per-chunk progress sidecar so an interrupted download can resume
-# without re-transferring anything already on disk. Below this, boto3's
-# multipart transfer is fine (its internal retries handle small blips).
-RESUMABLE_THRESHOLD = 1 * 1024 ** 3   # 1 GB
-RESUMABLE_CHUNK     = 256 * 1024 ** 2 # 256 MB per range-GET
-RESUMABLE_WORKERS   = 4               # concurrent chunks
-RESUMABLE_RETRIES   = 15              # per-chunk retries on top of boto3's own
-
-
 def _download(client, bucket: str, key: str, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        head = client.head_object(Bucket=bucket, Key=key)
-        size = head['ContentLength']
-    except Exception:
-        size = None
-    if size is not None and size >= RESUMABLE_THRESHOLD:
-        _download_resumable(client, bucket, key, dest, size)
-    else:
-        client.download_file(bucket, key, str(dest), Config=_transfer_config())
-
-
-def _download_resumable(client, bucket: str, key: str, dest: Path, size: int) -> None:
-    """Concurrent range-GET download with per-chunk resume state.
-
-    Chunks are written directly at their file offset via ``os.pwrite``. A
-    JSON sidecar next to the destination (``<dest>.progress``) tracks
-    which chunk indices are done, so an interrupted run continues without
-    re-downloading anything already on disk.
-
-    Rationale: boto3's built-in ``download_file`` uses multipart concurrent
-    downloads but if a single part exhausts its own retries the whole
-    download fails and the file is discarded. On a Hetzner-flavoured 125
-    GB pull that means paying for the whole file every attempt. This
-    variant lets us pay only for the parts that actually failed.
-    """
-    import json
-    import os
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    n_chunks = (size + RESUMABLE_CHUNK - 1) // RESUMABLE_CHUNK
-    progress_path = dest.with_suffix(dest.suffix + '.progress')
-    done: set[int] = set()
-
-    if progress_path.exists() and dest.exists():
-        try:
-            state = json.loads(progress_path.read_text())
-            if state.get('key') == key and state.get('size') == size:
-                done = set(state.get('done', []))
-        except (OSError, ValueError):
-            done = set()
-
-    if not dest.exists() or dest.stat().st_size != size:
-        with open(dest, 'wb') as fh:
-            fh.truncate(size)
-        done = set()   # size mismatch → start over
-
-    def _fetch(idx: int) -> int:
-        start = idx * RESUMABLE_CHUNK
-        end = min(start + RESUMABLE_CHUNK, size) - 1
-        expected = end - start + 1
-        last_exc: Optional[BaseException] = None
-        for attempt in range(RESUMABLE_RETRIES):
-            try:
-                resp = client.get_object(
-                    Bucket=bucket, Key=key, Range=f'bytes={start}-{end}',
-                )
-                body = resp['Body'].read()
-                if len(body) != expected:
-                    raise IOError(
-                        f'chunk {idx}: got {len(body)} bytes, expected {expected}'
-                    )
-                fd = os.open(dest, os.O_WRONLY)
-                try:
-                    os.pwrite(fd, body, start)
-                finally:
-                    os.close(fd)
-                return idx
-            except (ClientError, IOError, OSError) as exc:
-                last_exc = exc
-                if attempt < RESUMABLE_RETRIES - 1:
-                    time.sleep(min(60, 2 ** attempt))
-        raise last_exc if last_exc is not None else IOError(f'chunk {idx} failed')
-
-    missing = [i for i in range(n_chunks) if i not in done]
-    if not missing:
-        try:
-            progress_path.unlink()
-        except FileNotFoundError:
-            pass
-        print(_dim(f'  resumable: all {n_chunks} chunks already on disk — skipping download'))
-        return
-
-    print(_dim(
-        f'  resumable download: {size / 1024**3:.1f} GB in {n_chunks} chunks '
-        f'of {RESUMABLE_CHUNK / 1024**2:.0f} MB '
-        f'({len(done)} already done, {len(missing)} to fetch, '
-        f'{RESUMABLE_WORKERS} workers)'
-    ))
-
-    n_completed = len(done)
-    last_report = n_completed
-    with ThreadPoolExecutor(max_workers=RESUMABLE_WORKERS) as ex:
-        futures = {ex.submit(_fetch, i): i for i in missing}
-        try:
-            for fut in as_completed(futures):
-                idx = fut.result()
-                done.add(idx)
-                n_completed += 1
-                # Persist progress every chunk (cheap — small JSON write).
-                progress_path.write_text(json.dumps({
-                    'key':  key,
-                    'size': size,
-                    'done': sorted(done),
-                }))
-                if n_completed - last_report >= 10 or n_completed == n_chunks:
-                    pct = 100 * n_completed / n_chunks
-                    print(_dim(
-                        f'  progress: {n_completed}/{n_chunks} chunks ({pct:.1f}%)'
-                    ))
-                    last_report = n_completed
-        except BaseException:
-            # Any thread failed (or user hit Ctrl-C). Cancel remaining
-            # work, persist the current state, and re-raise so the caller
-            # sees the failure. `.progress` stays on disk → next run
-            # resumes from here.
-            for f in futures:
-                f.cancel()
-            progress_path.write_text(json.dumps({
-                'key':  key,
-                'size': size,
-                'done': sorted(done),
-            }))
-            raise
-
-    if len(done) != n_chunks:
-        raise IOError(
-            f'resumable download incomplete: {len(done)}/{n_chunks} chunks done'
-        )
-    try:
-        progress_path.unlink()
-    except FileNotFoundError:
-        pass
+    """Download via the shared helper (resumable range GETs for files of 1 GB or more)."""
+    _pipeline_download(client, bucket, key, dest)
 
 
 def _sha256_file(path: Path) -> str:
@@ -565,254 +350,52 @@ def _run(label: str, cmd: List[str]) -> Tuple[bool, str]:
 # Per-dataset workflow
 # ─────────────────────────────────────────────────────────────────────────
 
-def _catalog_paths(data_folder: Path, plan: DatasetPlan) -> Tuple[Path, Path]:
-    """Return (catalog_h5ad_path, catalog_mus_path) for a plan."""
-    parts = [data_folder, plan.data_project]
-    if plan.subfolder:
-        parts.append(plan.subfolder)
-    catalog_dir = Path(*parts)
-    h5ad_name = plan.basename + H5AD_SUFFIX
-    return catalog_dir / h5ad_name, catalog_dir / (h5ad_name + '.mus')
+_PIPELINE_STATE_TO_STATUS = {'live': 'ok', 'held': 'held', 'failed': 'failed', 'needs_decision': 'conflict'}
 
 
-def _staging_dir(data_folder: Path, plan: DatasetPlan) -> Path:
-    parts = [data_folder, STAGING_DIR_REL, plan.data_project]
-    if plan.subfolder:
-        parts.append(plan.subfolder)
-    return Path(*parts)
+def _work_root() -> Path:
+    """Work dir of the manual route (outside the store)."""
+    return anthive_config.get_ingest_work_dir() / 'manual'
 
 
-def _print_h5ad_conflict_table(
-    plan: DatasetPlan,
-    incoming_path: Path, incoming_sha: str,
-    catalog_path: Path, catalog_sha: str,
-    incoming_mus_text: str,
-) -> None:
-    """Verbose diff to help the human resolve a same-name-different-sha clash."""
-    msg = _parse_sidecar_keys(incoming_mus_text).get('irods_message') or \
-          _parse_sidecar_keys(incoming_mus_text).get('note') or ''
-    _err(f'h5ad collision for {plan.display_name}:')
-    print(f'    INCOMING')
-    print(f'      key:    {plan.incoming_h5ad_key}')
-    print(f'      sha256: {incoming_sha}')
-    print(f'      size:   {incoming_path.stat().st_size:,} bytes')
-    if msg:
-        print(f'      msg:    {msg[:120]}')
-    print(f'    CATALOG (already in data/h5adstore/)')
-    print(f'      path:   {catalog_path}')
-    print(f'      sha256: {catalog_sha}')
-    print(f'      size:   {catalog_path.stat().st_size:,} bytes')
-    print(f'      mtime:  {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(catalog_path.stat().st_mtime))}')
-    print(f'    To resolve, choose ONE:')
-    print(f'      a) Keep catalog, discard incoming:')
-    print(f'           ant-ingest prune --only-incoming-key {plan.incoming_h5ad_key}')
-    print(f'      b) Replace catalog with incoming:')
-    print(f'           rm {catalog_path}{{,.mus}}')
-    print(f'           ant-ingest --filter {plan.data_project}')
-    print(f'      c) Treat as a new dataset under a different name:')
-    print(f'           rename in S3 __incoming/ first, then ant-ingest')
-
-
-def _process_dataset(
-    plan: DatasetPlan,
-    client,
-    bucket: str,
-    data_folder: Path,
-    args: argparse.Namespace,
-) -> DatasetResult:
-    """Execute steps 2-9 of the workflow for one h5ad. All-or-nothing per
-    dataset — any failure leaves staging intact so the user can inspect."""
+def _process_dataset(item, pipeline: Pipeline, args: argparse.Namespace) -> DatasetResult:
+    """Run one deposited h5ad through the shared pipeline (lib/ingest_pipeline.py)."""
+    plan = DatasetPlan(
+        data_project=item.data_project, subfolder=item.subfolder, basename=item.basename,
+        incoming_h5ad_key=item.h5ad.key, incoming_mus_key=item.mus.key if item.mus else '',
+        static_keys=[obj.key for obj in item.static_to_consume()],
+    )
     result = DatasetResult(plan=plan)
     print(f'\n─── {plan.display_name} ───')
-
-    # 2. Pull h5ad + .mus into staging.
-    staging_dir = _staging_dir(data_folder, plan)
-    staged_h5ad = staging_dir / (plan.basename + H5AD_SUFFIX)
-    staged_mus = staging_dir / (plan.basename + H5AD_SUFFIX + '.mus')
-
     if args.dry_run:
         result.status = 'dry-run'
-        result.detail = f'would pull {plan.incoming_h5ad_key} + sidecar'
+        result.detail = f'would pull {plan.incoming_h5ad_key} + sidecar, check, convert and publish'
         result.s3_incoming_keys = [plan.incoming_h5ad_key, plan.incoming_mus_key]
         return result
-
+    if item.mus is None:
+        result.status = 'failed'
+        result.detail = f'missing companion sidecar {item.h5ad.key}.mus'
+        _err(result.detail)
+        return result
     try:
-        print(f'  Pulling sidecar  {plan.incoming_mus_key}')
-        _download(client, bucket, plan.incoming_mus_key, staged_mus)
-        result.staging_files.append(str(staged_mus))
-
-        print(f'  Pulling h5ad     {plan.incoming_h5ad_key} ({_human_size(client, bucket, plan.incoming_h5ad_key)})')
-        _download(client, bucket, plan.incoming_h5ad_key, staged_h5ad)
-        result.staging_files.append(str(staged_h5ad))
-    except ClientError as exc:
+        outcome = pipeline.process(item)
+    except TransientError as exc:
         result.status = 'failed'
-        result.detail = f'pull failed: {exc}'
+        result.detail = f'S3 or server error, rerun later: {exc}'
         _err(result.detail)
         return result
-
-    # 3. Validate sha.
-    incoming_text = staged_mus.read_text(encoding='utf-8', errors='replace')
-    incoming_meta = _parse_sidecar_keys(incoming_text)
-    declared_sha = incoming_meta.get('sha256', '')
-    actual_sha = _sha256_file(staged_h5ad)
-    if not declared_sha:
-        _warn('sidecar has no sha256= line; cannot verify integrity, proceeding')
-    elif declared_sha != actual_sha:
-        result.status = 'failed'
-        result.detail = (
-            f'sha256 mismatch: pulled file is {actual_sha}, '
-            f'sidecar declared {declared_sha}. Aborting (possible mid-upload race or corruption).'
-        )
-        _err(result.detail)
-        return result
+    result.status = _PIPELINE_STATE_TO_STATUS.get(outcome.state, outcome.state)
+    result.detail = outcome.detail + (f'  (report: {outcome.report_path})' if outcome.report_path else '')
+    for warning in outcome.warnings:
+        _warn(warning)
+    if outcome.state == 'live':
+        _ok(f'{outcome.db_id} {outcome.kind} {outcome.version}')
+        result.s3_incoming_keys = sorted(outcome.consumed)
+        result.staging_files = [str(pipeline.config.work_root)]
+        result.promoted_files = [outcome.store_h5ad] if outcome.store_h5ad else []
     else:
-        _ok(f'sha256 verified ({actual_sha[:12]}…)')
-
-    # 4. Catalog clash check.
-    catalog_h5ad, catalog_mus = _catalog_paths(data_folder, plan)
-    h5ad_action = 'promote'   # 'promote' | 'reuse' (already in catalog with matching sha)
-    if catalog_h5ad.exists():
-        existing_sha = _sha256_file(catalog_h5ad)
-        if existing_sha == actual_sha:
-            h5ad_action = 'reuse'
-            _ok('catalog h5ad already present with matching sha — proceeding to metadata')
-        else:
-            _print_h5ad_conflict_table(
-                plan,
-                incoming_path=staged_h5ad, incoming_sha=actual_sha,
-                catalog_path=catalog_h5ad, catalog_sha=existing_sha,
-                incoming_mus_text=incoming_text,
-            )
-            result.status = 'conflict'
-            result.detail = (
-                'catalog has same-name h5ad with different sha256 — '
-                'human must resolve before re-running'
-            )
-            return result
-
-    # 5. Metadata merge.
-    local_text = read_sidecar(catalog_mus)
-    merge = merge_sidecars(local_text, incoming_text)
-    if merge.conflicts:
-        for conflict in merge.conflicts:
-            _warn(
-                f'sidecar key conflict — kept local: '
-                f'{conflict.key}={conflict.local_value}  '
-                f'(incoming was: {conflict.incoming_value})'
-            )
-        result.sidecar_conflicts = list(merge.conflicts)
-    if merge.adopted:
-        _ok(f'adopted {len(merge.adopted)} new sidecar key(s): {", ".join(merge.adopted[:8])}'
-            + ('…' if len(merge.adopted) > 8 else ''))
-    if merge.overwritten:
-        print(_dim(f'  machine-keys refreshed: {", ".join(merge.overwritten)}'))
-
-    # 6. Promote h5ad (if needed) and write merged sidecar.
-    catalog_h5ad.parent.mkdir(parents=True, exist_ok=True)
-    if h5ad_action == 'promote':
-        shutil.move(str(staged_h5ad), str(catalog_h5ad))
-        result.promoted_files.append(str(catalog_h5ad))
-        _ok(f'promoted h5ad → {catalog_h5ad}')
-    write_sidecar_atomic(catalog_mus, merge.merged_text)
-    result.promoted_files.append(str(catalog_mus))
-
-    # 7. Static files (sha-compare).
-    for static_key in plan.static_keys:
-        static_filename = static_key.split('/')[-1]
-        catalog_static = data_folder / plan.data_project / 'static' / static_filename
-        staged_static = staging_dir.parent / 'static' / static_filename
-        try:
-            _download(client, bucket, static_key, staged_static)
-        except ClientError as exc:
-            _warn(f'static pull failed: {static_key} — {exc}')
-            continue
-        incoming_sha_static = _sha256_file(staged_static)
-        if catalog_static.exists():
-            existing_static_sha = _sha256_file(catalog_static)
-            if existing_static_sha == incoming_sha_static:
-                staged_static.unlink()  # identical — no-op
-                continue
-            _warn(
-                f'static file conflict (kept local): '
-                f'{catalog_static.relative_to(data_folder)}  '
-                f'(catalog sha {existing_static_sha[:8]}…, incoming sha {incoming_sha_static[:8]}…)'
-            )
-            result.static_conflicts.append(str(catalog_static))
-            staged_static.unlink()
-            continue
-        catalog_static.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(staged_static), str(catalog_static))
-        result.promoted_files.append(str(catalog_static))
-        _ok(f'promoted static → {catalog_static.relative_to(data_folder)}')
-
-    # 8. Run check, convert, duckdb-check.
-    ant_h5ad_check = _SCRIPT_DIR / 'ant-h5ad-check'
-    ant_convert = _SCRIPT_DIR / 'ant-convert'
-    ant_duckdb_check = _SCRIPT_DIR / 'ant-duckdb-check'
-
-    for label, cmd in [
-        ('ant-h5ad-check', [str(ant_h5ad_check), str(catalog_h5ad)]),
-        ('ant-convert', [str(ant_convert), str(catalog_h5ad)]),
-        ('ant-duckdb-check', [str(ant_duckdb_check),
-                              str(catalog_h5ad.with_suffix('.duckdb'))]),
-    ]:
-        ok, msg = _run(label, cmd)
-        if not ok:
-            result.status = 'failed'
-            result.detail = msg
-            _err(msg)
-            return result
-        _ok(f'{label} ok')
-
-    # 9. Push to catalog root + re-stamp s3_*.
-    catalog_key = _catalog_key(plan)
-    h5ad_size = catalog_h5ad.stat().st_size
-    print(f'  Pushing to catalog: s3://{bucket}/{catalog_key}  ({_fmt_size(h5ad_size)})')
-    try:
-        client.upload_file(
-            str(catalog_h5ad), bucket, catalog_key,
-            Config=_transfer_config(),
-            ExtraArgs={'Metadata': {'original-mtime': str(int(catalog_h5ad.stat().st_mtime))}},
-        )
-        head = client.head_object(Bucket=bucket, Key=catalog_key)
-        etag = head['ETag'].strip('"')
-        uploaded_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-        endpoint = get_config()['s3'].get('endpoint')
-        url = f'https://{endpoint}/{bucket}/{catalog_key}' if endpoint else \
-              f's3://{bucket}/{catalog_key}'
-        new_text = restamp_s3_block(
-            catalog_mus.read_text(encoding='utf-8'),
-            bucket=bucket, key=catalog_key, url=url,
-            etag=etag, uploaded_at=uploaded_at,
-        )
-        write_sidecar_atomic(catalog_mus, new_text)
-        # Also push the sidecar so S3 stays consistent with the local truth.
-        client.upload_file(
-            str(catalog_mus), bucket, catalog_key + '.mus',
-            Config=_transfer_config(),
-            ExtraArgs={'Metadata': {'original-mtime': str(int(catalog_mus.stat().st_mtime))}},
-        )
-        _ok('pushed to catalog + sidecar s3_* re-stamped')
-    except ClientError as exc:
-        result.status = 'failed'
-        result.detail = f'catalog push failed: {exc}'
-        _err(result.detail)
-        return result
-
-    # 10. Record __incoming/ keys for pending prune.
-    result.s3_incoming_keys = [plan.incoming_mus_key, plan.incoming_h5ad_key]
-    result.s3_incoming_keys.extend(plan.static_keys)
-    result.status = 'ok'
-    result.detail = 'ingested'
+        _err(f'{outcome.state}: {outcome.detail}')
     return result
-
-
-def _catalog_key(plan: DatasetPlan) -> str:
-    parts = [plan.data_project]
-    if plan.subfolder:
-        parts.append(plan.subfolder)
-    parts.append(plan.basename + H5AD_SUFFIX)
-    return '/'.join(parts)
 
 
 def _fmt_size(num_bytes: int) -> str:
@@ -851,8 +434,8 @@ def _catalog_orphans(client, bucket: str, data_folder: Path) -> List[str]:
     for page in paginator.paginate(Bucket=bucket):
         for obj in page.get('Contents', []):
             key = obj['Key']
-            if key.startswith(INCOMING_PREFIX):
-                continue
+            if key.startswith(INCOMING_PREFIX) or key.startswith('__'):
+                continue            # incoming and test prefixes (__incoming_test/, __ingest_test_catalog/)
             if any(key.startswith(p) for p in _CATALOG_NONDATA_PREFIXES):
                 continue
             local_path = data_folder / key
@@ -866,20 +449,34 @@ def _catalog_orphans(client, bucket: str, data_folder: Path) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────
 
 def _ledger_path(data_folder: Path) -> Path:
-    return data_folder / STAGING_DIR_REL / PENDING_PRUNE_FILE
+    """Pending-prune ledger in the ingest state dir (never inside the store)."""
+    return anthive_config.get_ingest_state_dir() / PENDING_PRUNE_FILE
+
+
+def _legacy_ledger_path(data_folder: Path) -> Path:
+    return data_folder / LEGACY_STAGING_DIR_REL / LEGACY_PENDING_PRUNE_FILE
 
 
 def _load_ledger(data_folder: Path) -> Dict:
+    """The ledger, with entries of the pre-2026-10-14 ledger inside the store merged in."""
+    ledger = {'datasets': []}
     ledger_file = _ledger_path(data_folder)
-    if not ledger_file.exists():
-        return {'datasets': []}
-    return json.loads(ledger_file.read_text())
+    if ledger_file.exists():
+        ledger = json.loads(ledger_file.read_text())
+    legacy = _legacy_ledger_path(data_folder)
+    if legacy.exists():
+        ledger.setdefault('datasets', []).extend(json.loads(legacy.read_text()).get('datasets', []))
+        ledger['legacy_merged'] = str(legacy)
+    return ledger
 
 
 def _save_ledger(data_folder: Path, ledger: Dict) -> None:
+    legacy_name = ledger.pop('legacy_merged', None)
     ledger_file = _ledger_path(data_folder)
     ledger_file.parent.mkdir(parents=True, exist_ok=True)
     ledger_file.write_text(json.dumps(ledger, indent=2, default=str))
+    if legacy_name and Path(legacy_name).exists():
+        Path(legacy_name).rename(Path(legacy_name).with_suffix('.json.migrated'))
 
 
 def _append_to_ledger(data_folder: Path, results: List[DatasetResult]) -> None:
@@ -995,8 +592,7 @@ def _print_prune_hints(data_folder: Path, results: List[DatasetResult],
             sum(len(r.s3_incoming_keys) for r in successes)
             + sum(len(r.s3_incoming_keys) for r in de_successes)
         )
-        print(f'  Local staging:      {n_staging} file(s) under '
-              f'{(data_folder / STAGING_DIR_REL).relative_to(data_folder)}/')
+        print(f'  Local work files:   {n_staging} path(s) under {_work_root()}/')
         print(f'  S3 __incoming/ :    {n_incoming} key(s) under s3://{bucket}/{INCOMING_PREFIX}')
 
     # Catalog orphans — cheap to scan, useful even if no datasets ingested.
@@ -1108,10 +704,7 @@ def _resolve_target_h5ad(
 
 
 def _de_staging_dir(data_folder: Path, plan: DEPlan) -> Path:
-    return (
-        data_folder / STAGING_DIR_REL / plan.data_project /
-        'de' / plan.local_parent
-    )
+    return _work_root() / 'de' / plan.data_project / plan.local_parent
 
 
 def _process_de(
@@ -1349,18 +942,18 @@ def cmd_run(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
         _err(f'list_objects_v2 failed: {exc}')
         return 2
 
-    plans, malformed = _group_into_plans(objects)
+    items, malformed = plan_items(objects, INCOMING_PREFIX)
     de_plans, de_malformed = _group_into_de_plans(objects)
     malformed.extend(de_malformed)
 
-    if not plans and not de_plans and not malformed:
+    if not items and not de_plans and not malformed:
         print('  (nothing under __incoming/)')
         _print_prune_hints(data_folder, [], client, bucket, args)
         return 0
 
     parts = []
-    if plans:
-        parts.append(f'{len(plans)} h5ad dataset(s)')
+    if items:
+        parts.append(f'{len(items)} h5ad dataset(s)')
     if de_plans:
         parts.append(f'{len(de_plans)} DE deposit(s)')
     if malformed:
@@ -1369,14 +962,27 @@ def cmd_run(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
 
     # Process h5ads FIRST so DE files can resolve their target_id against
     # an already-promoted .md. (Mus's recommended ingest order, #134.)
+    state_dir = anthive_config.get_ingest_state_dir()
+    pipeline = Pipeline(
+        PipelineConfig(store_root=data_folder, work_root=_work_root(), reports_root=state_dir / 'reports',
+                       bucket=bucket, catalog_prefix='', post_steps=args.post_steps,
+                       store_git_commit=args.git_commit, route='manual', state_dir=state_dir,
+                       s3_endpoint=s3_cfg.get('endpoint')),
+        client, SubprocessRunner(log_path=state_dir / 'logs' / f'ant_ingest_{time.strftime("%Y%m%d")}.log'),
+        ApiClient(anthive_config.get_api_url(), anthive_config.internal_auth_headers(), retry_delays=(2, 5, 10)),
+        log=lambda message: print(_dim(f'  {message}')))
     results: List[DatasetResult] = []
-    for plan in plans:
-        result = _process_dataset(plan, client, bucket, data_folder, args)
+    consumed_by_pipeline: set = set()
+    for item in items:
+        result = _process_dataset(item, pipeline, args)
         results.append(result)
+        consumed_by_pipeline.update(result.s3_incoming_keys)
 
-    # Process DE files SECOND.
+    # Process DE files SECOND (those the h5ad pipeline did not already ingest).
     de_results: List[DEResult] = []
     for plan in de_plans:
+        if plan.incoming_data_key in consumed_by_pipeline:
+            continue
         de_result = _process_de(plan, client, bucket, data_folder, args)
         de_results.append(de_result)
 
@@ -1460,15 +1066,22 @@ def cmd_prune(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
         return 0
 
     deleted_local = 0
+    work_root = _work_root().resolve()
     for path in staging_files:
         try:
-            path.unlink()
-            deleted_local += 1
+            if path.is_dir():
+                resolved = path.resolve()
+                if resolved == work_root or work_root in resolved.parents:
+                    shutil.rmtree(path)
+                    deleted_local += 1
+            else:
+                path.unlink()
+                deleted_local += 1
         except FileNotFoundError:
             pass
 
-    # Also remove staging dirs that became empty.
-    staging_root = data_folder / STAGING_DIR_REL
+    # Also remove work dirs that became empty.
+    staging_root = _work_root()
     if staging_root.exists():
         for sub in sorted(staging_root.rglob('*'), reverse=True):
             if sub.is_dir() and not any(sub.iterdir()):
@@ -1511,13 +1124,73 @@ def _bulk_delete(client, bucket: str, keys: List[str]) -> int:
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────
 
+def cmd_purge(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
+    """Remove archived versions (``<group>/_versions/<basename>/<version>/`` locally and on S3)."""
+    import ingest_versions
+    import ingest_watch
+
+    if not args.all and not args.db_id:
+        _err('name a dataset (ant-ingest purge <db_id>) or pass --all')
+        return 2
+    datasets = ingest_versions.find_datasets(data_folder)
+    if args.db_id:
+        datasets = [entry for entry in datasets if entry['db_id'] == args.db_id]
+        if not datasets:
+            _err(f'{args.db_id}: no such dataset in {data_folder}')
+            return 2
+    client = _s3_client(s3_cfg) if not args.local_only else None
+    bucket = s3_cfg['bucket']
+    plans = []
+    for entry in datasets:
+        plan = ingest_versions.plan_purge(entry['db_id'], entry['dataset_dir'], entry['rel_dir'], entry['basename'],
+                                          entry['version'], args.keep, s3=client, bucket=bucket,
+                                          catalog_prefix=args.catalog_prefix)
+        if plan.remove_versions:
+            plans.append(plan)
+    if not plans:
+        print(f'Nothing to purge (keep {args.keep}).')
+        return 0
+    for plan in plans:
+        print(f'{plan.db_id}  current {plan.current_version}  remove {", ".join(plan.remove_versions)}')
+        for folder in plan.local_dirs:
+            print(f'    local  {folder}')
+        for key in plan.s3_keys:
+            print(f'    s3     {key}')
+    if args.dry_run:
+        print('\n(dry-run: nothing deleted)')
+        return 0
+    if not args.yes:
+        answer = input(f'Delete {sum(len(p.local_dirs) for p in plans)} folder(s) and '
+                       f'{sum(len(p.s3_keys) for p in plans)} S3 key(s)? Type yes: ')
+        if answer.strip().lower() != 'yes':
+            print('Aborted, nothing deleted.')
+            return 1
+    db = ingest_watch.StateDB(anthive_config.get_ingest_state_dir() / ingest_watch.DB_FILE)
+    for plan in plans:
+        def record(kind: str, target: str, version: str, plan=plan) -> None:
+            db.record_version(plan.db_id, f'{plan.rel_dir}/{plan.basename}', f'purged_{kind}', version, '', target)
+        removed = ingest_versions.purge(plan, s3=client, bucket=bucket, record=record)
+        _ok(f'{plan.db_id}: removed {removed["local_dirs"]} folder(s), {removed["s3_keys"]} S3 key(s)')
+    db.close()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description='End-to-end ingestion from S3 __incoming/ to the anthive catalog.',
     )
     parser.add_argument(
-        '--data-folder', default='data/h5adstore',
-        help='h5adstore root (default: data/h5adstore)',
+        '--data-folder', default=None,
+        help='h5adstore root (default: the configured store, h5adstore / ANTHIVE_H5ADSTORE)',
+    )
+    parser.add_argument(
+        '--post-steps', default='',
+        help='comma separated post steps after publication (score, gene_stats, module_variability, '
+             'facet_test, facet_test_modules, ingest_index, manifest); default none',
+    )
+    parser.add_argument(
+        '--git-commit', action='store_true',
+        help='commit the .md / .h5ad.mus / index.md in the store repository',
     )
     parser.add_argument(
         '--filter', metavar='DATA_PROJECT',
@@ -1545,7 +1218,21 @@ def main() -> int:
         help='Also delete S3 catalog keys with no local counterpart',
     )
 
+    purge_parser = subparsers.add_parser(
+        'purge', help='Remove archived versions of datasets (local _versions/ folders and their S3 keys)',
+    )
+    purge_parser.add_argument('db_id', nargs='?', help='dataset id, e.g. WT6/MIC')
+    purge_parser.add_argument('--all', action='store_true', help='every dataset')
+    purge_parser.add_argument('--keep', type=int, default=1,
+                              help='versions to keep, the current one included (default 1: only the current)')
+    purge_parser.add_argument('--dry-run', action='store_true', help='show what would be removed')
+    purge_parser.add_argument('--yes', action='store_true', help='do not ask for confirmation')
+    purge_parser.add_argument('--local-only', action='store_true', help='leave S3 alone')
+    purge_parser.add_argument('--catalog-prefix', default='', help="catalog prefix on S3 ('' = the root)")
+
     args = parser.parse_args()
+    if hasattr(args, 'post_steps') and isinstance(args.post_steps, str):
+        args.post_steps = [step for step in args.post_steps.split(',') if step]
 
     cfg = get_config()
     if 's3' not in cfg:
@@ -1560,13 +1247,16 @@ def main() -> int:
     # to perform the action.
     require_primary(cfg, tool='ant-ingest')
 
-    data_folder = (Path.cwd() / args.data_folder).resolve()
+    data_folder = (Path(args.data_folder).resolve() if args.data_folder
+                   else anthive_config.get_data_folder(cfg).resolve())
     if not data_folder.exists():
         _err(f'data folder not found: {data_folder}')
         return 2
 
     if args.command == 'prune':
         return cmd_prune(args, cfg['s3'], data_folder)
+    if args.command == 'purge':
+        return cmd_purge(args, cfg['s3'], data_folder)
     return cmd_run(args, cfg['s3'], data_folder)
 
 
