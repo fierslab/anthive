@@ -29,15 +29,16 @@ def test_the_destructive_checkers_are_never_called(source):
 
 
 def test_s3_deletes_live_only_in_the_guarded_functions():
-    """DeleteObject appears only in delete_consumed (watch) and purge (versions); no batch delete in the route."""
+    """DeleteObject appears only in _delete_if_match (watch) and purge (versions); no batch delete in the route."""
     for source in WATCH_SOURCES[:5]:
         text = source.read_text()
         assert 'delete_objects' not in text, source.name
         calls = [match.start() for match in re.finditer(r'\.delete_object\(', text)]
+        enclosing = {text[text.rfind('\ndef ', 0, start):].split('(')[0].strip() for start in calls}
         if source.name == 'ingest_pipeline.py':
-            assert len(calls) == 1 and text.rfind('def delete_consumed', 0, calls[0]) > text.rfind('\ndef ', 0, calls[0]) - 1
+            assert enclosing == {'def _delete_if_match'} and len(calls) == 2
         elif source.name == 'ingest_versions.py':
-            assert len(calls) == 1 and text.rfind('def purge(', 0, calls[0]) > 0
+            assert enclosing == {'def purge'} and len(calls) == 1
         else:
             assert not calls, source.name
 
@@ -144,13 +145,26 @@ def test_layer_stats_match_a_full_computation(tmp_path):
             assert profile.layer_stats[name][key] == pytest.approx(expected[key]), (name, key)
 
 
-def test_sidecar_merge_incoming_wins_and_reports_changes():
-    merged, changed = md_fill.merge_sidecar_incoming_wins(
-        '# local\norganism=human\ntissue=brain\nlocal_only=1\ns3_etag=old\n',
-        'organism=human\ntissue=cortex\nnew_key=v\ns3_etag=new\n')
-    assert 'tissue=cortex' in merged and 'local_only=1' in merged and '# local' in merged
-    assert 's3_etag=new' in merged
-    assert changed == [('tissue', 'brain', 'cortex'), ('new_key', '', 'v')]
+def test_sidecar_merge_store_wins_override_and_guarded_keys():
+    merge = md_fill.merge_sidecar_store_wins(
+        '# local\norganism=human\ntissue=brain\ncell_type=microglia\nlocal_only=1\ns3_etag=old\naccess=internal\n',
+        'organism=human\ntissue=cortex\ncell_type=astrocyte\noverride_cell_type=true\nnew_key=v\ns3_etag=new\n'
+        'access=public\n')
+    assert 'tissue=brain' in merge.text and 'cell_type=astrocyte' in merge.text
+    assert 'local_only=1' in merge.text and '# local' in merge.text and 's3_etag=new' in merge.text
+    assert 'override_' not in merge.text and 'access=internal' in merge.text
+    assert merge.conflicts == [('tissue', 'brain', 'cortex')]
+    assert merge.overridden == [('cell_type', 'microglia', 'astrocyte')]
+    assert merge.adopted == [('new_key', '', 'v')]
+    assert merge.guarded == [('access', 'internal', 'public')]
+
+
+def test_seed_md_delta():
+    store = {'title': 'T', 'caveats': [{'message': 'old'}], 'version': '1.0.0'}
+    caveats, conflicts = md_fill.seed_md_delta({'title': 'T', 'caveats': [{'message': 'old'}, {'message': 'new'}],
+                                                'version': '9'}, store)
+    assert caveats == [{'message': 'new'}] and conflicts == []
+    assert md_fill.seed_md_delta({'title': 'Other'}, store)[1] == ['title']
 
 
 def test_plan_update_rules(tmp_path):
@@ -198,28 +212,32 @@ def _dataset_with_versions(tmp_path: Path, versions) -> tuple:
     return group, s3
 
 
-def test_archive_local_moves_sources_and_keeps_derived_out(tmp_path):
+def test_archive_plan_links_and_never_moves(tmp_path):
     group = tmp_path / 'G'
     group.mkdir()
     for suffix in ('.h5ad', '.md', '.h5ad.mus', '.scores.parquet', '.de.parquet', '.duckdb'):
         (group / f'd{suffix}').write_text(suffix)
+    links, remove_after = ingest_versions.archive_plan(group, 'd', '1.0.0')
+    assert {destination.name for _, destination in links} == {'d.h5ad', 'd.md', 'd.h5ad.mus', 'd.scores.parquet',
+                                                              'd.de.parquet'}
+    assert remove_after == [group / 'd.scores.parquet']
+    assert not (group / '_versions').exists()                      # planning touches nothing
     archived = ingest_versions.archive_local(group, 'd', '1.0.0')
     folder = group / '_versions' / 'd' / '1.0.0'
-    assert {path.name for path in archived} == {'d.h5ad', 'd.md', 'd.h5ad.mus', 'd.scores.parquet', 'd.de.parquet'}
-    assert not (group / 'd.h5ad').exists() and (group / 'd.de.parquet').exists() and (group / 'd.duckdb').exists()
-    assert (folder / 'd.h5ad').read_text() == '.h5ad'
+    assert all((group / f'd{suffix}').exists() for suffix in ('.h5ad', '.md', '.h5ad.mus', '.scores.parquet'))
+    assert (folder / 'd.h5ad').read_text() == '.h5ad' and len(archived) == 5
+    assert (folder / 'd.h5ad').stat().st_ino == (group / 'd.h5ad').stat().st_ino     # a hard link
     with pytest.raises(FileExistsError):
-        ingest_versions.archive_local(group, 'd', '1.0.0')
+        ingest_versions.archive_plan(group, 'd', '1.0.0')
 
 
-def test_archive_local_metadata_only_links_the_h5ad(tmp_path):
+def test_archive_plan_metadata_only_keeps_the_scores(tmp_path):
     group = tmp_path / 'G'
     group.mkdir()
-    for suffix in ('.h5ad', '.md', '.h5ad.mus'):
+    for suffix in ('.h5ad', '.md', '.h5ad.mus', '.scores.parquet'):
         (group / f'd{suffix}').write_text(suffix)
-    ingest_versions.archive_local(group, 'd', '1.0.0', data_changed=False)
-    assert (group / 'd.h5ad').exists() and not (group / 'd.md').exists()
-    assert (group / '_versions' / 'd' / '1.0.0' / 'd.h5ad').read_text() == '.h5ad'
+    _, remove_after = ingest_versions.archive_plan(group, 'd', '1.0.0', data_changed=False)
+    assert remove_after == []
 
 
 def test_archived_versions_are_skipped_by_scan_sync_and_md_check(tmp_path):

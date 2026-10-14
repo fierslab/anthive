@@ -13,7 +13,7 @@ from ingest_pipeline import Pipeline, PipelineConfig, delete_consumed, plan_item
 from tests.ingest_watch_helpers import (BUCKET, CATALOG, INDEX_SEED, PREFIX, FakeApi, FakeRunner, FakeS3,
                                         make_h5ad, sha_of, sidecar_text)
 
-SETTINGS = {'prefix': PREFIX, 'catalog_prefix': CATALOG, 'settle_seconds': 900, 'interval_seconds': 300,
+SETTINGS = {'prefix': PREFIX, 'catalog_prefix': CATALOG, 'settle_seconds': 0, 'interval_seconds': 300,
             'delete_incoming_after_ingest': True, 'notify': {'on': []}}
 
 
@@ -34,10 +34,13 @@ class Env:
         self.pipeline = Pipeline(PipelineConfig(store_root=self.store, work_root=tmp_path / 'work',
                                                 reports_root=self.state / 'reports', bucket=BUCKET,
                                                 catalog_prefix=CATALOG, post_steps=['score', 'facet_test'],
-                                                state_dir=self.state),
+                                                state_dir=self.state, min_free_gb=0),
                                  self.s3, self.runner, self.api, log=lambda message: None)
         self.watcher = ingest_watch.Watcher(self.settings, self.db, self.s3, BUCKET, self.pipeline, self.state,
-                                            log=lambda message: None, clock=lambda: self.clock_value)
+                                            log=lambda message: None, clock=lambda: self.clock_value,
+                                            stop_requested=lambda: self.stop)
+        self.stop = False
+        self.pipeline.stop_requested = lambda: self.stop
 
     def deposit(self, basename: str = 'micro', group: str = 'WatchTest2026', seed: int = 0, sidecar_extra=None,
                 with_seeds: bool = True, mtime: float | None = None, sha_override: str | None = None,
@@ -87,9 +90,28 @@ def test_a_changed_etag_between_polls_restarts_the_wait(tmp_path):
     assert env.watcher.poll() == {'live': 1}
 
 
-def test_old_uploads_are_ready_after_the_settle_time(tmp_path):
+def test_the_first_listing_never_processes_even_an_old_upload(tmp_path):
     env = Env(tmp_path)
-    env.deposit(mtime=env.clock_value - 2000)
+    env.deposit(mtime=env.clock_value - 5000)
+    assert env.watcher.poll() == {}
+    assert env.watcher.poll() == {'live': 1}
+
+
+def test_settle_seconds_is_a_minimum_age(tmp_path):
+    env = Env(tmp_path, settings={'settle_seconds': 600})
+    keys = env.deposit(mtime=env.clock_value)
+    assert env.poll_twice() == {}
+    env.clock_value += 601
+    assert env.watcher.poll() == {'live': 1}
+    assert env.row(keys['h5ad'])['state'] == 'live'
+
+
+def test_a_changed_static_file_restarts_the_wait(tmp_path):
+    env = Env(tmp_path)
+    keys = env.deposit()
+    env.watcher.poll()
+    env.s3.put(keys['pdf'], b'%PDF-1.4 v2', env.clock_value)
+    assert env.watcher.poll() == {}
     assert env.watcher.poll() == {'live': 1}
 
 
@@ -117,8 +139,8 @@ def test_plan_items_layout(tmp_path):
     assert by_name['b'].subfolder == 'sub' and by_name['b'].mus is None
     assert len(malformed) == 2
     # the .md seed of item b is not consumed by item a
-    assert [obj.key for obj in by_name['a'].static_to_consume()] == []
-    assert [obj.key for obj in by_name['b'].static_to_consume()] == [f'{PREFIX}G/static/b.md']
+    assert [obj.key for obj in by_name['a'].static_for_item()] == []
+    assert [obj.key for obj in by_name['b'].static_for_item()] == [f'{PREFIX}G/static/b.md']
 
 
 # ── lock ─────────────────────────────────────────────────────────────────────
@@ -274,7 +296,8 @@ def test_no_delete_when_not_served_or_catalog_unverified(tmp_path):
     assert env.poll_twice() == {'live': 1}
     assert not env.s3.deleted
     env2 = Env(tmp_path / 'b')
-    env2.s3.drop_metadata = True
+    env2.s3.drop_metadata = True             # legacy object without sha256 metadata ...
+    env2.s3.corrupt_upload = True            # ... whose bytes differ (same size, other MD5)
     env2.deposit()
     assert env2.poll_twice() == {'live': 1}
     assert not env2.s3.deleted
@@ -360,25 +383,40 @@ def test_update_with_new_data_is_a_minor_version_and_keeps_the_previous_one(tmp_
                                                                                  ('archived', '1.0.0')]
 
 
-def test_metadata_only_update_is_a_patch_and_the_deposit_wins_for_its_keys(tmp_path):
+def test_metadata_only_update_needs_an_override_to_replace_a_curated_key(tmp_path):
     env = Env(tmp_path)
     _live_v1(env)
     group = env.store / 'WatchTest2026'
     sidecar_path = group / 'micro.h5ad.mus'
     sidecar_path.write_text(sidecar_path.read_text() + 'local_only=kept\n')
-    keys = env.deposit(seed=0, with_seeds=False, sidecar_extra={'tissue': 'prefrontal cortex'})
+    keys = env.deposit(seed=0, with_seeds=False, sidecar_extra={'tissue': 'prefrontal cortex',
+                                                                 'override_tissue': 'true'})
     env.clock_value += 10
     assert env.poll_twice() == {'live': 1}
     row = env.row(keys['h5ad'])
     assert row['kind'] == 'update_patch' and row['version'] == '1.0.1'
     text = sidecar_path.read_text()
-    assert 'tissue=prefrontal cortex' in text and 'local_only=kept' in text
+    assert 'tissue=prefrontal cortex' in text and 'local_only=kept' in text and 'override_' not in text
     meta = yaml.safe_load((group / 'micro.md').read_text().split('---\n')[1])
     assert any('tissue' in change for change in meta['changelog'][-1]['changes'])
     assert 'previous_sha256' not in meta['changelog'][-1]
     assert env.runner.tools().count('ant-convert') == 1          # only the first version was converted
     assert f'{CATALOG}WatchTest2026/_versions/micro/1.0.0/micro.h5ad' not in env.s3.objects
     assert f'{CATALOG}WatchTest2026/_versions/micro/1.0.0/micro.h5ad.mus' in env.s3.objects
+
+
+def test_curated_sidecar_value_wins_without_an_override(tmp_path):
+    env = Env(tmp_path)
+    _live_v1(env)
+    group = env.store / 'WatchTest2026'
+    keys = env.deposit(seed=0, with_seeds=False, sidecar_extra={'tissue': 'prefrontal cortex', 'strain': 'x'})
+    env.clock_value += 10
+    assert env.poll_twice() == {'live': 1}
+    text = (group / 'micro.h5ad.mus').read_text()
+    assert 'tissue=brain' in text and 'strain=x' in text
+    meta = yaml.safe_load((group / 'micro.md').read_text().split('---\n')[1])
+    changes = ' '.join(meta['changelog'][-1]['changes'])
+    assert 'kept the curated' in changes and 'strain' in changes
 
 
 def test_identical_reupload_is_unchanged_without_a_version_bump(tmp_path):
@@ -425,8 +463,8 @@ def test_held_update_leaves_the_published_version_alone(tmp_path):
     env = Env(tmp_path)
     _live_v1(env)
     md_before = (env.store / 'WatchTest2026' / 'micro.md').read_text()
-    env.runner.report = {'result': 'pass', 'publish': 'held', 'held_reasons': ['public_access'], 'checks': []}
-    keys = env.deposit(seed=0, with_seeds=False, sidecar_extra={'access': 'public'})
+    env.runner.report = {'result': 'pass', 'publish': 'held', 'held_reasons': ['donor_overlap'], 'checks': []}
+    keys = env.deposit(seed=0, with_seeds=False, sidecar_extra={'tissue': 'cortex', 'override_tissue': 'true'})
     env.clock_value += 10
     deleted_before = list(env.s3.deleted)
     assert env.poll_twice() == {'held': 1}
