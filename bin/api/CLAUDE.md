@@ -170,8 +170,21 @@ and `lib/config.py` (anthive.yaml loader).
   (2.44: 25 s warm, 170 s cold). Builds are single flight per key
   (`FacetResults._cached_build`: no global lock during a build, previous value
   served while a rebuild runs); pass `reader.prepare(datasets)` to several
-  calls of one request so the files are stat-ed once. ant-serve warms the
-  caches in a low priority thread at start (`ANTHIVE_FACET_WARMUP=0` skips).
+  calls of one request so the files are stat-ed once. Caches built from a
+  dataset list are keyed by `PreparedDatasets.visibility` (the set of db_ids)
+  and sized for `VISIBILITY_KINDS` = 2, so signed-in and anonymous callers
+  never evict each other. A donor-pooled unit is served only when every
+  member is in the caller's list (`pool_is_visible`); `/facets/cohorts` lists
+  served rows only.
+- **Warm-up** (`_warm_caches`, config block `warmup`, `config.get_warmup_settings`):
+  a nice-10 daemon thread after start builds the facet caches once per visitor
+  kind (`_warmup_visitor_kinds`: signed-in unless `auth.mode: none`, anonymous
+  when internal datasets are hidden, run under `_as_visitor`), then the
+  per-donor values of `warmup.donor_genes`, then the module rank tables
+  (`module_ranks: all | priority | off`, `module_rank_datasets` first,
+  `workers` 1 or 2 against the store's 2 build slots). `ANTHIVE_WARMUP=0` or
+  the older `ANTHIVE_FACET_WARMUP=0` skips it. Tests: the `warmup` tests in
+  `tests/test_facet_results.py`.
   `facets_visible` (config) only adds `hidden_by_config` to the facet
   listings; nothing is dropped from the API.
 

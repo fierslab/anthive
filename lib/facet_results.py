@@ -96,6 +96,10 @@ HUMAN_CELL_SEX_FACETS = ('sex', 'graft_sex')
 FAMILY_CACHE_ENTRIES = len(FACET_ORDER) * len(facet_scopes.SCOPES) * 2
 #: Gene cards kept (one per facet, scope and gene): a gene page asks for every facet and scope of one gene.
 CARD_CACHE_ENTRIES = 256
+#: Dataset sets a cache holds at once: what a signed-in caller sees and what an anonymous caller sees when
+#: ``access: internal`` datasets are hidden from them (lib/dataset_access.py). Caches built from a dataset list
+#: are keyed by it (``PreparedDatasets.visibility``), so the two kinds of visitor never evict each other's entries.
+VISIBILITY_KINDS = 2
 METHOD_ORDER = (('cell_mean', 'geneset'), ('cell_mean', 'ucell'), ('pseudobulk', 'gene_list'))
 
 # Columns returned per gene row and per module row (only those present in the
@@ -547,11 +551,16 @@ def json_safe(value: Any) -> Any:
 
 
 class PreparedDatasets:
-    """Datasets resolved by ``FacetResults.prepare``: the resolved dicts and the signature of their result files."""
+    """Datasets resolved by ``FacetResults.prepare``: the resolved dicts and the signature of their result files.
+
+    ``visibility`` identifies the set of db_ids (a hash): a signed-in and an anonymous caller of a site with
+    hidden internal datasets get different values, and the caches built from the list key on it.
+    """
 
     def __init__(self, datasets: List[Dict[str, Any]], signature: Tuple):
         self.datasets = datasets
         self.signature = signature
+        self.visibility = hash(tuple(sorted(str(d['db_id']) for d in datasets)))
 
 
 class FacetResults:
@@ -582,7 +591,7 @@ class FacetResults:
         self._cards: "OrderedDict[Tuple, Tuple[Tuple, Dict[str, Any]]]" = OrderedDict()
         self._counting: Dict[Tuple, Tuple[pd.DataFrame, pd.DataFrame]] = {}
         self._key_locks: Dict[Tuple, threading.Lock] = {}
-        self._scopes_memo: Optional[Tuple[Tuple, Dict[str, List[str]]]] = None
+        self._scopes_memo: Dict[int, Tuple[Tuple, Dict[str, List[str]]]] = {}   # visibility -> (signature, by facet)
         self._family_slots = threading.BoundedSemaphore(FAMILY_WORKERS)
 
     # ── low-level reads ────────────────────────────────────────────────────
@@ -715,10 +724,8 @@ class FacetResults:
         """Scopes (in ``facet_scopes.SCOPES`` order) in which ``facet`` has at least one tested unit."""
         prepared = self.prepare(datasets)
         with self._lock:
-            if self._scopes_memo is not None and self._scopes_memo[0] == prepared.signature:
-                by_facet = self._scopes_memo[1]
-            else:
-                by_facet = None
+            memo = self._scopes_memo.get(prepared.visibility)
+            by_facet = memo[1] if memo is not None and memo[0] == prepared.signature else None
         if by_facet is None:
             found: Dict[str, set] = {}
             for dataset in prepared.datasets:
@@ -733,7 +740,9 @@ class FacetResults:
             by_facet = {name: [scope for scope in facet_scopes.SCOPES if scope in scopes]
                         for name, scopes in found.items()}
             with self._lock:
-                self._scopes_memo = (prepared.signature, by_facet)
+                if len(self._scopes_memo) >= VISIBILITY_KINDS and prepared.visibility not in self._scopes_memo:
+                    self._scopes_memo.clear()
+                self._scopes_memo[prepared.visibility] = (prepared.signature, by_facet)
         return list(by_facet.get(canonical_facet(facet), []))
 
     @staticmethod
@@ -1410,12 +1419,12 @@ class FacetResults:
         """
         facet = canonical_facet(facet) if facet else facet
         prepared = self.prepare(datasets)
-        tables = self._cached_build(self._tables, ('tables',), prepared.signature,
-                                    lambda: self._build_gene_tables(prepared.datasets), max_entries=1)
+        tables = self._cached_build(self._tables, ('tables', prepared.visibility), prepared.signature,
+                                    lambda: self._build_gene_tables(prepared.datasets), max_entries=VISIBILITY_KINDS)
         if scope is not None:
             return tables.get((facet, scope)) or self._empty_gene_table()
         with self._lock:
-            merged = self._tables_unscoped.get(facet)
+            merged = self._tables_unscoped.get((facet, prepared.visibility))
             if merged is not None and merged[0] is tables:
                 return merged[1]
         parts = [tables[key] for key in tables if key[0] == facet]
@@ -1428,7 +1437,9 @@ class FacetResults:
         else:
             result = self._empty_gene_table()
         with self._lock:
-            self._tables_unscoped[facet] = (tables, result)
+            if len(self._tables_unscoped) >= len(FACET_ORDER) * VISIBILITY_KINDS * 2:
+                self._tables_unscoped.clear()     # entries of dataset sets that are gone (rescans)
+            self._tables_unscoped[(facet, prepared.visibility)] = (tables, result)
         return result
 
     def _table_signature(self, datasets: Sequence[Dict[str, Any]]) -> Tuple:
@@ -1962,8 +1973,8 @@ class FacetResults:
                         families[group] = self._family(sub, group_units, facet)
             return families
 
-        return self._cached_build(self._families, (facet, scope, bool(exclude_secondary)), prepared.signature, build,
-                                  max_entries=FAMILY_CACHE_ENTRIES)
+        return self._cached_build(self._families, (facet, scope, bool(exclude_secondary), prepared.visibility),
+                                  prepared.signature, build, max_entries=FAMILY_CACHE_ENTRIES * VISIBILITY_KINDS)
 
     @staticmethod
     def _family(sub: pd.DataFrame, group_units: pd.DataFrame, facet: Optional[str] = None) -> Dict[str, Any]:
@@ -2120,7 +2131,8 @@ class FacetResults:
         scope = scope or self.default_scope(facet)
         prepared = self.prepare(datasets)
         return self._cached_build(
-            self._cards, (facet, gene.upper(), cell_type, bool(exclude_secondary), scope), prepared.signature,
+            self._cards, (facet, gene.upper(), cell_type, bool(exclude_secondary), scope, prepared.visibility),
+            prepared.signature,
             lambda: self._gene_effects(facet, gene, prepared, cell_type, exclude_secondary, scope),
             max_entries=CARD_CACHE_ENTRIES)
 

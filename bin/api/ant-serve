@@ -60,12 +60,13 @@ from urllib.parse import urlencode
 import time
 import uuid
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
 from io import BytesIO, StringIO
 from pathlib import Path
 from threading import Lock
-from typing import Annotated, Any, Dict, List, Optional, Set, Tuple
+from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import duckdb
 import pandas as pd
@@ -90,7 +91,7 @@ from canonical_columns import BACKCOMPAT_LEGACY_NAMES  # type: ignore
 from config import get_config, get_docs_base_url
 from config import facet_hidden_by_config, get_facet_results_dir, get_facets_visible
 from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
-                    get_duckdb_temp_dir, get_internal_requires_auth, get_library_dir,
+                    get_duckdb_temp_dir, get_internal_requires_auth, get_library_dir, get_warmup_settings,
                     get_library_index_dir, get_model_cache_dir, get_log_dir, get_state_dir, get_tmp_dir,
                     get_webapp_dir)
 from library_service import LIBRARY_S3_PREFIX, LibraryService
@@ -1968,9 +1969,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_build_startup_indexes())
     # Paper library + literature index: a few seconds, also off the startup path.
     asyncio.create_task(asyncio.to_thread(_library_refresh_safe))
-    # Facet result tables and replication families: about a minute of CPU, so build them in a
-    # low-priority thread; the first gene page then hits a warm cache.
-    _start_facet_warmup()
+    # Facet caches (per kind of visitor), per-donor values and module rank tables: minutes of
+    # CPU, so build them in a low-priority thread; the first pages then hit warm caches.
+    _start_warmup()
     # Slave-mode banner — make the deployment role obvious in the logs
     # so it's the first thing visible when debugging "why won't this
     # write?". Banner ONLY fires when role=slave is opt-in; primaries
@@ -4270,15 +4271,20 @@ def _no_scope_reason(db_id: str, meta: Dict[str, Any]) -> Optional[str]:
         {'organism': meta.get('organism'), 'experimental_system': meta.get('experimental_system')}, db_id=db_id)
 
 
-def _warm_facet_results() -> None:
-    """Build the facet gene tables and replication families (``FacetResults.warm``) at low priority.
-
-    Never raises: a failure only means the first request builds the cache itself.
-    """
+def _lower_thread_priority() -> None:
+    """Give the calling thread nice 10 (Linux: per thread), so warm-up work yields to requests."""
     try:
         os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
     except (AttributeError, OSError):
         pass
+
+
+def _warm_facet_results() -> None:
+    """Build the facet gene tables, replication families, module families and gene detection table for the
+    datasets the current caller sees (``_warm_caches`` sets the visibility of the thread).
+
+    Never raises: a failure only means the first request builds the cache itself.
+    """
     started = time.monotonic()
     try:
         datasets = _facet_test_datasets()
@@ -4294,11 +4300,135 @@ def _warm_facet_results() -> None:
         log.warning("facet results warm-up failed: %s", exc)
 
 
-def _start_facet_warmup() -> None:
-    """Start ``_warm_facet_results`` in a daemon thread unless ``ANTHIVE_FACET_WARMUP=0``."""
-    if os.environ.get('ANTHIVE_FACET_WARMUP', '1').strip() == '0':
+def _warmup_visitor_kinds(anonymous: bool) -> List[Tuple[str, frozenset]]:
+    """``(label, hidden db_ids)`` of each kind of caller whose facet caches the warm-up builds.
+
+    The facet caches are keyed by the datasets a caller sees (``PreparedDatasets.visibility``). Without hidden
+    internal datasets there is one kind. With them: signed-in callers (not on ``auth.mode: none``, where nobody
+    signs in) and, when ``anonymous`` is on or they are the only visitors, anonymous callers.
+    """
+    settings = _access_settings()
+    hidden = registry.internal_db_ids() if (registry is not None and settings['requires_auth']) else frozenset()
+    if not hidden:
+        return [('every caller', frozenset())]
+    kinds: List[Tuple[str, frozenset]] = []
+    if settings['auth_mode'] != 'none':
+        kinds.append(('signed-in', frozenset()))
+    if anonymous or settings['auth_mode'] == 'none':
+        kinds.append(('anonymous', hidden))
+    return kinds
+
+
+def _as_visitor(hidden: frozenset, function: Callable[..., Any], *args: Any) -> Any:
+    """Run ``function`` in this thread as a caller from whom ``hidden`` datasets are hidden."""
+    token = _HIDDEN_DB_IDS.set(hidden)
+    try:
+        return function(*args)
+    finally:
+        _HIDDEN_DB_IDS.reset(token)
+
+
+def _warm_donor_values(genes: Sequence[str], cell_type: str, pause: float) -> int:
+    """Per-donor values of ``genes`` in ``cell_type`` for every facet with results in its default scope.
+
+    Opens the sample sidecars and the anchor datasets the first donor plot of a session needs. Returns the number
+    of payloads built; a facet or gene without results is skipped.
+    """
+    if not genes or not cell_type:
+        return 0
+    reader = _facet_results()
+    prepared = reader.prepare(_facet_test_datasets())
+    built = 0
+    for gene in genes:
+        for facet in facet_results_lib.FACET_ORDER:
+            if reader.default_scope(facet) not in reader.scopes_with_results(facet, prepared):
+                continue
+            try:
+                _donor_units_payload(facet, gene, None, cell_type, None, False, False, None, None, True)
+                built += 1
+            except Exception as exc:  # noqa: BLE001 - HTTPException for an absent gene or cell type, or a read error
+                log.debug("donor values warm-up %s %s: %s", facet, gene, exc)
+            if pause:
+                time.sleep(pause)
+    return built
+
+
+def _module_rank_warm_ids(mode: str, priority: Sequence[str]) -> List[str]:
+    """Datasets whose rank tables the warm-up loads: the priority list first, then (mode ``all``) every other
+    served dataset in id order (those without a score sidecar are skipped cheaply by ``_module_rank_means``)."""
+    if mode == 'off' or registry is None:
+        return []
+    served = set(registry._databases_all)
+    first = [db_id for db_id in dict.fromkeys(priority) if db_id in served]
+    if mode == 'priority':
+        return first
+    return first + sorted(db_id for db_id in served if db_id not in set(first))
+
+
+def _warm_module_ranks(db_ids: Sequence[str], workers: int, pause: float) -> int:
+    """Load or build the rank tables of ``db_ids`` with at most ``workers`` at once; returns how many are ready."""
+    def one(db_id: str) -> bool:
+        _lower_thread_priority()
+        try:
+            means, _ = _module_rank_means(db_id)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("module rank warm-up %s: %s", db_id, exc)
+            means = None
+        if pause:
+            time.sleep(pause)
+        return means is not None
+
+    if not db_ids:
+        return 0
+    with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix='warmup-rank') as pool:
+        return sum(pool.map(one, db_ids))
+
+
+def _warm_caches() -> None:
+    """The background warm-up after a start (``warmup`` in anthive.yaml, ``config.get_warmup_settings``).
+
+    In order: facet caches per kind of visitor, per-donor values of the configured genes per kind, the module rank
+    tables. Runs at nice 10 in daemon threads and never raises; requests that arrive first build what they need
+    themselves and share the builds (single flight), so the warm-up never makes a request wait for it.
+    """
+    _lower_thread_priority()
+    try:
+        settings = get_warmup_settings()
+    except Exception as exc:  # noqa: BLE001 - a bad block must not stop the server
+        log.warning("warm-up skipped: %s", exc)
         return
-    threading.Thread(target=_warm_facet_results, name='facet-warmup', daemon=True).start()
+    kinds = _warmup_visitor_kinds(settings['anonymous'])
+    for label, hidden in kinds:
+        log.info("warm-up: facet caches for %s callers", label)
+        _as_visitor(hidden, _warm_facet_results)
+    for label, hidden in kinds:
+        started = time.monotonic()
+        try:
+            built = _as_visitor(hidden, _warm_donor_values, settings['donor_genes'], settings['donor_cell_type'],
+                                settings['pause_seconds'])
+            log.info("warm-up: %d per-donor value sets for %s callers in %.1f s", built, label, time.monotonic() - started)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("donor values warm-up failed: %s", exc)
+    started = time.monotonic()
+    try:
+        ids = _module_rank_warm_ids(settings['module_ranks'], settings['module_rank_datasets'])
+        ready = _warm_module_ranks(ids, settings['workers'], settings['pause_seconds'])
+        log.info("warm-up: module rank tables of %d datasets ready (%d looked at) in %.1f s",
+                 ready, len(ids), time.monotonic() - started)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("module rank warm-up failed: %s", exc)
+
+
+def _start_warmup() -> None:
+    """Start ``_warm_caches`` in a daemon thread unless the warm-up is off (``warmup.enabled``, ``ANTHIVE_WARMUP=0``
+    or the older ``ANTHIVE_FACET_WARMUP=0``)."""
+    try:
+        enabled = get_warmup_settings()['enabled']
+    except Exception as exc:  # noqa: BLE001
+        log.warning("warm-up skipped: %s", exc)
+        return
+    if enabled:
+        threading.Thread(target=_warm_caches, name='cache-warmup', daemon=True).start()
 
 
 def _facet_results_location(db_id: str) -> Tuple[str, str]:

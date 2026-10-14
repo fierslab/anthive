@@ -44,7 +44,7 @@ import replication
 from celltype_groups import UNMAPPED, group_info, group_of
 from facet_aliases import canonical_facet
 from facet_results import (
-    FAMILY_CACHE_ENTRIES, PC_METHOD, POOL_PREFIX, READ_WORKERS, FacetResults, PreparedDatasets, _as_int, _clean_text,
+    FAMILY_CACHE_ENTRIES, VISIBILITY_KINDS, PC_METHOD, POOL_PREFIX, READ_WORKERS, FacetResults, PreparedDatasets, _as_int, _clean_text,
     _file_key, _finite, _is_small, _not_counted_reason, _rename_deprecated_facets, _rounded, cohort_display,
     forest_view, json_safe, not_tested_reason, result_paths)
 
@@ -226,8 +226,8 @@ class ModuleResults:
         (``MODULE_UNIT_COLUMNS``). Donor-pooled units have no module counterpart.
         """
         prepared = self.reader.prepare(datasets)
-        return self.reader._cached_build(self._tables, ('tables',), prepared.signature,
-                                         lambda: self._build_tables(prepared.datasets), max_entries=1)
+        return self.reader._cached_build(self._tables, ('tables', prepared.visibility), prepared.signature,
+                                         lambda: self._build_tables(prepared.datasets), max_entries=VISIBILITY_KINDS)
 
     def _read_dataset(self, dataset: Dict[str, Any], cohorts: Dict[str, Dict[str, Any]]
                       ) -> Dict[str, Tuple[List[Dict[str, Any]], List[pd.DataFrame]]]:
@@ -381,8 +381,8 @@ class ModuleResults:
                         families[(group, str(method), str(source))] = self._family(part, group_units, facet)
             return families
 
-        return self.reader._cached_build(self._families, (facet, scope, bool(exclude_secondary)), prepared.signature,
-                                         build, max_entries=FAMILY_CACHE_ENTRIES)
+        return self.reader._cached_build(self._families, (facet, scope, bool(exclude_secondary), prepared.visibility),
+                                         prepared.signature, build, max_entries=FAMILY_CACHE_ENTRIES * VISIBILITY_KINDS)
 
     @staticmethod
     def _family(sub: pd.DataFrame, group_units: pd.DataFrame, facet: str = '') -> Dict[str, Any]:
@@ -615,7 +615,8 @@ class ModuleResults:
         scope = scope or FacetResults.default_scope(facet)
         prepared = self.reader.prepare(datasets)
         return self.reader._cached_build(
-            self._cards, (facet, module_key(catalog, module).lower(), cell_type, bool(exclude_secondary), scope),
+            self._cards, (facet, module_key(catalog, module).lower(), cell_type, bool(exclude_secondary), scope,
+                          prepared.visibility),
             prepared.signature,
             lambda: self._module_effects(catalog, module, prepared, facet, exclude_secondary, scope, cell_type),
             max_entries=256)

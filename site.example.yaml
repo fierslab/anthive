@@ -191,4 +191,10 @@ resources:
 
 # Escape hatch: extra keys copied verbatim into the rendered anthive.yaml
 # (see anthive.default.yaml for every key). Wins over everything above.
+# Example: the background cache warm-up after a start (default on), see
+# doc/DEPLOY_CONTAINERS.md "Cache warm-up after a start":
+#   anthive:
+#     warmup:
+#       module_ranks: priority          # all | priority | off
+#       module_rank_datasets: [L26/PSY]
 anthive: {}

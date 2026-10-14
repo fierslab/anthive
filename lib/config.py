@@ -636,6 +636,73 @@ def get_internal_requires_auth(cfg: Optional[Dict[str, Any]] = None) -> bool:
     return str(value).strip().lower() not in ('false', '0', 'no', 'off')
 
 
+_WARMUP_MODULE_RANK_MODES = ('all', 'priority', 'off')
+
+
+def _flag(value: Any, default: bool) -> bool:
+    """A yaml or env boolean: true/false, yes/no, on/off, 1/0; ``default`` for None or empty."""
+    if value is None or value == '':
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ('false', '0', 'no', 'off')
+
+
+def get_warmup_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The background cache warm-up of ant-serve (block ``warmup``, see anthive.default.yaml).
+
+    Returns ``{enabled, anonymous, donor_genes, donor_cell_type, module_ranks, module_rank_datasets, workers,
+    pause_seconds}``. Env overrides: ANTHIVE_WARMUP (enabled; the older ANTHIVE_FACET_WARMUP=0 also turns it off),
+    ANTHIVE_WARMUP_ANONYMOUS, ANTHIVE_WARMUP_DONOR_GENES (comma list), ANTHIVE_WARMUP_MODULE_RANKS
+    (all | priority | off), ANTHIVE_WARMUP_MODULE_RANK_DATASETS (comma list), ANTHIVE_WARMUP_WORKERS.
+    Raises ConfigError for an unknown ``module_ranks`` mode or a ``workers`` value that is not 1 or 2.
+    """
+    cfg = cfg if cfg is not None else load_config()
+    block = cfg.get('warmup') or {}
+    if not isinstance(block, dict):
+        block = {}
+
+    def pick(key: str, env: str, default: Any) -> Any:
+        env_value = os.environ.get(env, '').strip()
+        if env_value:
+            return env_value
+        value = block.get(key)
+        return default if value in (None, '') else value
+
+    def names(value: Any) -> List[str]:
+        items = value.split(',') if isinstance(value, str) else list(value or [])
+        return [str(item).strip() for item in items if str(item).strip()]
+
+    enabled = _flag(pick('enabled', 'ANTHIVE_WARMUP', True), True)
+    if os.environ.get('ANTHIVE_FACET_WARMUP', '').strip() == '0':
+        enabled = False
+    mode = str(pick('module_ranks', 'ANTHIVE_WARMUP_MODULE_RANKS', 'all')).strip().lower()
+    if mode not in _WARMUP_MODULE_RANK_MODES:
+        raise ConfigError(f"ERROR: [Config] Invalid warmup.module_ranks {mode!r}; "
+                          f"expected one of {', '.join(_WARMUP_MODULE_RANK_MODES)}")
+    try:
+        workers = int(pick('workers', 'ANTHIVE_WARMUP_WORKERS', 1))
+    except (TypeError, ValueError):
+        workers = 0
+    if workers not in (1, 2):
+        raise ConfigError("ERROR: [Config] warmup.workers must be 1 or 2 (ant-serve builds at most 2 "
+                          "module rank tables at once; 1 leaves one for requests)")
+    try:
+        pause = max(0.0, float(pick('pause_seconds', 'ANTHIVE_WARMUP_PAUSE_SECONDS', 0.5)))
+    except (TypeError, ValueError):
+        pause = 0.5
+    return {
+        'enabled': enabled,
+        'anonymous': _flag(pick('anonymous', 'ANTHIVE_WARMUP_ANONYMOUS', True), True),
+        'donor_genes': names(pick('donor_genes', 'ANTHIVE_WARMUP_DONOR_GENES', ['TREM2'])),
+        'donor_cell_type': str(pick('donor_cell_type', 'ANTHIVE_WARMUP_DONOR_CELL_TYPE', 'microglia')).strip(),
+        'module_ranks': mode,
+        'module_rank_datasets': names(pick('module_rank_datasets', 'ANTHIVE_WARMUP_MODULE_RANK_DATASETS', [])),
+        'workers': workers,
+        'pause_seconds': pause,
+    }
+
+
 def get_catalog_scan_mode(cfg: Optional[Dict[str, Any]] = None) -> str:
     """local | s3 | auto. auto (default) consults S3 only when a bucket is set."""
     mode = str(_setting(cfg, 'catalog_scan', 'ANTHIVE_CATALOG_SCAN', 'auto')).strip().lower()

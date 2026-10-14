@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import duckdb
 import pandas as pd
@@ -1374,45 +1374,207 @@ def test_endpoint_facet_tests_scope_and_reason_come_from_the_dataset(serve):
     assert 'organism not human (mouse)' in body['reason'] and body['reason'].startswith('no facet scope')
 
 
-def _warmup_namespace(monkeypatch, calls: List[str], fail: bool = False) -> Dict[str, Any]:
+_WARMUP_FUNCTIONS = {'_lower_thread_priority', '_warm_facet_results', '_warmup_visitor_kinds', '_as_visitor',
+                     '_warm_donor_values', '_module_rank_warm_ids', '_warm_module_ranks', '_warm_caches', '_start_warmup'}
+
+
+class _WarmRegistry:
+    def __init__(self, hidden: frozenset):
+        self._hidden = hidden
+        self._databases_all = {'A/a': 'x', 'B/b': 'x', 'C/c': 'x'}
+
+    def internal_db_ids(self) -> frozenset:
+        return self._hidden
+
+
+def _warmup_namespace(calls: List[Any], fail: bool = False, hidden: frozenset = frozenset(),
+                      auth_mode: Optional[str] = 'authelia', requires_auth: bool = True) -> Dict[str, Any]:
+    """The warm-up functions of ant-serve with fakes for the caches; ``calls`` records what ran and as whom."""
+    from concurrent.futures import ThreadPoolExecutor
     tree = ast.parse(SERVE_PATH.read_text())
-    wanted = {'_warm_facet_results', '_start_facet_warmup'}
-    body = [node for node in tree.body if getattr(node, 'name', None) in wanted]
+    body = [node for node in tree.body if getattr(node, 'name', None) in _WARMUP_FUNCTIONS]
+    assert {node.name for node in body} == _WARMUP_FUNCTIONS
 
     class _Reader:
         def warm(self, datasets):
-            calls.append('warm')
+            calls.append(('facets', dataset_access.current_hidden()))
             if fail:
                 raise RuntimeError('boom')
             return 3
 
+        def prepare(self, datasets):
+            return datasets
+
+        @staticmethod
+        def default_scope(facet):
+            return 'human_postmortem'
+
+        def scopes_with_results(self, facet, prepared):
+            return ['human_postmortem'] if facet in ('sex', 'braak') else []
+
+    class _Modules:
+        def warm(self, datasets):
+            calls.append(('modules', dataset_access.current_hidden()))
+            return 1
+
+    def donor_payload(facet, gene, module, cell_type, *rest):
+        calls.append(('donor', facet, gene, cell_type, dataset_access.current_hidden()))
+        return {}
+
+    def rank_means(db_id):
+        calls.append(('rank', db_id))
+        return (object(), '') if db_id != 'C/c' else (None, 'no per-cell scores for this dataset')
+
     namespace: Dict[str, Any] = {
         'os': os, 'time': time, 'threading': threading, 'log': logging.getLogger('test-warmup'),
-        '_facet_results': lambda: _Reader(), '_facet_test_datasets': lambda: []}
+        'List': List, 'Tuple': Tuple, 'Any': Any, 'Callable': Callable, 'Sequence': Sequence, 'Optional': Optional,
+        'ThreadPoolExecutor': ThreadPoolExecutor, 'get_warmup_settings': config.get_warmup_settings,
+        '_HIDDEN_DB_IDS': dataset_access.HIDDEN_DB_IDS, 'registry': _WarmRegistry(hidden),
+        '_access_settings': lambda: {'requires_auth': requires_auth, 'auth_mode': auth_mode},
+        '_facet_results': lambda: _Reader(), '_module_results': lambda: _Modules(), '_facet_test_datasets': lambda: [],
+        '_detection_tables': lambda: calls.append(('detection', dataset_access.current_hidden())),
+        'facet_results_lib': fr, '_donor_units_payload': donor_payload, '_module_rank_means': rank_means}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     return namespace
 
 
-def test_startup_warmup_runs_in_a_thread_and_can_be_disabled(monkeypatch):
-    calls: List[str] = []
-    namespace = _warmup_namespace(monkeypatch, calls)
-    monkeypatch.setenv('ANTHIVE_FACET_WARMUP', '0')
-    namespace['_start_facet_warmup']()
-    assert calls == []
-    monkeypatch.delenv('ANTHIVE_FACET_WARMUP')
-    namespace['_start_facet_warmup']()
+@pytest.fixture
+def warm_env(monkeypatch):
+    """Fast, deterministic warm-up settings: no pause, empty site config."""
+    for name in list(os.environ):
+        if name.startswith('ANTHIVE_WARMUP') or name == 'ANTHIVE_FACET_WARMUP':
+            monkeypatch.delenv(name)
+    monkeypatch.setenv('ANTHIVE_WARMUP_PAUSE_SECONDS', '0')
+    monkeypatch.setattr(config, 'load_config', lambda *a, **k: {})
+    return monkeypatch
+
+
+def _join_warmup():
     for thread in threading.enumerate():
-        if thread.name == 'facet-warmup':
-            thread.join(5)
-    assert calls == ['warm']
+        if thread.name == 'cache-warmup':
+            thread.join(10)
 
 
-def test_warmup_failure_is_logged_not_raised(monkeypatch, caplog):
-    calls: List[str] = []
-    namespace = _warmup_namespace(monkeypatch, calls, fail=True)
+def test_startup_warmup_runs_in_a_thread_and_can_be_disabled(warm_env):
+    calls: List[Any] = []
+    namespace = _warmup_namespace(calls)
+    warm_env.setenv('ANTHIVE_FACET_WARMUP', '0')         # the older switch still works
+    namespace['_start_warmup']()
+    assert calls == []
+    warm_env.delenv('ANTHIVE_FACET_WARMUP')
+    warm_env.setenv('ANTHIVE_WARMUP', 'false')
+    namespace['_start_warmup']()
+    assert calls == []
+    warm_env.delenv('ANTHIVE_WARMUP')
+    namespace['_start_warmup']()
+    _join_warmup()
+    assert ('facets', frozenset()) in calls and ('rank', 'A/a') in calls
+
+
+def test_warmup_builds_the_caches_of_both_visitor_kinds_when_internal_data_is_hidden(warm_env):
+    calls: List[Any] = []
+    hidden = frozenset({'B/b'})
+    warm_env.setenv('ANTHIVE_WARMUP_MODULE_RANK_DATASETS', 'C/c,nope/x')
+    _warmup_namespace(calls, hidden=hidden)['_warm_caches']()
+    facets = [entry for entry in calls if entry[0] == 'facets']
+    assert facets == [('facets', frozenset()), ('facets', hidden)]          # signed-in first, then anonymous
+    assert ('detection', hidden) in calls and ('modules', hidden) in calls
+    donors = [entry for entry in calls if entry[0] == 'donor']
+    assert donors == [('donor', 'sex', 'TREM2', 'microglia', frozenset()), ('donor', 'braak', 'TREM2', 'microglia', frozenset()),
+                      ('donor', 'sex', 'TREM2', 'microglia', hidden), ('donor', 'braak', 'TREM2', 'microglia', hidden)]
+    ranks = [entry[1] for entry in calls if entry[0] == 'rank']
+    assert ranks == ['C/c', 'A/a', 'B/b']                                    # priority list first, unknown ids dropped
+    assert dataset_access.current_hidden() == frozenset()                    # the visibility does not leak
+
+
+def test_warmup_visitor_kinds_follow_the_site(warm_env):
+    hidden = frozenset({'B/b'})
+
+    def kinds(anonymous: bool = True, **options) -> List[str]:
+        return [label for label, _ in _warmup_namespace([], **options)['_warmup_visitor_kinds'](anonymous)]
+
+    assert kinds() == ['every caller']                                        # nothing hidden: one kind
+    assert kinds(hidden=hidden, requires_auth=False) == ['every caller']
+    assert kinds(hidden=hidden) == ['signed-in', 'anonymous']
+    assert kinds(hidden=hidden, auth_mode='none') == ['anonymous']           # nobody signs in on auth.mode none
+    assert kinds(False, hidden=hidden) == ['signed-in']
+    assert kinds(False, hidden=hidden, auth_mode='none') == ['anonymous']    # the only visitors are anonymous
+
+
+def test_warmup_module_ranks_modes(warm_env):
+    calls: List[Any] = []
+    namespace = _warmup_namespace(calls)
+    assert namespace['_module_rank_warm_ids']('off', ['A/a']) == []
+    assert namespace['_module_rank_warm_ids']('priority', ['C/c', 'Z/z']) == ['C/c']
+    assert namespace['_module_rank_warm_ids']('all', ['C/c']) == ['C/c', 'A/a', 'B/b']
+    assert namespace['_warm_module_ranks'](['A/a', 'C/c'], 2, 0) == 1        # C/c has no sidecar
+
+
+def test_warmup_failure_is_logged_not_raised(warm_env, caplog):
+    calls: List[Any] = []
+    namespace = _warmup_namespace(calls, fail=True)
     with caplog.at_level(logging.WARNING, logger='test-warmup'):
-        namespace['_warm_facet_results']()
-    assert calls == ['warm'] and 'warm-up failed' in caplog.text
+        namespace['_warm_caches']()
+    assert calls[0] == ('facets', frozenset()) and 'warm-up failed' in caplog.text
+    assert ('rank', 'A/a') in calls                                          # later stages still run
+
+
+def test_warmup_settings_defaults_env_and_errors(monkeypatch):
+    for name in list(os.environ):
+        if name.startswith('ANTHIVE_WARMUP') or name == 'ANTHIVE_FACET_WARMUP':
+            monkeypatch.delenv(name)
+    settings = config.get_warmup_settings({})
+    assert settings == {'enabled': True, 'anonymous': True, 'donor_genes': ['TREM2'], 'donor_cell_type': 'microglia',
+                        'module_ranks': 'all', 'module_rank_datasets': [], 'workers': 1, 'pause_seconds': 0.5}
+    block = {'warmup': {'enabled': False, 'donor_genes': [], 'module_ranks': 'priority',
+                        'module_rank_datasets': ['L26/PSY'], 'workers': 2}}
+    settings = config.get_warmup_settings(block)
+    assert (settings['enabled'], settings['donor_genes'], settings['module_ranks'], settings['workers']) == (
+        False, [], 'priority', 2)
+    monkeypatch.setenv('ANTHIVE_WARMUP', '1')
+    monkeypatch.setenv('ANTHIVE_WARMUP_DONOR_GENES', 'APOE, SPP1')
+    settings = config.get_warmup_settings(block)
+    assert settings['enabled'] is True and settings['donor_genes'] == ['APOE', 'SPP1']
+    monkeypatch.setenv('ANTHIVE_FACET_WARMUP', '0')
+    assert config.get_warmup_settings(block)['enabled'] is False
+    with pytest.raises(config.ConfigError):
+        config.get_warmup_settings({'warmup': {'module_ranks': 'some'}})
+    with pytest.raises(config.ConfigError):
+        config.get_warmup_settings({'warmup': {'workers': 4}})
+
+
+def test_default_yaml_declares_the_warmup_block(monkeypatch):
+    import yaml
+    for name in list(os.environ):
+        if name.startswith('ANTHIVE_WARMUP') or name == 'ANTHIVE_FACET_WARMUP':
+            monkeypatch.delenv(name)
+    defaults = yaml.safe_load((REPO_ROOT / 'anthive.default.yaml').read_text())
+    assert config.get_warmup_settings(defaults) == config.get_warmup_settings({})
+    assert set(defaults['warmup']) == {'enabled', 'anonymous', 'donor_genes', 'donor_cell_type', 'module_ranks',
+                                       'module_rank_datasets', 'workers', 'pause_seconds'}
+
+
+def test_facet_caches_keep_one_entry_per_visibility(results):
+    """A signed-in and an anonymous caller do not evict each other's gene tables and families."""
+    reader = fr.FacetResults(results)
+    builds: List[int] = []
+    original = reader._build_gene_tables
+
+    def counting(datasets):
+        builds.append(len(datasets))
+        return original(datasets)
+
+    reader._build_gene_tables = counting  # type: ignore[assignment]
+    everyone = DATASETS
+    anonymous = [d for d in DATASETS if d['db_id'] != 'G2/ds2']
+    for _ in range(3):
+        reader.facet_gene_table('braak', everyone, 'human_postmortem')
+        reader.facet_gene_table('braak', anonymous, 'human_postmortem')
+    assert builds == [len(reader.prepare(everyone).datasets), len(reader.prepare(anonymous).datasets)]
+    assert reader.prepare(everyone).visibility != reader.prepare(anonymous).visibility
+    families = reader.replication_families('braak', everyone, True, 'human_postmortem')
+    assert reader.replication_families('braak', anonymous, True, 'human_postmortem') is not families
+    assert reader.replication_families('braak', everyone, True, 'human_postmortem') is families
 
 
 def test_xenograft_sex_facets_are_registered_with_their_columns_and_info():

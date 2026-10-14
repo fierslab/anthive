@@ -99,6 +99,16 @@ Renames and error codes (2026-10-13):
   `compatible_pyvark` (`>=0.9.0`), the oldest pyvark that works with this API. `compatible_antclient` carries the same
   pin and is deprecated (antclient became pyvark); it is removed in 2.46.
 
+Server (2026-10-14, no contract change):
+
+- Donor-pooled units (`pool:<id>`) are served only when the site serves every member dataset to the caller: a pool
+  with a member the site lacks (or hides from an anonymous caller) is missing from the facet views, donor values and
+  `/facets/cohorts`, like the member itself. `/facets/cohorts` lists only rows of datasets the site serves.
+- Background warm-up after a start (`warmup` block in anthive.yaml, default on): facet caches for signed-in and
+  anonymous callers (the caches are now kept per visibility, so the two kinds no longer evict each other), per-donor
+  values of `warmup.donor_genes`, and the gene set rank tables of `/genesets/.../rank` and
+  `/databases/{id}/module-ranks`. `ANTHIVE_WARMUP=0` (or the older `ANTHIVE_FACET_WARMUP=0`) turns it off.
+
 Changed behaviour (2026-10-08 to 2026-10-10):
 
 - **Xenograft sex facets.** New tested facets `graft_sex` (sex of the donor line of the grafted cells, the test of

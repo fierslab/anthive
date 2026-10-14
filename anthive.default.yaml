@@ -185,6 +185,36 @@ auth:
 # public). Env: ANTHIVE_INTERNAL_REQUIRES_AUTH (true/false).
 internal_requires_auth: true
 
+# Background cache warm-up of ant-serve after every start (low CPU priority,
+# never blocks /health; a request that arrives first builds what it needs).
+#   enabled          false skips it. Env ANTHIVE_WARMUP (ANTHIVE_FACET_WARMUP=0
+#                    also turns it off).
+#   anonymous        also build the facet caches an anonymous caller uses when
+#                    internal datasets are hidden from them (they are keyed by
+#                    the datasets a caller sees). Signed-in caches are skipped
+#                    on auth.mode none (nobody signs in there).
+#   donor_genes      genes whose per-donor values are computed for every facet
+#                    in donor_cell_type: opens the sidecars and datasets the
+#                    first donor plot needs. [] skips it.
+#   module_ranks     all: rank tables (/genesets/.../rank, /databases/{id}/
+#                    module-ranks) of every dataset with a score sidecar, the
+#                    module_rank_datasets first; priority: only those; off.
+#                    A table is read from <tmp_dir>/module_rank when it is
+#                    there, else built from the sidecar (up to a minute each).
+#   workers          rank tables built at once by the warm-up (1 or 2; the
+#                    server builds at most 2 at once, so 1 leaves one for
+#                    requests).
+#   pause_seconds    pause between two warm-up items.
+warmup:
+  enabled: true
+  anonymous: true
+  donor_genes: [TREM2]
+  donor_cell_type: microglia
+  module_ranks: all
+  module_rank_datasets: []
+  workers: 1
+  pause_seconds: 0.5
+
 # DuckDB resource limits for ant-convert (ingest).
 duckdb_memory_limit: auto
 duckdb_threads: 2
