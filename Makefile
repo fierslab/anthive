@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop caddy-passwd caddy-passwd-clear dev-jupyter refresh-viewer symlink sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm docker-build docker-run docker-smoketest docker-clean lock images sif push-images ship stack-check
+.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop dev-jupyter refresh-viewer symlink sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry manifest cache-warm docker-build docker-run docker-smoketest docker-clean lock images sif push-images ship stack-check
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -20,8 +20,6 @@ help:
 	@echo "  make serve-restart SVC=browse        - Restart a single service"
 	@echo "  make serve-restart SVC='api browse'  - Restart several at once"
 	@echo "  make serve-restart SVC=all           - Restart every child"
-	@echo "  make caddy-passwd       - Add basic-auth to Caddy on :8501 (interactive)"
-	@echo "  make caddy-passwd-clear - Remove the auth, reopening :8501 to all"
 	@echo ""
 	@echo "Development:"
 	@echo "  make serve-api         - Run REST API server (port 8080)"
@@ -239,38 +237,6 @@ serve-restart:
 
 serve-status:
 	@./bin/ops/ant-supervisor status
-
-# Drop a basic-auth credential into config/caddy-auth-basic.conf, gitignored.
-# The Caddyfile imports `caddy-auth-*.conf` automatically — present = auth on.
-# Username defaults to `admin` if you press enter.
-# Caddy must be restarted afterwards (printed at the end).
-caddy-passwd:
-	@printf "Username [admin]: " > /dev/stderr; \
-	read -r CADDY_USER; \
-	CADDY_USER=$${CADDY_USER:-admin}; \
-	echo "Generating bcrypt hash with caddy hash-password..." > /dev/stderr; \
-	HASH=$$(caddy hash-password); \
-	if [ -z "$$HASH" ]; then \
-		echo "ERROR: caddy hash-password returned empty — aborting." > /dev/stderr; exit 1; \
-	fi; \
-	printf '%s\n' \
-		'@protected {' \
-		'	not path /mcp* /.well-known/* /register' \
-		'}' \
-		'' \
-		"basic_auth @protected {" \
-		"	$$CADDY_USER $$HASH" \
-		'}' \
-		> config/caddy-auth-basic.conf; \
-	echo "" > /dev/stderr; \
-	echo "✓ Wrote config/caddy-auth-basic.conf  (user='$$CADDY_USER')" > /dev/stderr; \
-	echo "  Restart Caddy to activate: make serve-restart SVC=caddy" > /dev/stderr
-
-# Remove the auth file so /:8501 is open again.
-caddy-passwd-clear:
-	@rm -f config/caddy-auth-basic.conf config/caddy-auth-*.conf
-	@echo "✓ Removed config/caddy-auth-*.conf"
-	@echo "  Restart Caddy: make serve-restart SVC=caddy"
 
 # SIGTERM the running supervisor — it cascades to every child (api, browse,
 # mcp, caddy).  Re-run `make serve-debug` or `make serve-all`

@@ -57,8 +57,7 @@ config/      Caddyfile (single source of path routing on dev + prod),
              caddy-{tls,auth,http-redirect,servers}.{dev,prod} (env-toggled snippets),
              nginx.conf (thin shim → Caddy for `make serve-nginx`),
              nginx-intern-anthive.conf (drop-in prod vhost),
-             Caddyfile-prod-snippet (annotated env-var reference),
-             caddy-auth.example (basic-auth template)
+             Caddyfile-prod-snippet (annotated env-var reference)
 ```
 
 The web UI is now a **top-level seam** (`./web/`), not an `ant` subcommand.

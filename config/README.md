@@ -16,10 +16,13 @@ prod:   browser ─https─▶ nginx :443 (TLS [+ auth]) ─http─▶ Caddy 127
 | --- | --- | --- |
 | `Caddyfile` | ✅ | The shared, env-driven router. All path routing lives here. |
 | `caddy-{tls,auth,http-redirect,servers}.{dev,prod}` | ✅ | Snippets imported by the Caddyfile; pick dev vs prod behaviour. |
-| `caddy-auth.example` | ✅ | Template for an optional Caddy basic-auth file. |
 | `authelia/` | partial | `configuration.example.yml` is tracked; the real `configuration.yml`, `secrets/`, `users_database.yml` are gitignored. |
 | `examples/` | ✅ | Templates for the per-instance files you must create (nginx vhost, systemd unit, anthive.yaml). Placeholders only. |
 | `server/` | ❌ gitignored | **Real** per-instance/-server configs (hostnames, ports, paths, cert locations, units). Lives in a separate private repo. |
+
+There is no basic-auth file to drop in here: basic auth exists only in the
+container stack, where `bin/ops/ant-stack` renders it from `site.yaml`
+(`auth.mode: basic`, see `doc/DEPLOY_CONTAINERS.md`, "Login modes").
 
 The generic mechanism (Caddyfile + snippets + authelia template) is tracked
 because the supervisor references it by relative path at runtime. Everything

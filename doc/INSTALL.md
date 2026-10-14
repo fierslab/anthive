@@ -229,16 +229,14 @@ make serve-debug        # starts the supervisor with --caddy
 3. Run Caddy under systemd separately (don't use `make serve-debug`
    for production — see section 7).
 
-**Add basic auth** (recommended for any non-public-data deploy):
-
-```sh
-make caddy-passwd       # interactive: pick a user + password
-# → writes config/caddy-auth-basic.conf (gitignored).
-# Caddy picks it up automatically; api + browse + the entire UI are
-# now behind HTTP basic auth.
-
-make caddy-passwd-clear # remove the auth and re-open the host
-```
+**Add a login** (needed for any deploy with non-public data): the
+supervisor stack has no basic-auth switch any more (`make caddy-passwd`
+was removed in 2.45.0; the Caddyfile never imported its file). Use the
+container stack, where `site.yaml` sets `auth.mode` (`authelia`, `basic`,
+`trusted-proxy` or `none`) and `ant-stack` renders the Caddy auth
+snippet: `doc/DEPLOY_CONTAINERS.md`, "Login modes". On this path the
+Caddyfile's default auth snippet, `caddy-auth.dev`, expects Authelia
+(`config/authelia/`) in front.
 
 **Restrict which interfaces Caddy binds to** (multi-homed hosts —
 Nebula / Tailscale / Wireguard + LAN):

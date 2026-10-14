@@ -78,7 +78,9 @@ data/
 # Claude runtime artefacts (lock files, transient state)
 .claude/scheduled_tasks.lock
 
-# Caddy basic-auth credentials — dropped in by 'make caddy-passwd'
+# Caddy basic-auth files from before ant-stack (nothing reads them any more:
+# basic auth is rendered from site.yaml by bin/ops/ant-stack); kept ignored so
+# a leftover credential file is never committed.
 config/caddy-auth-*.conf
 
 # Authelia: secrets + the user database (bcrypt hashes still secret).
