@@ -67,7 +67,7 @@ help:
 # these from cache on repeat runs. PYTHONPATH=lib mirrors the sys.path shim
 # the tools use at runtime.
 TEST_DEPS = --with pytest --with duckdb --with pyyaml --with numpy \
-            --with pandas --with pyarrow --with h5py --with scipy \
+            --with pandas --with pyarrow --with h5py --with scipy --with scanpy \
             --with fastapi --with httpx --with jinja2 \
             --with markdown --with requests --with anndata --with bcrypt \
             --with uvicorn --with matplotlib --with seaborn \
