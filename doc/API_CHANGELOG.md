@@ -156,9 +156,10 @@ New endpoints:
   median_std_effect, median_estimate, min_effect, max_effect, agreement, r_cohorts, n_small, small_cohorts, k_over_m,
   cohorts_label, n_cohorts_tested, p_check_cohorts, p_check_flag, per_region_only_cohorts, module_scope_note,
   other_variants: [{method, source, label, call, r_value, median_std_effect, r_direction, cohorts_label}], ab,
-  quality_sensitive, directionless, n_genes}`; the gene tiers `strict`, `r_strong`, `replicated_strong`, `r_treat` and
-  `replicated_effect` are always null for modules. A row has no `label`, `basis` or `forest` (those are on the card
-  variants).
+  quality_sensitive, directionless, n_genes}`. Modules have no strict or treat tier, so a row carries none of the gene
+  tier keys `strict`, `r_strong`, `replicated_strong`, `r_treat` and `replicated_effect` (earlier 2.45 builds sent them
+  as null; the card variants still carry `strict: null`). A row has no `label`, `basis` or `forest` (those are on the
+  card variants).
 - `GET /facets/{facet}/effects/overview` (`n`, `scope`, `exclude_secondary`): the simplified facet view in one call.
   `{facet, scope, scopes, headline: {celltype_group, cohorts, n_genes_in_family, n_replicated, n_effect_gate, n_strict,
   strict_genes, effect_gate_unit}, cell_types: [{celltype_group, cl_id, n_cohorts, n_genes_in_family, n_replicated,

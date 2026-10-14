@@ -62,6 +62,10 @@ VARIANT_LABELS = {
 }
 #: Effect size (standardised) at which both variants must reach the gate for an opposite-sign call to count.
 AB_EFFECT = 0.2
+#: Gene-only replication tiers. Modules have no strict or treat tier, so these are always None in a module
+#: variant; the rows of ``top_modules`` (``/facets/{f}/modules/top``) leave them out (2.45.0). The geneset
+#: card variants keep them as None for callers that share code with the gene cards.
+GENE_TIER_KEYS = frozenset({'strict', 'r_strong', 'replicated_strong', 'r_treat', 'replicated_effect'})
 #: Smallest permutation p value a run of 10,000 shuffles can give; a parametric p below it is floored before the
 #: two p values are compared.
 PERMUTATION_P_FLOOR = 1.0 / 10001
@@ -831,7 +835,7 @@ class ModuleResults:
                                                family['tested_cohorts'].get(key, ()), gate_sd=family['gate'],
                                                facet=family['facet'])
         chosen = (record['method'], record['source'])
-        main = entries[chosen]
+        main = {name: value for name, value in entries[chosen].items() if name not in GENE_TIER_KEYS}
         side_a = next((entries[v] for v in VARIANT_ORDER[1:] if v in entries), None)
         side_b = entries.get(VARIANT_ORDER[0])
         catalog, _, name = key.rpartition('/')

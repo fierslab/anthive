@@ -441,7 +441,9 @@ def test_top_modules_rank_filter_and_page(modules):
     assert body['n_replicated'] == 2 and body['n_effect_gate'] == 2 and body['n_modules_in_family'] == 3
     row = next(r for r in body['rows'] if r['module'] == 'modB')
     assert row['ab']['disagree'] is True and row['other_variants'][0]['method'] == 'cell_mean'
-    assert row['geneset_id'] == 'Study/Exp/modB' and row['strict'] is None
+    assert row['geneset_id'] == 'Study/Exp/modB'
+    assert not set(row) & {'strict', 'r_strong', 'replicated_strong', 'r_treat', 'replicated_effect'}   # gene-only tiers
+    assert 'r_significant' in row and 'effect_gate_passed' in row
     everything = modules.top_modules('braak', VIEW_DATASETS, cell_type='microglia', include_not_replicated=True)
     assert everything['n_matching'] == 3 and everything['rows'][-1]['module'] == 'modC'
     page = modules.top_modules('braak', VIEW_DATASETS, cell_type='microglia', include_not_replicated=True, limit=1, offset=2)
