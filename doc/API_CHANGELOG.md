@@ -29,7 +29,7 @@ the spec drifting away from the running code.
 
 ---
 
-## 2.45.0 (unreleased)
+## 2.45.0 (2026-10-14)
 
 Release summary. The data behind the new gene, gene set and facet views: forest rows with limma intervals and the
 calls a view draws, module (gene set) replication across cohorts with the member-gene counts next to it, an
