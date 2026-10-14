@@ -3,7 +3,7 @@
 This is the one supported way to run anthive: a docker compose stack,
 described by one file (`site.yaml`) and driven by one tool
 (`bin/ops/ant-stack`). Follow the steps in order. Every command below was run
-end to end on a fresh checkout for release 2.45.0.
+end to end on a fresh checkout for release 2.45.1.
 
 Plan about an hour, plus the time it takes to download the data.
 
@@ -74,7 +74,7 @@ sudo mkdir -p /srv/anthive && sudo chown $USER /srv/anthive
 cd /srv/anthive
 git clone https://gitlab.kuleuven.be/bdslab/anthive/anthive4.git
 cd anthive4
-git checkout v2.45.0
+git checkout v2.45.1
 ```
 
 Always check out a release tag, and use the same number as the image tag in
@@ -157,7 +157,7 @@ ports:
 
 images:
   registry: registry.gitlab.kuleuven.be/bdslab/anthive/anthive4
-  tag: 2.45.0                                 # same number as the git tag (step 2)
+  tag: 2.45.1                                 # same number as the git tag (step 2)
 
 s3:                                           # skip if you have no S3 keys
   enabled: true
@@ -579,7 +579,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.43.0** | Facet test engine v2: partial-conjunction replication, `apoe_carrier` renamed `apoe4_carrier` (the old name stays as an alias), dataset versions. | `git pull` the h5adstore, then `ant sync pull`; set `images: tag: 2.43.0`, `ant-stack pull`, `ant-stack up` |
 | **2.44.0** | (1) **Facets**: `ant sync pull` now also brings `_facet_tests/` (the facet test results the API serves; logs and scripts stay out), and the h5adstore repo has many changed `.md` files (facet layer metadata, lineage fields). (2) **Mirror sites with symlinks**: new `data.extra_mounts` bind-mounts folders read-only at the same path into api, web, mcp and ingest, so symlinks from your stores into another site's stores resolve in the containers; `ant-stack check` validates them and warns about symlinks that would dangle. (3) **Hidden paper links**: on every site a `papers:` link to a citekey that is not in the site's own library is hidden everywhere (web, REST, MCP, BibTeX); `GET /library/status` shows `unresolved_references`, issue texts and paths to admins only (on `auth.mode: none` to nobody), non-admins get counts (`n_errors`, `n_warnings`). (4) **Library**: a plain, non-git library of symlinked records works read-only (no git is run in it); `file not found` warnings are computed from the disk on each call and no longer outlive the PDF's arrival; a symlinked record whose target is gone is an error entry, not a crash. (5) **Own literature index**: new `library.index_pull` (default true); `ant sync` never downloads the shared index when `s3.enabled` is false or `library.index_pull: false`. (6) **Facet engine v3 and help API**: facet scopes, new facets and exclusions, per-cell-type clusters, faster facet endpoints; `GET /api/help` and the MCP `explain` tool serve plain-language explanations; facet results are published by `ant sync push` and pulled by `ant sync pull`. (7) **Cron and systemd**: new `config/examples/anthive-sync.{cron,service}.example` set PATH for uv; `ant-stack check` says where uv is and warns when it is missing. | none required. `git pull` the h5adstore, then `ant-stack ingest -- ant sync pull` for `_facet_tests/`. Set `images: tag: 2.44.0`, `ant-stack pull`, `ant-stack up`. Optional: `data.extra_mounts`, `library.index_pull`; cron jobs: add `PATH=$HOME/.local/bin:...` (see "Run syncs from cron or a timer") |
 | **2.45.0** | (1) **Internal datasets need a login**: datasets that are not `access: public` (also those without an `access` value) are hidden from callers without an identity: absent from every listing, 404 on their routes (new `auth.internal_requires_auth`, default true; see "Internal datasets"). Sites with a login see no change; on `auth.mode: none` internal datasets disappear, and a `trusted-proxy` site behind a vhost without a login must drop the `Remote-*` headers there. (2) `X-Remote-User` / `X-Remote-Groups` are ignored everywhere and dropped by the Caddy snippets. (3) Cache, index and rescan routes (`/admin/*-cache/*`, `/admin/*-index/*`, `/admin/api-config/*`, `POST /genesets/rescan`, `/module-variability/rescan`, `/catalogs/rescan`) need an admin, a host-local tool or the internal secret; other signed-in users get 403. (4) The web, mcp and api containers must run the same release (the web now forwards the visitor's identity to the api). (5) **Cache warm-up**: after a start the api fills the facet caches for signed-in and anonymous visitors, per-donor values and the gene set rank tables in the background (new `warmup` block of anthive.yaml, default on; see "Cache warm-up after a start"). The first start builds the rank tables (up to a minute per dataset with scores, one at a time). | `ant-stack check` (it prints how many datasets are internal and who sees them, and warns only for `internal_requires_auth: false` or `trusted-proxy`), set `images: tag: 2.45.0`, `ant-stack pull`, `ant-stack up`; then `ant-stack restart api web mcp` (2.45.0's `up` does not recreate them when only the config changed; fixed in 2.45.1). If your upstream proxy sends identity as `X-Remote-*` only, switch it to `Remote-User` / `Remote-Groups`. If you copied an nginx vhost from `config/examples/`, add the new `proxy_set_header ... ""` lines (the public vhost must drop `Remote-*`). Scripts that call the rescan routes need an admin account. |
-| **2.45.1** (unreleased) | Fixes in `ant-stack`: `up` recreates api, web and mcp when their rendered config or secrets changed (before, a changed `auth.internal_requires_auth` or `auth.mode` did not take effect until a restart); `restart` takes several services; `passwd` without a terminal points to `--password`; `check` labels Caddy's in-container listener, prints the published host address and always prints the internal dataset count; `ant-stack logs api` shows the warm-up progress. | set `images: tag: 2.45.1`, `ant-stack pull`, `ant-stack up` |
+| **2.45.1** | Fixes in `ant-stack`: `up` recreates api, web and mcp when their rendered config or secrets changed (before, a changed `auth.internal_requires_auth` or `auth.mode` did not take effect until a restart); `restart` takes several services; `passwd` without a terminal points to `--password`; `check` labels Caddy's in-container listener, prints the published host address and always prints the internal dataset count; `ant-stack logs api` shows the warm-up progress. | set `images: tag: 2.45.1`, `ant-stack pull`, `ant-stack up` |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.

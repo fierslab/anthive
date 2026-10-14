@@ -29,7 +29,7 @@ the spec drifting away from the running code.
 
 ---
 
-## 2.45.1 (unreleased)
+## 2.45.1 (2026-10-14)
 
 Patch release: fixes only, no contract change. Found by the 2.45.0 scratch-site check
 (`doc/RELEASING.md`); all of them are in the deployment tool `bin/ops/ant-stack` and the
