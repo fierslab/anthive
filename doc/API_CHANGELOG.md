@@ -29,6 +29,39 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.45.1 (unreleased)
+
+Patch release: fixes only, no contract change. Found by the 2.45.0 scratch-site check
+(`doc/RELEASING.md`); all of them are in the deployment tool `bin/ops/ant-stack` and the
+server log setup.
+
+- **SECURITY: `ant-stack up` applies a changed config.** api, web and mcp read their rendered
+  config (`stack/anthive-api.yaml`, `stack/anthive.yaml`) and secret files only at start, and
+  compose saw no change in their service definition when only that content changed. Switching
+  `auth.internal_requires_auth` to true or changing `auth.mode` therefore left the old
+  containers running: on the scratch site an internal dataset stayed visible to anonymous
+  callers. The rendered `compose.site.yaml` now gives each of the three services
+  `ANTHIVE_CONFIG_SHA`, a sha256 over every config and secret file mounted into it, so
+  `up` recreates exactly the services whose input changed. static, caddy and authelia are
+  still force-recreated on every `up`.
+- `ant-stack restart` takes several services (`restart api web mcp`); without a name it
+  restarts all of them, as before.
+- `ant-stack passwd` without a terminal no longer ends in a traceback: it says to pass
+  `--password` or set `ANTHIVE_NEW_PASSWORD`. After the change it says what applies it:
+  authelia picks the new hash up within seconds, basic mode needs `ant-stack restart caddy`.
+- ant-serve INFO lines (warm-up progress among them) also go to stderr when the new config
+  key `log_stderr_level` asks for it (`debug | info | warning | error`, env
+  `ANTHIVE_LOG_STDERR_LEVEL`). The default stays `warning`, so the dev supervisor, which
+  shows stderr next to `ant-serve.log`, prints no duplicates; `ant-stack` renders `info`, so
+  `ant-stack logs api` shows the warm-up. The full log stays in `<log_dir>/ant-serve.log`.
+- `ant-stack check` labels the listener as `caddy (in container)` and prints the published
+  host address next to it (`127.0.0.1:8443 (host) -> :8443 (caddy)`). It always prints how
+  many datasets are internal and who sees them (e.g. "97 of 159 datasets are internal:
+  visible only to signed-in users"), in every auth mode, and warns only in the risky
+  combinations (`internal_requires_auth: false`, `trusted-proxy`).
+- Docs: `doc/DEPLOY_CONTAINERS.md`, `site.example.yaml` (`images.tag` names the release)
+  and a "Before the tag" checklist in `doc/RELEASING.md`.
+
 ## 2.45.0 (2026-10-14)
 
 Release summary. The data behind the new gene, gene set and facet views: forest rows with limma intervals and the

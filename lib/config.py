@@ -324,6 +324,19 @@ def get_log_dir(cfg: Optional[Dict[str, Any]] = None, create: bool = True) -> Pa
     return path
 
 
+LOG_STDERR_LEVELS = ('debug', 'info', 'warning', 'error')
+
+
+def get_log_stderr_level(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """Lowest ant-serve log level copied to stderr (``log_stderr_level``, default warning)."""
+    level = str(_setting(cfg, 'log_stderr_level', 'ANTHIVE_LOG_STDERR_LEVEL', 'warning') or 'warning').strip().lower()
+    if level not in LOG_STDERR_LEVELS:
+        raise ConfigError(
+            f"ERROR: [Config] Invalid log_stderr_level {level!r}; expected {', '.join(LOG_STDERR_LEVELS)}"
+        )
+    return level
+
+
 def get_data_folder(cfg: Optional[Dict[str, Any]] = None) -> Path:
     """The h5adstore root."""
     return resolve_path(_setting(cfg, 'h5adstore', 'ANTHIVE_H5ADSTORE', 'data/h5adstore'))

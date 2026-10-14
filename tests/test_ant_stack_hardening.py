@@ -4,6 +4,9 @@ Covers: S3 keys and other secrets reaching only the containers that use
 them, the secret-permission warnings of `check`, Caddy's trusted proxies
 and the forwarded scheme towards Authelia (tls off behind a proxy), `pull`
 using the refs site.yaml names now, and the host-side `publish-library`.
+2.45.1: ANTHIVE_CONFIG_SHA recreates api/web/mcp on a config change,
+`restart` with several services, `passwd` without a terminal, the
+internal-dataset line and listener labels of `check`, log_stderr_level.
 
 Runs without docker. The Caddy tests need a `caddy` binary on PATH (or
 envs/caddy/caddy) and are skipped without one.
@@ -547,3 +550,119 @@ def test_publish_library_shows_all_of_gits_error(tmp_path, ant_stack, library_re
     assert code == 1
     text = output.out + output.err
     assert 'missing.git' in text and 'does not appear to be a git repository' in text
+
+
+# ── 2.45.1: fixes from the 2.45.0 scratch-site check ────────────────────────
+
+def _config_shas(ant_stack, site) -> dict[str, str]:
+    stack = ant_stack.render(site, quiet=True)
+    services = yaml.safe_load((stack / 'compose.site.yaml').read_text())['services']
+    return {name: (services[name].get('environment') or {}).get('ANTHIVE_CONFIG_SHA')
+            for name in ('api', 'web', 'mcp', 'caddy', 'static', 'authelia', 'ingest')}
+
+
+def test_config_sha_changes_with_the_rendered_config(tmp_path, ant_stack):
+    """A change that only touches a rendered config (internal_requires_auth,
+    auth.mode) must change the compose definition of the services that read
+    it, or `docker compose up` keeps the old containers running."""
+    site = _site(ant_stack, tmp_path)
+    ant_stack.ensure_secrets(site)
+    before = _config_shas(ant_stack, site)
+    for name in ant_stack.CONFIG_HASHED_SERVICES:
+        assert before[name] and len(before[name]) == 64
+    for name in ('caddy', 'static', 'authelia', 'ingest'):
+        assert before[name] is None                 # force-recreated or one-off instead
+    assert _config_shas(ant_stack, site) == before   # same input, same hash: no needless recreate
+
+    flipped = _site(ant_stack, tmp_path, auth={'internal_requires_auth': False})
+    after = _config_shas(ant_stack, flipped)
+    assert all(after[name] != before[name] for name in ('api', 'web', 'mcp'))
+
+    basic = _site(ant_stack, tmp_path, auth={'mode': 'basic'})
+    assert _config_shas(ant_stack, basic)['api'] != after['api']
+
+
+def test_config_sha_only_changes_for_the_services_that_read_it(tmp_path, ant_stack):
+    site = _site(ant_stack, tmp_path, services={'chat': True})
+    ant_stack.ensure_secrets(site)
+    before = _config_shas(ant_stack, site)
+    (site['_state'] / 'secrets' / 'chat_api_key').write_text('sk-NEW\n')   # api config only... and chat.enabled
+    after = _config_shas(ant_stack, site)
+    assert after['api'] != before['api']
+    # chat.enabled flips in the web+mcp config too (the UI shows the chat)
+    assert after['web'] != before['web']
+    before = after
+    (site['_state'] / 'secrets' / 'chat_api_key').write_text('sk-OTHER\n')  # key text only: api alone
+    after = _config_shas(ant_stack, site)
+    assert after['api'] != before['api']
+    assert after['web'] == before['web'] and after['mcp'] == before['mcp']
+    # a secret file mounted into mcp and api, not web
+    (site['_state'] / 'secrets' / 'internal_secret').write_text('rotated\n')
+    rotated = _config_shas(ant_stack, site)
+    assert rotated['api'] != after['api'] and rotated['mcp'] != after['mcp']
+    assert rotated['web'] == after['web']
+
+
+def test_restart_takes_several_services(tmp_path, ant_stack, monkeypatch):
+    path = _write_site(tmp_path)
+    ant_stack.ensure_secrets(ant_stack.load_site(path))
+    seen = []
+    monkeypatch.setattr(ant_stack, 'run_compose', lambda site, *args, check=True: seen.append(args) or 0)
+    monkeypatch.setattr('sys.argv', ['ant-stack', '--site', str(path), 'restart', 'api', 'web', 'mcp'])
+    assert ant_stack.main() == 0
+    assert seen[-1] == ('restart', 'api', 'web', 'mcp')
+    monkeypatch.setattr('sys.argv', ['ant-stack', '--site', str(path), 'restart'])
+    assert ant_stack.main() == 0
+    assert seen[-1] == ('restart',)
+
+
+def test_passwd_without_a_terminal_points_to_the_options(tmp_path, ant_stack, monkeypatch, capsys):
+    path = _write_site(tmp_path)
+    ant_stack.ensure_secrets(ant_stack.load_site(path))
+    monkeypatch.delenv('ANTHIVE_NEW_PASSWORD', raising=False)
+    import getpass  # noqa: PLC0415
+
+    def no_tty(prompt=''):
+        raise EOFError
+    monkeypatch.setattr(getpass, 'getpass', no_tty)
+    monkeypatch.setattr('sys.argv', ['ant-stack', '--site', str(path), 'passwd', 'boss'])
+    assert ant_stack.main() == 2
+    err = capsys.readouterr().err
+    assert '--password' in err and 'ANTHIVE_NEW_PASSWORD' in err
+
+
+def test_internal_access_line_in_every_auth_mode(tmp_path, ant_stack):
+    cases = {
+        ('authelia', True): ('visible only to signed-in users', False),
+        ('basic', True): ('visible only to signed-in users', False),
+        ('none', True): ('hidden on this site', False),
+        ('trusted-proxy', True): ('upstream proxy', True),
+        ('authelia', False): ('without an identity', True),
+        ('none', False): ('ANYONE', True),
+    }
+    site = _site(ant_stack, tmp_path)
+    for (mode, requires_auth), (expected, warns) in cases.items():
+        site['auth']['mode'] = mode
+        site['auth']['internal_requires_auth'] = requires_auth
+        line, warning = ant_stack.internal_access_summary(site, 97, 159)
+        assert line.startswith('97 of 159 datasets are internal') and expected in line, (mode, line)
+        assert bool(warning) is warns, (mode, requires_auth)
+    line, warning = ant_stack.internal_access_summary(site, 0, 159)
+    assert line.startswith('0 of 159') and warning is None
+
+
+def test_plan_labels_the_container_listener_and_the_host_address(tmp_path, ant_stack, capsys):
+    site = _site(ant_stack, tmp_path, tls={'mode': 'internal'}, ports={'bind': '127.0.0.1', 'https': 9443})
+    ant_stack.print_plan(site)
+    out = capsys.readouterr().out
+    assert '(in container): https://anthive.example.org:8443' in out
+    assert '127.0.0.1:9443 (host) -> :8443 (caddy)' in out
+
+
+def test_container_config_copies_info_logs_to_stderr(tmp_path, ant_stack):
+    import config  # noqa: PLC0415
+    site = _site(ant_stack, tmp_path)
+    assert ant_stack.render_anthive_yaml(site, 'api')['log_stderr_level'] == 'info'
+    assert config.get_log_stderr_level({}) == 'warning'          # dev supervisor: no duplicate INFO lines
+    with pytest.raises(config.ConfigError):
+        config.get_log_stderr_level({'log_stderr_level': 'loud'})

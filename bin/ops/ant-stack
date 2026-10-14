@@ -15,7 +15,7 @@ Commands:
                          print the resolved plan
     render               write <state_dir>/stack/: .env, compose.site.yaml,
                          anthive.yaml, Caddy snippets, Authelia config
-    up / down / ps / logs [service] / restart [service]
+    up / down / ps / logs [service] / restart [service...]
                          docker compose wrappers (each renders first)
     pull [--no-ingest]   render, then pull every image site.yaml names (app,
                          ingest, caddy, authelia) and report what changed
@@ -400,6 +400,9 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
         'state_dir': C_STATE,
         'tmp_dir': f"{C_SCRATCH}/tmp",
         'log_dir': f"{C_SCRATCH}/logs",
+        # ant-serve copies INFO lines (warm-up progress) to stderr, so
+        # `ant-stack logs api` shows them; the file in log_dir keeps everything.
+        'log_stderr_level': 'info',
         'webapp_dir': C_WEBAPP,
         'duckdb_temp_directory': f"{C_SCRATCH}/duckdb_spill",
         'convert_staging_dir': f"{C_SCRATCH}/convert",
@@ -631,6 +634,34 @@ def _state_mounts(site: dict, secret_names: tuple[str, ...], whole_state: bool) 
     return volumes, tmpfs
 
 
+# Services whose container must be recreated when what they read at start
+# changes. Their inputs are bind-mounted files (the rendered anthive*.yaml and
+# secret files), so compose sees no difference in the service definition when
+# only the file content changes; `config_digest` puts that content into the
+# environment (ANTHIVE_CONFIG_SHA) so `up` recreates exactly the changed
+# services. static, caddy and authelia are force-recreated by `up` instead.
+CONFIG_HASHED_SERVICES = ('api', 'web', 'mcp')
+
+
+def config_digest(volumes: list[dict]) -> str:
+    """sha256 over the path and content of every bind-mounted regular file
+    (rendered config, secret files) in a service's volume list. Folders
+    (stores, state_dir) are not hashed: their content is data, not config."""
+    import hashlib  # noqa: PLC0415
+    digest = hashlib.sha256()
+    for mount in sorted((m for m in volumes if m.get('type') == 'bind'), key=lambda m: m['target']):
+        source = Path(mount['source'])
+        if source.is_dir():
+            continue
+        digest.update(f"{mount['target']}\0{source}\0".encode())
+        try:
+            digest.update(source.read_bytes())
+        except OSError:
+            digest.update(b'<missing>')
+        digest.update(b'\0')
+    return digest.hexdigest()
+
+
 def render_compose_site(site: dict) -> dict:
     state = site['_state']
     stack = stack_dir(site)
@@ -681,6 +712,8 @@ def render_compose_site(site: dict) -> dict:
         },
         'authelia': {'volumes': [_bind(state / 'authelia', '/config')]},
     }
+    for name in CONFIG_HASHED_SERVICES:
+        services[name]['environment'] = {'ANTHIVE_CONFIG_SHA': config_digest(services[name]['volumes'])}
     doc: dict[str, Any] = {'services': services}
     if not site['_scratch']:
         doc['volumes'] = {'scratch': {}}
@@ -750,7 +783,7 @@ def _validate_rendered_config(path: Path) -> None:
     code = ("import sys; sys.path.insert(0, sys.argv[1]); import config; "
             "cfg = config.load_config(); config.get_auth_settings(cfg); "
             "config.get_coordinate_mode(cfg); config.get_catalog_scan_mode(cfg); "
-            "config.get_facets_visible(cfg)")
+            "config.get_facets_visible(cfg); config.get_log_stderr_level(cfg)")
     env = {**os.environ, 'ANTHIVE_CONFIG': str(path)}
     result = subprocess.run([sys.executable, '-c', code, str(REPO / 'lib')],
                             env=env, capture_output=True, text=True)
@@ -1219,43 +1252,71 @@ def _internal_dataset_count(store: Path) -> tuple[int, int]:
     return internal, total
 
 
+def internal_access_summary(site: dict, internal: int, total: int) -> tuple[str, str | None]:
+    """(the line `check` always prints, a warning for the risky combinations or None).
+
+    Risky: internal datasets reaching callers without a login
+    (auth.internal_requires_auth false), or trusted-proxy mode where the
+    upstream proxy decides who is signed in."""
+    mode = site['auth']['mode']
+    requires_auth = bool(site['auth'].get('internal_requires_auth', True))
+    head = f"{internal} of {total} datasets are internal"
+    if not internal:
+        return f"{head}: every dataset is access: public", None
+    if not requires_auth:
+        if mode == 'none':
+            return (f"{head}: served to ANYONE (auth.mode none, auth.internal_requires_auth false)",
+                    f"auth.internal_requires_auth is false on a site WITHOUT login: {internal} of {total} "
+                    f"datasets are not access: public and are served to anyone. Set it to true, or keep only "
+                    f"public datasets in data.h5adstore.")
+        return (f"{head}: also served to callers without an identity (auth.internal_requires_auth false)",
+                f"auth.internal_requires_auth is false: {internal} internal datasets are also served to callers "
+                f"without an identity (an MCP without personal links, a direct call to the api container).")
+    if mode == 'none':
+        return f"{head}: hidden on this site (auth.mode none, no login)", None
+    if mode == 'trusted-proxy':
+        return (f"{head}: visible only to callers the upstream proxy signs in (Remote-User)",
+                f"auth.mode trusted-proxy: {internal} internal datasets are served whenever the upstream proxy "
+                f"sends Remote-User. A public vhost must drop Remote-User/Remote-Groups "
+                f"(config/examples/nginx-vhost.public.conf.example).")
+    return f"{head}: visible only to signed-in users", None
+
+
 def _check_internal_access(site: dict) -> None:
-    """Warn when access=internal datasets could reach people without a login (lib/dataset_access.py)."""
+    """Print how many datasets are internal and who sees them (lib/dataset_access.py);
+    warn when they could reach people without a login."""
     store = site['_h5adstore']
     if not store or not store.is_dir():
         return
     internal, total = _internal_dataset_count(store)
-    if not internal:
-        return
-    mode = site['auth']['mode']
-    requires_auth = bool(site['auth'].get('internal_requires_auth', True))
-    if not requires_auth:
-        if mode == 'none':
-            _warn(f"auth.internal_requires_auth is false on a site WITHOUT login: {internal} of {total} datasets "
-                  f"are not access: public and are served to anyone. Set it to true, or keep only public "
-                  f"datasets in data.h5adstore.")
-        else:
-            _warn(f"auth.internal_requires_auth is false: {internal} internal datasets are also served to callers "
-                  f"without an identity (an MCP without personal links, a direct call to the api container).")
-        return
-    if mode == 'none':
-        _say(f"{internal} of {total} datasets are not access: public: hidden on this site (no login).")
-    elif mode == 'trusted-proxy':
-        _warn(f"auth.mode trusted-proxy: {internal} internal datasets are served whenever the upstream proxy "
-              f"sends Remote-User. A public vhost must drop Remote-User/Remote-Groups "
-              f"(config/examples/nginx-vhost.public.conf.example).")
+    line, warning = internal_access_summary(site, internal, total)
+    _say(line)
+    if warning:
+        _warn(warning)
+
+
+def published_summary(site: dict) -> str:
+    """The host address(es) docker publishes Caddy on, with the container port,
+    e.g. `127.0.0.1:8443 (host) -> :8443 (caddy)`."""
+    parts = []
+    for spec in _listen_and_ports(site)[1]:
+        bind, host_port, container_port = spec.rsplit(':', 2)
+        host = f"[{bind}]" if ':' in bind else bind
+        parts.append(f"{host}:{host_port} (host) -> :{container_port} (caddy)")
+    return ', '.join(parts)
 
 
 def print_plan(site: dict) -> None:
-    listen, ports, _ = _listen_and_ports(site)
+    listen, _ports, _ = _listen_and_ports(site)
     print(f"""
   site           {site['site']['name']}  ({site['_path']})
   public_url     {site['site']['public_url']}
   auth           {site['auth']['mode']}   admins: {', '.join(site['auth'].get('admins') or []) or '-'}
-  tls            {site['tls']['mode']}    caddy listens: {listen}
+  tls            {site['tls']['mode']}
+  caddy          (in container): {listen}
   trusted proxy  {' '.join(site['_trusted_proxies']) or '-'}
   s3             {('on, api access: ' + site['s3']['api_access']) if site['s3'].get('enabled') else 'off'}
-  published      {', '.join(ports)}
+  published      {published_summary(site)}
   h5adstore      {site['_h5adstore']}{' (read-only)' if site['data'].get('readonly') else ''}
   genesetstore   {site['_genesetstore'] or '-'}
   library        {site['_library'] or '-'}
@@ -1332,6 +1393,8 @@ def cmd_up(args: argparse.Namespace) -> int:
     #    stale container instead of recreating it with the new config.
     if site['auth']['mode'] == 'authelia':
         run_compose(site, 'up', '-d', '--no-deps', '--force-recreate', 'authelia')
+    # api, web and mcp carry ANTHIVE_CONFIG_SHA (render_compose_site): a
+    # changed rendered config or secret recreates exactly those services here.
     run_compose(site, 'up', '-d', '--remove-orphans', *extra)
     # 3. Services whose profile is now off (auth mode or mcp switched) are
     #    not orphans to compose; stop and remove them explicitly.
@@ -1367,7 +1430,7 @@ def cmd_simple(args: argparse.Namespace) -> int:
         'logs': ['logs', '--tail', str(getattr(args, 'tail', 200))]
                 + (['-f'] if getattr(args, 'follow', False) else [])
                 + ([args.service] if getattr(args, 'service', None) else []),
-        'restart': ['restart'] + ([args.service] if getattr(args, 'service', None) else []),
+        'restart': ['restart'] + list(getattr(args, 'services', None) or []),
     }[args.command]
     return run_compose(site, *compose_args, check=False)
 
@@ -1596,8 +1659,13 @@ def cmd_passwd(args: argparse.Namespace) -> int:
     password = args.password or os.environ.get('ANTHIVE_NEW_PASSWORD')
     if not password:
         import getpass  # noqa: PLC0415
-        password = getpass.getpass(f"new password for {args.user}: ")
-        if password != getpass.getpass("again: "):
+        try:
+            password = getpass.getpass(f"new password for {args.user}: ")
+            again = getpass.getpass("again: ")
+        except EOFError:
+            raise SiteError("no terminal to read the password from: pass --password PASSWORD "
+                            "or set ANTHIVE_NEW_PASSWORD") from None
+        if password != again:
             raise SiteError("passwords differ")
     if len(password) < 10:
         raise SiteError("use at least 10 characters")
@@ -1611,8 +1679,11 @@ def cmd_passwd(args: argparse.Namespace) -> int:
             doc['users'][args.user]['password'] = hashes[args.user]
             _write_secret(users_db, yaml.safe_dump(doc, sort_keys=True), overwrite=True)
     render(site, quiet=True)
-    _say(f"password for {args.user} updated (basic list + authelia db); "
-         f"basic mode needs `ant-stack restart caddy`")
+    if site['auth']['mode'] == 'basic':
+        _say(f"password for {args.user} updated; run `ant-stack restart caddy` to apply it (basic mode)")
+    else:
+        _say(f"password for {args.user} updated (basic list + authelia db; authelia picks it up "
+             f"within seconds)")
     return 0
 
 
@@ -1668,7 +1739,7 @@ def main() -> int:
     p_logs.add_argument('-f', '--follow', action='store_true')
     p_logs.add_argument('--tail', type=int, default=200)
     p_restart = sub.add_parser('restart')
-    p_restart.add_argument('service', nargs='?')
+    p_restart.add_argument('services', nargs='*', help='services to restart (default: all), e.g. api web mcp')
     p_build = sub.add_parser('build')
     p_build.add_argument('--pull', action='store_true', help='pull newer base images')
     p_build.add_argument('--app-only', action='store_true')

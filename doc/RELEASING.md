@@ -14,14 +14,68 @@ fails if they drift. A running server reports it in `/api/health`
 - minor (2.x.0): additions (new endpoints or parameters with defaults)
 - major (x.0.0): anything that breaks an existing client
 
+## Before the tag
+
+Tick every box before step 1 of "Cutting a release".
+
+**Code merged**
+
+- [ ] Every branch and worktree for this release is merged into `main`;
+      `git worktree list` shows only the main checkout, and nothing is left
+      uncommitted that belongs in the release.
+
+**API clean**
+
+- [ ] `doc/API_CHANGELOG.md` matches the code: every new or changed
+      endpoint, parameter and response field of this release has an entry,
+      and no entry describes something that did not ship.
+- [ ] Breaking changes are marked BREAKING, with what a client must do.
+- [ ] The version follows the rule above (patch: fixes only; minor:
+      additions; major: breaks), or the changelog says why not.
+- [ ] Versions in sync: `API_VERSION` in `bin/api/ant-serve`, `lib/__init__.py`
+      (`tests/test_version_sync.py`), `API_COMPATIBLE_PYVARK`.
+- [ ] Deprecations whose announced removal date or release has passed are
+      removed now, or their date is moved with a changelog line.
+
+**Clients synced**
+
+- [ ] pyvark (`codeberg.org/mfiers/pyvark`) and vark cover the new and
+      changed endpoints, or the gap is written down.
+- [ ] MCP tools in `bin/api/ant-mcp` match the REST changes.
+- [ ] The agent skills (`data/skills`) are current, including the help sync
+      (`make help-sync ANTHIVE=<this checkout>` in `data/skills`, review the
+      diff, rebuild).
+
+**Docs current**
+
+- [ ] `lib/help_content/` and `web/templates/help.html` describe every
+      user-facing change (`tests/test_help_content.py`).
+- [ ] `web/CLAUDE.md` and the other scoped `CLAUDE.md` files name the new
+      pieces.
+- [ ] For any change to how a site is set up or run: `doc/DEPLOY_CONTAINERS.md`
+      (including the upgrade table row), `site.example.yaml` and
+      `ant-stack check` are updated.
+- [ ] Release numbers are bumped in `doc/DEPLOY_CONTAINERS.md` (the "run
+      end to end ... for release X.Y.Z" line, `git checkout vX.Y.Z`,
+      `tag: X.Y.Z` in step 4) and `images.tag` in `site.example.yaml`.
+
+**Data pushed**
+
+- [ ] `ant sync push` has run for every dataset, facet result and library
+      change the release relies on.
+- [ ] When they changed: the gene stats and the module variability indices
+      are rebuilt and pushed, and the literature index (below).
+
 ## Cutting a release
 
 From a clean checkout of `main` on a machine with Docker:
 
 ```sh
 # 1. bump both version strings, set API_VERSION_RELEASED (today, YYYY-MM-DD) and
-#    API_COMPATIBLE_PYVARK in bin/api/ant-serve, and date the changelog heading
-$EDITOR bin/api/ant-serve lib/__init__.py doc/API_CHANGELOG.md
+#    API_COMPATIBLE_PYVARK in bin/api/ant-serve, and date the changelog heading;
+#    set images.tag in site.example.yaml and the release numbers in
+#    doc/DEPLOY_CONTAINERS.md to X.Y.Z
+$EDITOR bin/api/ant-serve lib/__init__.py doc/API_CHANGELOG.md site.example.yaml doc/DEPLOY_CONTAINERS.md
 make test                                   # no new failures
 git commit -am "X.Y.Z: <summary>"
 git tag -a vX.Y.Z -m "anthive X.Y.Z: <summary>"
@@ -70,9 +124,18 @@ built with the same model. Changing the model means a full index rebuild
 (`ant lib-index --full`) and updating `IMAGE_EMBEDDING_MODEL` in
 `bin/ops/ant-stack`.
 
-Before announcing a release, deploy it once on a scratch site following
-DEPLOY_CONTAINERS.md word for word (fresh `state_dir`, anonymous pulls with an
-empty `DOCKER_CONFIG`). Release 2.37.2 found four real problems that way.
+## After the tag
+
+- [ ] **Scratch-site check.** Before announcing a release, deploy it once on
+      a scratch site following DEPLOY_CONTAINERS.md word for word (fresh
+      `state_dir`, anonymous pulls with an empty `DOCKER_CONFIG`). Also change
+      a setting afterwards (for example `auth.internal_requires_auth`) and
+      check with `ant-stack up` that it takes effect. Release 2.37.2 found
+      four real problems that way, 2.45.0 found that `up` ignored config-only
+      changes.
+- [ ] **pyvark on PyPI.** The maintainer publishes the matching pyvark
+      release to PyPI.
+- [ ] **vark.** The maintainer runs `make ship` in the vark repo.
 
 ## Where images live
 

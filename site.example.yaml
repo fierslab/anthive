@@ -30,7 +30,7 @@ site:
   # setup, MCP links, library). Leave out to use the anthive4 GitLab docs.
   # docs_base_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/blob/main/doc
   # Facets shown on the /facets pages and in the dataset facet card. While
-  # the facet audit decisions are pending, only the four that the donor-level
+  # the facet audit decisions are pending, only the six that the donor-level
   # facet tests analyse are shown; the other ant_* columns stay in the data
   # and the API. An empty list ([]) or null shows every facet.
   facets_visible: [ant_sex, ant_disease, ant_apoe4_carrier, ant_braak, ant_age, ant_app_nlgf]
@@ -44,7 +44,7 @@ data:
   # by `ant-stack ingest -- ant sync pull`). Both optional: null runs the
   # site without papers and literature search.
   library: null                            # e.g. /srv/anthive/library
-  library_index: null                      # e.g. /srv/anthive/library_index
+  library_index: null                      # e.g. /srv/anthive/library_index (mkdir it only with a library)
   # Mount the h5adstore read-only into the API (mirror sites that never
   # annotate). Admin editors and annotation writes then fail.
   readonly: false
@@ -129,7 +129,10 @@ images:
   registry: registry.gitlab.kuleuven.be/bdslab/anthive/anthive4
   app: anthive-app
   ingest: anthive-ingest
-  tag: latest
+  # The release you run: the same number as the git tag you checked out
+  # (`git describe --tags`). Change it at every upgrade. Never `latest`, it
+  # changes under you.
+  tag: 2.45.0
   # Leave the defaults unless you mirror these images.
   caddy: caddy:2.11-alpine
   authelia: authelia/authelia:4.39

@@ -128,6 +128,13 @@ tmp_dir: tmp
 # Background job logs (precompute runs). null = tmp_dir. Env: ANTHIVE_LOG_DIR.
 log_dir: null
 
+# Lowest ant-serve log level that also goes to stderr (the full log is always
+# <log_dir>/ant-serve.log). warning keeps the dev supervisor output short (it
+# shows stderr next to the file); the container stack renders info so
+# `ant-stack logs api` shows the warm-up progress. debug | info | warning |
+# error. Env: ANTHIVE_LOG_STDERR_LEVEL.
+log_stderr_level: warning
+
 # Static bundle root served by the proxy (jupyter/, plots/, artifacts/).
 # Env: ANTHIVE_WEBAPP_DIR.
 webapp_dir: webapp

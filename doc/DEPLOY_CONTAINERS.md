@@ -3,7 +3,7 @@
 This is the one supported way to run anthive: a docker compose stack,
 described by one file (`site.yaml`) and driven by one tool
 (`bin/ops/ant-stack`). Follow the steps in order. Every command below was run
-end to end on a fresh checkout for release 2.44.0.
+end to end on a fresh checkout for release 2.45.0.
 
 Plan about an hour, plus the time it takes to download the data.
 
@@ -55,6 +55,11 @@ Tick every box. Most failed installs skip one of these.
       site has no papers, literature search or paper context for AI clients.
 - [ ] S3 keys for the data bucket (an access key id and a secret). Without
       them you can still run a site, but only with data you convert yourself.
+- [ ] For the three repos above: an SSH key of this server's user on your
+      `gitlab.kuleuven.be` account (Preferences > SSH Keys; check with
+      `ssh -T git@gitlab.kuleuven.be`), because step 3 clones over SSH. Without
+      one, clone over HTTPS with a personal or project access token
+      (`read_repository`) instead; step 3 shows both.
 
 The software itself needs no access: the code and the images are public.
 
@@ -69,7 +74,7 @@ sudo mkdir -p /srv/anthive && sudo chown $USER /srv/anthive
 cd /srv/anthive
 git clone https://gitlab.kuleuven.be/bdslab/anthive/anthive4.git
 cd anthive4
-git checkout v2.44.0
+git checkout v2.45.0
 ```
 
 Always check out a release tag, and use the same number as the image tag in
@@ -85,7 +90,17 @@ cd /srv/anthive
 git clone git@gitlab.kuleuven.be:bdslab/anthive/h5adstore.git
 git clone git@gitlab.kuleuven.be:bdslab/genesetdbs/anthive-genesetdb.git genesetstore
 git clone git@gitlab.kuleuven.be:bdslab/anthive/library_store.git library          # optional, see step 1
-mkdir -p library_index
+mkdir -p library_index                                                            # only with the library
+```
+
+These SSH clones need the SSH key from step 1 (`ssh -T git@gitlab.kuleuven.be`
+greets you by name when it works). Without a key, use HTTPS with an access
+token; git asks for a user name (your GitLab user name) and a password (the token):
+
+```sh
+git clone https://gitlab.kuleuven.be/bdslab/anthive/h5adstore.git
+git clone https://gitlab.kuleuven.be/bdslab/genesetdbs/anthive-genesetdb.git genesetstore
+git clone https://gitlab.kuleuven.be/bdslab/anthive/library_store.git library    # optional
 ```
 
 `h5adstore/` now contains one folder per collection with small text files.
@@ -95,8 +110,9 @@ precomputed literature index are downloaded in step 5.
 
 The library repository (`bdslab/anthive/library_store`) is private: ask the
 maintainers for read access. It holds only the paper records (`.md`); the
-PDFs come from S3 in step 5. Without access, leave the two library lines out
-of `site.yaml` in step 4: the site runs without papers.
+PDFs come from S3 in step 5. Without access, skip the library clone and the
+`mkdir library_index`, and keep `library: null` and `library_index: null` in
+`site.yaml` in step 4: the site runs without papers.
 
 ---
 
@@ -118,8 +134,8 @@ site:
 data:
   h5adstore: /srv/anthive/h5adstore           # absolute paths
   genesetstore: /srv/anthive/genesetstore     # or null if you have no access
-  library: /srv/anthive/library               # the paper library checkout, or leave out
-  library_index: /srv/anthive/library_index   # literature index (filled in step 5)
+  library: /srv/anthive/library               # the paper library checkout, or null
+  library_index: /srv/anthive/library_index   # literature index (filled in step 5), or null
 
 state_dir: /srv/anthive/state                 # secrets, users, caches: back this up
 
@@ -141,7 +157,7 @@ ports:
 
 images:
   registry: registry.gitlab.kuleuven.be/bdslab/anthive/anthive4
-  tag: 2.44.0                                 # same number as the git tag
+  tag: 2.45.0                                 # same number as the git tag (step 2)
 
 s3:                                           # skip if you have no S3 keys
   enabled: true
@@ -149,6 +165,10 @@ s3:                                           # skip if you have no S3 keys
   region: eu-central
   bucket: anthive4a
 ```
+
+`images.tag` must be the release you checked out in step 2 (`git describe
+--tags` prints it). `site.example.yaml` carries the number of its own release,
+so a fresh `site.yaml` starts right; when you upgrade, change it by hand.
 
 Then run `init` a second time. It creates `state_dir`, all secrets and a
 password for every user:
@@ -282,6 +302,12 @@ password from step 4, then change it:
 bin/ops/ant-stack passwd admin
 ```
 
+It asks for the new password twice (at least 10 characters). In a script,
+where there is no terminal to ask on, pass it with `--password '...'` or in
+the environment variable `ANTHIVE_NEW_PASSWORD`. With `auth.mode: authelia`
+the new password works within seconds; with `auth.mode: basic` run
+`bin/ops/ant-stack restart caddy` afterwards.
+
 ---
 
 ## 7. Check that it works
@@ -292,10 +318,14 @@ bin/ops/ant-stack passwd admin
 - [ ] The address shows the login page when you are logged out.
 - [ ] After login, the dataset list shows the collections you pulled, and a
       dataset page opens with its plots.
-- [ ] Your account menu has "Connect an AI client (MCP)"; creating a link
-      there works.
+- [ ] Your account menu has "Connect an MCP client" ("MCP links" once you
+      have one); creating a link there works.
 - [ ] From another machine, the API answers with a login:
-      `curl -u jdoe:PASSWORD https://anthive.mylab.org:8443/api/health`
+      `curl -u jdoe:PASSWORD https://anthive.mylab.org:8443/api/health`.
+      With `tls.mode: internal` curl does not know the site's certificate
+      authority: copy `anthive-root.crt` out as in "Certificates" and add
+      `--cacert anthive-root.crt`, or use `-k` (skips the check) for a quick
+      trial.
 
 If one of these fails, see Troubleshooting at the end.
 
@@ -308,16 +338,37 @@ Run these from `/srv/anthive/anthive4`.
 | I want to... | Do this |
 | --- | --- |
 | add a person | add them under `auth.users` in `site.yaml`, run `bin/ops/ant-stack init` (prints their password), give it to them. Works without a restart. |
-| reset a password | `bin/ops/ant-stack passwd <name>` |
+| reset a password | `bin/ops/ant-stack passwd <name>` (basic mode: then `restart caddy`) |
 | make someone admin | add them to `auth.admins` and give them `groups: [admins]`, then `bin/ops/ant-stack init` |
 | get new datasets | `cd ../h5adstore && git pull && cd ../anthive4`, then `bin/ops/ant-stack ingest -- ant sync pull --include-duckdb 'Collection/*'`, then `bin/ops/ant-stack restart api` |
 | see what runs | `bin/ops/ant-stack ps` |
 | read logs | `bin/ops/ant-stack logs api` (or `web`, `mcp`, `caddy`, `authelia`) |
-| restart one part | `bin/ops/ant-stack restart api` |
+| restart one part | `bin/ops/ant-stack restart api` (several: `restart api web mcp`) |
+| change a setting | edit `site.yaml`, then `bin/ops/ant-stack check` and `bin/ops/ant-stack up` (see "After editing site.yaml") |
 | stop everything | `bin/ops/ant-stack down` (keeps data, users and settings) |
 | start again | `bin/ops/ant-stack up` |
 | convert my own .h5ad | put it in a collection folder with its `.md`, then `bin/ops/ant-stack ingest -- ant convert /srv/anthive/h5adstore/MyStudy/file.h5ad` |
 | publish uploaded papers | `bin/ops/ant-stack publish-library` (better: from a timer, see "Let people add papers") |
+
+### After editing site.yaml
+
+Every change to `site.yaml` takes effect the same way:
+
+```sh
+bin/ops/ant-stack check     # validates the change and prints the plan
+bin/ops/ant-stack up        # renders the config and recreates what changed
+```
+
+`up` recreates exactly the containers whose input changed. api, web and mcp
+read their rendered config and secret files only at start, so the rendered
+compose file carries a hash of those files for each of them
+(`ANTHIVE_CONFIG_SHA`); when the hash changes, compose recreates that
+container. Caddy, Authelia and the static copy are recreated on every `up`.
+Since 2.45.1 this covers changes that only touch the rendered config, such as
+`auth.internal_requires_auth` or `auth.mode`; with 2.45.0 and older, run
+`bin/ops/ant-stack restart api web mcp` after such a change (or the old
+setting stays in force). `restart` alone is not enough after a change of
+mounts, ports or images: use `up`.
 
 ### Let people add papers
 
@@ -527,7 +578,8 @@ Read every entry between your current version (top-right of the site, or
 | **2.42.1** | A running server picks up records and a literature index that a sync changed on disk (within about 30 s). Needed on the site that publishes the index and on sites that download it. | none: set `images: tag: 2.42.1`, `ant-stack pull`, `ant-stack up` |
 | **2.43.0** | Facet test engine v2: partial-conjunction replication, `apoe_carrier` renamed `apoe4_carrier` (the old name stays as an alias), dataset versions. | `git pull` the h5adstore, then `ant sync pull`; set `images: tag: 2.43.0`, `ant-stack pull`, `ant-stack up` |
 | **2.44.0** | (1) **Facets**: `ant sync pull` now also brings `_facet_tests/` (the facet test results the API serves; logs and scripts stay out), and the h5adstore repo has many changed `.md` files (facet layer metadata, lineage fields). (2) **Mirror sites with symlinks**: new `data.extra_mounts` bind-mounts folders read-only at the same path into api, web, mcp and ingest, so symlinks from your stores into another site's stores resolve in the containers; `ant-stack check` validates them and warns about symlinks that would dangle. (3) **Hidden paper links**: on every site a `papers:` link to a citekey that is not in the site's own library is hidden everywhere (web, REST, MCP, BibTeX); `GET /library/status` shows `unresolved_references`, issue texts and paths to admins only (on `auth.mode: none` to nobody), non-admins get counts (`n_errors`, `n_warnings`). (4) **Library**: a plain, non-git library of symlinked records works read-only (no git is run in it); `file not found` warnings are computed from the disk on each call and no longer outlive the PDF's arrival; a symlinked record whose target is gone is an error entry, not a crash. (5) **Own literature index**: new `library.index_pull` (default true); `ant sync` never downloads the shared index when `s3.enabled` is false or `library.index_pull: false`. (6) **Facet engine v3 and help API**: facet scopes, new facets and exclusions, per-cell-type clusters, faster facet endpoints; `GET /api/help` and the MCP `explain` tool serve plain-language explanations; facet results are published by `ant sync push` and pulled by `ant sync pull`. (7) **Cron and systemd**: new `config/examples/anthive-sync.{cron,service}.example` set PATH for uv; `ant-stack check` says where uv is and warns when it is missing. | none required. `git pull` the h5adstore, then `ant-stack ingest -- ant sync pull` for `_facet_tests/`. Set `images: tag: 2.44.0`, `ant-stack pull`, `ant-stack up`. Optional: `data.extra_mounts`, `library.index_pull`; cron jobs: add `PATH=$HOME/.local/bin:...` (see "Run syncs from cron or a timer") |
-| **2.45.0** | (1) **Internal datasets need a login**: datasets that are not `access: public` (also those without an `access` value) are hidden from callers without an identity: absent from every listing, 404 on their routes (new `auth.internal_requires_auth`, default true; see "Internal datasets"). Sites with a login see no change; on `auth.mode: none` internal datasets disappear, and a `trusted-proxy` site behind a vhost without a login must drop the `Remote-*` headers there. (2) `X-Remote-User` / `X-Remote-Groups` are ignored everywhere and dropped by the Caddy snippets. (3) Cache, index and rescan routes (`/admin/*-cache/*`, `/admin/*-index/*`, `/admin/api-config/*`, `POST /genesets/rescan`, `/module-variability/rescan`, `/catalogs/rescan`) need an admin, a host-local tool or the internal secret; other signed-in users get 403. (4) The web, mcp and api containers must run the same release (the web now forwards the visitor's identity to the api). (5) **Cache warm-up**: after a start the api fills the facet caches for signed-in and anonymous visitors, per-donor values and the gene set rank tables in the background (new `warmup` block of anthive.yaml, default on; see "Cache warm-up after a start"). The first start builds the rank tables (up to a minute per dataset with scores, one at a time). | `ant-stack check` (it counts internal datasets and warns), set `images: tag: 2.45.0`, `ant-stack pull`, `ant-stack up`. If your upstream proxy sends identity as `X-Remote-*` only, switch it to `Remote-User` / `Remote-Groups`. If you copied an nginx vhost from `config/examples/`, add the new `proxy_set_header ... ""` lines (the public vhost must drop `Remote-*`). Scripts that call the rescan routes need an admin account. |
+| **2.45.0** | (1) **Internal datasets need a login**: datasets that are not `access: public` (also those without an `access` value) are hidden from callers without an identity: absent from every listing, 404 on their routes (new `auth.internal_requires_auth`, default true; see "Internal datasets"). Sites with a login see no change; on `auth.mode: none` internal datasets disappear, and a `trusted-proxy` site behind a vhost without a login must drop the `Remote-*` headers there. (2) `X-Remote-User` / `X-Remote-Groups` are ignored everywhere and dropped by the Caddy snippets. (3) Cache, index and rescan routes (`/admin/*-cache/*`, `/admin/*-index/*`, `/admin/api-config/*`, `POST /genesets/rescan`, `/module-variability/rescan`, `/catalogs/rescan`) need an admin, a host-local tool or the internal secret; other signed-in users get 403. (4) The web, mcp and api containers must run the same release (the web now forwards the visitor's identity to the api). (5) **Cache warm-up**: after a start the api fills the facet caches for signed-in and anonymous visitors, per-donor values and the gene set rank tables in the background (new `warmup` block of anthive.yaml, default on; see "Cache warm-up after a start"). The first start builds the rank tables (up to a minute per dataset with scores, one at a time). | `ant-stack check` (it prints how many datasets are internal and who sees them, and warns only for `internal_requires_auth: false` or `trusted-proxy`), set `images: tag: 2.45.0`, `ant-stack pull`, `ant-stack up`; then `ant-stack restart api web mcp` (2.45.0's `up` does not recreate them when only the config changed; fixed in 2.45.1). If your upstream proxy sends identity as `X-Remote-*` only, switch it to `Remote-User` / `Remote-Groups`. If you copied an nginx vhost from `config/examples/`, add the new `proxy_set_header ... ""` lines (the public vhost must drop `Remote-*`). Scripts that call the rescan routes need an admin account. |
+| **2.45.1** (unreleased) | Fixes in `ant-stack`: `up` recreates api, web and mcp when their rendered config or secrets changed (before, a changed `auth.internal_requires_auth` or `auth.mode` did not take effect until a restart); `restart` takes several services; `passwd` without a terminal points to `--password`; `check` labels Caddy's in-container listener, prints the published host address and always prints the internal dataset count; `ant-stack logs api` shows the warm-up progress. | set `images: tag: 2.45.1`, `ant-stack pull`, `ant-stack up` |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.
@@ -663,8 +715,11 @@ hidden from everyone even when they sit in `data.h5adstore`. On
 `config/examples/nginx-vhost.public.conf.example`), or a visitor could send
 them. `X-Remote-User` and `X-Remote-Groups` are never an identity.
 
-`ant-stack check` counts the internal datasets in `data.h5adstore` and
-warns when they could reach people without a login. Set
+`ant-stack check` always prints how many datasets in `data.h5adstore` are
+internal and who sees them, in every login mode (for example "97 of 159
+datasets are internal: visible only to signed-in users"), and warns when they
+could reach people without a login (`internal_requires_auth: false`, or
+`trusted-proxy`, where the upstream proxy decides). Set
 `internal_requires_auth: false` only for a site whose whole store may be
 public; the files themselves stay readable to anyone with shell access to the
 host, so keep internal data off a public host.
@@ -697,6 +752,14 @@ as the signed-in ones (above 1 GB on a full store); a site that only serves
 signed-in people can set `anonymous: false`. `warmup.enabled: false` (or env
 `ANTHIVE_WARMUP=0`) turns the warm-up off. Every key is explained in
 `anthive.default.yaml`.
+
+To watch the progress, follow the api log:
+`bin/ops/ant-stack logs -f api` prints a `warm-up:` line per step with its
+duration (`facet caches for signed-in callers`, the per-donor value sets, `module rank tables
+of N datasets ready`). The same lines, with every other ant-serve message, are
+in `ant-serve.log` under `logs/` on the scratch disk (`scratch_dir`, or the
+docker volume `<site.name>_scratch`). Before 2.45.1 they were only in that
+file.
 
 ### Certificates (`tls.mode`)
 
@@ -742,8 +805,11 @@ build time (`docker/check-image`).
 
 Each part is its own container that restarts on its own if it crashes.
 The data folders are mounted at the same absolute path inside the containers
-as on the server, because each `.duckdb` refers to its parquet files by
-absolute path.
+as on the server. Since 2.41.0 the expression layers are read relative to
+each `.duckdb`, so a store that moved still works; the same-path mount is
+still needed because symlinks in the stores and the library point to
+absolute host paths, and `data.extra_mounts` relies on it to make them
+resolve inside the containers.
 
 ### site.yaml keys
 
@@ -765,7 +831,7 @@ absolute path.
 | `auth.internal_requires_auth` | whether datasets that are not `access: public` need a signed-in caller (default `true`; see "Internal datasets") |
 | `auth.*`, `tls.*`, `ports.*` | see above |
 | `run_as` | the user id the containers run as (default: whoever runs ant-stack) |
-| `images.*` | registry, image names, tag |
+| `images.*` | registry, image names, tag (the release number; change it at every upgrade) |
 | `services.mcp` | personal MCP links for AI clients (on by default; the supported way to use AI with anthive) |
 | `mcp.token_ttl_days`, `mcp.max_links_per_user` | how long a link lives (0 = forever) and how many links one user may hold (default 5) |
 | `services.paper_upload` | let `library.upload_groups` add papers through the API and MCP (mounts the library read-write) |

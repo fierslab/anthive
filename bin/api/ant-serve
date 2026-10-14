@@ -92,7 +92,7 @@ from config import get_config, get_docs_base_url
 from config import facet_hidden_by_config, get_facet_results_dir, get_facets_visible
 from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
                     get_duckdb_temp_dir, get_internal_requires_auth, get_library_dir, get_warmup_settings,
-                    get_library_index_dir, get_model_cache_dir, get_log_dir, get_state_dir, get_tmp_dir,
+                    get_library_index_dir, get_model_cache_dir, get_log_dir, get_log_stderr_level, get_state_dir, get_tmp_dir,
                     get_webapp_dir)
 from library_service import LIBRARY_S3_PREFIX, LibraryService
 import dataset_access
@@ -193,9 +193,11 @@ def _setup_logging(log_dir: Path = None) -> logging.Logger:
     ))
     logger.addHandler(file_handler)
 
-    # Console: warnings and above only (uvicorn handles INFO)
+    # stderr: warnings and above by default (the dev supervisor shows stderr
+    # next to this file); the container stack sets log_stderr_level: info so
+    # `docker logs` / `ant-stack logs api` shows the warm-up progress too.
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.WARNING)
+    console_handler.setLevel(getattr(logging, get_log_stderr_level().upper()))
     console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
     logger.addHandler(console_handler)
 
