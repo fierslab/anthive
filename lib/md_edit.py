@@ -11,8 +11,9 @@ Operations (all on the front matter between the two ``---`` lines):
 * :func:`set_top`: set or insert a top-level key (scalar, list or mapping);
 * :func:`set_path` / :func:`delete_path`: set or delete a key inside nested
   mappings (``['api', 'obs_rename', 'Braak']``);
-* :func:`bump_version`: patch bump of ``version`` plus a ``changelog`` entry
-  and the ``updated`` date;
+* :func:`bump_version`: patch (or minor) bump of ``version`` plus a ``changelog``
+  entry (with ``previous_sha256`` when the data changed) and the ``updated`` date;
+* :func:`append_top`: append an item to a top-level list (a caveat);
 * :func:`apply_edits`: several operations, one verification.
 """
 from __future__ import annotations
@@ -161,21 +162,61 @@ def delete_path(path: Sequence[str]) -> Dict[str, Any]:
     return {'op': 'delete', 'path': list(path)}
 
 
-def bump_version(changes: Sequence[str], date: str) -> Dict[str, Any]:
-    """Operation: patch-bump ``version``, set ``updated`` (when present) and append a changelog entry."""
-    return {'op': 'bump', 'changes': list(changes), 'date': date}
+def bump_version(changes: Sequence[str], date: str, part: str = 'patch',
+                 previous_sha256: Optional[str] = None) -> Dict[str, Any]:
+    """Operation: bump ``version``, set ``updated`` (when present) and append a changelog entry.
+
+    Args:
+        changes: Lines of the changelog entry.
+        date: ISO date of the entry.
+        part: ``patch`` (metadata only) or ``minor`` (the data changed: X.Y+1.0).
+        previous_sha256: Recorded in the entry when the h5ad changed.
+    """
+    if part not in ('patch', 'minor'):
+        raise MdEditError(f'unknown version part {part!r}')
+    operation = {'op': 'bump', 'changes': list(changes), 'date': date, 'part': part}
+    if previous_sha256:
+        operation['previous_sha256'] = previous_sha256
+    return operation
 
 
-def _bump(version: Any) -> str:
+def append_top(key: str, item: Any) -> Dict[str, Any]:
+    """Operation: append one item to a top-level list (created when absent), e.g. a caveat."""
+    return {'op': 'append', 'path': [key], 'value': item}
+
+
+def _append_lines(lines: List[str], data: Dict[str, Any], key: str, item: Any) -> None:
+    """Append ``item`` to the top-level list ``key``; ``data`` is the verification model."""
+    found = _key_line(lines, key, 0, len(lines), 0)
+    current = data.get(key)
+    if found is None or current is None:
+        if found is not None:
+            del lines[found:_block_end(lines, found)]
+        anchor = _insertion_point(lines, 0, len(lines), 0, key)
+        lines[anchor:anchor] = _dump(key, [item], 0)
+        data[key] = [item]
+        return
+    if not isinstance(current, list):
+        raise MdEditError(f'{key!r} is not a list')
+    end = _block_end(lines, found)
+    item_indent = next((_indent(line) for line in lines[found + 1:end] if line.lstrip().startswith('-')), 0)
+    dumped = yaml.dump([item], default_flow_style=False, sort_keys=False, allow_unicode=True, width=10**6)
+    lines[end:end] = [' ' * item_indent + line if line else line for line in dumped.rstrip('\n').split('\n')]
+    current.append(item)
+
+
+def _bump(version: Any, part: str = 'patch') -> str:
     parts = str(version).split('.')
-    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+    if len(parts) != 3 or not all(part_text.isdigit() for part_text in parts):
         raise MdEditError(f'version {version!r} is not major.minor.patch')
+    if part == 'minor':
+        return f'{parts[0]}.{int(parts[1]) + 1}.0'
     return f'{parts[0]}.{parts[1]}.{int(parts[2]) + 1}'
 
 
 def _apply_bump(lines: List[str], data: Dict[str, Any], operation: Dict[str, Any]) -> None:
     """Patch bump, ``updated`` date and changelog entry; ``data`` is the verification model."""
-    new_version = _bump(data.get('version'))
+    new_version = _bump(data.get('version'), operation.get('part', 'patch'))
     version_line = _key_line(lines, 'version', 0, len(lines), 0)
     if version_line is None:
         raise MdEditError('no version key')
@@ -183,7 +224,10 @@ def _apply_bump(lines: List[str], data: Dict[str, Any], operation: Dict[str, Any
     updated_line = _key_line(lines, 'updated', 0, len(lines), 0)
     if updated_line is not None:
         lines[updated_line] = f"updated: '{operation['date']}'"
-    entry = {'version': new_version, 'date': operation['date'], 'changes': list(operation['changes'])}
+    entry = {'version': new_version, 'date': operation['date']}
+    if operation.get('previous_sha256'):
+        entry['previous_sha256'] = operation['previous_sha256']
+    entry['changes'] = list(operation['changes'])
     changelog_line = _key_line(lines, 'changelog', 0, len(lines), 0)
     if changelog_line is None:
         lines.extend(_dump('changelog', [entry], 0))
@@ -226,6 +270,8 @@ def apply_edits(text: str, operations: Sequence[Dict[str, Any]]) -> str:
             _model_delete(expected, operation['path'])
         elif operation['op'] == 'bump':
             _apply_bump(lines, expected, operation)
+        elif operation['op'] == 'append':
+            _append_lines(lines, expected, operation['path'][0], operation['value'])
         else:
             raise MdEditError(f'unknown operation {operation["op"]!r}')
     after = yaml.safe_load('\n'.join(lines)) or {}
