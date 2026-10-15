@@ -1,6 +1,8 @@
 """lib/md_edit.py: minimal verified text edits of a dataset .md front matter."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -99,3 +101,63 @@ def test_quoted_keys_and_values_with_colons():
     front = _front(new)
     assert front['api']['obs_derive']['ant_age']['map'] == {'60': 60, '61': 62}
     assert front['note'] == 'a: b # c'
+
+
+# ── flow-style empty values (vark init writes `caveats: []`) ──────────────────
+
+FIXTURES = Path(__file__).resolve().parent / 'fixtures'
+
+
+@pytest.mark.parametrize('name', ['vark_init_seed.md', 'store_md_with_empty_caveats.md'])
+def test_append_caveat_after_a_flow_empty_list(name):
+    text = (FIXTURES / name).read_text()
+    assert '\ncaveats: []\n' in text
+    caveat = {'level': 'low', 'text': 'Metadata update: age added.'}
+    new_text = md_edit.apply_edits(text, [md_edit.append_top('caveats', caveat)])
+    data = yaml.safe_load(new_text.split('---\n')[1])
+    assert data['caveats'] == [caveat]
+    assert 'caveats: []' not in new_text
+    again = md_edit.apply_edits(new_text, [md_edit.append_top('caveats', {'level': 'low', 'text': 'two'})])
+    assert len(yaml.safe_load(again.split('---\n')[1])['caveats']) == 2
+
+
+def test_store_md_update_edits_with_empty_caveats_and_bump():
+    text = (FIXTURES / 'store_md_with_empty_caveats.md').read_text()
+    new_text = md_edit.apply_edits(text, [
+        md_edit.append_top('caveats', {'level': 'low', 'text': 'x'}),
+        md_edit.set_top('age', '33-62 years'),
+        md_edit.bump_version(['metadata update'], '2026-10-15')])
+    data = yaml.safe_load(new_text.split('---\n')[1])
+    assert data['version'] == '1.0.2' and data['caveats'] == [{'level': 'low', 'text': 'x'}]
+
+
+@pytest.mark.parametrize('line,before', [
+    ('caveats: [{level: low, text: a}]', [{'level': 'low', 'text': 'a'}]),
+    ('caveats:  [] # none yet', []),
+    ('caveats: null', None),
+    ('caveats: ~', None),
+])
+def test_append_after_inline_list_values(line, before):
+    text = f'---\nid: X\n{line}\nversion: 1.0.0\n---\nbody\n'
+    new_text = md_edit.apply_edits(text, [md_edit.append_top('caveats', {'level': 'low', 'text': 'b'})])
+    data = yaml.safe_load(new_text.split('---\n')[1])
+    assert data['caveats'] == (before or []) + [{'level': 'low', 'text': 'b'}]
+    assert new_text.endswith('---\nbody\n')
+
+
+@pytest.mark.parametrize('line', ['api: {}', 'api:', 'api: null', 'api: {obs_hidden: [a]}'])
+def test_set_path_under_an_inline_mapping(line):
+    text = f'---\nid: X\n{line}\nversion: 1.0.0\n---\n'
+    new_text = md_edit.apply_edits(text, [md_edit.set_path(['api', 'obs_rename'], {'Braak': 'ant_braak'})])
+    data = yaml.safe_load(new_text.split('---\n')[1])
+    assert data['api']['obs_rename'] == {'Braak': 'ant_braak'}
+    if 'obs_hidden' in line:
+        assert data['api']['obs_hidden'] == ['a']
+
+
+@pytest.mark.parametrize('line', ['changelog: []', 'changelog:', 'changelog: null'])
+def test_bump_with_an_empty_changelog(line):
+    text = f'---\nid: X\nversion: 1.0.0\n{line}\n---\n'
+    new_text = md_edit.apply_edits(text, [md_edit.bump_version(['c'], '2026-10-15')])
+    data = yaml.safe_load(new_text.split('---\n')[1])
+    assert data['changelog'] == [{'version': '1.0.1', 'date': '2026-10-15', 'changes': ['c']}]

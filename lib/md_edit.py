@@ -68,6 +68,43 @@ def _key_line(lines: List[str], key: str, start: int, end: int, indent: int) -> 
     return None
 
 
+def _inline_value(line: str) -> Optional[str]:
+    """The text after ``key:`` on a key line (comment stripped), or None for a block key (``key:``)."""
+    after = line.split(':', 1)[1] if ':' in line else ''
+    text = after.strip()
+    if not text or text.startswith('#'):
+        return None
+    if ' #' in text and not text.startswith(('"', "'")):
+        text = text.split(' #', 1)[0].rstrip()
+    return text
+
+
+def _blockify(lines: List[str], index: int, indent: int) -> None:
+    """Turn ``key: {}`` / ``key: []`` / ``key: null`` / a flow collection into block style in place.
+
+    Lines appended under a key whose value sits on the key line itself (``caveats: []``, which vark init
+    writes) are not valid YAML, so the value is rewritten in block style first (an empty or null value
+    becomes a bare ``key:``). Scalars are left alone.
+    """
+    text = _inline_value(lines[index])
+    if text is None:
+        return
+    try:
+        value = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise MdEditError(f'cannot read the value on line {lines[index]!r}: {exc}') from exc
+    if value is not None and not isinstance(value, (list, dict)):
+        return
+    key_text = lines[index].split(':', 1)[0].strip()
+    block_end = _block_end(lines, index)
+    if not value:
+        lines[index:block_end] = [' ' * indent + key_text + ':']
+    else:
+        dumped = _dump('__k__', value, indent)
+        dumped[0] = ' ' * indent + key_text + ':'
+        lines[index:block_end] = dumped
+
+
 def _dump(key: str, value: Any, indent: int) -> List[str]:
     text = yaml.dump({key: value}, default_flow_style=False, sort_keys=False, allow_unicode=True, width=10**6)
     prefix = ' ' * indent
@@ -99,6 +136,8 @@ def _set_lines(lines: List[str], path: Sequence[str], value: Any) -> None:
             anchor = _insertion_point(lines, start, end, indent, key) if indent == 0 else insert_at
             lines[anchor:anchor] = _dump(key, value, indent)
             return
+        if not last:
+            _blockify(lines, found, indent)
         block_end = _block_end(lines, found)
         if last:
             lines[found:block_end] = _dump(key, value, indent)
@@ -136,6 +175,8 @@ def _delete_lines(lines: List[str], path: Sequence[str]) -> bool:
 def _model_set(data: Dict[str, Any], path: Sequence[str], value: Any) -> None:
     node = data
     for key in path[:-1]:
+        if node.get(key) is None:
+            node[key] = {}
         node = node[key]
     node[path[-1]] = copy.deepcopy(value)
 
@@ -198,6 +239,7 @@ def _append_lines(lines: List[str], data: Dict[str, Any], key: str, item: Any) -
         return
     if not isinstance(current, list):
         raise MdEditError(f'{key!r} is not a list')
+    _blockify(lines, found, 0)
     end = _block_end(lines, found)
     item_indent = next((_indent(line) for line in lines[found + 1:end] if line.lstrip().startswith('-')), 0)
     dumped = yaml.dump([item], default_flow_style=False, sort_keys=False, allow_unicode=True, width=10**6)
@@ -229,6 +271,12 @@ def _apply_bump(lines: List[str], data: Dict[str, Any], operation: Dict[str, Any
         entry['previous_sha256'] = operation['previous_sha256']
     entry['changes'] = list(operation['changes'])
     changelog_line = _key_line(lines, 'changelog', 0, len(lines), 0)
+    if changelog_line is not None and data.get('changelog') is None:
+        del lines[changelog_line:_block_end(lines, changelog_line)]
+        data.pop('changelog', None)
+        changelog_line = None
+    if changelog_line is not None:
+        _blockify(lines, changelog_line, 0)
     if changelog_line is None:
         lines.extend(_dump('changelog', [entry], 0))
     else:
