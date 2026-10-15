@@ -1913,7 +1913,8 @@ class Pipeline:
         if not data_files:
             return imported
         de_dir = work / '_de'
-        sources_root = self.config.store_root / data_project / 'de_sources'
+        # sources are kept per dataset: <group>/de_sources/<basename>/<folder>/<file> (never another dataset's)
+        sources_root = self.config.store_root / data_project / 'de_sources' / basename
         for obj in data_files:
             mus_obj = by_key.get(obj.key + '.mus')
             name = obj.name
@@ -1929,8 +1930,7 @@ class Pipeline:
                 outcome.warnings.append(f'DE sidecar {mus_obj.key}: {exc}')
                 continue
             meta = parse_sidecar_text(staged_mus.read_text(encoding='utf-8', errors='replace'))
-            if str(meta.get('de_dataset_id') or '').upper() not in ('', file_id.upper()) or (
-                    not meta.get('de_dataset_id') and meta.get('de_dataset_h5ad') != f'{basename}{H5AD_SUFFIX}'):
+            if not de_sidecar_names(meta, file_id, basename):
                 continue
             source_dir = sources_root / parent
             ensure_inside(source_dir / name, sources_root)
@@ -1955,12 +1955,30 @@ class Pipeline:
             imported.append(name)
         return imported
 
-    def ingest_de_deposit(self, deposit: Dict[str, Any], de_objs: Sequence[ObjInfo]) -> Outcome:
-        """DE tables deposited alone for a published dataset (an API deposit with ``update_of``).
+    def list_de_studies(self, duckdb_path: Path) -> Set[str]:
+        """Study ids in a dataset's duckdb (read-only open; none when it has no DE tables)."""
+        import duckdb  # noqa: PLC0415
 
-        Every table must be imported, else nothing is consumed and the deposit is ``failed``. Then the dataset
-        gets a patch version with a changelog entry (a curation decision), the ``.de.parquet`` sidecar is pushed
-        to the catalog, the server rescans, and the ``.md`` is committed (when the store is a git checkout).
+        connection = duckdb.connect(str(duckdb_path), read_only=True)
+        try:
+            tables = {row[0] for row in connection.execute(
+                "SELECT table_name FROM information_schema.tables").fetchall()}
+            if '__de_study' not in tables:
+                return set()
+            return {str(row[0]) for row in connection.execute('SELECT study_id FROM __de_study').fetchall()}
+        finally:
+            connection.close()
+
+    def ingest_de_deposit(self, deposit: Dict[str, Any], de_objs: Sequence[ObjInfo]) -> Outcome:
+        """DE tables deposited alone for a published dataset (an API deposit with ``update_of``). All or nothing.
+
+        Under the dataset's writer lock: a study id the dataset already has is refused unless the depositor is
+        an admin (then the previous studies are archived to ``_versions/<basename>/de/<study>/`` and the
+        changelog says "replaced"); the tables are imported into a copy of the duckdb in the work dir; only
+        when every table went in, the copy and its ``.de.parquet`` replace the served files (release /
+        restore), the sources are placed under ``<group>/de_sources/<basename>/``, and the dataset gets a patch
+        version with a changelog entry. Then the ``.de.parquet`` is pushed, the server rescans and the ``.md``
+        is committed. A failure changes nothing in the store.
         """
         import dataset_deposit  # noqa: PLC0415  (imports this module: no import at the top)
         import md_edit  # noqa: PLC0415
@@ -1975,48 +1993,122 @@ class Pipeline:
         store_dir, basename = md.parent, md.stem
         data_project = md.relative_to(self.config.store_root).parts[0]
         if data_project != deposit.get('data_project'):
-            outcome.state, outcome.detail = 'needs_decision', f'{db_id} lives in {data_project}, not ' \
-                                                               f'{deposit.get("data_project")}'
+            outcome.state, outcome.detail = 'needs_decision', (f'{db_id} lives in {data_project}, not '
+                                                               f'{deposit.get("data_project")}')
             return outcome
+        file_id = db_id.split('/')[-1]
         work = self.config.work_root / slug(f'de:{deposit.get("id")}')
-        work.mkdir(parents=True, exist_ok=True)
-        tables = [obj for obj in de_objs if not obj.key.endswith('.mus')]
-        imported = self._ingest_de_tables(data_project, basename, db_id.split('/')[-1], de_objs, outcome,
-                                          store_dir, work)
-        if len(imported) != len(tables):
-            outcome.state = 'failed'
-            outcome.detail = ('DE tables not imported: ' + ', '.join(obj.name for obj in tables
-                                                                      if obj.name not in imported)
-                              + ('; ' + '; '.join(outcome.warnings) if outcome.warnings else ''))
-            outcome.consumed = {}
+        shutil.rmtree(work, ignore_errors=True)
+        de_dir, work_store = work / '_de', work / 'store'
+        by_key = {obj.key: obj for obj in de_objs}
+        plan: List[Tuple[ObjInfo, ObjInfo, Dict[str, str], str, Path, Path]] = []
+        for obj in [obj for obj in de_objs if not obj.key.endswith('.mus')]:
+            mus_obj = by_key.get(obj.key + '.mus')
+            parent, name = obj.key.rsplit('/', 2)[-2], obj.name
+            if mus_obj is None or not name.endswith(DE_DATA_EXTS) or not valid_segment(parent) or not valid_segment(name):
+                outcome.state, outcome.detail = 'failed', f'{obj.key}: not a DE table with its sidecar'
+                return outcome
+            staged_data, staged_mus = de_dir / parent / name, de_dir / parent / (name + '.mus')
+            self._pull(mus_obj, staged_mus)
+            self._pull(obj, staged_data)
+            meta = parse_sidecar_text(staged_mus.read_text(encoding='utf-8', errors='replace'))
+            if not de_sidecar_names(meta, file_id, basename):
+                outcome.state, outcome.detail = 'failed', f'{mus_obj.name} does not name {db_id}'
+                return outcome
+            if meta.get('sha256') and meta['sha256'] != sha256_file(staged_data):
+                outcome.state, outcome.detail = 'failed', f'{obj.key}: sha256 mismatch'
+                return outcome
+            plan.append((obj, mus_obj, meta, de_study_id(meta, name), staged_data, staged_mus))
+        studies = [entry[3] for entry in plan]
+        if len(set(studies)) != len(studies):
+            outcome.state, outcome.detail = 'failed', f'two tables of the deposit have the same study id: {studies}'
             return outcome
+        served_duckdb = store_dir / f'{basename}.duckdb'
+        served_sidecar = store_dir / f'{basename}.de.parquet'
         today = md_fill.today_iso()
-        change = (f'DE tables {", ".join(imported)} added through the deposit {deposit.get("id")} by '
-                  f'{deposit.get("user")}.')
-        try:
-            with writer_lock(store_dir / f'{basename}.duckdb', timeout=600):
+        with writer_lock(served_duckdb, timeout=600):
+            try:
+                existing = self.list_de_studies(served_duckdb)
+            except Exception as exc:  # noqa: BLE001
+                raise TransientError(f'cannot read the DE studies of {db_id}: {exc}') from exc
+            clashes = sorted(set(studies) & existing)
+            if clashes and not deposit.get('is_admin'):
+                outcome.state = 'failed'
+                outcome.detail = (f'the dataset already has the DE study {", ".join(clashes)}; give the table another '
+                                  f'de_study_id (or ask an admin to replace it)')
+                return outcome
+            # the import goes into a copy; the served files change only when every table went in
+            work_group = work_store / data_project
+            work_group.mkdir(parents=True, exist_ok=True)
+            copy_duckdb = work_group / served_duckdb.name
+            shutil.copy2(served_duckdb, copy_duckdb)
+            shutil.copy2(md, work_group / md.name)
+            if (store_dir / 'index.md').exists():
+                shutil.copy2(store_dir / 'index.md', work_group / 'index.md')
+            if served_sidecar.exists():
+                shutil.copy2(served_sidecar, work_group / served_sidecar.name)
+            for obj, mus_obj, meta, study, staged_data, staged_mus in plan:
+                cmd = ['env', f'ANTHIVE_H5ADSTORE={work_store}',
+                       *de_ingest_command(copy_duckdb, staged_data, meta, staged_data.name,
+                                          replace=study in clashes)]
+                code, tail = self.runner.run('ant-de-ingest', cmd, cwd=work)
+                if code != 0:
+                    outcome.state = 'failed'
+                    outcome.detail = (f'ant-de-ingest {staged_data.name} failed (exit {code}): {tail[-500:]}; '
+                                      f'nothing was changed')
+                    shutil.rmtree(work, ignore_errors=True)
+                    return outcome
+            archived = []
+            for study in clashes:                    # an admin replaces: keep the previous studies
+                if served_sidecar.exists():
+                    target = store_dir / ingest_versions.VERSIONS_DIR / basename / 'de' / study / \
+                        f'{time.strftime("%Y%m%dT%H%M%S")}.de.parquet'
+                    ensure_inside(target, store_dir)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(served_sidecar, target)
+                    archived.append(str(target.relative_to(self.config.store_root)))
+            self.api.release(db_id)
+            try:
+                place_file(copy_duckdb, served_duckdb)
+                if (work_group / served_sidecar.name).exists():
+                    place_file(work_group / served_sidecar.name, served_sidecar)
+            finally:
+                self.api.restore(db_id)
+            sources_root = store_dir / 'de_sources' / basename
+            for obj, mus_obj, meta, study, staged_data, staged_mus in plan:
+                folder = staged_data.parent.name
+                ensure_inside(sources_root / folder / staged_data.name, sources_root)
+                place_file(staged_data, sources_root / folder / staged_data.name)
+                place_file(staged_mus, sources_root / folder / staged_mus.name)
+                outcome.consumed[obj.key] = obj.etag
+                outcome.consumed[mus_obj.key] = mus_obj.etag
+            added = [study for study in studies if study not in clashes]
+            change = (f'DE through the deposit {deposit.get("id")} by {deposit.get("user")}: '
+                      + (f'added {", ".join(added)}' if added else '')
+                      + ('; ' if added and clashes else '')
+                      + (f'replaced {", ".join(clashes)} (previous archived at {", ".join(archived) or "-"})'
+                         if clashes else '') + '.')
+            try:
                 text = md.read_text(encoding='utf-8')
                 new_text = md_edit.apply_edits(text, [md_edit.bump_version([change], today, 'patch')])
                 partial = md.with_name(f'.{md.name}.de-partial')
                 partial.write_text(new_text, encoding='utf-8')
                 os.replace(partial, md)
-            outcome.version = str(md_fill_version(md))
-        except Exception as exc:  # noqa: BLE001 - imported but not versioned: a person adds the entry
-            outcome.warnings.append(f'version bump of {md.name} failed ({exc}); add the changelog entry by hand')
-        de_parquet = store_dir / f'{basename}.de.parquet'
-        if self.config.push_catalog and de_parquet.exists():
+                outcome.version = str(md_fill_version(md))
+            except Exception as exc:  # noqa: BLE001 - imported but not versioned: a person adds the entry
+                outcome.warnings.append(f'version bump of {md.name} failed ({exc}); add the changelog entry by hand')
+        if self.config.push_catalog and served_sidecar.exists():
             rel = store_dir.relative_to(self.config.store_root)
             try:
-                self._upload(de_parquet, f'{self.config.catalog_prefix}{rel}/{de_parquet.name}')
+                self._upload(served_sidecar, f'{self.config.catalog_prefix}{rel}/{served_sidecar.name}')
             except Exception as exc:  # noqa: BLE001
-                outcome.warnings.append(f'push of {de_parquet.name} failed: {exc}')
+                outcome.warnings.append(f'push of {served_sidecar.name} failed: {exc}')
         try:
             self.api.rescan()
             outcome.served = True
         except TransientError as exc:
             outcome.warnings.append(f'rescan failed: {exc}')
         if self.config.store_git_commit:
-            name, _, email = self.config.git_identity.partition('<')
             dataset_deposit._commit_md(self.config.store_root, md, f'deposit {deposit.get("id")}: {change}\n',
                                        self.config.git_identity,
                                        lambda cmd: _CompletedRun(*self.runner.run('git', cmd)),
@@ -2025,6 +2117,7 @@ class Pipeline:
         outcome.detail = change
         shutil.rmtree(work, ignore_errors=True)
         return outcome
+
 
     def _git_commit(self, item: Item, outcome: Outcome, store_dir: Path) -> None:
         """Commit the catalogue files the route wrote, and only when they are exactly what it wrote.
@@ -2097,10 +2190,27 @@ def md_fill_version(md: Path) -> Any:
     return parse_md_file(md)[0].get('version')
 
 
-def de_ingest_command(target_duckdb: Path, data_file: Path, meta: Dict[str, str], basename: str) -> List[Any]:
-    """The ``ant-de-ingest`` call for one DE table and its sidecar keys (``de_*``, ``de_map_*``)."""
-    study_id = meta.get('de_study_id') or next(
-        (basename[:-len(ext)] for ext in DE_DATA_EXTS if basename.endswith(ext)), basename.rsplit('.', 1)[0])
+def de_study_id(meta: Dict[str, str], file_name: str) -> str:
+    """The study id a DE table is imported under: ``de_study_id``, else the file name without its extension."""
+    return meta.get('de_study_id') or next(
+        (file_name[:-len(ext)] for ext in DE_DATA_EXTS if file_name.endswith(ext)), file_name.rsplit('.', 1)[0])
+
+
+def de_sidecar_names(meta: Dict[str, str], file_id: str, basename: str) -> bool:
+    """Does a DE table's sidecar name this dataset? ``de_dataset_id`` decides when present, else
+    ``de_dataset_h5ad`` (the rule of the import and of the API's check at complete)."""
+    if str(meta.get('de_dataset_id') or '').strip():
+        return str(meta['de_dataset_id']).strip().upper() == file_id.upper()
+    return meta.get('de_dataset_h5ad') == f'{basename}{H5AD_SUFFIX}'
+
+
+def de_ingest_command(target_duckdb: Path, data_file: Path, meta: Dict[str, str], basename: str,
+                      replace: bool = True) -> List[Any]:
+    """The ``ant-de-ingest`` call for one DE table and its sidecar keys (``de_*``, ``de_map_*``).
+
+    ``replace``: ``--replace`` (an existing study of the same id is deleted first). The DE-only deposit route
+    passes it only for a replacement an admin deposited."""
+    study_id = de_study_id(meta, basename)
     method = meta.get('de_method')
     if not method and meta.get('de_format'):
         try:
@@ -2111,7 +2221,7 @@ def de_ingest_command(target_duckdb: Path, data_file: Path, meta: Dict[str, str]
         except ImportError:
             method = None
     cmd: List[Any] = [BIN / 'annot' / 'ant-de-ingest', target_duckdb, '--from', data_file,
-                      '--preset', meta.get('de_format', ''), '--study-id', study_id, '--replace']
+                      '--preset', meta.get('de_format', ''), '--study-id', study_id] + (['--replace'] if replace else [])
     for flag, key in (('--term', 'de_term'), ('--contrast', 'de_contrast'), ('--description', 'de_description'),
                       ('--covariates', 'de_covariates'), ('--reference-type', 'de_reference_type')):
         if meta.get(key):

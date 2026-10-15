@@ -654,11 +654,18 @@ class Watcher:
             return counts
         try:
             listing = {obj['Key']: ObjInfo.from_listing(obj) for obj in objects}
+            # an import a previous run left 'importing' died with it (the watcher runs alone): try it again
+            for stale in store._rows("SELECT id FROM deposits WHERE deposit_kind = 'de_only' AND "
+                                     "watch_state = 'importing'"):
+                store.update(stale['id'], watch_state=None)
+                store.event(stale['id'], 'watcher', 'retry', 'an interrupted import is tried again')
             records = store._rows("SELECT * FROM deposits WHERE deposit_kind = 'de_only' AND state = 'uploaded' "
                                   "AND COALESCE(watch_state, '') = ''")
             for record in records:
                 if self.stop_requested():
                     break
+                if not store.claim_import(record['id']):     # withdrawn meanwhile, or another claim
+                    continue
                 files = store.files(record['id'])
                 objs = [listing.get(row['key']) for row in files]
                 roots = self.deposit_roots()
@@ -669,7 +676,13 @@ class Watcher:
                     counts['needs_decision'] = counts.get('needs_decision', 0) + 1
                     continue
                 self.log(f'DE deposit {record["id"]} for {record.get("update_of")}')
-                outcome = self.pipeline.ingest_de_deposit(record, objs)
+                try:
+                    outcome = self.pipeline.ingest_de_deposit(record, objs)
+                except TransientError as exc:
+                    store.update(record['id'], watch_state=None)
+                    store.event(record['id'], 'watcher', 'retry', str(dataset_deposit.sanitize_text(str(exc), roots)))
+                    counts['retry'] = counts.get('retry', 0) + 1
+                    continue
                 row = {'state': outcome.state, 'db_id': outcome.db_id, 'version': outcome.version, 'kind': 'de',
                        'held_reasons': '[]', 'error': None if outcome.state == 'live' else outcome.detail,
                        'warnings': json.dumps(outcome.warnings)}

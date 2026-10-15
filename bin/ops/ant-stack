@@ -1041,6 +1041,9 @@ def _check_datasets(site: dict) -> list[str]:
     _warn(f"dataset deposits stage uploads in s3://{s3.get('bucket')}/__deposits/{site_id}/ and the watcher reads "
           f"__incoming/ of that bucket: another site on the same bucket must have a different site name "
           f"(datasets.site_id) and must not run a watcher on the same incoming prefix")
+    _say("dataset deposits: give the bucket a lifecycle rule AbortIncompleteMultipartUpload (e.g. after 8 days) "
+         "for __deposits/ and __incoming/, so multipart uploads nobody completes do not keep storage "
+         "(doc/DEPLOY_CONTAINERS.md)")
     _say(f"dataset deposits: on for {groups}; presigning with the {'read-write' if source == 'write' else source} key pair; run ant-ingest-watch on this "
          f"host with ANTHIVE_INGEST_STATE_DIR={site['_state'] / 'ingest'} (the api reads its state there)")
     return problems

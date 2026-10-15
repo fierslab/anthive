@@ -153,6 +153,7 @@ class DepositSettings:
     max_per_day: int = 20               # deposits a user may start in 24 hours
     max_refreshes: int = 500            # URL refresh calls per deposit
     async_complete_gb: float = 5.0      # deposits larger than this complete in the background (202)
+    complete_lease_minutes: float = 10.0  # a completing deposit not touched for this long may be resumed
     update_policy: str = 'own'          # own | any
     prefix: str = '__incoming/'
     #: Where presigned uploads land: outside the watched prefix, one folder per deposit. Complete copies the
@@ -318,13 +319,18 @@ class DepositStore:
                                   [entry[name] for name in names])
             self.conn.commit()
 
-    def cas(self, deposit_id: str, from_states: Sequence[str], to_state: str, **fields: Any) -> bool:
-        """Move the deposit to ``to_state`` only when it is in one of ``from_states`` (the per-deposit lock)."""
+    def cas(self, deposit_id: str, from_states: Sequence[str], to_state: str, not_importing: bool = False,
+            **fields: Any) -> bool:
+        """Move the deposit to ``to_state`` only when it is in one of ``from_states`` (the per-deposit lock).
+
+        ``not_importing``: also only while the watcher is not importing it (DE-only deposits)."""
         fields.setdefault('updated', time.time())
         assignments = ', '.join(f'{name} = ?' for name in fields)
+        extra = " AND COALESCE(watch_state, '') != 'importing'" if not_importing else ''
         with self._lock:
             cursor = self.conn.execute(
-                f'UPDATE deposits SET state = ?, {assignments} WHERE id = ? AND state IN ({", ".join("?" * len(from_states))})',
+                f'UPDATE deposits SET state = ?, {assignments} WHERE id = ? AND state IN '
+                f'({", ".join("?" * len(from_states))}){extra}',
                 [to_state] + list(fields.values()) + [deposit_id] + list(from_states))
             return cursor.rowcount == 1
 
@@ -385,6 +391,59 @@ class DepositStore:
                         raise DepositError(409, 'key_in_open_deposit',
                                            f'{entry["name"]} is part of the open deposit {which}{hint}')
                 self.conn.execute('COMMIT')
+            except BaseException:
+                self.conn.execute('ROLLBACK')
+                raise
+
+    def claim_import(self, deposit_id: str) -> bool:
+        """The watcher takes a completed DE-only deposit (watch state ``importing``); withdraw then waits."""
+        with self._lock:
+            cursor = self.conn.execute("UPDATE deposits SET watch_state = 'importing', updated = ? WHERE id = ? AND "
+                                       "state = 'uploaded' AND COALESCE(watch_state, '') = ''",
+                                       (time.time(), deposit_id))
+            return cursor.rowcount == 1
+
+    def finish_complete(self, deposit_id: str, file_etags: Dict[str, str], now: float, **fields: Any) -> bool:
+        """In one transaction: ``completing -> uploaded`` with ``fields``, and the files complete with their
+        incoming ETags. False (nothing changed) when the deposit is no longer completing."""
+        with self._lock:
+            self.conn.execute('BEGIN IMMEDIATE')
+            try:
+                assignments = ', '.join(f'{name} = ?' for name in fields)
+                cursor = self.conn.execute(
+                    f"UPDATE deposits SET state = 'uploaded', updated = ?{', ' if fields else ''}{assignments} "
+                    f"WHERE id = ? AND state = 'completing'", [now] + list(fields.values()) + [deposit_id])
+                if cursor.rowcount != 1:
+                    self.conn.execute('ROLLBACK')
+                    return False
+                for name, etag in file_etags.items():
+                    self.conn.execute("UPDATE files SET state = 'complete', etag = ?, completed = ? WHERE "
+                                      "deposit_id = ? AND name = ?", (etag, now, deposit_id, name))
+                self.conn.execute('DELETE FROM open_keys WHERE deposit_id = ?', (deposit_id,))
+                self.conn.execute('COMMIT')
+                return True
+            except BaseException:
+                self.conn.execute('ROLLBACK')
+                raise
+
+    def redeclare(self, deposit_id: str, name: str, size: int, sha256: str) -> bool:
+        """Declare the sidecar again, only while the deposit is uploading (one transaction)."""
+        with self._lock:
+            self.conn.execute('BEGIN IMMEDIATE')
+            try:
+                deposit = self.conn.execute("SELECT state FROM deposits WHERE id = ?", (deposit_id,)).fetchone()
+                row = self.conn.execute("SELECT size, state FROM files WHERE deposit_id = ? AND name = ? AND "
+                                        "kind = 'mus'", (deposit_id, name)).fetchone()
+                if deposit is None or deposit[0] != 'uploading' or row is None or row[1] == 'complete':
+                    self.conn.execute('ROLLBACK')
+                    return False
+                self.conn.execute("UPDATE files SET size = ?, sha256 = ?, method = 'put', state = 'pending', "
+                                  "staging_etag = NULL, upload_id = NULL, part_size = NULL, part_count = NULL "
+                                  "WHERE deposit_id = ? AND name = ?", (size, sha256, deposit_id, name))
+                self.conn.execute("UPDATE deposits SET total_bytes = total_bytes - ? + ?, updated = ? WHERE id = ?",
+                                  (int(row[0] or 0), size, time.time(), deposit_id))
+                self.conn.execute('COMMIT')
+                return True
             except BaseException:
                 self.conn.execute('ROLLBACK')
                 raise
@@ -736,6 +795,7 @@ class DepositService:
         self.state_dir = Path(state_dir)
         self.clock = clock
         self.limiter = RateLimiter(settings.presign_per_minute, clock)
+        self.lookup_limiter = RateLimiter(max(60, settings.presign_per_minute * 2), clock)
         #: identifies this process in ``deposits.worker`` (a restart resumes completes of other workers)
         self.worker_id = f'{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}'
         #: how background work runs (a daemon thread; tests pass a synchronous runner)
@@ -1102,6 +1162,7 @@ class DepositService:
         is that dataset published and may the caller deposit a new version (its db id only then)."""
         if not isinstance(data_project, str) or not valid_segment(data_project) or len(data_project) > 64:
             raise DepositError(422, 'invalid_data_project', 'data_project: letters, digits, ._- only')
+        self.lookup_limiter.check(identity.user)
         folder = self.store_root / data_project
         exists = folder.is_dir() and (folder / 'index.md').exists()
         answer: Dict[str, Any] = {'data_project': data_project, 'exists': exists}
@@ -1123,7 +1184,12 @@ class DepositService:
                 raise DepositError(422, 'invalid_name', f'{basename!r} is not a usable dataset name')
             existing = dataset_db_id(self.store_root, data_project, basename) if exists else None
             answer['dataset_exists'] = existing is not None
-            if existing:
+            inactive = existing is not None and (folder / f'{basename}.inactive').exists()
+            if inactive and not identity.is_admin:
+                answer['may_update'] = False          # a retired dataset is never offered, nor its id shown
+            elif existing:
+                if inactive:
+                    answer['inactive'] = True
                 may = identity.is_admin or self.settings.update_policy == 'any' \
                     or self.store.owner_of_dataset(existing) == identity.user
                 answer['may_update'] = bool(may)
@@ -1400,14 +1466,13 @@ class DepositService:
             raise DepositError(410, 'expired', 'this deposit has been open too long; start a new deposit')
         self.store.update(deposit_id, expires=expires, refreshes=int(record.get('refreshes') or 0) + 1)
         if redeclare:
+            if not self.store.redeclare(deposit_id, name, size, sha):
+                raise DepositError(409, 'not_uploading', 'the deposit is no longer uploading (completing or ended)')
             # the old staging object (if any) goes; the new URL signs the new size and sha256
             try:
                 self.s3.delete_object(Bucket=self.bucket, Key=row['staging_key'])
             except Exception:  # noqa: BLE001 - absent is fine
                 pass
-            self.store.update_file(deposit_id, name, size=size, sha256=sha, method='put', state='pending',
-                                   staging_etag=None, upload_id=None, part_size=None, part_count=None)
-            self.store.update(deposit_id, total_bytes=int(record['total_bytes']) - int(row['size']) + size)
             self.store.event(deposit_id, identity.user, 'redeclared', f'{name}: {size} bytes')
             row = {**row, 'size': size, 'sha256': sha, 'method': 'put', 'upload_id': None}
         if row['method'] == 'put':
@@ -1479,9 +1544,15 @@ class DepositService:
                 self.s3.copy_object(Bucket=self.bucket, Key=row['key'], CopySource=source, Metadata=metadata,
                                     MetadataDirective='REPLACE', CopySourceIfMatch=condition)
             else:                                         # managed copy: UploadPartCopy in parts
+                beat = {'last': time.time()}
+
+                def heartbeat(_bytes: int) -> None:       # keeps the lease of a long copy (resume_interrupted)
+                    if time.time() - beat['last'] > 30:
+                        beat['last'] = time.time()
+                        self.store.update(deposit_id, updated=self.clock())
                 self.s3.copy(source, self.bucket, row['key'],
                              ExtraArgs={'Metadata': metadata, 'MetadataDirective': 'REPLACE',
-                                        'CopySourceIfMatch': condition})
+                                        'CopySourceIfMatch': condition}, Callback=heartbeat)
         except Exception as exc:  # noqa: BLE001
             if _error_code(exc) in ('PreconditionFailed', '412'):
                 raise StagingChanged(f'{row["name"]} changed in staging during complete') from exc
@@ -1517,9 +1588,8 @@ class DepositService:
             if not name.endswith('.mus'):
                 continue
             meta = parse_sidecar_text(self._read_staged(row))
-            names_it = (str(meta.get('de_dataset_id') or '').upper() == file_id.upper()
-                        or meta.get('de_dataset_h5ad') == f'{record["basename"]}{H5AD_SUFFIX}')
-            if not names_it:
+            from ingest_pipeline import de_sidecar_names  # noqa: PLC0415
+            if not de_sidecar_names(meta, file_id, record['basename']):
                 errors.append(f'{name} names neither de_dataset_id={file_id} nor '
                               f'de_dataset_h5ad={record["basename"]}{H5AD_SUFFIX}')
         return errors
@@ -1698,23 +1768,23 @@ class DepositService:
             self._undo_complete(deposit_id, copied, error)
             raise
         now = self.clock()
-        for row in rows.values():
-            self.store.update_file(deposit_id, row['name'], state='complete', etag=copied[row['key']], completed=now)
-            try:
-                self.s3.delete_object(Bucket=self.bucket, Key=row['staging_key'])
-            except Exception:  # noqa: BLE001 - the staging sweep removes it later
-                pass
         h5ad_row = next((row for row in rows.values() if row['kind'] == 'h5ad'), None)
         mus_row = next((row for row in rows.values() if row['kind'] == 'mus'), None)
-        if not self.store.cas(deposit_id, ('completing',), 'uploaded', completed=now,
-                              h5ad_etag=copied[h5ad_row['key']] if h5ad_row else record['h5ad_etag'],
-                              mus_etag=copied[mus_row['key']] if mus_row else None):
-            # expired or withdrawn meanwhile (a recovery that judged the complete stale): not ours to publish
+        finished = self.store.finish_complete(
+            deposit_id, {row['name']: copied[row['key']] for row in rows.values()}, now, completed=now,
+            h5ad_etag=copied[h5ad_row['key']] if h5ad_row else record['h5ad_etag'],
+            mus_etag=copied[mus_row['key']] if mus_row else None, progress=None)
+        if not finished:
+            # expired, withdrawn or taken over meanwhile: not ours to publish
             for key, etag in copied.items():
                 delete_consumed(self.s3, self.bucket, self.settings.prefix, {key: etag})
             raise DepositError(409, 'not_completed', 'the deposit was ended while it was being completed; '
                                                      'start a new deposit')
-        self.store.release_keys(deposit_id)
+        for row in rows.values():                      # only now: the deposit is uploaded
+            try:
+                self.s3.delete_object(Bucket=self.bucket, Key=row['staging_key'])
+            except Exception:  # noqa: BLE001 - the staging sweep removes it later
+                pass
         self.store.event(deposit_id, user, 'completed', f'{len(rows)} file(s)')
         return {'deposit_id': deposit_id, 'state': 'uploaded',
                 'files': [{'name': row['name'], 'key': row['key'], 'size': row['size'], 'sha256': row['sha256'],
@@ -1730,8 +1800,10 @@ class DepositService:
         verified and made again in the background. Returns the deposit ids resumed.
         """
         resumed = []
+        lease = self.settings.complete_lease_minutes * 60
         for record in self.store._rows("SELECT * FROM deposits WHERE state = 'completing' AND "
-                                       "COALESCE(worker, '') != ?", (self.worker_id,)):
+                                       "COALESCE(worker, '') != ? AND updated <= ?",
+                                       (self.worker_id, self.clock() - lease)):
             if not self.store.cas(record['id'], ('completing',), 'uploading', worker=None):
                 continue
             self.store.event(record['id'], 'restart', 'resumed', 'the server restarted during complete')
@@ -1915,7 +1987,7 @@ class DepositService:
             raise DepositError(409, 'busy', 'the deposit is being completed right now; try again in a moment')
         row = read_watch_row(self.state_dir, record.get('watch_key'))
         state = public_state(record, row if watch_row_matches(record, row) else None)
-        if state == 'checking':
+        if state in ('checking', 'importing'):
             raise DepositError(409, 'busy', 'the watcher is processing this deposit; withdraw it once it is done')
         if state == 'live':
             raise DepositError(409, 'live', 'the deposit is published; ask an admin to retire the dataset')
@@ -1937,13 +2009,19 @@ class DepositService:
             if public_state(other, other_row if watch_row_matches(other, other_row) else None) in ('checking',
                                                                                                     'live'):
                 raise DepositError(409, 'busy', f'the correction {other["id"]} is being processed or live')
-            if self.store.cas(other['id'], ('uploading', 'uploaded'), 'withdrawing'):
-                self._abort_and_delete(other, identity.user)
+            if self.store.cas(other['id'], ('uploading', 'uploaded'), 'withdrawing', not_importing=True):
+                try:
+                    self._abort_and_delete(other, identity.user)
+                except Exception as exc:  # noqa: BLE001 - never leave a correction withdrawing
+                    self.store.cas(other['id'], ('withdrawing',), other['state'])
+                    raise DepositError(502, 's3_error', f'withdrawing the correction {other["id"]} failed '
+                                                        f'({_error_code(exc)}); nothing else was withdrawn, '
+                                                        f'try again')
                 self.store.cas(other['id'], ('withdrawing',), 'withdrawn')
                 self.store.release_keys(other['id'])
                 self.store.event(other['id'], identity.user, 'withdrawn', f'with the original deposit {deposit_id}')
                 cascaded.append(other['id'])
-        if not self.store.cas(deposit_id, ('uploading', 'uploaded'), 'withdrawing'):
+        if not self.store.cas(deposit_id, ('uploading', 'uploaded'), 'withdrawing', not_importing=True):
             raise DepositError(409, 'busy', 'the deposit changed state meanwhile; look at it again')
         try:
             result = self._abort_and_delete(record, identity.user)
