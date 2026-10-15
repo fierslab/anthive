@@ -1181,3 +1181,14 @@ Second review (same day):
 | a group lookup | `GET /datasets/deposit/groups/{data_project}[?basename=]` (db id only for who may update) |
 | withdrawing a correction left the original h5ad without a sidecar | a correction is withdrawn with its original (cascade), not alone (409 `continuation`); the watcher marks a deposit h5ad without sidecar `needs_decision` |
 | large completes block the request | above `datasets_deposit_async_complete_gb` (5) complete answers 202 and copies in a background thread with progress in the status; a restart resumes (worker id per process) |
+
+Third review (same day):
+
+| Finding | Change |
+| --- | --- |
+| R1 a DE-only deposit could overwrite an existing study, wrote sources over another dataset's, and a failed table left the others imported without a version | a study id the dataset has is refused unless an admin deposited it (then archived under `_versions/<basename>/de/<study>/`, "replaced" in the changelog); sources under `<group>/de_sources/<basename>/`; the import runs on a copy of the duckdb under the writer lock and replaces the served files (release / restore) only when every table went in; version and changelog only on success |
+| R2 a restarted ant-serve could take over a complete that was still running; files were marked complete before the final state | resume only after `datasets_deposit_complete_lease_minutes` (10) without a lease refresh (each copy and a 30 s heartbeat during long copies refresh it); the final state, the files and the key locks change in one transaction, staging is deleted after it |
+| R3 a failing correction in the cascade withdraw stayed `withdrawing` | rolled back with 502, nothing else withdrawn |
+| R4 a DE-only deposit could be withdrawn while the watcher imported it | the watcher claims it (`importing`, compare-and-set); withdraw answers 409 `busy`; a claim of a dead run is retried |
+| R5 a sidecar could be declared again after the deposit left `uploading` | in one transaction, only while `uploading` |
+| nits | the group lookup never offers retired datasets to non-admins and is rate-limited; the API checks DE sidecars with the import's rule; an `AbortIncompleteMultipartUpload` lifecycle rule is recommended and `ant-stack check` says so |

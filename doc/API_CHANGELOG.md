@@ -131,12 +131,19 @@ Added for the vark client (phase 2):
   `<folder>/<file>.mus` naming the dataset by `de_dataset_id=<dataset id>` or `de_dataset_h5ad=<basename>.h5ad`).
   Same owner/admin rules as an update. The answer has `deposit_kind: "de_only"` (also in status and lists;
   `"dataset"` otherwise). `complete` refuses with 422 `de_mismatch` when a table's sidecar names another
-  dataset. The watcher imports the tables (`ant-de-ingest`), bumps the dataset's patch version with a changelog
-  entry, pushes the `.de.parquet`, rescans and commits the `.md`; status `live` (version = the new one) or
-  `failed` (nothing consumed).
+  dataset (`de_dataset_id` decides when present, else `de_dataset_h5ad`). While the watcher imports, the state is
+  `importing` and withdraw answers 409 `busy`. The import is all or nothing: a study id the dataset already
+  has is `failed` ("already has the DE study ...", give another `de_study_id`) unless an admin deposited it (then
+  it is replaced, the previous studies archived under `_versions/<basename>/de/<study>/`, the changelog says
+  "replaced"); the tables go into a copy of the duckdb that replaces the served one only when every table went
+  in; sources are kept under `<group>/de_sources/<basename>/`. On success the dataset gets a patch version
+  with a changelog entry, the `.de.parquet` is pushed, the server rescans and the `.md` is committed; status
+  `live` (version = the new one). On failure nothing in the store changes and nothing is consumed (`failed`).
 - `GET /datasets/deposit/groups/{data_project}[?basename=...]`: `{data_project, exists, group_id?,
-  may_create?, reason?, dataset_exists?, may_update?, db_id?}`. `db_id` only when the caller may deposit a new
-  version; `may_create`/`reason` for a group that does not exist.
+  may_create?, reason?, dataset_exists?, may_update?, db_id?, inactive?}`. `db_id` only when the caller may
+  deposit a new version; `may_create`/`reason` for a group that does not exist; a retired (`.inactive`)
+  dataset is never offered to non-admins (`may_update: false`, no id); admins see `inactive: true`.
+  Rate-limited per user (429 `rate_limited`).
 - Corrections: withdrawing a correction (a deposit with `continues`) while its original still waits is 409
   `continuation` (the message names the original); withdrawing the original also withdraws its corrections
   (`withdrawn_corrections: [ids]` in the answer). The watcher marks a deposit's h5ad without a sidecar in
@@ -146,8 +153,9 @@ Added for the vark client (phase 2):
   files_copied, bytes_total, bytes_copied}, warnings, next}` and copies in a background thread of ant-serve.
   `GET /datasets/deposit/{id}` shows `progress` while `completing`; a failed background copy returns the
   deposit to `uploading` with `complete_error: {status, message, ...}` (the error body a synchronous complete
-  would have given). A restart of ant-serve resumes interrupted completes (the staging files stay until every
-  copy succeeded). Smaller deposits complete synchronously as before (200).
+  would have given). A restarted ant-serve resumes a complete whose lease (`updated`, refreshed while copying)
+  is older than `datasets_deposit_complete_lease_minutes` (10); the staging files stay until the deposit is
+  `uploaded`. Smaller deposits complete synchronously as before (200).
 
 MCP: `my_deposits(all_users=False)` and `deposit_status(deposit_id)`, read-only, shown only to users in
 `datasets_upload_groups`. Datasets are uploaded with vark, never through MCP.
@@ -156,7 +164,8 @@ Config (new keys, `anthive.default.yaml`): `datasets_upload_groups`, `datasets_d
 env `ANTHIVE_DATASETS_DEPOSIT_ENABLED`), `datasets_deposit_max_gb`, `_url_ttl_hours`, `_max_open_days`,
 `_max_open_per_user`, `_max_pending_gb_per_user`, `_presign_per_minute`, `_parts_per_batch`,
 `_single_put_max_mb`, `_max_files`, `_max_per_day` (20), `_max_refreshes` (500), `_staging_prefix`
-(`__deposits/`), `_site_id` (default the host name; container sites `site.name`), `_async_complete_gb` (5), `_update_policy` (`own` | `any`), `datasets_deposit_s3` (an optional key pair for
+(`__deposits/`), `_site_id` (default the host name; container sites `site.name`), `_async_complete_gb` (5),
+`_complete_lease_minutes` (10), `_update_policy` (`own` | `any`), `datasets_deposit_s3` (an optional key pair for
 presigning); `ingest_watch.accept_unlinked` (default true; false refuses uploads that no API deposit accounts
 for). `datasets_upload_max_gb` (the check `files.size`) is now 200 GB, like the deposit limit. Container sites:
 `services.dataset_deposit` and the `datasets:` block of `site.yaml`.

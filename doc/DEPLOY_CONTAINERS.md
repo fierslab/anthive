@@ -496,10 +496,18 @@ s3:
    `dataset deposits: on for admins, curators; presigning with the incoming key pair; run ant-ingest-watch ...`,
    or the problem (`s3.enabled` off, no key pair).
 4. For e-mails to depositors (live, held, failed) set `ingest_watch.notify.smtp_host` in the watcher's config.
-5. Datasets published before deposits existed have no owner, so only admins can deposit new versions of them.
+5. Give the bucket a lifecycle rule `AbortIncompleteMultipartUpload` (for example after 8 days, longer than
+   `datasets.max_open_days`) on `__deposits/` and `__incoming/`. Expiry and withdraw abort the uploads they
+   know; the rule catches the rest (a crashed server, an object store that lost an abort), which otherwise
+   keep storage without showing in listings. With the AWS CLI against your endpoint:
+   `aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --endpoint-url https://<endpoint>
+   --lifecycle-configuration '{"Rules": [{"ID": "abort-deposits", "Status": "Enabled", "Filter": {"Prefix":
+   "__deposits/"}, "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 8}}]}'` (and a second rule for
+   `__incoming/`). `ant-stack check` reminds you.
+6. Datasets published before deposits existed have no owner, so only admins can deposit new versions of them.
    Name an owner with `ant-ingest-watch owner set <db_id> <user> --by <you>` on the watcher's host (or
    `POST /api/datasets/deposit/owners`); it adds a caveat to the dataset's `.md`, which you commit.
-6. Once depositors use vark, set `ingest_watch.accept_unlinked: false` in the watcher's config so only
+7. Once depositors use vark, set `ingest_watch.accept_unlinked: false` in the watcher's config so only
    deposits made with an Anthive login are published.
 
 Depositors need the curators group (`auth.users[].groups`) and, once it exists, the vark client. Their MCP
