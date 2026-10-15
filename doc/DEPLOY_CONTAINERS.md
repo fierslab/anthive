@@ -460,6 +460,43 @@ Other sites get the new papers with their next `ant sync pull` (or `ant sync
 library`), which pulls the records from git and the PDFs from S3. See
 `doc/LIBRARY.md` for conflicts and deletes.
 
+### Let depositors add datasets
+
+Off by default. With it on, signed-in members of `datasets.upload_groups` deposit datasets without S3 keys of
+their own: the api hands out presigned uploads into the incoming prefix of the S3 watcher, and the watcher
+checks and publishes them (`doc/DATASET_INGESTION.md`, "Depositing through the API"; design section 22).
+
+```yaml
+services:
+  dataset_deposit: true
+datasets:
+  upload_groups: [admins, curators]   # Authelia groups; basic mode: auth.admins
+  max_gb: 200                         # largest deposit
+  url_ttl_hours: 24
+  max_open_per_user: 5
+  max_pending_gb_per_user: 400
+  update_policy: own                  # own | any: who may deposit a new version of a dataset
+s3:
+  enabled: true                       # required
+```
+
+1. Give the api a key pair to presign with:
+   `<state_dir>/secrets/s3_incoming_access_key_id` and `s3_incoming_secret_access_key` (chmod 600). Limit it
+   to `PutObject`, the multipart calls, `HeadObject`, `GetObject` and `DeleteObject` on `__incoming/*` if your
+   object store can scope keys. Without these files the api presigns with the read-write pair
+   (`s3_access_key_id`), and `check` warns that the api container then holds the catalogue's write key.
+2. Run the watcher on the host, as the uid the containers run as, with the api's state:
+   `ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest`. The api keeps the deposits in
+   `<state_dir>/ingest/deposits.sqlite` and reads the watcher's progress and reports from the same folder.
+   See "The S3 ingest watcher" below for the rest of its setup.
+3. `bin/ops/ant-stack check`, then `bin/ops/ant-stack up`. `check` prints
+   `dataset deposits: on for admins, curators; presigning with the incoming key pair; run ant-ingest-watch ...`,
+   or the problem (`s3.enabled` off, no key pair).
+4. For e-mails to depositors (live, held, failed) set `ingest_watch.notify.smtp_host` in the watcher's config.
+
+Depositors need the curators group (`auth.users[].groups`) and, once it exists, the vark client. Their MCP
+link shows `my_deposits` and `deposit_status`; uploads never go through MCP.
+
 ### A mirror with a hand-picked subset (symlinked stores and library)
 
 A public mirror can serve a few curated datasets and papers that physically
@@ -547,7 +584,8 @@ the command with `bin/ops/ant-cron-run`, which adds the usual uv folders to
 ### The S3 ingest watcher (not in the compose stack yet)
 
 `ant ingest-watch` (the S3 watch route of `doc/DATASET_INGESTION.md`) has no compose service and no
-`site.yaml` key yet. It runs on the dev box as its own systemd unit
+`site.yaml` key yet. With `services.dataset_deposit` on, start it with
+`ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest` so the api and the watcher share the deposit state. It runs on the dev box as its own systemd unit
 (`config/examples/anthive-ingest-watch.service.example`), off unless `ingest_watch.enabled: true` in that
 host's `anthive.yaml`. Container sites receive what it publishes the usual way, through S3:
 `ant-stack ingest -- ant sync pull --include-duckdb '<Group>/*'` and a rescan. All its paths already resolve
@@ -590,6 +628,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.44.0** | (1) **Facets**: `ant sync pull` now also brings `_facet_tests/` (the facet test results the API serves; logs and scripts stay out), and the h5adstore repo has many changed `.md` files (facet layer metadata, lineage fields). (2) **Mirror sites with symlinks**: new `data.extra_mounts` bind-mounts folders read-only at the same path into api, web, mcp and ingest, so symlinks from your stores into another site's stores resolve in the containers; `ant-stack check` validates them and warns about symlinks that would dangle. (3) **Hidden paper links**: on every site a `papers:` link to a citekey that is not in the site's own library is hidden everywhere (web, REST, MCP, BibTeX); `GET /library/status` shows `unresolved_references`, issue texts and paths to admins only (on `auth.mode: none` to nobody), non-admins get counts (`n_errors`, `n_warnings`). (4) **Library**: a plain, non-git library of symlinked records works read-only (no git is run in it); `file not found` warnings are computed from the disk on each call and no longer outlive the PDF's arrival; a symlinked record whose target is gone is an error entry, not a crash. (5) **Own literature index**: new `library.index_pull` (default true); `ant sync` never downloads the shared index when `s3.enabled` is false or `library.index_pull: false`. (6) **Facet engine v3 and help API**: facet scopes, new facets and exclusions, per-cell-type clusters, faster facet endpoints; `GET /api/help` and the MCP `explain` tool serve plain-language explanations; facet results are published by `ant sync push` and pulled by `ant sync pull`. (7) **Cron and systemd**: new `config/examples/anthive-sync.{cron,service}.example` set PATH for uv; `ant-stack check` says where uv is and warns when it is missing. | none required. `git pull` the h5adstore, then `ant-stack ingest -- ant sync pull` for `_facet_tests/`. Set `images: tag: 2.44.0`, `ant-stack pull`, `ant-stack up`. Optional: `data.extra_mounts`, `library.index_pull`; cron jobs: add `PATH=$HOME/.local/bin:...` (see "Run syncs from cron or a timer") |
 | **2.45.0** | (1) **Internal datasets need a login**: datasets that are not `access: public` (also those without an `access` value) are hidden from callers without an identity: absent from every listing, 404 on their routes (new `auth.internal_requires_auth`, default true; see "Internal datasets"). Sites with a login see no change; on `auth.mode: none` internal datasets disappear, and a `trusted-proxy` site behind a vhost without a login must drop the `Remote-*` headers there. (2) `X-Remote-User` / `X-Remote-Groups` are ignored everywhere and dropped by the Caddy snippets. (3) Cache, index and rescan routes (`/admin/*-cache/*`, `/admin/*-index/*`, `/admin/api-config/*`, `POST /genesets/rescan`, `/module-variability/rescan`, `/catalogs/rescan`) need an admin, a host-local tool or the internal secret; other signed-in users get 403. (4) The web, mcp and api containers must run the same release (the web now forwards the visitor's identity to the api). (5) **Cache warm-up**: after a start the api fills the facet caches for signed-in and anonymous visitors, per-donor values and the gene set rank tables in the background (new `warmup` block of anthive.yaml, default on; see "Cache warm-up after a start"). The first start builds the rank tables (up to a minute per dataset with scores, one at a time). | `ant-stack check` (it prints how many datasets are internal and who sees them, and warns only for `internal_requires_auth: false` or `trusted-proxy`), set `images: tag: 2.45.0`, `ant-stack pull`, `ant-stack up`; then `ant-stack restart api web mcp` (2.45.0's `up` does not recreate them when only the config changed; fixed in 2.45.1). If your upstream proxy sends identity as `X-Remote-*` only, switch it to `Remote-User` / `Remote-Groups`. If you copied an nginx vhost from `config/examples/`, add the new `proxy_set_header ... ""` lines (the public vhost must drop `Remote-*`). Scripts that call the rescan routes need an admin account. |
 | **2.45.1** | Fixes in `ant-stack`: `up` recreates api, web and mcp when their rendered config or secrets changed (before, a changed `auth.internal_requires_auth` or `auth.mode` did not take effect until a restart); `restart` takes several services; `passwd` without a terminal points to `--password`; `check` labels Caddy's in-container listener, prints the published host address and always prints the internal dataset count; `ant-stack logs api` shows the warm-up progress. | set `images: tag: 2.45.1`, `ant-stack pull`, `ant-stack up` |
+| **2.46.0** (unreleased) | Dataset deposits through the API: signed-in members of `datasets.upload_groups` get presigned uploads into the S3 watcher's incoming prefix and follow their deposit in the API (and two read-only MCP tools). Off by default; nothing changes for a site that leaves it off. | optional: `services: dataset_deposit: true`, the `datasets:` block, a presigning key pair and the watcher on the host (see "Let depositors add datasets"); `ant-stack check` |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.
@@ -845,6 +884,8 @@ resolve inside the containers.
 | `services.mcp` | personal MCP links for AI clients (on by default; the supported way to use AI with anthive) |
 | `mcp.token_ttl_days`, `mcp.max_links_per_user` | how long a link lives (0 = forever) and how many links one user may hold (default 5) |
 | `services.paper_upload` | let `library.upload_groups` add papers through the API and MCP (mounts the library read-write) |
+| `services.dataset_deposit` | let `datasets.upload_groups` deposit datasets through presigned S3 uploads (needs `s3.enabled`; see "Let depositors add datasets") |
+| `datasets.*` | who may deposit (`upload_groups`, default admins and curators), `max_gb`, `url_ttl_hours`, `max_open_per_user`, `max_pending_gb_per_user`, `update_policy` |
 | `library.*` | upload groups, PDF size limit, git committer and push, S3 autopush, index publisher, `index_pull` (false: this site never downloads the shared literature index) |
 | `library.deploy_key` | SSH key `ant-stack publish-library` pushes the library with (host path) |
 | `s3.api_access` | what the api may do on S3: `none` (default), `read` (own read-only key pair) or `write` |
@@ -860,7 +901,7 @@ Who sees which secret:
 
 | Container | Config | From `state_dir` |
 | --- | --- | --- |
-| api | `stack/anthive-api.yaml` (S3 keys only as `s3.api_access` allows, chat key) | read-write, but `secrets/`, `authelia/` and `stack/` are hidden; only `internal_secret` and `mcp_token_secret` come back, read-only |
+| api | `stack/anthive-api.yaml` (S3 keys only as `s3.api_access` allows, the presigning pair with `services.dataset_deposit`, chat key) | read-write, but `secrets/`, `authelia/` and `stack/` are hidden; only `internal_secret` and `mcp_token_secret` come back, read-only |
 | mcp | `stack/anthive.yaml` (no keys) | only `secrets/internal_secret`, read-only |
 | web | `stack/anthive.yaml` (no keys) | nothing |
 | authelia | its own `authelia/` folder | nothing else |

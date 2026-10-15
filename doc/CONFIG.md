@@ -113,6 +113,16 @@ See `doc/LIBRARY.md` and `doc/LIBRARY_INDEX.md`.
 - **Default**: `[admins]`
 - **Description**: Groups (from `Remote-Groups`) allowed to add papers through `POST /papers/upload` and the MCP tools `check_paper` / `upload_paper`. In basic auth mode the users in `auth.admins` count as `admins`. Container sites set `library.upload_groups`.
 
+#### `datasets_upload_groups`
+- **Type**: list of strings
+- **Default**: `[admins, curators]`
+- **Description**: Groups (from `Remote-Groups`) allowed to deposit datasets through `/datasets/deposit` and to see the MCP tools `my_deposits` / `deposit_status`. In basic auth mode the users in `auth.admins` count as `admins`. Anonymous callers and `auth.mode: none` never. Container sites set `datasets.upload_groups`.
+
+#### `datasets_deposit_*`
+- **Type**: see `anthive.default.yaml`
+- **Default**: `enabled: false`, `max_gb: 200`, `url_ttl_hours: 24`, `max_open_days: 7`, `max_open_per_user: 5`, `max_pending_gb_per_user: 400`, `presign_per_minute: 30`, `parts_per_batch: 100`, `single_put_max_mb: 64`, `max_files: 100`, `update_policy: own`, `s3: {}`
+- **Description**: Dataset deposits through the API (doc/DESIGN_dataset_ingestion.md section 22). `datasets_deposit_enabled` (env `ANTHIVE_DATASETS_DEPOSIT_ENABLED`) switches them on; `datasets_deposit_s3` is an optional key pair for presigning (endpoint, region and bucket default to `s3`). Deposits land under `ingest_watch.prefix`. Container sites set `services.dataset_deposit` and the `datasets:` block.
+
 #### `library_upload_max_pdf_mb`
 - **Type**: integer
 - **Default**: `25`

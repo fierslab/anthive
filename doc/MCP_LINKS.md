@@ -88,6 +88,10 @@ requirements); everyone else does not see them at all. The PDF goes base64-encod
 call and is capped at `mcp.max_upload_mb` (default 25 MB). The paper is
 committed to the library with you as the author (`doc/LIBRARY.md`).
 
+Dataset deposit tools (2.46): `my_deposits(all_users=False)` and `deposit_status(deposit_id)` show your
+dataset deposits and their state, held reasons and failed checks. Read-only, and only shown to members of
+`datasets_upload_groups`; the data itself is uploaded with the vark client, never through MCP.
+
 Apart from `upload_paper`, all tools are read-only. Admin-only tools
 (`analytics_viz`, which runs Python on the server, and `rescan_databases`)
 only appear for members of the `admins` group.

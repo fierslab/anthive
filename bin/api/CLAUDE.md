@@ -154,6 +154,18 @@ and `lib/config.py` (anthive.yaml loader).
   defaults to `background`; folder precedence proposals > lab > datasets >
   methods > reading.
 
+- **Dataset deposits** (2.46, design section 22): `/datasets/deposit` (vocab, create, `{id}`, `/urls`,
+  `/complete`, `/report`, `/withdraw`, `/approve`, `/reject`), tag `datasets-deposit`, hidden from the schema.
+  Rules live in `lib/dataset_deposit.py` (`DepositService`, store `<ingest_state_dir>/deposits.sqlite`); the
+  handlers only call `_require_dataset_uploader` (Remote-User in `datasets_upload_groups`, never anonymous,
+  never on `auth.mode: none`) and turn `DepositError` into its JSON. The server presigns exact keys under
+  `ingest_watch.prefix` with `datasets_deposit_s3` (else the `s3` keys); the keys never leave it. Status
+  merges the watcher's `ingest_watch.sqlite` row (same `ingest_state_dir`, read-only) with the record;
+  everything a depositor sees is redacted (`redacted_report`, `sanitize_text`). Another user's deposit is a
+  404. Approve/reject call `ingest_watch.approve/reject(channel='api')`. ant-mcp: `my_deposits`,
+  `deposit_status` (`DEPOSIT_TOOLS`, `_may_deposit`), read-only; no upload through MCP. Tests:
+  `tests/test_dataset_deposit*.py` (fake S3 with presigned URLs and multipart).
+
 - **Facet test results** (unreleased): `lib/facet_results.py` reads the
   output of `bin/annot/ant-facet-test[-modules]` from `facet_results_dir`
   (default `<h5adstore>/_facet_tests`, outside the catalogue scan). Routes:

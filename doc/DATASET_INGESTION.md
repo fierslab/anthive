@@ -1,12 +1,70 @@
 # Dataset ingestion: checks and the S3 watch route
 
-Status: P1 of `doc/DESIGN_dataset_ingestion.md` (2026-10-05) plus the S3 watch route (2026-10-14, design
-section 21). `ant ingest-check`, `ant ingest-index` and `ant ingest-watch` exist; the presigned-upload route,
-its worker and the admin pages (P3 and later) do not. The check ids are frozen: the curator skill (P2) is
-written against them, so an id is never renamed.
+Status: P1 of `doc/DESIGN_dataset_ingestion.md` (2026-10-05), the S3 watch route (2026-10-14, design
+section 21) and the deposit API (2026-10-15, REST 2.46.0, design section 22, server side). `ant
+ingest-check`, `ant ingest-index`, `ant ingest-watch` and the `/datasets/deposit` routes exist; the vark
+commands and the skill for depositors come next, and there is no admin web page. The check ids are frozen:
+the curator skill is written against them, so an id is never renamed.
 
-The first half of this page is the how-to for depositors and operators of the watch route. The second half
-describes `ant ingest-check` and every check.
+The first part of this page is the how-to for depositors and operators (through the API, or with mus and S3
+keys). The second part describes `ant ingest-check` and every check.
+
+## Depositing through the API (signed in, no S3 keys)
+
+<details>
+<summary>In short: the server hands out presigned upload URLs for your files, the watcher checks and publishes them, and you follow the deposit with your Anthive login.</summary>
+
+Who may deposit: signed-in members of `datasets_upload_groups` (default `admins` and `curators`; container
+sites `datasets.upload_groups`). Deposits are off until an operator sets `datasets_deposit_enabled: true`
+(container sites `services.dataset_deposit: true`). The vark client will do the steps below for you; the REST
+shapes are in `doc/API_CHANGELOG.md` (2.46.0).
+
+1. **Read the rules** with `GET /api/datasets/deposit/vocab`: the file names per kind, the limits (200 GB per
+   deposit by default), the mus vocabulary the server checks against, the sidecar keys the route reads, and
+   templates for the seed `.md` and `index.md`.
+2. **Prepare the files** as for the watch route below: `<basename>.h5ad` (log-normalised X, raw counts in
+   `layers['counts']`, an embedding), the collapsed sidecar `<basename>.h5ad.mus` with `sha256=` of the h5ad,
+   `license=` and `data_use=`, the seed `<basename>.md` with front matter, and for a new group `index.md`. A
+   new group is named like a paper (`Smith2024`); an existing group is spelled exactly as in the catalogue.
+3. **Declare the deposit**: `POST /api/datasets/deposit` with the group, the basename and every file's
+   name, size, sha256 and kind. The answer has one presigned URL per small file (send the listed headers
+   with the PUT) and part URLs for large ones. Nothing else on S3 is reachable with them.
+4. **Upload**, then `POST /api/datasets/deposit/<id>/complete`. The server checks every part and the sidecar
+   and says what will hold the deposit (no `license`, no `data_use`, `access=public`).
+5. **Follow it**: `GET /api/datasets/deposit/<id>` shows the state, the dataset id and version once it is
+   live, held reasons, and the failed checks with their fix; `.../report` has the full check report without
+   other datasets' details or server paths. With SMTP configured you also get an e-mail when it goes live,
+   is held or fails.
+6. **Fix and retry**: deposit again. A corrected sidecar or seed for an h5ad of yours that still waits in
+   incoming needs no new h5ad upload (leave the h5ad out of the file list). A new deposit of byte-identical
+   files is checked again.
+7. **Withdraw** with `POST /api/datasets/deposit/<id>/withdraw` while it is not being processed and not yet
+   live: the uploads are aborted and the deposit's own files are deleted.
+
+Updates: a deposit for a dataset that is already published must say `"update_of": "<db_id>"`, and by default
+only the user whose deposit published the dataset (or an admin) may deposit a new version. The sidecar's
+`depositor=` lines are ignored on this route: the login is recorded as the depositor (the `.md` `ingest:`
+block, the store sidecar and the author of the store commit).
+
+| State | Meaning |
+| --- | --- |
+| `uploading` | URLs handed out, not completed; expires 24 hours after the last URL refresh (at most 7 days) |
+| `uploaded` | complete, waiting for the watcher's next listing |
+| `seen`, `stable`, `checking` | the watcher has it (`checking` = pulled, converted, checked) |
+| `live`, `held`, `failed`, `needs_decision`, `rejected` | as for the watch route below |
+| `withdrawn`, `expired`, `superseded` | withdrawn by you or an admin; not completed in time; replaced before the watcher saw it |
+
+Admins approve or reject a held deposit with `POST /api/datasets/deposit/<id>/approve` or `.../reject`
+(body `{"note": "..."}`); it is the watcher's own approve, recorded with the admin's login. `GET
+/api/datasets/deposit?all=true` lists every deposit. MCP clients see `my_deposits` and `deposit_status`
+(read-only); data never goes through MCP.
+
+Operators: the api presigns with `datasets_deposit_s3` (container sites: `secrets/s3_incoming_access_key_id`
+and `s3_incoming_secret_access_key`), else with the `s3` keys. The api and the watcher must share
+`ingest_state_dir`: on a container site run the watcher on the host with
+`ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest` as the containers' uid (`ant-stack check` prints the line).
+
+</details>
 
 ## Depositing with mus (the S3 watch route)
 
@@ -115,7 +173,8 @@ ant ingest-watch reject  __incoming/<Group>/<basename>.h5ad --by "Your Name" --n
 it; the dataset gets a caveat naming who approved it and why, and the OS user who ran the command is recorded.
 Any change to the deposit (the data, the sidecar, a seed or a static file) voids the approval. `reject` marks
 it final; nothing is published or deleted. Both run only on the primary site, on the watcher's host: whoever
-can run them there is trusted as an admin of the route.
+can run them there is trusted as an admin of the route. Deposits made through the API can also be approved or
+rejected by a signed-in admin (`POST /api/datasets/deposit/<id>/approve` or `.../reject`).
 
 Updates of a dataset that is published with `access=public` are always held, so a person approves every new
 version of public data.
@@ -312,5 +371,5 @@ cohort; `ant ingest-check` reads only which cohorts are flagged.
 
 ## Not done yet
 
-The presigned-upload route, the submission store, its worker, the admin pages and the skill (P2 to P5 of the
-design). For the watch route: the compose service, DE-only deposits, size routing to HPC (design section 21.8).
+The vark and pyvark commands for deposits, the depositor skill and an admin page (design 22.8). For the
+watch route: the compose service, DE-only deposits, size routing to HPC (design section 21.8).
