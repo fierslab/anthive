@@ -3094,9 +3094,8 @@ def test_help_page_skills_and_mcp_facts(client):
     resp = client.get("/help")
     text = resp.text
     assert ("DISABLE_TELEMETRY=1 npx skills add "
-            "https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g --agent &#39;*&#39;") in text \
-        or ("DISABLE_TELEMETRY=1 npx skills add "
-            "https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g --agent '*'") in text
+            "https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g -y --agent claude-code codex") in text
+    assert "https://gitlab.kuleuven.be/bdslab/anthive/skills/-/blob/main/INSTALL.md" in text
     assert "npx skills update -g" in text
     assert "claude mcp add --transport http anthive" in text
     for tool in ("search_datasets", "get_dataset_info", "get_dataset_context", "search_genes",
@@ -3127,10 +3126,13 @@ def test_help_page_quick_start_first(client):
     assert re.findall(r'href="#([a-z-]+)"', toc)[0] == "quickstart"
     quick = body.split('id="quickstart"', 1)[1].split('</section>', 1)[0]
     assert ("DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git"
-            " -g --agent &#39;*&#39;") in quick
+            " -g -y --agent claude-code codex") in quick
+    quick_cmd = quick.split('id="quickstart-skills-cmd">', 1)[1].split('</pre>', 1)[0]
+    assert "*" not in quick_cmd and "--agent claude-code codex" in quick_cmd
     assert "data-copy-help" in quick
-    assert "does not support global skill installation" in quick and "harmless" in quick
-    assert "ls ~/.agents/skills ~/.claude/skills" in quick
+    assert "<code>gemini-cli</code> (Gemini CLI)" in quick
+    assert 'href="https://gitlab.kuleuven.be/bdslab/anthive/skills/-/blob/main/INSTALL.md"' in quick
+    assert "ls ~/.claude/skills" in quick and "ls ~/.agents/skills" in quick
     for name in HELP_SKILL_NAMES:
         url = f"https://gitlab.kuleuven.be/bdslab/anthive/skills/-/raw/main/zips/{name}.zip?inline=false"
         assert f'href="{url}"' in quick, name
@@ -3152,7 +3154,9 @@ def test_help_page_skills_section_complete(client):
     assert mentioned <= set(HELP_SKILL_NAMES), mentioned - set(HELP_SKILL_NAMES)
     assert "npx skills update -g" in skills
     assert "does not support global skill installation" in skills
-    assert "ls ~/.agents/skills ~/.claude/skills" in skills
+    assert "-g -y --agent claude-code codex" in skills
+    assert 'href="https://gitlab.kuleuven.be/bdslab/anthive/skills/-/blob/main/INSTALL.md"' in skills
+    assert "ls ~/.claude/skills" in skills and "ls ~/.agents/skills" in skills
     assert "--skill anthive-basics anthive-literature" in skills
     assert "Customize &gt; Skills" in skills and "code execution" in skills
     assert "Anthropic&#39;s cloud" in skills or "Anthropic's cloud" in skills
