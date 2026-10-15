@@ -3504,11 +3504,11 @@ Safety rules. Follow them for the whole session.
    - For any other agent (OpenCode, Cursor, Windsurf, VS Code, Zed, Goose and others), open {docs_url}/MCP_CLIENTS.md, find the section for your agent and follow it, using your user-level (global) configuration file, the connection name {connection_name} and my link. Anthive needs no sign-in, so if your configuration has an OAuth or sign-in option, switch it off. If your agent is not listed, tell me and stop this step.
    If a connection named {connection_name} already exists, tell me (without showing its full link) and ask whether to replace it.
 
-3. Install the Anthive skills. Skills are small instruction files that teach you how to use Anthive well. Check whether Node.js is installed by running node --version
-   - If it is, run
-     DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g --agent '*'
+3. Install the Anthive skills. Skills are small instruction files that teach you how to use Anthive well. The full install guide, with a section per AI app, is https://gitlab.kuleuven.be/bdslab/anthive/skills/-/blob/main/INSTALL.md (read it if anything below is unclear or does not match what you see). Check whether Node.js is installed by running node --version
+   - If it is, install the skills for this agent by name. The command below names Claude Code and Codex; replace the names after --agent with the ones for the AI apps I use (one or more, separated by spaces): claude-code for Claude Code, codex for Codex, gemini-cli for Gemini CLI, opencode for OpenCode, cursor for Cursor, github-copilot for GitHub Copilot. For another app, look up its name in the install guide above. Ask me which apps I use if you are not sure.
+     DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g -y --agent claude-code codex
      In Windows PowerShell, which does not understand the DISABLE_TELEMETRY=1 prefix, first run $env:DISABLE_TELEMETRY=1 and then the same command without that prefix.
-     A few agents, such as Eve and PromptScript, only take per-project skills, so the output may contain lines like "Eve does not support global skill installation". Those lines are expected and harmless and do not count as a failed step. Tell me so, then verify the install by checking that the anthive-* folders exist in ~/.agents/skills or ~/.claude/skills.
+     Then verify the install: the anthive-* folders must exist in ~/.claude/skills (Claude Code only) or ~/.agents/skills (the other apps). A "No such file or directory" for the other folder is normal.
    - If Node.js is missing, do not install it on your own. Tell me how to install it for my operating system (https://nodejs.org) and ask whether I want to do that now. If I prefer not to, offer to copy the folders under skills/ from https://gitlab.kuleuven.be/bdslab/anthive/skills into your own user-level skills folder (for Claude Code ~/.claude/skills/, for most other agents ~/.agents/skills/).
 
 4. Optional, ask me first: install vark. vark is a command-line tool for querying Anthive from a terminal or a script. Ask whether I want it. If I say no, skip to step 5.

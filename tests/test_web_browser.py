@@ -6319,15 +6319,16 @@ def test_mcp_setup_prompt_fills_in_link_and_commands():
     assert "doc/MCP_CLIENTS.md" in prompt
     # Skills, optional vark (login typed by the user), checks.
     assert ("DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git"
-            " -g --agent '*'") in prompt
+            " -g -y --agent claude-code codex") in prompt
+    # Named agents, never the all-apps wildcard; the skills INSTALL.md is the canonical guide.
+    assert "--agent '*'" not in prompt
+    assert "gemini-cli for Gemini CLI" in prompt
+    assert "https://gitlab.kuleuven.be/bdslab/anthive/skills/-/blob/main/INSTALL.md" in prompt
     assert "curl -sSL https://gitlab.kuleuven.be/bdslab/anthive/vark/-/raw/main/install.sh | bash" in prompt
     assert ("vark server login --name anthive-example --url https://anthive.example.org/api"
             " --user mf") in prompt
     assert "vark server check anthive-example -o json" in prompt
-    # The harmless "does not support global skill installation" lines are explained.
-    assert "does not support global skill installation" in prompt
-    assert "expected and harmless" in prompt
-    assert "anthive-* folders exist in ~/.agents/skills or ~/.claude/skills" in prompt
+    assert "the anthive-* folders must exist in ~/.claude/skills" in prompt
     assert "Do not run the login yourself" in prompt
     # Safety rules and the ask-first / stop-on-failure behaviour.
     assert "works like my password" in prompt
