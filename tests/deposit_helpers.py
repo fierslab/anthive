@@ -91,7 +91,8 @@ class DepositFakeS3(FakeS3):
         return {'Body': io.BytesIO(self.objects[Key]['body'])}
 
     def copy_object(self, Bucket: str, Key: str, CopySource: dict, Metadata: Optional[dict] = None,  # noqa: N803
-                    MetadataDirective: str = 'COPY', CopySourceIfMatch: Optional[str] = None) -> None:  # noqa: N803
+                    MetadataDirective: str = 'COPY', CopySourceIfMatch: Optional[str] = None,  # noqa: N803
+                    ContentType: Optional[str] = None) -> None:  # noqa: N803
         self._condition(CopySource['Key'], CopySourceIfMatch)
         if self.before_copy:
             self.before_copy(CopySource['Key'])

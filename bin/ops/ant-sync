@@ -12,6 +12,9 @@ Usage:
   ant-sync push   [FILTER]   Upload local files to S3
   ant-sync pull   [FILTER]   Download S3 files to local
   ant-sync status [FILTER]   Show sync status (no transfers)
+  ant-sync stamp-sha256 [FILTER] [--dry-run]
+                             Set x-amz-meta-sha256 on catalogue .h5ad objects that lack it (in-place copy,
+                             only when the local file is provably the same object; no deletes)
 
 FILTER is an optional glob pattern relative to --data-folder.
 
@@ -47,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'lib'))
 from config import get_config, is_slave, require_primary  # noqa: E402
 from h5adstore import iter_h5adstore  # noqa: E402
 from metadata import get_priority, parse_md_file, PRIORITY_DEFAULT  # noqa: E402
+from s3_etag import etag_matches_file, sha256_file  # noqa: E402
 
 # Only these extensions are ever pushed/pulled.
 # .md files are intentionally excluded — they live in git (h5adstore repo), not S3.
@@ -94,6 +98,10 @@ SKIP_SUFFIXES        = {'.wal', '.deleted', '.partial'}
 # Set on every push so we can detect content-without-size-change drift
 # (e.g., ant-score adds module-score columns in-place).
 MTIME_METADATA_KEY   = 'original-mtime'
+# sha256 of a pushed .h5ad (the watch route and the deposit API read it: a metadata-only update reuses a
+# published h5ad only when its object carries the hash the catalogue records).
+SHA_METADATA_KEY     = 'sha256'
+SINGLE_COPY_MAX      = 5 * 1024 ** 3          # CopyObject limit; larger objects use the managed multipart copy
 
 MULTIPART_THRESHOLD = 256 * 1024 ** 2   # 256 MB
 MULTIPART_CHUNKSIZE = 256 * 1024 ** 2
@@ -265,6 +273,138 @@ def _fmt_size(num_bytes: int) -> str:
             return f'{num_bytes:.1f} {unit}'
         num_bytes /= 1024
     return str(num_bytes)
+
+
+def _recorded_sha256(local_path: Path) -> Set[str]:
+    """sha256 values the catalogue records for an .h5ad: its .md front matter and its .h5ad.mus sidecar."""
+    found: Set[str] = set()
+    md = local_path.with_suffix('.md')
+    if md.exists():
+        try:
+            raw = (parse_md_file(md)[0] or {}).get('sha256')
+            value = '' if raw is None else str(raw).strip().lower()
+            if value:
+                found.add(value)
+        except Exception:  # noqa: BLE001 - an unreadable .md records nothing
+            pass
+    mus = local_path.with_name(local_path.name + '.mus')
+    if mus.exists():
+        for line in mus.read_text(encoding='utf-8', errors='replace').splitlines():
+            key, _, value = line.partition('=')
+            if key.strip() == 'sha256' and value.strip():
+                found.add(value.strip().lower())
+    return found
+
+
+def _push_metadata(local_path: Path, rel: str, local_mtime: int) -> dict:
+    """Object metadata of a push: the mtime, and for an .h5ad its sha256 (computed from the file; a .md or
+    .mus that records another value is reported, never trusted)."""
+    metadata = {MTIME_METADATA_KEY: str(local_mtime)}
+    if rel.endswith('.h5ad'):
+        sha = sha256_file(local_path)
+        recorded = _recorded_sha256(local_path)
+        if recorded and sha not in recorded:
+            print(f'  note: {rel}: the .md/.mus record another sha256 than the file ({", ".join(sorted(recorded))[:80]})')
+        metadata[SHA_METADATA_KEY] = sha
+    return metadata
+
+
+def stamp_plan(client, bucket: str, prefix: str, data_folder: Path, pattern: Optional[str]) -> list:
+    """What ``stamp-sha256`` would do: one entry per catalogue .h5ad, ``action`` stamp / already / skip."""
+    plan = []
+    prefix_str = prefix.rstrip('/') + '/' if prefix else ''
+    for page in client.get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=prefix_str):
+        for obj in page.get('Contents', []) or []:
+            key = obj['Key']
+            rel = _rel_from_s3_key(key, prefix)
+            if not rel.endswith('.h5ad') or not _is_syncable(rel, {'.h5ad'}, include_static=False):
+                continue
+            if pattern and not fnmatch.fnmatch(rel, pattern):
+                continue
+            entry = {'rel': rel, 'key': key, 'size': int(obj.get('Size', 0)),
+                     'etag': str(obj.get('ETag', '')).strip('"')}
+            head = client.head_object(Bucket=bucket, Key=key)
+            metadata = {str(k).lower(): str(v) for k, v in (head.get('Metadata') or {}).items()}
+            entry['metadata'], entry['content_type'] = metadata, head.get('ContentType')
+            if metadata.get(SHA_METADATA_KEY):
+                plan.append({**entry, 'action': 'already'})
+                continue
+            local = data_folder / rel
+            if not local.is_file():
+                plan.append({**entry, 'action': 'skip', 'reason': 'no local copy to verify against'})
+                continue
+            if local.stat().st_size != entry['size']:
+                plan.append({**entry, 'action': 'skip', 'reason': 'the local file has another size'})
+                continue
+            if not etag_matches_file(entry['etag'], local):
+                plan.append({**entry, 'action': 'skip', 'reason': 'the local file is not the S3 object (ETag)'})
+                continue
+            sha = sha256_file(local)
+            recorded = _recorded_sha256(local)
+            if recorded and sha not in recorded:
+                plan.append({**entry, 'action': 'skip', 'sha256': sha,
+                             'reason': 'the .md/.mus record another sha256 than the file'})
+                continue
+            plan.append({**entry, 'action': 'stamp', 'sha256': sha})
+    return plan
+
+
+def stamp_apply(client, bucket: str, entry: dict, transfer=None) -> dict:
+    """Set the sha256 metadata of one object by an in-place copy (existing metadata and content type kept,
+    conditional on the listed ETag). Returns ``{'ok': bool, 'etag': new ETag, 'reason'?}``. No deletes."""
+    metadata = {**entry['metadata'], SHA_METADATA_KEY: entry['sha256']}
+    source = {'Bucket': bucket, 'Key': entry['key']}
+    extra = {'Metadata': metadata, 'MetadataDirective': 'REPLACE',
+             'ContentType': entry.get('content_type') or 'application/octet-stream',
+             'CopySourceIfMatch': f'"{entry["etag"]}"'}
+    if entry['size'] <= SINGLE_COPY_MAX:
+        client.copy_object(Bucket=bucket, Key=entry['key'], CopySource=source, **extra)
+    else:
+        kwargs = {'ExtraArgs': extra}
+        if transfer is not None:
+            kwargs['Config'] = transfer
+        client.copy(source, bucket, entry['key'], **kwargs)
+    head = client.head_object(Bucket=bucket, Key=entry['key'])
+    new_metadata = {str(k).lower(): str(v) for k, v in (head.get('Metadata') or {}).items()}
+    if int(head.get('ContentLength') or 0) != entry['size'] or new_metadata.get(SHA_METADATA_KEY) != entry['sha256']:
+        return {'ok': False, 'etag': str(head.get('ETag', '')).strip('"'), 'reason': 'not verified after the copy'}
+    return {'ok': True, 'etag': str(head.get('ETag', '')).strip('"')}
+
+
+def cmd_stamp(args, s3_cfg: dict, data_folder: Path) -> None:
+    """``ant-sync stamp-sha256``: backfill x-amz-meta-sha256 on catalogue .h5ad objects."""
+    require_primary(tool='ant-sync stamp-sha256')
+    client = _s3_client(s3_cfg)
+    bucket, prefix = s3_cfg['bucket'], s3_cfg.get('prefix', '') or ''
+    print('Planning (hashes every local .h5ad whose object lacks the metadata; this reads them all)…')
+    plan = stamp_plan(client, bucket, prefix, data_folder, args.filter)
+    counts: Dict[str, int] = {}
+    for entry in plan:
+        counts[entry['action']] = counts.get(entry['action'], 0) + 1
+        if entry['action'] == 'skip':
+            print(f'[SKIP]  {entry["rel"]}: {entry["reason"]}')
+        elif entry['action'] == 'stamp':
+            print(f'[STAMP] {entry["rel"]}  sha256 {entry["sha256"][:16]}…  ({_fmt_size(entry["size"])})')
+    print(f'\nPlan: {counts.get("stamp", 0)} to stamp, {counts.get("already", 0)} already stamped, '
+          f'{counts.get("skip", 0)} skipped')
+    if args.dry_run:
+        print('Dry run: nothing changed.')
+        return
+    transfer = _transfer_config()
+    failed = 0
+    for entry in plan:
+        if entry['action'] != 'stamp':
+            continue
+        try:
+            result = stamp_apply(client, bucket, entry, transfer)
+        except Exception as exc:  # noqa: BLE001 - e.g. PreconditionFailed: the object changed meanwhile
+            result = {'ok': False, 'etag': entry['etag'], 'reason': str(exc)[:200]}
+        changed = '' if result['etag'] == entry['etag'] else f' (ETag {entry["etag"]} -> {result["etag"]})'
+        print(f'[{"DONE" if result["ok"] else "FAIL"}] {entry["rel"]}{changed}'
+              + ('' if result['ok'] else f': {result.get("reason")}'))
+        failed += 0 if result['ok'] else 1
+    if failed:
+        sys.exit(1)
 
 
 class _ProgressCallback:
@@ -447,7 +587,7 @@ def cmd_push(args, s3_cfg: dict, data_folder: Path) -> None:
             s3_key,
             Config=transfer,
             Callback=callback,
-            ExtraArgs={'Metadata': {MTIME_METADATA_KEY: str(local_mtime)}},
+            ExtraArgs={'Metadata': _push_metadata(local_path, rel, local_mtime)},
         )
         uploaded += 1
 
@@ -1391,6 +1531,10 @@ def main() -> None:
              'only shows what is currently on disk — useful when offline.',
     )
 
+    stamp_sub = subparsers.add_parser(
+        'stamp-sha256', help='Set x-amz-meta-sha256 on catalogue .h5ad objects that lack it (in-place copy)')
+    stamp_sub.add_argument('filter', nargs='?', default=None, help='Optional glob filter relative to data-folder')
+    stamp_sub.add_argument('--dry-run', action='store_true', help='Show the plan, change nothing')
     status_sub = subparsers.add_parser('status', help='Show local/S3 sync state')
     status_sub.add_argument(
         'filter', nargs='?', default=None,
@@ -1432,6 +1576,8 @@ def main() -> None:
         cmd_plan(args, s3_cfg, data_folder)
     elif args.command == 'status':
         cmd_status(args, s3_cfg, data_folder)
+    elif args.command == 'stamp-sha256':
+        cmd_stamp(args, s3_cfg, data_folder)
 
 
 if __name__ == '__main__':
