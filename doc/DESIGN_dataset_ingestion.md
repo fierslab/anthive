@@ -783,6 +783,7 @@ oldest first, under nice 19 and the idle IO class.
 seen -> stable -> pulled -> checked -> live | held | failed | needs_decision | rejected
 held --(ant-ingest-watch approve --by NAME)--> stable -> ... -> live
 held | failed | needs_decision --(ant-ingest-watch reject --by NAME)--> rejected
+needs_decision | failed --(ant-ingest-watch retry --by NAME)--> stable -> ... (after the cause was fixed)
 ```
 
 One row per h5ad key in `<ingest_state_dir>/ingest_watch.sqlite` (tables `items`, `events`, `deletions`,
@@ -1024,7 +1025,13 @@ bucket-wide key handed to depositors, no status a depositor can reach, self-decl
    the staging objects, releases the key locks and sets `uploaded`. A refusal at any step deletes the copies
    already made and returns the deposit to `uploading`.
 5. The watcher lists the objects, links them to the deposit (22.4) and runs the pipeline of section 21.
-6. `GET /datasets/deposit[/{id}]` and `/report` follow it; `withdraw`, `approve`, `reject`, `expire` act on it.
+6. `GET /datasets/deposit[/{id}]` and `/report` follow it; `withdraw`, `approve`, `reject`, `retry`, `expire` act
+   on it. `retry` (admins) runs a `needs_decision` or `failed` deposit again; `reject` is final and deletes the
+   incoming objects of the deposit and of the deposits it continues (guarded: `x-amz-meta-deposit` and the
+   completed ETag), withdraws open corrections, and a create never continues a rejected deposit (409
+   `rejected` if an object of it is left). A reject on the host is recorded in the deposit store and the next
+   poll does the same cleanup (`DepositService.pending_rejected` / `clean_rejected`). `/report` of a deposit
+   that stopped before the checks answers 404 `no_report` with `state` and `reason`.
 
 ### 22.3 Rules
 

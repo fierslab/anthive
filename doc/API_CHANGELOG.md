@@ -223,6 +223,36 @@ or `.mus` records, by an in-place copy that keeps the other metadata and the con
 on the ETag it checked. It never deletes. Run it with `--dry-run` first; it hashes every local `.h5ad` whose
 object lacks the metadata.
 
+After the third skill test (a novice deposit through vark and the skills):
+
+- Fix: an update that adds a caveat to a dataset whose `.md` says `caveats: []` (vark init writes it) stopped
+  at `needs_decision` ("the store .md cannot be edited safely"). `md_edit` now rewrites an inline `key: []`,
+  `key: {}` or null value in block style before appending (caveats, changelog, nested `api:` keys).
+- New: `POST /datasets/deposit/{id}/retry` (admins, body `{note?}`) runs a `needs_decision` or `failed`
+  deposit again once the cause is fixed; answers `{deposit_id, state: "checking", previous_state, next}`, 409
+  `not_retryable` for other states. `approve` of such a deposit answers 409 `not_held` and names retry. On the
+  host: `ant ingest-watch retry <key> --by NAME`.
+- Changed: a reject is final. `POST .../reject` also deletes the incoming objects of the deposit and of the
+  deposits it continues (only objects still marked as theirs with the completed ETag) and withdraws open
+  corrections; the answer adds `deleted`, `kept`, `withdrawn_corrections`. A create never continues a rejected
+  deposit (409 `rejected` when an object of it is left over). A reject on the host is cleaned up by the next
+  poll.
+- Fix: depositors read "rejected by an admin" (the "(API login ...)" / "(OS user ...)" part is shown to admins
+  only).
+- `GET .../report` of a deposit that stopped before the checks: 404 `no_report` now carries `state` and
+  `reason` (also in the message).
+- `deposit_kind` of a correction is the kind of the deposit it continues (a corrected metadata update stays
+  `metadata_update`). `deposit_kind` says what was deposited, `kind` what the watcher made of it
+  (`new`, `update_patch`, ...).
+- A new dataset without a designation is written with `is_secondary: false` (changelog line "Designation:
+  primary dataset"), so it is served as `primary`, not `unresolved`; `design.designation` says so.
+- `layers.x_lognorm`: with a counts layer, varying expm1 row sums are an info that defers to
+  `layers.consistency` (no advice to declare `normalisation:`, which skips that comparison); without one the
+  fix asks for the counts layer and reserves `normalisation:` for another method.
+- `GET /datasets/deposit/vocab`: `mus.field_info` `{field: {form, organisms, values?}}` for every recommended
+  (soft) field (e.g. `age`: a value or a range with a unit; `strain`: animals only). `mus.vocab` no longer
+  asks for fields that do not apply to the organism (`strain` for human data).
+
 Fix (also a candidate for a 2.45.2 patch release): `GET /health` answers 200 for a running server with an
 empty catalogue (`databases: 0`, `note: "empty catalog"`). Up to 2.45.1 it answered 503 "No databases
 available", so the compose healthcheck never passed on a new site with an empty h5adstore and `ant-stack up`

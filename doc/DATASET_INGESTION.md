@@ -74,7 +74,12 @@ block, the store sidecar and the author of the store commit).
 | `withdrawn`, `expired`, `superseded` | withdrawn by you or an admin; not completed in time; replaced before the watcher saw it |
 
 Admins approve or reject a held deposit with `POST /api/datasets/deposit/<id>/approve` or `.../reject`
-(body `{"note": "..."}`); it is the watcher's own approve, recorded with the admin's login. `GET
+(body `{"note": "..."}`); it is the watcher's own approve, recorded with the admin's login. A
+`needs_decision` or `failed` deposit has nothing to approve: once the cause is fixed (for example a store
+`.md` edited by hand), `POST /api/datasets/deposit/<id>/retry` runs it again; an unfixed cause stops it at the
+same state. A reject is final: the deposit's incoming objects (and those of the deposit it corrects) are
+deleted, open corrections are withdrawn, and a later deposit of the same name starts afresh instead of
+continuing the rejected one. Depositors read "rejected by an admin"; admins also see the login. `GET
 /api/datasets/deposit?all=true` lists every deposit. MCP clients see `my_deposits` and `deposit_status`
 (read-only); data never goes through MCP.
 
@@ -179,22 +184,27 @@ needs_decision send a JSON message.
 | `held` | clean, but an admin must decide (`public_access`, `licence_unknown`, `data_use_unknown`, `controlled_access`, `donor_overlap`) | read the report; fix the sidecar and upload it again, or approve it (below) |
 | `failed` | errors in the checks, a sha256 mismatch, a convert failure | read the report, fix, upload again |
 | `needs_decision` | the store, S3 or the update conflicts in a way the route does not resolve | see below |
-| `rejected` | an admin rejected it | remove the deposit from S3 by hand |
+| `rejected` | an admin rejected it | final. A deposit made through the API loses its incoming objects at once (or at the next poll after a reject on the host); remove other uploads from S3 by hand |
 
 Interrupted work (S3 errors, a killed tool, too little disk space, the server restarting, a stop of the
 service) is not a state of its own: the item stays `stable` and is retried after 2, 4, 8 ... minutes.
 
-### Approving or rejecting a held deposit
+### Approving, rejecting or retrying
 
 ```bash
 ant ingest-watch approve __incoming/<Group>/<basename>.h5ad --by "Your Name" --note "licence checked"
 ant ingest-watch reject  __incoming/<Group>/<basename>.h5ad --by "Your Name" --note "wrong cohort"
+ant ingest-watch retry   __incoming/<Group>/<basename>.h5ad --by "Your Name" --note "store .md fixed"
 ```
+
+`retry` sends a `needs_decision` or `failed` item back to the pipeline after its cause was fixed outside the
+upload; `approve` refuses them (there is no held reason to approve).
 
 `approve` lets the item through the held reasons it has now (errors still block) and the next poll publishes
 it; the dataset gets a caveat naming who approved it and why, and the OS user who ran the command is recorded.
 Any change to the deposit (the data, the sidecar, a seed or a static file) voids the approval. `reject` marks
-it final; nothing is published or deleted. Both run only on the primary site, on the watcher's host: whoever
+it final; nothing is published. A plain upload is not deleted; for an API deposit the next poll deletes its
+incoming objects (only objects that are still exactly the deposit's). Both run only on the primary site, on the watcher's host: whoever
 can run them there is trusted as an admin of the route. Deposits made through the API can also be approved or
 rejected by a signed-in admin (`POST /api/datasets/deposit/<id>/approve` or `.../reject`).
 
