@@ -171,6 +171,12 @@ presigning); `ingest_watch.accept_unlinked` (default true; false refuses uploads
 for). `datasets_upload_max_gb` (the check `files.size`) is now 200 GB, like the deposit limit. Container sites:
 `services.dataset_deposit` and the `datasets:` block of `site.yaml`.
 
+Fix (also a candidate for a 2.45.2 patch release): `GET /health` answers 200 for a running server with an
+empty catalogue (`databases: 0`, `note: "empty catalog"`). Up to 2.45.1 it answered 503 "No databases
+available", so the compose healthcheck never passed on a new site with an empty h5adstore and `ant-stack up`
+stopped with `container ...-api-1 is unhealthy`. 503 now means a real failure only (the catalogue not loaded
+yet, or the registry unreadable).
+
 ## 2.45.1 (2026-10-14)
 
 Patch release: fixes only, no contract change. Found by the 2.45.0 scratch-site check

@@ -2285,7 +2285,9 @@ def health_check():
     Health check + speed signal for load balancers and client-side server
     selection.
 
-    Returns 200 if healthy, 503 if unhealthy.  `mean_response_ms` /
+    Returns 200 when the server is up, also with an empty catalogue (``databases: 0``, ``note: "empty
+    catalog"``: a new site starts before its data arrives, and the containers that wait on this check must
+    start too); 503 only while the registry is not there yet or cannot be read.  `mean_response_ms` /
     `p50_response_ms` are computed over the last 1024 non-probe requests;
     a client picking between multiple anthive servers should prefer the
     one with the lowest values (null = no samples yet).
@@ -2293,19 +2295,16 @@ def health_check():
     Health and /metrics requests are excluded from the timing samples so
     that polling doesn't skew the metric.
     """
+    if registry is None:
+        raise HTTPException(status_code=503, detail="starting: the catalogue is not loaded yet")
     try:
         database_count = len(registry.databases)
         error_count = sum(1 for m in registry.metadata_cache.values() if 'error' in m)
 
-        if database_count == 0:
-            raise HTTPException(
-                status_code=503,
-                detail="No databases available"
-            )
-
         timing = _timing_snapshot()
         return {
             "status": "healthy",
+            **({"note": "empty catalog"} if database_count == 0 else {}),
             "databases": database_count,
             "database_errors": error_count,
             "uptime_seconds": int(registry.get_uptime()),

@@ -87,12 +87,12 @@ may show them to visitors who are not signed in (see "Internal datasets");
 their files still come through the maintainers. `ant sync` has no
 "public only" mode and always needs S3 keys.
 
-**Without access.** You can install and start everything, but with release
-2.45.1 the site does not come up with a completely empty store: the api
-reports itself unhealthy while it has no dataset at all, and `ant-stack up`
-then stops with `container ...-api-1 is unhealthy` before the web site
-starts. To try the software without the lab's data, put at least one
-dataset of your own in the store (an `.h5ad` with log-normalised `X` plus
+**Without access.** You can install and start everything. From 2.46.0 the site
+also comes up with a completely empty store (`/api/health` answers
+`databases: 0, note: "empty catalog"`); release 2.45.1 did not: its api
+reported itself unhealthy without any dataset, and `ant-stack up` stopped
+with `container ...-api-1 is unhealthy` before the web site started. To try
+the software with some data, put at least one dataset of your own in the store (an `.h5ad` with log-normalised `X` plus
 its `.md`, converted with `ant convert`; see the table in "Everyday tasks"
 and `doc/DATASET_INGESTION.md`). Keep `genesetstore`, `library` and
 `library_index` at `null` and `s3.enabled: false`. The site then shows the
@@ -923,7 +923,7 @@ catalogue from git.
 | `check`: port already in use | something else listens there | pick another `ports.https` and change `public_url` to match |
 | `check`: store not readable by uid | the data folder belongs to someone else | `sudo chown -R $USER /srv/anthive`, or set `run_as` |
 | browser: "connection is not private" | the site signs its own certificate | continue once, or trust it (see Certificates), or use `tls.mode: acme` |
-| `up` stops after a few minutes with `container ...-api-1 is unhealthy`, and `logs api` says `Found 0 databases` | the store has no dataset at all; with 2.45.1 the api then never reports healthy | clone the h5adstore and pull a collection, or add a dataset of your own (step 1, "Without access") |
+| `up` stops after a few minutes with `container ...-api-1 is unhealthy`, and `logs api` says `Found 0 databases` | release 2.45.1 with an empty store: its api never reports healthy without a dataset (fixed in 2.46.0) | upgrade, or clone the h5adstore and pull a collection, or add a dataset of your own (step 1, "Without access") |
 | `up` waits a long time, then "unhealthy" | the API is still scanning a large, mostly remote catalogue | pull the data you serve (step 5), run `up` again; `logs api` shows progress |
 | 502 right after `up --no-wait` | the API is still starting | wait a minute |
 | logged in but admin pages say 403 | the user is not an admin | basic mode: add to `auth.admins`, `ant-stack init`, `restart caddy`; authelia mode: add `admins` to the user's groups (see "Users and groups") |
