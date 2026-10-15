@@ -145,9 +145,21 @@ def _deposit_groups() -> set:
 
 
 def _may_deposit(identity: Optional[dict]) -> bool:
+    """As ant-serve's _require_dataset_uploader: a group in datasets_upload_groups, or (basic auth mode,
+    no groups) a user listed in auth.admins when admins may deposit."""
     if not identity:
         return False
-    return bool({g.lower() for g in identity.get('groups', [])} & _deposit_groups())
+    groups = {g.lower() for g in identity.get('groups', [])}
+    allowed = _deposit_groups()
+    if groups & allowed:
+        return True
+    try:
+        from config import get_auth_settings  # noqa: PLC0415
+        auth = get_auth_settings(_get_anthive_config())
+    except Exception:  # noqa: BLE001
+        return False
+    return ('admins' in allowed and auth.get('mode') == 'basic' and not groups
+            and identity.get('user') in auth.get('admins', set()))
 
 
 class _McpLinkAuthMiddleware:

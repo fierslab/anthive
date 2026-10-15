@@ -16790,8 +16790,11 @@ _deposit_service_instance = None
 _deposit_service_lock = Lock()
 
 
-def _require_dataset_uploader(request: Request):
-    """(Identity, None) for a signed-in caller in datasets_upload_groups, else (None, a 403 JSONResponse)."""
+def _require_dataset_uploader(request: Request, admin_ok: bool = False):
+    """(Identity, None) for a signed-in caller in datasets_upload_groups, else (None, a 403 JSONResponse).
+
+    ``admin_ok``: admin routes (approve, reject, expire, owners, every deposit) also let in admins who are
+    not in the upload groups."""
     from config import get_dataset_deposit_settings  # noqa: PLC0415
     from dataset_deposit import Identity  # noqa: PLC0415
     allowed = set(get_dataset_deposit_settings(get_config())['upload_groups'])
@@ -16800,7 +16803,7 @@ def _require_dataset_uploader(request: Request):
     user = (request.headers.get('Remote-User') or '').strip()
     if get_auth_settings()['mode'] != 'none' and user:
         is_admin = _caller_is_admin(request)
-        if groups & allowed or ('admins' in allowed and is_admin):
+        if groups & allowed or (is_admin and ('admins' in allowed or admin_ok)):
             return Identity(user=user, name=(request.headers.get('Remote-Name') or '').strip(),
                             email=(request.headers.get('Remote-Email') or '').strip(), is_admin=is_admin), None
     return None, JSONResponse(
@@ -16851,12 +16854,11 @@ def _deposit_service():
 def _deposit_call(request: Request, action, admin_only: bool = False, status_code: int = 200):
     """Run ``action(service, identity)`` for an uploader; DepositError becomes its JSON answer."""
     from dataset_deposit import DepositError  # noqa: PLC0415
-    identity, forbidden = _require_dataset_uploader(request)
+    identity, forbidden = _require_dataset_uploader(request, admin_ok=admin_only)
     if forbidden is not None:
         return forbidden
     if admin_only and not identity.is_admin:
-        return JSONResponse({'status': 'forbidden', 'message': 'only admins approve or reject deposits'},
-                            status_code=403)
+        return JSONResponse({'status': 'forbidden', 'message': 'only admins may do this'}, status_code=403)
     try:
         return JSONResponse(action(_deposit_service(), identity), status_code=status_code)
     except DepositError as exc:
@@ -16875,11 +16877,20 @@ def dataset_deposit_vocab(request: Request):
 @app.get("/datasets/deposit", tags=["datasets-deposit"], include_in_schema=False)
 def dataset_deposit_list(request: Request, all: bool = Query(False, description="admins: every user's deposits")):  # noqa: A002
     """Your deposits (admins with ?all=true: everyone's), newest first, with their state."""
-    return _deposit_call(request, lambda service, identity: service.list(identity, all_users=all))
+    return _deposit_call(request, lambda service, identity: service.list(identity, all_users=all), admin_only=all)
+
+
+@app.post("/datasets/deposit/owners", tags=["datasets-deposit"], include_in_schema=False)
+def dataset_deposit_set_owner(request: Request, body: Any = Body(None)):
+    """Admins: ``{db_id, user, note?}`` lets ``user`` deposit new versions of a dataset published before
+    deposits existed (update_policy own); the watcher writes a caveat into the dataset's .md."""
+    body = body if isinstance(body, dict) else {}
+    return _deposit_call(request, lambda service, identity: service.set_owner(
+        identity, body.get('db_id'), body.get('user'), str(body.get('note') or '')), admin_only=True)
 
 
 @app.post("/datasets/deposit", tags=["datasets-deposit"], include_in_schema=False)
-def dataset_deposit_create(request: Request, body: Dict[str, Any] = Body(...)):
+def dataset_deposit_create(request: Request, body: Any = Body(None)):
     """Declare one dataset deposit ``{data_project, basename, files: [{name, size, sha256, kind}],
     update_of?}`` and get presigned upload instructions per file (201)."""
     return _deposit_call(request, lambda service, identity: service.create(identity, body), status_code=201)
@@ -16899,7 +16910,7 @@ def dataset_deposit_report(request: Request, deposit_id: str):
 
 
 @app.post("/datasets/deposit/{deposit_id}/urls", tags=["datasets-deposit"], include_in_schema=False)
-def dataset_deposit_urls(request: Request, deposit_id: str, body: Dict[str, Any] = Body(...)):
+def dataset_deposit_urls(request: Request, deposit_id: str, body: Any = Body(None)):
     """Fresh presigned URLs for one file ``{name, first_part?, last_part?}`` and the parts S3 already has."""
     return _deposit_call(request, lambda service, identity: service.refresh_urls(identity, deposit_id, body))
 
@@ -16914,6 +16925,13 @@ def dataset_deposit_complete(request: Request, deposit_id: str, body: Optional[D
 def dataset_deposit_withdraw(request: Request, deposit_id: str):
     """Withdraw a deposit (depositor or admin): abort its uploads, delete its own incoming objects."""
     return _deposit_call(request, lambda service, identity: service.withdraw(identity, deposit_id))
+
+
+@app.post("/datasets/deposit/{deposit_id}/expire", tags=["datasets-deposit"], include_in_schema=False)
+def dataset_deposit_expire(request: Request, deposit_id: str):
+    """Admins: end an open deposit now (its uploads are aborted and its files removed)."""
+    return _deposit_call(request, lambda service, identity: service.force_expire(identity, deposit_id),
+                         admin_only=True)
 
 
 @app.post("/datasets/deposit/{deposit_id}/approve", tags=["datasets-deposit"], include_in_schema=False)
