@@ -188,7 +188,8 @@ class StateDB:
 def leftover_of_live(row: Dict[str, Any], item: Item) -> bool:
     """The listed objects are what is left of a live deposit after some of its keys were deleted."""
     return (row['state'] == 'live' and item.h5ad.etag == row['h5ad_etag'] and item.h5ad.size == row['h5ad_size']
-            and (item.mus is None or item.mus.etag == row['mus_etag']))
+            and (item.mus is None or item.mus.etag == row['mus_etag'])
+            and not item.deposit)              # a new API deposit of the same bytes is processed (as unchanged)
 
 
 def observe(db: StateDB, items: Sequence[Item], now: float, settle_seconds: float) -> List[Item]:
@@ -252,8 +253,17 @@ def _os_user() -> str:
         return f'uid {os.getuid()}'
 
 
-def approve(db: StateDB, key_or_db_id: str, by: str, note: str = '') -> Dict[str, Any]:
+def _who(by: str, channel: str) -> str:
+    """How the decision is recorded: the OS user on the host (cli), or the API login (api)."""
+    return f'API login {by}' if channel == 'api' else f'OS user {_os_user()}'
+
+
+def approve(db: StateDB, key_or_db_id: str, by: str, note: str = '', channel: str = 'cli') -> Dict[str, Any]:
     """Mark a held item for publication by the next poll, past the held reasons it has now.
+
+    ``channel`` is ``cli`` (``ant-ingest-watch approve`` on the host; the OS
+    user is recorded) or ``api`` (``POST /datasets/deposit/{id}/approve`` by an
+    admin; ``by`` is the proxy's Remote-User).
 
     Raises:
         ValueError: no such item, the item is not held, or ``by`` is empty.
@@ -263,20 +273,21 @@ def approve(db: StateDB, key_or_db_id: str, by: str, note: str = '') -> Dict[str
         raise ValueError('approve needs --by <name>')
     if row['state'] != 'held':
         raise ValueError(f'{row["key"]} is {row["state"]}, not held')
-    approval = {'by': by.strip(), 'os_user': _os_user(), 'reasons': json.loads(row['held_reasons'] or '[]'),
+    approval = {'by': by.strip(), 'os_user': _os_user() if channel == 'cli' else None, 'channel': channel,
+                'reasons': json.loads(row['held_reasons'] or '[]'),
                 'note': note.strip(), 'date': time.strftime('%Y-%m-%d'), 'signature': row['settle_signature']}
-    db.transition(row['key'], 'stable', f'approved by {by} (OS user {approval["os_user"]}) for '
+    db.transition(row['key'], 'stable', f'approved by {by} ({_who(by, channel)}) for '
                                         f'{", ".join(approval["reasons"])}',
                   approval=json.dumps(approval), polls_unchanged=1, next_attempt=0)
     return approval
 
 
-def reject(db: StateDB, key_or_db_id: str, by: str, note: str = '') -> None:
+def reject(db: StateDB, key_or_db_id: str, by: str, note: str = '', channel: str = 'cli') -> None:
     """Mark a held, failed or needs_decision item as rejected (final; nothing is published or deleted)."""
     row = _find(db, key_or_db_id)
     if row['state'] not in ('held', 'failed', 'needs_decision'):
         raise ValueError(f'{row["key"]} is {row["state"]}; only held, failed or needs_decision items are rejected')
-    text = f'rejected by {by} (OS user {_os_user()})' + (f': {note}' if note else '')
+    text = f'rejected by {by} ({_who(by, channel)})' + (f': {note}' if note else '')
     db.transition(row['key'], 'rejected', text, error=text)
 
 
@@ -332,6 +343,49 @@ def notify(settings: Dict[str, Any], row: Dict[str, Any], log: Callable[[str], N
                 smtp.send_message(message)
         except Exception as exc:  # noqa: BLE001
             log(f'notify: e-mail failed: {exc}')
+
+
+def notify_depositor(settings: Dict[str, Any], deposit: Dict[str, Any], row: Dict[str, Any],
+                     summary: Optional[Dict[str, Any]], log: Callable[[str], None] = print) -> bool:
+    """E-mail the depositor of an API deposit about live, held or failed (redacted; never raises).
+
+    Uses the ``notify`` SMTP settings; needs ``smtp_host`` and a valid e-mail
+    of the deposit (the proxy's Remote-Email at deposit time). Returns True
+    when a message was handed to the SMTP server.
+    """
+    import dataset_deposit  # noqa: PLC0415
+    from ingest_md_fill import _EMAIL_RE  # noqa: PLC0415
+
+    notify_settings = settings.get('notify') or {}
+    email = str(deposit.get('email') or '').strip()
+    if row.get('state') not in dataset_deposit.NOTIFY_DEPOSITOR_ON or not notify_settings.get('smtp_host') \
+            or not _EMAIL_RE.match(email):
+        return False
+    held = json.loads(row.get('held_reasons') or '[]')
+    lines = [f'Your Anthive deposit {deposit.get("id")} ({deposit.get("data_project")}/{deposit.get("basename")}) '
+             f'is now: {row.get("state")}.', '']
+    if row.get('state') == 'live':
+        lines.append(f'Published as {row.get("db_id")} version {row.get("version")}.')
+    if held:
+        lines.append('Held for an admin: ' + ', '.join(held) + '.')
+    if row.get('state') != 'live' and row.get('error'):
+        lines.append('Note: ' + str(dataset_deposit.sanitize_text(row.get('error')))[:1000])
+    for problem in (summary or {}).get('problems', [])[:20]:
+        lines.append(f'- {problem.get("status")} {problem.get("id")}: {problem.get("summary")}'
+                     + (f' Fix: {problem.get("fix")}' if problem.get('fix') else ''))
+    lines += ['', f'Details: GET /api/datasets/deposit/{deposit.get("id")} (or `vark datasets status`).']
+    try:
+        message = EmailMessage()
+        message['Subject'] = f'[anthive] deposit {deposit.get("basename")}: {row.get("state")}'
+        message['From'] = notify_settings.get('email_from') or 'anthive-ingest@localhost'
+        message['To'] = email
+        message.set_content('\n'.join(lines))
+        with smtplib.SMTP(notify_settings['smtp_host'], int(notify_settings.get('smtp_port') or 25), timeout=20) as smtp:
+            smtp.send_message(message)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log(f'notify: depositor e-mail failed: {exc}')
+        return False
 
 
 # ── status ───────────────────────────────────────────────────────────────────
@@ -441,6 +495,7 @@ class Watcher:
         items, malformed = plan_items(objects, self.settings['prefix'])
         for message in malformed:
             self.log(f'malformed: {message}')
+        items = self.link_deposits(items)
         ready = observe(self.db, items, self.clock(), float(self.settings['settle_seconds']))
         self.retry_unverified(items)
         for index, item in enumerate(ready):
@@ -453,6 +508,83 @@ class Watcher:
             counts[state] = counts.get(state, 0) + 1
         self.prune_work_dirs()
         return counts
+
+    # API deposits (lib/dataset_deposit.py) --------------------------------
+
+    def deposit_roots(self) -> Dict[str, Path]:
+        """Server paths replaced in what a depositor sees."""
+        return {'store': self.pipeline.config.store_root, 'state': self.state_dir,
+                'work': self.pipeline.config.work_root}
+
+    def link_deposits(self, items: List[Item]) -> List[Item]:
+        """Attach API deposit records to the items they describe; hold back projects with an open deposit.
+
+        An item belongs to a deposit when its h5ad and sidecar keys and ETags
+        are exactly the ones the deposit completed. While a deposit of a
+        project is still uploading (and not expired), no item of that project
+        is looked at: its files may be half there.
+        """
+        import dataset_deposit  # noqa: PLC0415
+
+        try:
+            store = dataset_deposit.DepositStore.open_if_exists(self.state_dir)
+        except Exception as exc:  # noqa: BLE001 - deposits are optional; never stop the watch route
+            self.log(f'deposits: cannot open the deposit store: {exc}')
+            return items
+        if store is None:
+            return items
+        try:
+            busy = store.open_projects(self.clock())
+            kept: List[Item] = []
+            for item in items:
+                if item.data_project in busy:
+                    continue
+                if item.mus is not None:
+                    record = store.find_for_item(item.h5ad.key, item.h5ad.etag, item.mus.key, item.mus.etag)
+                    if record:
+                        item.deposit = {key: record.get(key) for key in
+                                        ('id', 'user', 'name', 'email', 'update_of', 'data_project', 'basename')}
+                kept.append(item)
+            skipped = len(items) - len(kept)
+            if skipped:
+                self.log(f'deposits: {skipped} item(s) wait for an open deposit of their project '
+                         f'({", ".join(sorted(busy))})')
+            return kept
+        finally:
+            store.close()
+
+    def sync_deposit(self, item: Item) -> None:
+        """Copy the outcome of an API deposit's item into its record, write its redacted report, mail the depositor."""
+        if not item.deposit:
+            return
+        import dataset_deposit  # noqa: PLC0415
+
+        row = self.db.get(item.key)
+        if not row:
+            return
+        try:
+            store = dataset_deposit.DepositStore.open_if_exists(self.state_dir)
+            if store is None:
+                return
+            try:
+                roots = self.deposit_roots()
+                deposit_id = item.deposit['id']
+                copy = dataset_deposit.write_report_copy(self.state_dir, deposit_id, row.get('report_path'), roots)
+                store.record_watch(deposit_id, row, roots, report_file=str(copy) if copy else None)
+                store.event(deposit_id, 'watcher', row['state'],
+                            str(dataset_deposit.sanitize_text(row.get('error') or row.get('version') or '', roots)))
+                record = store.get(deposit_id) or {}
+                marker = f'{row["state"]}:{row.get("processed_signature") or ""}'
+                if record.get('notified_state') != marker and row['state'] in dataset_deposit.NOTIFY_DEPOSITOR_ON:
+                    summary = None
+                    if copy:
+                        summary = dataset_deposit.report_summary(json.loads(copy.read_text()))
+                    if notify_depositor(self.settings, {**record, **item.deposit}, row, summary, self.log):
+                        store.update(deposit_id, notified_state=marker)
+            finally:
+                store.close()
+        except Exception as exc:  # noqa: BLE001 - the deposit record is a mirror; never stop the watch route
+            self.log(f'deposits: could not record the outcome of {item.key}: {exc}')
 
     def process(self, item: Item, listed: Sequence[Item] = ()) -> str:
         """Run the pipeline for one ready item and record the outcome."""
@@ -471,6 +603,7 @@ class Watcher:
                 self.db.transition(key, 'failed', f'gave up after {attempts} attempts: {exc}', attempts=attempts,
                                    error=str(exc), processed_signature=item.content_signature())
                 self._notify(key)
+                self.sync_deposit(item)
                 return 'failed'
             delay = 0 if self.stop_requested() else min(3600, 60 * 2 ** attempts)
             self.db.transition(key, 'stable', f'retry in {delay} s: {exc}', attempts=attempts,
@@ -480,11 +613,13 @@ class Watcher:
             self.db.transition(key, 'failed', f'{type(exc).__name__}: {exc}', error=f'{type(exc).__name__}: {exc}',
                                processed_signature=item.content_signature())
             self._notify(key)
+            self.sync_deposit(item)
             return 'failed'
         self.record(item, outcome, approval)
         if outcome.state == 'live':
             self.delete_if_verified(item, outcome, listed)
         self._notify(key)
+        self.sync_deposit(item)
         return outcome.state
 
     def record(self, item: Item, outcome: Outcome, approval: Optional[Dict[str, Any]] = None) -> None:

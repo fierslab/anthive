@@ -140,6 +140,10 @@ class Item:
     static: List[ObjInfo] = field(default_factory=list)
     de: List[ObjInfo] = field(default_factory=list)
     other_basenames: List[str] = field(default_factory=list)
+    #: The API deposit these exact objects came from (``lib/dataset_deposit.py``): ``{'id', 'user', 'name',
+    #: 'email', 'update_of'}``. Its identity replaces the sidecar's ``depositor`` keys, and its
+    #: ``update_of`` is the update marker.
+    deposit: Optional[Dict[str, Any]] = None
 
     @property
     def key(self) -> str:
@@ -154,10 +158,17 @@ class Item:
         return f'{self.rel_dir}/{self.basename}'
 
     def content_signature(self) -> str:
-        """ETag + size of the h5ad and its sidecar: a change means a new upload to process."""
+        """ETag + size of the h5ad and its sidecar: a change means a new upload to process.
+
+        An API deposit also counts with its id: a new deposit of byte-identical
+        files (a corrected seed with the same sidecar, the usual fix of a failed
+        check) is processed again, although S3 gives it the same ETags.
+        """
         parts = [(self.h5ad.key, self.h5ad.etag, self.h5ad.size)]
         if self.mus:
             parts.append((self.mus.key, self.mus.etag, self.mus.size))
+        if self.deposit and self.deposit.get('id'):
+            parts.append(('deposit', str(self.deposit['id']), 0))
         return json.dumps(parts)
 
     def settle_signature(self) -> str:
@@ -429,6 +440,14 @@ def parse_sidecar_text(text: str) -> Dict[str, str]:
         key, _, value = line.partition('=')
         pairs[key.strip()] = value.strip()
     return pairs
+
+
+def deposit_author(deposit: Optional[Dict[str, Any]]) -> Optional[str]:
+    """``Name <email>`` of an API deposit's depositor (validated like a sidecar depositor), else None."""
+    if not deposit:
+        return None
+    return md_fill.depositor_of({'depositor': deposit.get('name') or deposit.get('user') or '',
+                                 'depositor_email': deposit.get('email') or ''})
 
 
 def head_etag(s3: Any, bucket: str, key: str) -> Optional[str]:
@@ -1115,9 +1134,23 @@ class Pipeline:
         import mus  # noqa: PLC0415
 
         annotation = mus.parse_mus_file(staged_mus)
-        depositor = md_fill.depositor_of(sidecar)
-        ingest = md_fill.ingest_block(cfg.route, item.h5ad.key, item.h5ad.etag, depositor, today)
-        notes = [note for note in [md_fill.depositor_note(sidecar)] if note]
+        deposit = item.deposit or None
+        if deposit:
+            # identity from the API deposit (the login), never from the sidecar
+            depositor = deposit_author(deposit)
+            ingest = md_fill.ingest_block(cfg.route, item.h5ad.key, item.h5ad.etag,
+                                          depositor or str(deposit.get('user') or ''), today)
+            ingest['deposit'] = {'id': deposit.get('id'), 'user': deposit.get('user')}
+            stated = ' '.join(str(sidecar.get(key) or '') for key in md_fill.DEPOSITOR_KEYS).strip()
+            notes = [f'Deposited through the API by {deposit.get("user")} (deposit {deposit.get("id")}).']
+            if stated:
+                cleaned = ''.join(char for char in stated if char.isprintable())[:120]
+                notes.append(f'The sidecar names the depositor {cleaned!r}; the API login was recorded instead.')
+        else:
+            depositor = md_fill.depositor_of(sidecar)
+            ingest = md_fill.ingest_block(cfg.route, item.h5ad.key, item.h5ad.etag, depositor, today)
+            notes = [note for note in [md_fill.depositor_note(sidecar)] if note]
+        deposit_update_of = str((deposit or {}).get('update_of') or '').strip()
         approval_caveat = None
         if approval:
             approval_caveat = md_fill.curation_caveat(
@@ -1158,13 +1191,23 @@ class Pipeline:
                                     f'not applied, left in incoming')
             return False
         if not is_update:
+            if deposit_update_of:
+                raise Blocked('needs_decision', f'the deposit declares an update of {deposit_update_of} but '
+                                                f'{store_md} does not exist')
             if any(sidecar.get(key) for key in UPDATE_MARKER_KEYS):
                 raise Blocked('needs_decision', f'the sidecar declares an update ({", ".join(k for k in UPDATE_MARKER_KEYS if sidecar.get(k))}) '
                                                 f'but {store_md} does not exist')
             from sidecar_merge import S3_KEYS  # noqa: PLC0415
 
+            dropped = set(S3_KEYS) | (set(md_fill.DEPOSITOR_KEYS) if deposit else set())
             kept = [line for line in sidecar_text.splitlines()
-                    if line.partition('=')[0].strip() not in S3_KEYS]     # stamps of the incoming copy
+                    if line.partition('=')[0].strip() not in dropped]     # stamps of the incoming copy
+            if deposit:                                                    # the login, not what the sidecar says
+                author = deposit_author(deposit)
+                login = re.sub(r'[^\w.@ -]', '', str(deposit.get('user') or ''))[:80]
+                kept.append(f'depositor={author.split(" <")[0] if author else login}')
+                if author:
+                    kept.append(f'depositor_email={deposit.get("email")}')
             staged_mus.write_text('\n'.join(kept) + '\n')
             sidecar_text = staged_mus.read_text()
             curation_notes: List[Tuple[str, str]] = []
@@ -1216,10 +1259,15 @@ class Pipeline:
             index_consumed = index_seed_matches_store()
             outcome.previous_version = str(old_meta.get('version') or '0.0.0')
             outcome.db_id = self._db_id(store_index, old_meta)
-            update_of = sidecar.get('update_of', '').strip()
+            update_of = deposit_update_of or sidecar.get('update_of', '').strip()
             if update_of and update_of.upper() != (outcome.db_id or '').upper():
-                raise Blocked('needs_decision', f'the sidecar says update_of={update_of} but {store_md} is '
+                raise Blocked('needs_decision', f'the {"deposit" if deposit_update_of else "sidecar"} says '
+                                                f'update_of={update_of} but {store_md} is '
                                                 f'{outcome.db_id}: a name collision? Rename one of them')
+            if deposit and not deposit_update_of:
+                raise Blocked('needs_decision', f'{outcome.db_id} exists, but the API deposit {deposit.get("id")} '
+                                                f'did not declare update_of (it was published after the deposit '
+                                                f'started?); deposit again with update_of')
             previous = sidecar.get('previous_sha256', '').strip()
             if previous and previous != old_sha:
                 raise Blocked('needs_decision', f'the sidecar says previous_sha256={previous[:12]} but the store '
@@ -1227,6 +1275,9 @@ class Pipeline:
             if cfg.require_update_marker and not (update_of or previous):
                 raise Blocked('needs_decision', f'{outcome.db_id} exists; an update needs update_of= or '
                                                 f'previous_sha256= in the sidecar (ingest_watch.require_update_marker)')
+            if deposit:                     # identity comes from the login: the deposit's depositor lines are not adopted
+                staged_mus.write_text('\n'.join(line for line in staged_mus.read_text().splitlines()
+                                                if line.partition('=')[0].strip() not in md_fill.DEPOSITOR_KEYS) + '\n')
             merge = md_fill.merge_sidecar_store_wins(
                 store_mus.read_text(encoding='utf-8') if store_mus.exists() else '', staged_mus.read_text())
             if merge.guarded:
@@ -1920,7 +1971,10 @@ class Pipeline:
         name, _, email = self.config.git_identity.partition('<')
         committer = ['-c', f'user.name={name.strip()}', '-c', f'user.email={email.rstrip(">").strip()}']
         sidecar_path = store_dir / f'{item.basename}{MUS_SUFFIX}'
-        depositor = md_fill.depositor_of(parse_sidecar_text(sidecar_path.read_text())) if sidecar_path.exists() else None
+        if item.deposit:
+            depositor = deposit_author(item.deposit)
+        else:
+            depositor = md_fill.depositor_of(parse_sidecar_text(sidecar_path.read_text())) if sidecar_path.exists() else None
         message = (f'ingest-watch: {item.display} {outcome.version} ({outcome.kind})\n\n'
                    f'Deposit {item.h5ad.key} (ETag {item.h5ad.etag}), sha256 {outcome.sha256}.\n')
         code, tail = self.runner.run('git add', ['git', '-C', store, 'add', '--', *rel])
