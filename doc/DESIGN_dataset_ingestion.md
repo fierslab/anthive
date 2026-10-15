@@ -999,52 +999,76 @@ bucket-wide key handed to depositors, no status a depositor can reach, self-decl
    `lib/_mus_vocab.yaml`, the sidecar keys the route reads, the seed `.md` and `index.md` rules with
    templates, held reasons, states).
 2. `POST /datasets/deposit` with `{data_project, basename, files: [{name, size, sha256, kind}], update_of?}`.
-   The server checks names, the group rule, sizes, the update rules and the per-user limits, records the
-   deposit, creates the multipart uploads itself and answers with presigned URLs for exact keys:
-   `<prefix><data_project>/<basename>.h5ad` and `.h5ad.mus`, `<prefix><data_project>/static/<name>` for the
-   seed `.md`, `index.md` and other static files, `<prefix><data_project>/de/<folder>/<file>` for DE tables.
-   This is the layout `mus s3 upload` writes, so the watcher needs no second code path.
+   The server checks names, the group rule, sizes and the update rules, then the rate limit (before any call
+   to the object store), then in one SQLite transaction (`BEGIN IMMEDIATE`) the per-user limits, the record
+   and a lock on every target key (`open_keys`, primary key = the key). Each file has a target key in the
+   watched prefix, the layout `mus s3 upload` writes (`<prefix><data_project>/<basename>.h5ad` and `.h5ad.mus`,
+   `.../static/<name>` for the seed `.md`, `index.md` and other static files, `.../de/<folder>/<file>`), and an
+   upload key in the deposit's own staging folder, `<staging_prefix><deposit_id>/<the same path>`
+   (`datasets_deposit_staging_prefix`, default `__deposits/`, never inside the watched prefix). The presigned
+   URLs point at the upload keys only.
 3. The client uploads. Files up to `datasets_deposit_single_put_max_mb` (64) are one `PutObject`, larger ones
    multipart (part size at least 64 MiB, whole MiB, at most about 9,500 parts). Every URL signs the exact
-   `Content-Length`; a single PUT also signs `x-amz-meta-sha256` and `x-amz-meta-deposit`, which the client
-   must send as given; multipart objects get the same metadata from `CreateMultipartUpload` on the server.
-   A different size, a missing header or another key is a 403 from S3 (checked on the lab bucket).
-   `POST /datasets/deposit/{id}/urls` refreshes URLs of one file and lists the parts S3 already has (resume).
-4. `POST /datasets/deposit/{id}/complete`. The server lists the parts (no ETags from the client), checks part
-   numbers and sizes against the declaration, completes, HEADs every object (size, `sha256` and `deposit`
-   metadata), records the ETags, and reads the sidecar back (at most 1 MB): its `sha256=` must be the
-   declared h5ad hash and `data_project=` the deposit's; held reasons it can foresee (no `license`, no
-   `data_use`, `access=public`), vocabulary problems and an ignored `depositor=` come back as warnings.
+   `Content-Length`; a single PUT also signs `x-amz-meta-sha256` and `x-amz-meta-deposit`; multipart objects
+   get the same metadata from `CreateMultipartUpload` on the server. `x-amz-meta-sha256` is the depositor's
+   attestation only: the pipeline recomputes the hash. A different size, a missing header or another key is a
+   403 from S3 (checked on the lab bucket). No URL lives longer than the deposit's window.
+   `POST /datasets/deposit/{id}/urls` refreshes URLs of one file and lists the parts S3 already has (resume;
+   at most `max_refreshes` per deposit).
+4. `POST /datasets/deposit/{id}/complete` moves the deposit to `completing` (a compare-and-set; withdraw and
+   expiry wait), lists the parts (no ETags from the client), checks part numbers and sizes, completes the
+   uploads in staging, HEADs every staging object (size, `sha256` and `deposit` metadata), reads the sidecar
+   back (at most 1 MB: `sha256=` must be the deposited h5ad's, or for a corrected sidecar the waiting h5ad's
+   recorded hash; `data_project=` the deposit's), then copies every file to its target key (`CopyObject`,
+   managed `UploadPartCopy` above 5 GB) with the deposit metadata, records the ETags of the copies, deletes
+   the staging objects, releases the key locks and sets `uploaded`. A refusal at any step deletes the copies
+   already made and returns the deposit to `uploading`.
 5. The watcher lists the objects, links them to the deposit (22.4) and runs the pipeline of section 21.
-6. `GET /datasets/deposit[/{id}]` and `/report` follow it; `withdraw`, `approve`, `reject` act on it.
+6. `GET /datasets/deposit[/{id}]` and `/report` follow it; `withdraw`, `approve`, `reject`, `expire` act on it.
 
 ### 22.3 Rules
 
 | Rule | Answer |
 | --- | --- |
-| Caller not signed in, not in `datasets_upload_groups`, or `auth.mode: none` | 403 `forbidden` on every route (also `vocab`); `X-Remote-*` is never read |
+| Caller not signed in, not in `datasets_upload_groups`, or `auth.mode: none` | 403 `forbidden` on every route (also `vocab`); `X-Remote-*` is never read. Admin routes (approve, reject, expire, owners, `?all=true`) also let in admins outside the upload groups |
 | Another user's deposit id, a malformed id | 404 `not_found` (admins see every deposit) |
-| `data_project`: a valid segment; an existing group spelled exactly, or a new group named like `Smith2024` (`^[A-Z][A-Za-z0-9_]*\d{4}$`, mus' rule); a case-insensitive clash with an existing group is refused | 422 `invalid_data_project` |
+| `data_project`: a valid segment; an existing group (a folder with `index.md`) spelled exactly, or a new group named like `Smith2024` (`^[A-Z][A-Za-z0-9_]*\d{4}$`, mus' rule); a folder without `index.md` is not available; a case-insensitive clash is refused without naming the existing group (admins see it) | 422 `invalid_data_project` |
+| `basename`: `[A-Za-z0-9._-]`, at most 50 characters, not `index` and not `*.index` (group seeds) | 422 `invalid_name` |
 | File names: one segment of `[A-Za-z0-9._-]` not starting with `.` or `_` (DE: `<folder>/<file>`), the fixed names per kind, no seed names as static files | 422 `invalid_name` |
 | One `mus` always; one h5ad unless a corrected sidecar is deposited for an h5ad of the same user still in incoming (`continues`) | 422 `invalid`, `h5ad_required` |
-| Sizes: the deposit at most `datasets_deposit_max_gb` (200); text kinds at most 1 MB | 413 `too_large` |
-| A dataset that is in the store: `update_of` must name it; with `update_policy: own` (default) only the user whose deposit published it, or an admin | 409 `update_of_required`, `update_of_mismatch`, 403 `not_your_dataset`; `update_of` for a dataset that does not exist is 422 `update_of_unknown` |
-| A key that is part of an open deposit; a key in incoming written by another user's deposit or not by a deposit (a lab member's `mus s3 upload`) | 409 `key_in_open_deposit`, `key_taken` (admins may replace) |
-| Open deposits per user (`max_open_per_user`, 5); bytes waiting per user (`max_pending_gb_per_user`, 400); presign calls per minute (`presign_per_minute`, 30) | 429 `too_many_open_deposits`, 413 `quota_exceeded`, 429 `rate_limited` with `Retry-After` |
+| Sizes: the deposit at most `datasets_deposit_max_gb` (200, equal to `datasets_upload_max_gb` of the check `files.size`); text kinds at most 1 MB | 413 `too_large` |
+| A dataset that is in the store and the caller may not update it (`update_policy: own`: only its owner, see 22.6, or an admin): one answer whether or not `update_of` was given, without the dataset id | 409 `name_taken` |
+| A dataset the caller may update: `update_of` must name it | 409 `update_of_required`, `update_of_mismatch`; `update_of` for a dataset that does not exist is 422 `update_of_unknown` |
+| A key locked by an open deposit (for `index.md` the answer says to use `<basename>.index.md`); a key in incoming written by another user's deposit or by a lab member's upload | 409 `key_in_open_deposit`, `key_taken` (admins may replace) |
+| Open deposits per user (`max_open_per_user`, 5); deposits started per user in 24 hours (`max_per_day`, 20); bytes waiting per user (`max_pending_gb_per_user`, 400); presign calls per minute (`presign_per_minute`, 30); URL refreshes per deposit (`max_refreshes`, 500) | 429 `too_many_open_deposits`, `too_many_deposits_today`, 413 `quota_exceeded`, 429 `rate_limited` with `Retry-After`, 429 `too_many_refreshes` |
 | Deposits off (`datasets_deposit_enabled` false or no S3 key pair) | 503 `disabled` for create and the upload routes; `vocab` says `uploads_enabled: false` |
-| URLs live `url_ttl_hours` (24); an open deposit expires that long after its last refresh, at the latest `max_open_days` (7) after it was created; an expired deposit's uploads are aborted and its own objects deleted (on the next call) | 410 `expired` |
+| URLs live `url_ttl_hours` (24) and never past the deposit's window; an open deposit expires that long after its last refresh, at the latest `max_open_days` (7) after it was created; an expired deposit's uploads are aborted and its staging folder emptied (by the next API call or the watcher's next poll) | 410 `expired` |
 
 ### 22.4 Watcher integration
 
-- **Link.** An item belongs to a deposit when its h5ad and sidecar keys and ETags are exactly the ones the
-  deposit completed (`DepositStore.find_for_item`, newest first). Unlinked items (lab members' `mus s3
-  upload`) behave as before.
-- **Open deposits.** While a deposit of a project is uploading and not expired, the watcher leaves every item
-  of that project alone (its files may be half there). Completion, withdrawal or expiry lifts it.
+- **Link.** An item belongs to a deposit when its h5ad and sidecar keys and ETags are exactly the copies the
+  deposit completed (`DepositStore.find_for_item`, newest first).
+- **Hold back.** Items whose h5ad or sidecar key is locked by a deposit that is `uploading` or `completing`
+  wait; nothing else waits (an open deposit no longer freezes its project). Uploads never reach the watched
+  prefix before complete, so only the seconds of the copy matter.
+- **Static and DE files belong to their deposit.** A linked item uses only the static and DE objects its own
+  deposit completed (and those of the deposits a corrected sidecar continues); an unlinked item never uses an
+  object a waiting deposit completed. The seeds (`<basename>.md`, `index.md`, `<basename>.index.md`) follow
+  the same rule.
+- **Refusals.** An unlinked item whose h5ad or sidecar carries `x-amz-meta-deposit` is `needs_decision`: only
+  the server writes that mark, so it is a replayed or left-over object. With `ingest_watch.accept_unlinked:
+  false` every unlinked item is `needs_decision`; it is `true` for now because lab members still deposit with
+  `mus s3 upload`, and becomes `false` once vark ships (Mark, 2026-10-15: preparation and upload move to
+  vark).
+- **Fail closed.** A deposit store that exists but cannot be opened or read stops the poll (TransientError,
+  backoff); nothing is processed without the deposit information.
+- **Housekeeping.** Each poll expires stale deposits (and interrupted completes, `completing` for 12 hours),
+  removes staging objects of deposits that are not open (a late PUT to an old URL lands there and is swept),
+  and writes pending owner caveats (22.6).
 - **Identity.** For a linked item the depositor is the deposit's login (Remote-User, with Remote-Name and
   Remote-Email when the proxy sent them): the `.md` `ingest:` block gets `depositor` and `deposit: {id,
-  user}`, the store sidecar of a new dataset gets `depositor=` / `depositor_email=` from the record (the
-  deposited lines are dropped), the store commit has that author, and a `depositor` stated in the sidecar is
+  user}`, the store sidecar gets `depositor=` / `depositor_email=` from the record (deposited lines are
+  dropped, also on updates), the store commit has that author, and a `depositor` stated in the sidecar is
   only mentioned in the changelog.
 - **Updates.** The record's `update_of` is the update marker. A linked deposit without it for a dataset that
   exists by the time the watcher runs is `needs_decision`.
@@ -1066,31 +1090,43 @@ copy in the record. A deposit whose objects were replaced before the watcher saw
 What a depositor sees is the curator view: `admin_detail` (other datasets' ids, cohort names, demographic
 match tables) is dropped as in `ant ingest-check --audience curator`, and every string loses its server
 paths (the store, state, work and tmp roots become `<store>`, `<state>`, ...; any other absolute path
-`<path>/<file name>`). Donor identifiers and crosswalk content never reach the report in the first place
-(section 8.2). The e-mail carries only the state, the dataset id and version, held reasons and the failed
-checks with their fix.
+`<path>/<file name>`), `s3://` addresses and the bucket name. Admin actions show as "an admin" to the
+depositor. Donor identifiers and crosswalk content never reach the report in the first place (section 8.2).
+The e-mail carries only the state, the dataset id and version, held reasons and the failed checks with their
+fix.
 
-### 22.6 Withdraw, approve, reject
+### 22.6 Withdraw, expire, approve, reject, owners
 
-- `withdraw` (the depositor or an admin): aborts the deposit's multipart uploads and deletes its own objects
-  through `delete_consumed` (HEAD-compared, one key at a time), but only objects whose
+- `withdraw` (the depositor or an admin): a compare-and-set to `withdrawing` (refused with 409 `busy` while a
+  complete runs), then aborts the deposit's multipart uploads, empties its staging folder and deletes its own
+  incoming copies through `delete_consumed` (HEAD-compared, one key at a time), but only objects whose
   `x-amz-meta-deposit` is this deposit and whose ETag is the completed one; anything else is reported as
-  kept. Refused while the watcher processes the deposit (409 `busy`) and once it is live (409 `live`).
+  kept. Refused while the watcher processes the deposit (409 `busy`), once it is live (409 `live`) and while a
+  corrected sidecar deposit uses its h5ad (409 `in_use`, naming that deposit).
+- `expire` (admins): ends an open deposit at once, as the expiry does.
 - `approve` and `reject` (admins): the watcher's own `approve` / `reject` on the watcher's row of this
   deposit, with `channel='api'` and the Remote-User as `by`. They need the row to be about this deposit
   (409 `not_reviewable`) and, for approve, `held` (409 `not_held`). No lock is taken: the watcher writes a
   final-state row only when its content changes, so the approval is not lost; it is bound to the settle
   signature as before.
+- Owners (Mark, 2026-10-15: `update_policy` stays `own`): datasets published before deposits existed have no
+  depositor, so an admin names one with `POST /datasets/deposit/owners {db_id, user, note?}` or
+  `ant-ingest-watch owner set <db_id> <user> --by NAME` on the watcher's host. The assignment is kept in the
+  deposit store (`owners`, it wins over the deposit history) and written into the dataset's `.md` as a caveat
+  (topic `dataset_owner`) by the watcher's next poll (the CLI writes it at once); the store commit of that
+  `.md` is left to a person.
 
 ### 22.7 Security notes
 
 - The server's S3 credentials never leave it: `datasets_deposit_s3` (container sites: the key pair in
-  `secrets/s3_incoming_access_key_id` and `s3_incoming_secret_access_key`), else the `s3` block. The review
-  found that the object store probably cannot scope keys to a prefix (about 70% confidence); then the api
-  holds a bucket-wide key, which `ant-stack check` warns about.
-- A presigned URL is bound to one key, one size and (single PUT) the metadata; it cannot list, read or
-  delete. Depositors cannot see other deposits, and the key exclusivity of 22.3 stops one depositor from
-  overwriting another's waiting files.
+  `secrets/s3_incoming_access_key_id` and `s3_incoming_secret_access_key`), else the `s3` block. It needs
+  `PutObject`, the multipart calls, `CopyObject`, `HeadObject`, `GetObject`, `DeleteObject` and `ListBucket`
+  on the staging prefix and the incoming prefix. The first review found that the object store probably
+  cannot scope keys to a prefix (about 70% confidence); then the api holds a bucket-wide key, which
+  `ant-stack check` warns about.
+- A presigned URL is bound to one staging key, one size and (single PUT) the metadata; it cannot list, read,
+  delete or write a key the watcher reads, and it dies with the deposit's window. Depositors cannot see other
+  deposits; the key locks and `key_taken` stop one depositor from overwriting another's waiting files.
 - The api and the watcher must share `ingest_state_dir` (the deposit store, the watcher's state database,
   the report copies). On a container site the watcher runs on the host with
   `ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest` and the same uid as the containers.
@@ -1098,10 +1134,28 @@ checks with their fix.
 ### 22.8 Not done in phase 1
 
 - vark (`vark datasets vocab | deposit | status | withdraw`) and pyvark, the `anthive-dataset-deposit` skill:
-  their owners build on the shapes in `doc/API_CHANGELOG.md` 2.46.0.
+  their owners build on the shapes in `doc/API_CHANGELOG.md` 2.46.0. When vark ships, set
+  `ingest_watch.accept_unlinked: false`.
 - No web page for deposits (no help topic either: the web UI does not mention them yet).
-- `ant ingest-check` checks `files.size` against `datasets_upload_max_gb` (50), the deposit API accepts up to
-  `datasets_deposit_max_gb` (200): a deposit between the two fails that check. One of the two should change.
-- Updates of datasets that were published before deposits existed have no owner: only admins can deposit a
-  new version of them (`update_policy: own`).
 - The watcher has no compose service yet (21.8), so container sites run it on the host.
+
+### 22.9 Security review (2026-10-15)
+
+| Finding | Change |
+| --- | --- |
+| C1 presigned PUT URLs outlived their deposit: after complete, withdraw or expiry a re-PUT or replay wrote the watched keys, and the object was ingested unlinked with the sidecar's identity, past the checks, quotas, withdraw and expiry | uploads go to `<staging_prefix><deposit_id>/`, outside the watched prefix; complete copies the verified files in; withdraw, expiry and a sweep each poll empty the staging folders; URLs never outlive the deposit window; the watcher refuses unlinked objects carrying a deposit mark; `ingest_watch.accept_unlinked` (true until vark ships) |
+| S1 an open deposit froze its whole project | only items whose keys a deposit in `uploading` / `completing` locks wait; URL refreshes capped (`max_refreshes`); admin `POST .../expire` |
+| S2 a linked item consumed every static and DE file of the project, also another user's; unlinked items consumed deposit files | per-deposit static, DE and seeds (`deposit_objects`, continuation chain); unlinked items skip deposit files |
+| S3 an unreadable deposit store let the poll run without deposit information | fail closed: TransientError, no poll |
+| S4 a dataset named `index` (or `*.index`) collided with the group seed names | refused by the API and reported as malformed by `plan_items` |
+| create checked limits and keys outside a transaction | `BEGIN IMMEDIATE` around the checks and the insert, key locks with a primary key |
+| withdraw or expiry could run while a complete copied | per-deposit compare-and-set states (`completing`, `withdrawing`, `expiring`); an interrupted complete is cleaned up after 12 hours |
+| withdraw of a deposit deleted the h5ad a corrected-sidecar deposit used | 409 `in_use` |
+| no daily limit; the rate limiter ran after S3 calls | `max_per_day` (20); the limiter runs before any S3 call |
+| admins outside the upload groups could not approve; MCP gate differed from REST in basic mode | admin routes admit admins; `_may_deposit` treats basic-mode `auth.admins` like REST |
+| existence oracle: different answers (with the dataset id) for "exists, update_of required" and "exists, not yours"; case clash named the group | one `name_taken` answer without the id for callers who may not update; the clash message names nothing (admins excepted) |
+| folders without `index.md` (scripts and the like) counted as groups | not a group; refused as a group name |
+| `s3://` addresses and the bucket name, admin names in depositor views | redacted; "an admin" |
+| malformed `refresh_urls` body or a broken `.md` gave a 500 | 422; a broken `.md` counts as an existing dataset |
+| a continuation sidecar was not checked against the waiting h5ad | its `sha256=` must equal the waiting h5ad's recorded hash |
+| `x-amz-meta-sha256` could be mistaken for verification | documented as an attestation; the pipeline recomputes the hash |

@@ -482,8 +482,9 @@ s3:
 
 1. Give the api a key pair to presign with:
    `<state_dir>/secrets/s3_incoming_access_key_id` and `s3_incoming_secret_access_key` (chmod 600). Limit it
-   to `PutObject`, the multipart calls, `HeadObject`, `GetObject` and `DeleteObject` on `__incoming/*` if your
-   object store can scope keys. Without these files the api presigns with the read-write pair
+   to `PutObject`, the multipart calls, `CopyObject`, `HeadObject`, `GetObject`, `DeleteObject` and listing on
+   `__deposits/*` (where uploads land) and `__incoming/*` (where complete copies them) if your object store
+   can scope keys. Without these files the api presigns with the read-write pair
    (`s3_access_key_id`), and `check` warns that the api container then holds the catalogue's write key.
 2. Run the watcher on the host, as the uid the containers run as, with the api's state:
    `ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest`. The api keeps the deposits in
@@ -493,6 +494,11 @@ s3:
    `dataset deposits: on for admins, curators; presigning with the incoming key pair; run ant-ingest-watch ...`,
    or the problem (`s3.enabled` off, no key pair).
 4. For e-mails to depositors (live, held, failed) set `ingest_watch.notify.smtp_host` in the watcher's config.
+5. Datasets published before deposits existed have no owner, so only admins can deposit new versions of them.
+   Name an owner with `ant-ingest-watch owner set <db_id> <user> --by <you>` on the watcher's host (or
+   `POST /api/datasets/deposit/owners`); it adds a caveat to the dataset's `.md`, which you commit.
+6. Once depositors use vark, set `ingest_watch.accept_unlinked: false` in the watcher's config so only
+   deposits made with an Anthive login are published.
 
 Depositors need the curators group (`auth.users[].groups`) and, once it exists, the vark client. Their MCP
 link shows `my_deposits` and `deposit_status`; uploads never go through MCP.

@@ -45,7 +45,14 @@ Errors are JSON `{"status": "<word>", "message": "...", ...}` with the HTTP stat
 `not_held`, `not_reviewable`, `h5ad_changed`), 410 `expired`, 413 (`too_large`, `quota_exceeded`), 422
 (`invalid`, `invalid_name`, `invalid_data_project`, `update_of_unknown`, `h5ad_required`,
 `sidecar_mismatch`), 429 (`too_many_open_deposits`, `rate_limited` with `Retry-After`), 502 `s3_error`, 503
-`disabled`.
+`disabled`. Added after the security review of the same day: 409 `name_taken` (a published dataset you may
+not update; one answer whether or not `update_of` was given, without its id), `in_use`, `not_open`, 429
+`too_many_deposits_today`, `too_many_refreshes`.
+
+Uploads go to a staging key of the deposit (`upload_key` in each file object, `__deposits/<deposit_id>/...`),
+never to the watched prefix: `complete` checks the staged files and copies them to their `key` under the
+prefix. A URL used after complete, withdraw or expiry can only write the staging folder, which is emptied.
+URLs never live past the deposit's window. A `basename` of `index` or `*.index` is refused.
 
 - `GET /datasets/deposit/vocab`: `{schema: "anthive.deposit_vocab/1", uploads_enabled, limits: {max_gb,
   max_files, text_file_max_kb, single_put_max_mb, min_part_mb, url_ttl_hours, max_open_days,
@@ -61,7 +68,7 @@ Errors are JSON `{"status": "<word>", "message": "...", ...}` with the HTTP stat
   `seed_md` (`<basename>.md`), `index_md` (`index.md` or `<basename>.index.md`), `static`, `de`
   (`<folder>/<file>`). Answer `{deposit_id, state: "uploading", data_project, basename, update_of,
   continues, expires, url_ttl_seconds, total_bytes, files: [...], warnings, next: {urls, complete, status}}`.
-  Each file is `{name, kind, key, size, sha256, method}` plus, for `method: "put"`, `{url, headers:
+  Each file is `{name, kind, key, upload_key, size, sha256, method}` plus, for `method: "put"`, `{url, headers:
   {"x-amz-meta-sha256", "x-amz-meta-deposit", "Content-Length"}}` (send exactly these headers with the PUT),
   or for `method: "multipart"`, `{upload_id, part_size, part_count, parts: [{part_number, size, url}],
   parts_more}` (PUT each part's bytes to its URL; the first `parts_per_batch` parts come here). Every URL
@@ -95,14 +102,25 @@ Errors are JSON `{"status": "<word>", "message": "...", ...}` with the HTTP stat
   on this deposit, recorded with the admin's login. Approve answers `{deposit_id, state: "stable", approval:
   {by, reasons, note}, next}`; reject `{deposit_id, state: "rejected", note}`.
 
+- `POST /datasets/deposit/{id}/expire` (admins): end an open deposit now; `{deposit_id, state: "expired"}`.
+- `POST /datasets/deposit/owners` (admins): body `{db_id, user, note?}` names who may deposit new versions of a
+  dataset published before deposits existed (`update_policy: own`); `{db_id, user, assigned_by, caveat}`. The
+  watcher writes a caveat into the dataset's `.md`. Host CLI: `ant-ingest-watch owner set <db_id> <user> --by
+  NAME`.
+- Admin routes (approve, reject, expire, owners, `GET /datasets/deposit?all=true`) admit admins who are not
+  in `datasets_upload_groups`.
+
 MCP: `my_deposits(all_users=False)` and `deposit_status(deposit_id)`, read-only, shown only to users in
 `datasets_upload_groups`. Datasets are uploaded with vark, never through MCP.
 
 Config (new keys, `anthive.default.yaml`): `datasets_upload_groups`, `datasets_deposit_enabled` (default off;
 env `ANTHIVE_DATASETS_DEPOSIT_ENABLED`), `datasets_deposit_max_gb`, `_url_ttl_hours`, `_max_open_days`,
 `_max_open_per_user`, `_max_pending_gb_per_user`, `_presign_per_minute`, `_parts_per_batch`,
-`_single_put_max_mb`, `_max_files`, `_update_policy` (`own` | `any`), `datasets_deposit_s3` (an optional key
-pair for presigning). Container sites: `services.dataset_deposit` and the `datasets:` block of `site.yaml`.
+`_single_put_max_mb`, `_max_files`, `_max_per_day` (20), `_max_refreshes` (500), `_staging_prefix`
+(`__deposits/`), `_update_policy` (`own` | `any`), `datasets_deposit_s3` (an optional key pair for
+presigning); `ingest_watch.accept_unlinked` (default true; false refuses uploads that no API deposit accounts
+for). `datasets_upload_max_gb` (the check `files.size`) is now 200 GB, like the deposit limit. Container sites:
+`services.dataset_deposit` and the `datasets:` block of `site.yaml`.
 
 ## 2.45.1 (2026-10-14)
 

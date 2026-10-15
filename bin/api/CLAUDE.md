@@ -158,8 +158,10 @@ and `lib/config.py` (anthive.yaml loader).
   `/complete`, `/report`, `/withdraw`, `/approve`, `/reject`), tag `datasets-deposit`, hidden from the schema.
   Rules live in `lib/dataset_deposit.py` (`DepositService`, store `<ingest_state_dir>/deposits.sqlite`); the
   handlers only call `_require_dataset_uploader` (Remote-User in `datasets_upload_groups`, never anonymous,
-  never on `auth.mode: none`) and turn `DepositError` into its JSON. The server presigns exact keys under
-  `ingest_watch.prefix` with `datasets_deposit_s3` (else the `s3` keys); the keys never leave it. Status
+  never on `auth.mode: none`; `admin_ok` for the admin routes approve/reject/expire/owners/`?all`) and turn
+  `DepositError` into its JSON. URLs point at `<datasets_deposit_staging_prefix><deposit_id>/...`, NEVER at
+  `ingest_watch.prefix`: complete copies the verified files in (security review C1; never presign a watched
+  key). Presigning uses `datasets_deposit_s3` (else the `s3` keys); the keys never leave the server. Status
   merges the watcher's `ingest_watch.sqlite` row (same `ingest_state_dir`, read-only) with the record;
   everything a depositor sees is redacted (`redacted_report`, `sanitize_text`). Another user's deposit is a
   404. Approve/reject call `ingest_watch.approve/reject(channel='api')`. ant-mcp: `my_deposits`,

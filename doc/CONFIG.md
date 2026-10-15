@@ -75,8 +75,8 @@ See `doc/LIBRARY.md` and `doc/LIBRARY_INDEX.md`.
 
 #### `datasets_upload_max_gb`
 - **Type**: number
-- **Default**: `50`
-- **Description**: Largest `.h5ad` that `ant ingest-check` (check `files.size`) and later the upload route accept. See `doc/DESIGN_dataset_ingestion.md`.
+- **Default**: `200` (50 before 2.46.0)
+- **Description**: Largest `.h5ad` that `ant ingest-check` (check `files.size`) accepts. Keep it equal to `datasets_deposit_max_gb`, the largest deposit the API takes. See `doc/DESIGN_dataset_ingestion.md`.
 
 #### `datasets_auto_publish_public`
 - **Type**: boolean
@@ -120,7 +120,7 @@ See `doc/LIBRARY.md` and `doc/LIBRARY_INDEX.md`.
 
 #### `datasets_deposit_*`
 - **Type**: see `anthive.default.yaml`
-- **Default**: `enabled: false`, `max_gb: 200`, `url_ttl_hours: 24`, `max_open_days: 7`, `max_open_per_user: 5`, `max_pending_gb_per_user: 400`, `presign_per_minute: 30`, `parts_per_batch: 100`, `single_put_max_mb: 64`, `max_files: 100`, `update_policy: own`, `s3: {}`
+- **Default**: `enabled: false`, `max_gb: 200`, `url_ttl_hours: 24`, `max_open_days: 7`, `max_open_per_user: 5`, `max_pending_gb_per_user: 400`, `presign_per_minute: 30`, `parts_per_batch: 100`, `single_put_max_mb: 64`, `max_files: 100`, `max_per_day: 20`, `max_refreshes: 500`, `staging_prefix: __deposits/` (where uploads land, outside `ingest_watch.prefix`), `update_policy: own`, `s3: {}`
 - **Description**: Dataset deposits through the API (doc/DESIGN_dataset_ingestion.md section 22). `datasets_deposit_enabled` (env `ANTHIVE_DATASETS_DEPOSIT_ENABLED`) switches them on; `datasets_deposit_s3` is an optional key pair for presigning (endpoint, region and bucket default to `s3`). Deposits land under `ingest_watch.prefix`. Container sites set `services.dataset_deposit` and the `datasets:` block.
 
 #### `library_upload_max_pdf_mb`

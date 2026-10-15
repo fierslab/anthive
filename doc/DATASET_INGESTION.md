@@ -28,7 +28,9 @@ shapes are in `doc/API_CHANGELOG.md` (2.46.0).
    new group is named like a paper (`Smith2024`); an existing group is spelled exactly as in the catalogue.
 3. **Declare the deposit**: `POST /api/datasets/deposit` with the group, the basename and every file's
    name, size, sha256 and kind. The answer has one presigned URL per small file (send the listed headers
-   with the PUT) and part URLs for large ones. Nothing else on S3 is reachable with them.
+   with the PUT) and part URLs for large ones. They write only the deposit's own staging folder: nothing
+   reaches the catalogue's incoming folder before you complete, and an old URL can never change a deposit
+   afterwards.
 4. **Upload**, then `POST /api/datasets/deposit/<id>/complete`. The server checks every part and the sidecar
    and says what will hold the deposit (no `license`, no `data_use`, `access=public`).
 5. **Follow it**: `GET /api/datasets/deposit/<id>` shows the state, the dataset id and version once it is
@@ -42,7 +44,10 @@ shapes are in `doc/API_CHANGELOG.md` (2.46.0).
    live: the uploads are aborted and the deposit's own files are deleted.
 
 Updates: a deposit for a dataset that is already published must say `"update_of": "<db_id>"`, and by default
-only the user whose deposit published the dataset (or an admin) may deposit a new version. The sidecar's
+only the user whose deposit published the dataset (or an admin) may deposit a new version. For datasets
+published before deposits existed an admin names the owner (`POST /api/datasets/deposit/owners` or
+`ant ingest-watch owner set <db_id> <user> --by NAME`); a caveat on the dataset records it. A dataset may not
+be called `index` (or end in `.index`). The sidecar's
 `depositor=` lines are ignored on this route: the login is recorded as the depositor (the `.md` `ingest:`
 block, the store sidecar and the author of the store commit).
 
@@ -59,7 +64,10 @@ Admins approve or reject a held deposit with `POST /api/datasets/deposit/<id>/ap
 /api/datasets/deposit?all=true` lists every deposit. MCP clients see `my_deposits` and `deposit_status`
 (read-only); data never goes through MCP.
 
-Operators: the api presigns with `datasets_deposit_s3` (container sites: `secrets/s3_incoming_access_key_id`
+Operators: uploads that no API deposit accounts for (lab members' `mus s3 upload`) are still published while
+`ingest_watch.accept_unlinked` is true (the default for now); set it to false once depositors use vark.
+Objects that carry a deposit's mark but were not completed by it are always refused (`needs_decision`).
+Admins end an open deposit with `POST /api/datasets/deposit/<id>/expire`. The api presigns with `datasets_deposit_s3` (container sites: `secrets/s3_incoming_access_key_id`
 and `s3_incoming_secret_access_key`), else with the `s3` keys. The api and the watcher must share
 `ingest_state_dir`: on a container site run the watcher on the host with
 `ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest` as the containers' uid (`ant-stack check` prints the line).
@@ -332,7 +340,7 @@ is a group in the store.
 | id | What it checks | Fails when | Typical fix |
 | --- | --- | --- | --- |
 | `files.sha256` | h5ad hash against `--sha256` and the `sha256` in the `.md` | mismatch (existing dataset: warn) | re-upload, or drop the stale `sha256` |
-| `files.size` | size against `datasets_upload_max_gb` | over the limit | split the dataset |
+| `files.size` | size against `datasets_upload_max_gb` (200 GB) | over the limit | split the dataset |
 | `files.filename` | basename and group folder names | spaces, special characters, over 50 characters, group starting with `_` or `.` | rename |
 | `h5ad.structure` | h5ad opens, has X or layers, obs, var | unreadable or incomplete; warns without an `obsm` embedding | re-save with anndata |
 | `duckdb.integrity` | `ant duckdb-check` on a copy of the (scratch) database | convert failed or tool exits non-zero | fix what `ant-convert` reads |
