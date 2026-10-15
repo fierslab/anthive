@@ -30,6 +30,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import socket
 import re
 import secrets
 import sqlite3
@@ -39,7 +41,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from ingest_pipeline import (H5AD_SUFFIX, MUS_SUFFIX, delete_consumed, parse_sidecar_text, valid_segment)
+from ingest_pipeline import (DE_DATA_EXTS, H5AD_SUFFIX, MUS_SUFFIX, delete_consumed, parse_sidecar_text,
+                             valid_segment)
 
 DB_FILE = 'deposits.sqlite'
 REPORTS_DIR = 'deposit_reports'
@@ -85,7 +88,8 @@ CREATE TABLE IF NOT EXISTS deposits (
     created REAL, updated REAL, expires REAL, completed REAL, total_bytes INTEGER DEFAULT 0,
     watch_key TEXT, h5ad_etag TEXT, mus_key TEXT, mus_etag TEXT, continues TEXT,
     watch_state TEXT, db_id TEXT, version TEXT, kind TEXT, held_reasons TEXT, error TEXT, warnings TEXT,
-    report_file TEXT, notified_state TEXT, approval TEXT, h5ad_sha256 TEXT, refreshes INTEGER DEFAULT 0
+    report_file TEXT, notified_state TEXT, approval TEXT, h5ad_sha256 TEXT, refreshes INTEGER DEFAULT 0,
+    deposit_kind TEXT DEFAULT 'dataset', progress TEXT, complete_error TEXT, worker TEXT
 );
 CREATE INDEX IF NOT EXISTS deposits_user ON deposits(user);
 CREATE INDEX IF NOT EXISTS deposits_watch_key ON deposits(watch_key);
@@ -148,6 +152,7 @@ class DepositSettings:
     max_files: int = 100
     max_per_day: int = 20               # deposits a user may start in 24 hours
     max_refreshes: int = 500            # URL refresh calls per deposit
+    async_complete_gb: float = 5.0      # deposits larger than this complete in the background (202)
     update_policy: str = 'own'          # own | any
     prefix: str = '__incoming/'
     #: Where presigned uploads land: outside the watched prefix, one folder per deposit. Complete copies the
@@ -271,7 +276,10 @@ class DepositStore:
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.executescript(SCHEMA)
         for table, column, kind in (('deposits', 'h5ad_sha256', 'TEXT'), ('deposits', 'refreshes', 'INTEGER DEFAULT 0'),
-                                    ('files', 'staging_key', 'TEXT'), ('files', 'staging_etag', 'TEXT')):
+                                    ('files', 'staging_key', 'TEXT'), ('files', 'staging_etag', 'TEXT'),
+                                    ('deposits', 'deposit_kind', "TEXT DEFAULT 'dataset'"),
+                                    ('deposits', 'progress', 'TEXT'), ('deposits', 'complete_error', 'TEXT'),
+                                    ('deposits', 'worker', 'TEXT')):
             if column not in {row[1] for row in self.conn.execute(f'PRAGMA table_info({table})')}:
                 self.conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
 
@@ -550,6 +558,23 @@ def find_dataset_md(store_root: Path, db_id: str) -> Optional[Path]:
     return None
 
 
+def facet_registry_for_vocab() -> List[Dict[str, Any]]:
+    """Every registered (and deprecated) ``ant_*`` facet with what a client needs to propose a mapping."""
+    import obscol_tags  # noqa: PLC0415
+
+    facets = []
+    for tag, entry in sorted(obscol_tags.facet_registry().items()):
+        definition = obscol_tags.facet_definition(tag)
+        facets.append({'column': entry.get('column') or f'ant_{tag}', 'tag': tag, 'status': entry.get('status'),
+                       'kind': entry.get('kind'), 'controlled_values': entry.get('controlled_values'),
+                       'range': entry.get('range'), 'integer': entry.get('integer'), 'ordered': entry.get('ordered'),
+                       'facet_scopes': entry.get('facet_scopes') or [], 'replaced_by': entry.get('replaced_by') or [],
+                       'computed_from': entry.get('computed_from'),
+                       'hint_keywords': definition.get('hint_keywords') or [], 'label': definition.get('label'),
+                       'summary': definition.get('summary')})
+    return facets
+
+
 def clean_note(note: Any, limit: int = 300) -> str:
     """One line of plain text: control characters and newlines become spaces, YAML document markers go."""
     text = ''.join(char if char.isprintable() else ' ' for char in str(note or ''))
@@ -702,7 +727,8 @@ class DepositService:
 
     def __init__(self, settings: DepositSettings, store: DepositStore, s3: Any, store_root: Path,
                  state_dir: Path, clock: Callable[[], float] = time.time,
-                 roots: Optional[Dict[str, Path]] = None):
+                 roots: Optional[Dict[str, Path]] = None,
+                 background: Optional[Callable[[Callable[[], None]], None]] = None):
         self.settings = settings
         self.store = store
         self.s3 = s3
@@ -710,6 +736,11 @@ class DepositService:
         self.state_dir = Path(state_dir)
         self.clock = clock
         self.limiter = RateLimiter(settings.presign_per_minute, clock)
+        #: identifies this process in ``deposits.worker`` (a restart resumes completes of other workers)
+        self.worker_id = f'{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}'
+        #: how background work runs (a daemon thread; tests pass a synchronous runner)
+        self.background: Callable[[Callable[[], None]], None] = background or (
+            lambda work: threading.Thread(target=work, name='deposit-complete', daemon=True).start())
         self.roots = dict(roots or {'store': self.store_root, 'state': self.state_dir})
         self.roots.setdefault('bucket', settings.bucket)
 
@@ -766,7 +797,8 @@ class DepositService:
                        'max_pending_gb_per_user': settings.max_pending_gb_per_user,
                        'presign_calls_per_minute': settings.presign_per_minute,
                        'parts_per_batch': settings.parts_per_batch, 'max_per_day': settings.max_per_day,
-                       'max_refreshes': settings.max_refreshes},
+                       'max_refreshes': settings.max_refreshes,
+                       'async_complete_gb': settings.async_complete_gb},
             'upload': ('URLs write to a staging key of the deposit (upload_key), outside the watched prefix; '
                        'complete checks the files and copies them to their key under the prefix'),
             'naming': {
@@ -828,11 +860,27 @@ class DepositService:
                                     'changelog', 'date', 'default_layer', 'layers_include', 'obsm_include',
                                     'obsnum_include', 'obscat_include', 'layer_stats', 'ingest'],
                 'leave_out': ['version', 'changelog', 'sha256', 'n_obs', 'n_vars', 'layer_stats', 'ingest'],
+                'required_spec': {'keys': ['title', 'replicate_unit', 'api'],
+                                  'one_of': [],
+                                  'description': {'key': 'description', 'or_markdown_body': True,
+                                                  'min_chars': 200},
+                                  'conditional': [{'key': 'disease_basis', 'when': 'api publishes ant_disease'},
+                                                  {'key': 'replicate_column', 'when': 'replicate_unit is not none'}],
+                                  'leave_out': ['version', 'changelog', 'sha256', 'n_obs', 'n_vars', 'layer_stats',
+                                                'ingest']},
                 'template': SEED_MD_TEMPLATE,
             },
             'index_md': {'required': ['group (equals data_project)', 'group_id (3 characters, unique)',
                                       'doi or paper_title', 'year', 'authors', 'default_dataset'],
+                         'required_spec': {'keys': ['group', 'group_id', 'year', 'default_dataset'],
+                                           'one_of': [['doi', 'paper_title'], ['authors', 'first_author']],
+                                           'equals': {'group': 'data_project'},
+                                           'group_id': {'length': 3, 'unique_in_store': True}},
                          'template': INDEX_MD_TEMPLATE},
+            'facets': facet_registry_for_vocab(),
+            'de_only': ('a deposit with update_of=<db_id> and only kind de files (each table with its <file>.mus '
+                        'naming the dataset by de_dataset_id=<dataset id> or de_dataset_h5ad=<basename>.h5ad) adds '
+                        'DE tables to that published dataset'),
             'held_reasons': {
                 'public_access': 'access=public: an admin publishes it',
                 'licence_unknown': 'no license= in the sidecar',
@@ -853,7 +901,8 @@ class DepositService:
 
     # create ----------------------------------------------------------------
 
-    def _validate_files(self, data_project: str, basename: str, files: Any) -> List[Dict[str, Any]]:
+    def _validate_files(self, data_project: str, basename: str, files: Any,
+                        de_only: bool = False) -> List[Dict[str, Any]]:
         if not isinstance(files, list) or not files:
             raise DepositError(422, 'invalid', 'files must be a non-empty list')
         if len(files) > self.settings.max_files:
@@ -910,6 +959,20 @@ class DepositService:
         for kind in ('h5ad', 'mus', 'seed_md', 'index_md'):
             if counts.get(kind, 0) > 1:
                 raise DepositError(422, 'invalid', f'at most one file of kind {kind}')
+        if de_only:
+            names = {entry['name'] for entry in clean}
+            tables = [entry['name'] for entry in clean if entry['name'].endswith(DE_DATA_EXTS)]
+            if not tables:
+                raise DepositError(422, 'invalid', f'a DE deposit needs at least one table '
+                                                   f'({", ".join(DE_DATA_EXTS)}) with its .mus')
+            missing = [name for name in tables if name + '.mus' not in names]
+            if missing:
+                raise DepositError(422, 'invalid', f'every DE table needs its sidecar: {missing[0]}.mus is missing')
+            stray = [entry['name'] for entry in clean if not entry['name'].endswith(DE_DATA_EXTS)
+                     and not (entry['name'].endswith('.mus') and entry['name'][:-4] in names)]
+            if stray:
+                raise DepositError(422, 'invalid', f'{stray[0]}: a DE deposit holds only tables and their .mus')
+            return clean
         if not counts.get('mus'):
             raise DepositError(422, 'invalid', f'the sidecar {basename}{MUS_SUFFIX} (kind mus) is required')
         return clean
@@ -1034,6 +1097,40 @@ class DepositService:
             raise DepositError(409, 'not_open', f'the deposit is {record["state"]}, not uploading')
         return {'deposit_id': deposit_id, 'state': 'expired'}
 
+    def group_info(self, identity: Identity, data_project: str, basename: Optional[str] = None) -> Dict[str, Any]:
+        """Lookup for clients: does the group exist (its group_id), may it be created, and with ``basename``:
+        is that dataset published and may the caller deposit a new version (its db id only then)."""
+        if not isinstance(data_project, str) or not valid_segment(data_project) or len(data_project) > 64:
+            raise DepositError(422, 'invalid_data_project', 'data_project: letters, digits, ._- only')
+        folder = self.store_root / data_project
+        exists = folder.is_dir() and (folder / 'index.md').exists()
+        answer: Dict[str, Any] = {'data_project': data_project, 'exists': exists}
+        if exists:
+            from metadata import parse_md_file  # noqa: PLC0415
+            try:
+                answer['group_id'] = parse_md_file(folder / 'index.md')[0].get('group_id')
+            except Exception:  # noqa: BLE001
+                answer['group_id'] = None
+        else:
+            try:
+                self._check_group(data_project, identity)
+                answer['may_create'] = True
+            except DepositError as exc:
+                answer['may_create'] = False
+                answer['reason'] = exc.body['message']
+        if basename is not None:
+            if not isinstance(basename, str) or not BASENAME_RE.match(basename) or RESERVED_BASENAME_RE.match(basename):
+                raise DepositError(422, 'invalid_name', f'{basename!r} is not a usable dataset name')
+            existing = dataset_db_id(self.store_root, data_project, basename) if exists else None
+            answer['dataset_exists'] = existing is not None
+            if existing:
+                may = identity.is_admin or self.settings.update_policy == 'any' \
+                    or self.store.owner_of_dataset(existing) == identity.user
+                answer['may_update'] = bool(may)
+                if may:
+                    answer['db_id'] = existing
+        return answer
+
     def set_owner(self, identity: Identity, db_id: str, user: str, note: str = '') -> Dict[str, Any]:
         """Admin: who may deposit new versions of a dataset (for datasets published before deposits existed)."""
         self._require_admin(identity, 'assign dataset owners')
@@ -1105,10 +1202,16 @@ class DepositService:
         if RESERVED_BASENAME_RE.match(basename):
             raise DepositError(422, 'invalid_name', f'{basename!r} cannot be a dataset name: index.md and '
                                                     f'<x>.index.md are group descriptions')
-        deposit_files = self._validate_files(data_project, basename, body.get('files'))
         update_of = body.get('update_of')
         if update_of is not None and (not isinstance(update_of, str) or not DB_ID_RE.match(update_of)):
             raise DepositError(422, 'invalid', 'update_of is a dataset id like ABC/xyz')
+        files_in = body.get('files')
+        de_only = isinstance(files_in, list) and bool(files_in) and all(
+            isinstance(entry, dict) and entry.get('kind') == 'de' for entry in files_in)
+        if de_only and not update_of:
+            raise DepositError(422, 'invalid', 'DE tables alone are added to a published dataset: give '
+                                               '"update_of": "<db_id>" (or deposit them with the h5ad)')
+        deposit_files = self._validate_files(data_project, basename, files_in, de_only=de_only)
         total = sum(entry['size'] for entry in deposit_files)
         if total > self.settings.max_gb * 1024 ** 3:
             raise DepositError(413, 'too_large', f'{total / 1024 ** 3:.1f} GB is over the {self.settings.max_gb:g} GB '
@@ -1116,6 +1219,8 @@ class DepositService:
         existing_db_id = self._existing_dataset(identity, data_project, basename, update_of) if group_exists else None
         if not group_exists and update_of:
             raise DepositError(422, 'update_of_unknown', f'update_of={update_of}, but {data_project} is not a group')
+        if de_only and not existing_db_id:
+            raise DepositError(422, 'update_of_unknown', f'{data_project}/{basename} is not a published dataset')
         self.limiter.check(identity.user)              # before any call to the object store
         self.expire_stale()
         now = self.clock()
@@ -1124,7 +1229,9 @@ class DepositService:
         h5ad_key = self._key(data_project, 'h5ad', f'{basename}{H5AD_SUFFIX}')
         continues = h5ad_etag = h5ad_sha = None
         h5ad_entry = next((entry for entry in deposit_files if entry['kind'] == 'h5ad'), None)
-        if h5ad_entry is None:
+        if de_only:
+            pass
+        elif h5ad_entry is None:
             head = _head(self.s3, self.bucket, h5ad_key)
             previous = self.store.get(head['metadata'].get('deposit', '')) if head and head['metadata'].get('deposit') else None
             previous_row = next((row for row in self.store.files(previous['id']) if row['kind'] == 'h5ad'
@@ -1153,8 +1260,10 @@ class DepositService:
         record = {'id': deposit_id, 'user': identity.user, 'name': identity.name, 'email': identity.email,
                   'is_admin': int(identity.is_admin), 'data_project': data_project, 'basename': basename,
                   'update_of': update_of, 'state': 'uploading', 'created': now, 'updated': now, 'expires': expires,
-                  'total_bytes': total, 'watch_key': h5ad_key, 'h5ad_etag': h5ad_etag, 'mus_key': mus_key,
-                  'continues': continues, 'h5ad_sha256': h5ad_sha, 'refreshes': 0}
+                  'total_bytes': total, 'watch_key': None if de_only else h5ad_key, 'h5ad_etag': h5ad_etag,
+                  'mus_key': None if de_only else mus_key, 'continues': continues,
+                  'h5ad_sha256': None if de_only else h5ad_sha, 'refreshes': 0,
+                  'deposit_kind': 'de_only' if de_only else 'dataset'}
         self.store.reserve(record, rows, now, self.settings)
         try:
             for row in rows:
@@ -1175,13 +1284,16 @@ class DepositService:
                          f'{len(rows)} file(s), {total} bytes' + (f', update of {update_of}' if update_of else '')
                          + (f', continues {continues}' if continues else ''))
         warnings = []
-        if not any(entry['kind'] == 'seed_md' for entry in deposit_files) and not existing_db_id:
+        if de_only:
+            pass
+        elif not any(entry['kind'] == 'seed_md' for entry in deposit_files) and not existing_db_id:
             warnings.append(f'no seed {basename}.md: the route writes a minimal .md, which usually fails '
                             f'meta.required_keys (no description)')
         if not group_exists and not any(entry['kind'] == 'index_md' for entry in deposit_files):
             warnings.append('a new group without index.md: the route builds one from the sidecar keys doi, year, '
                             'paper_title and authors, or the check meta.index_md fails')
         return {'deposit_id': deposit_id, 'state': 'uploading', 'data_project': data_project, 'basename': basename,
+                'deposit_kind': 'de_only' if de_only else 'dataset',
                 'update_of': update_of, 'continues': continues, 'expires': _iso(expires),
                 'url_ttl_seconds': self._ttl(), 'total_bytes': total, 'files': instructions, 'warnings': warnings,
                 'next': {'urls': f'/datasets/deposit/{deposit_id}/urls',
@@ -1263,6 +1375,16 @@ class DepositService:
         row = rows[name]
         if row['state'] == 'complete':
             raise DepositError(409, 'already_complete', f'{name} is already complete')
+        redeclare = 'size' in body or 'sha256' in body
+        if redeclare:
+            if row['kind'] != 'mus':
+                raise DepositError(422, 'invalid', 'only the sidecar (kind mus) can be declared again; withdraw and '
+                                                   'deposit again for other files')
+            size, sha = body.get('size'), str(body.get('sha256') or '').lower()
+            if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= TEXT_MAX_BYTES \
+                    or not SHA256_RE.match(sha):
+                raise DepositError(422, 'invalid', f'size (0..{TEXT_MAX_BYTES} bytes) and sha256 (64 hex) of the '
+                                                   f'corrected sidecar')
         if int(record.get('refreshes') or 0) >= self.settings.max_refreshes:
             raise DepositError(429, 'too_many_refreshes', f'this deposit asked for fresh URLs '
                                                           f'{self.settings.max_refreshes} times; start a new deposit')
@@ -1277,6 +1399,17 @@ class DepositService:
         if expires <= now:
             raise DepositError(410, 'expired', 'this deposit has been open too long; start a new deposit')
         self.store.update(deposit_id, expires=expires, refreshes=int(record.get('refreshes') or 0) + 1)
+        if redeclare:
+            # the old staging object (if any) goes; the new URL signs the new size and sha256
+            try:
+                self.s3.delete_object(Bucket=self.bucket, Key=row['staging_key'])
+            except Exception:  # noqa: BLE001 - absent is fine
+                pass
+            self.store.update_file(deposit_id, name, size=size, sha256=sha, method='put', state='pending',
+                                   staging_etag=None, upload_id=None, part_size=None, part_count=None)
+            self.store.update(deposit_id, total_bytes=int(record['total_bytes']) - int(row['size']) + size)
+            self.store.event(deposit_id, identity.user, 'redeclared', f'{name}: {size} bytes')
+            row = {**row, 'size': size, 'sha256': sha, 'method': 'put', 'upload_id': None}
         if row['method'] == 'put':
             return {**self._instructions(deposit_id, row, 1, 1, expires), 'expires': _iso(expires)}
         try:
@@ -1361,22 +1494,42 @@ class DepositService:
             raise StagingChanged(f'{row["name"]} changed in staging during complete')
         return head['etag']
 
+    def _read_staged(self, row: Dict[str, Any]) -> str:
+        """A verified staging text file, read with IfMatch on its verified ETag (and its MD5 checked, as a store may
+        ignore IfMatch); raises StagingChanged when it is no longer the verified version."""
+        try:
+            response = self.s3.get_object(Bucket=self.bucket, Key=row['staging_key'],
+                                          IfMatch=f'"{row["staging_etag"]}"')
+        except Exception as exc:  # noqa: BLE001
+            if _error_code(exc) in ('PreconditionFailed', '412'):
+                raise StagingChanged(f'{row["name"]} changed in staging during complete') from exc
+            raise
+        raw = response['Body'].read(TEXT_MAX_BYTES + 1)
+        if row['method'] == 'put' and hashlib.md5(raw).hexdigest() != row['staging_etag']:
+            raise StagingChanged(f'{row["name"]} read back is not the verified one')
+        return raw.decode('utf-8', errors='replace')
+
+    def _check_de_sidecars(self, record: Dict[str, Any], rows: Dict[str, Dict[str, Any]]) -> List[str]:
+        """Errors of a DE-only deposit: every table's .mus must name the dataset it is added to."""
+        errors = []
+        file_id = str(record.get('update_of') or '/').split('/')[-1]
+        for name, row in rows.items():
+            if not name.endswith('.mus'):
+                continue
+            meta = parse_sidecar_text(self._read_staged(row))
+            names_it = (str(meta.get('de_dataset_id') or '').upper() == file_id.upper()
+                        or meta.get('de_dataset_h5ad') == f'{record["basename"]}{H5AD_SUFFIX}')
+            if not names_it:
+                errors.append(f'{name} names neither de_dataset_id={file_id} nor '
+                              f'de_dataset_h5ad={record["basename"]}{H5AD_SUFFIX}')
+        return errors
+
     def _check_sidecar(self, record: Dict[str, Any], rows: Dict[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
         """(errors, warnings) of the deposited sidecar against the deposit (read from staging, at most 1 MB)."""
         import mus  # noqa: PLC0415
 
         mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
-        try:
-            response = self.s3.get_object(Bucket=self.bucket, Key=mus_row['staging_key'],
-                                          IfMatch=f'"{mus_row["staging_etag"]}"')
-        except Exception as exc:  # noqa: BLE001
-            if _error_code(exc) in ('PreconditionFailed', '412'):
-                raise StagingChanged('the sidecar changed in staging during complete') from exc
-            raise
-        raw = response['Body'].read(TEXT_MAX_BYTES + 1)
-        if mus_row['method'] == 'put' and hashlib.md5(raw).hexdigest() != mus_row['staging_etag']:
-            raise StagingChanged('the sidecar read back is not the verified one')    # IfMatch ignored by the store
-        text = raw.decode('utf-8', errors='replace')
+        text = self._read_staged(mus_row)
         sidecar = parse_sidecar_text(text)
         errors: List[str] = []
         warnings: List[str] = []
@@ -1416,65 +1569,133 @@ class DepositService:
         return errors, warnings
 
     def complete(self, identity: Identity, deposit_id: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Verify every upload in staging, copy the files into the watched prefix, record their ETags.
+        """Verify every upload in staging, then copy the files into the watched prefix and record their ETags.
 
         The deposit is ``completing`` meanwhile (withdraw and expiry wait); on any refusal it goes back to
-        ``uploading`` and nothing stays in the watched prefix.
+        ``uploading`` and nothing stays in the watched prefix. The checks always run in the request. The copies
+        run in the request too, unless the deposit is larger than ``async_complete_gb``: then the answer is
+        ``202 {state: completing}`` and a background worker copies (progress in the status, errors in
+        ``complete_error``; a restart resumes it, see :meth:`resume_interrupted`).
         """
         self._require_active()
         record = self._require_uploading(self._get_own(identity, deposit_id))
-        if not self.store.cas(deposit_id, ('uploading',), 'completing', updated=self.clock()):
+        if not self.store.cas(deposit_id, ('uploading',), 'completing', updated=self.clock(), complete_error=None,
+                              progress=None, worker=self.worker_id):
             raise DepositError(409, 'busy', 'the deposit is being completed, withdrawn or expired right now')
-        copied: Dict[str, str] = {}
-        changed = DepositError(409, 'staging_changed', 'a file was uploaded again while the deposit was being '
-                                                       'completed; nothing was published. Complete again once '
-                                                       'your uploads are finished.')
         try:
-            rows = {row['name']: row for row in self.store.files(deposit_id)}
-            try:
-                results = [self._finish_upload(deposit_id, row) for row in rows.values()]
-            except Exception as exc:  # noqa: BLE001
-                raise DepositError(502, 's3_error', f'completing the upload failed ({_error_code(exc)}); try again')
-            incomplete = [entry for entry in results if not entry['ok']]
-            if incomplete:
-                raise DepositError(409, 'incomplete', 'not every file is uploaded completely', files=incomplete)
-            rows = {row['name']: row for row in self.store.files(deposit_id)}
-            try:
-                errors, warnings = self._check_sidecar(record, rows)
-            except StagingChanged:
-                raise changed
-            except Exception as exc:  # noqa: BLE001
-                raise DepositError(502, 's3_error', f'reading the sidecar back failed ({_error_code(exc)})')
-            if errors:
-                mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
-                self.s3.delete_object(Bucket=self.bucket, Key=mus_row['staging_key'])
-                self.store.update_file(deposit_id, mus_row['name'], state='pending')
-                raise DepositError(422, 'sidecar_mismatch', '; '.join(errors) + '. Upload a corrected sidecar '
-                                                                                '(fresh URL from .../urls) and '
-                                                                                'complete again.')
-            if record.get('continues'):            # a sidecar for an h5ad still in incoming: it must not have changed
-                head = _head(self.s3, self.bucket, record['watch_key'])
-                if head is None or head['etag'] != record['h5ad_etag']:
-                    raise DepositError(409, 'h5ad_changed', 'the h5ad this sidecar belongs to changed or is gone; '
-                                                            'withdraw this deposit and deposit the h5ad again')
-            self._check_keys(Identity(user=record['user'], is_admin=bool(record['is_admin'])), list(rows.values()))
-            try:
-                for row in rows.values():
-                    copied[row['key']] = self._copy_in(deposit_id, row)
-                    self.store.update(deposit_id, updated=self.clock())   # alive: no stale-complete recovery
-            except StagingChanged:
-                raise changed
-            except Exception as exc:  # noqa: BLE001
-                raise DepositError(502, 's3_error', f'moving the files into incoming failed ({_error_code(exc)}); '
-                                                    f'try again')
+            rows, warnings = self._verify_for_complete(record, deposit_id)
         except DepositError as error:
-            for key, etag in copied.items():           # nothing of a refused complete stays where the watcher looks
-                delete_consumed(self.s3, self.bucket, self.settings.prefix, {key: etag})
-            if error is changed:                       # every single-PUT file is checked again next time
-                for row in self.store.files(deposit_id):
-                    if row['method'] == 'put' and row['state'] == 'staged':
-                        self.store.update_file(deposit_id, row['name'], state='pending', staging_etag=None)
-            self.store.cas(deposit_id, ('completing',), 'uploading')
+            self._undo_complete(deposit_id, {}, error)
+            raise
+        if int(record['total_bytes']) > self.settings.async_complete_gb * 1024 ** 3:
+            self.store.event(deposit_id, identity.user, 'completing', 'large deposit: copying in the background')
+            self._progress(deposit_id, rows, 0, 0)
+            self.background(lambda: self._copy_phase_logged(deposit_id, record, rows, warnings, identity.user))
+            return {'_http_status': 202, 'deposit_id': deposit_id, 'state': 'completing',
+                    'progress': self._progress_view(self.store.get(deposit_id)), 'warnings': warnings,
+                    'next': f'GET /datasets/deposit/{deposit_id} shows the copy progress; then it is uploaded'}
+        return self._copy_phase(deposit_id, record, rows, warnings, identity.user)
+
+    def _verify_for_complete(self, record: Dict[str, Any], deposit_id: str) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+        """The checks of complete (parts, sizes, metadata, sidecars, the waiting h5ad, key ownership)."""
+        changed = self._staging_changed_error()
+        rows = {row['name']: row for row in self.store.files(deposit_id)}
+        try:
+            results = [self._finish_upload(deposit_id, row) for row in rows.values()]
+        except Exception as exc:  # noqa: BLE001
+            raise DepositError(502, 's3_error', f'completing the upload failed ({_error_code(exc)}); try again')
+        incomplete = [entry for entry in results if not entry['ok']]
+        if incomplete:
+            raise DepositError(409, 'incomplete', 'not every file is uploaded completely', files=incomplete)
+        rows = {row['name']: row for row in self.store.files(deposit_id)}
+        warnings: List[str] = []
+        try:
+            if record.get('deposit_kind') == 'de_only':
+                errors = self._check_de_sidecars(record, rows)
+                if errors:
+                    raise DepositError(422, 'de_mismatch', '; '.join(errors) + '. Withdraw and deposit the tables '
+                                                                               'again with corrected sidecars.')
+            else:
+                errors, warnings = self._check_sidecar(record, rows)
+                if errors:
+                    mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
+                    self.s3.delete_object(Bucket=self.bucket, Key=mus_row['staging_key'])
+                    self.store.update_file(deposit_id, mus_row['name'], state='pending', staging_etag=None)
+                    raise DepositError(422, 'sidecar_mismatch', '; '.join(errors) + '. Declare the corrected '
+                                       'sidecar with POST .../urls {"name", "size", "sha256"} (a new URL), upload it '
+                                       'and complete again.')
+        except StagingChanged:
+            raise changed
+        except DepositError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DepositError(502, 's3_error', f'reading a sidecar back failed ({_error_code(exc)})')
+        if record.get('continues'):            # a sidecar for an h5ad still in incoming: it must not have changed
+            head = _head(self.s3, self.bucket, record['watch_key'])
+            if head is None or head['etag'] != record['h5ad_etag']:
+                raise DepositError(409, 'h5ad_changed', 'the h5ad this sidecar belongs to changed or is gone; '
+                                                        'withdraw this deposit and deposit the h5ad again')
+        self._check_keys(Identity(user=record['user'], is_admin=bool(record['is_admin'])), list(rows.values()))
+        return rows, warnings
+
+    @staticmethod
+    def _staging_changed_error() -> DepositError:
+        return DepositError(409, 'staging_changed', 'a file was uploaded again while the deposit was being '
+                                                    'completed; nothing was published. Complete again once your '
+                                                    'uploads are finished.')
+
+    def _undo_complete(self, deposit_id: str, copied: Dict[str, str], error: DepositError) -> None:
+        """Remove the copies of a refused complete and return the deposit to ``uploading``."""
+        for key, etag in copied.items():           # nothing of a refused complete stays where the watcher looks
+            delete_consumed(self.s3, self.bucket, self.settings.prefix, {key: etag})
+        if error.body.get('status') == 'staging_changed':      # every single-PUT file is checked again next time
+            for row in self.store.files(deposit_id):
+                if row['method'] == 'put' and row['state'] == 'staged':
+                    self.store.update_file(deposit_id, row['name'], state='pending', staging_etag=None)
+        self.store.cas(deposit_id, ('completing',), 'uploading', complete_error=json.dumps(error.body))
+
+    def _progress(self, deposit_id: str, rows: Dict[str, Dict[str, Any]], files_copied: int, bytes_copied: int) -> None:
+        self.store.update(deposit_id, updated=self.clock(), progress=json.dumps({
+            'files_total': len(rows), 'files_copied': files_copied,
+            'bytes_total': sum(int(row['size']) for row in rows.values()), 'bytes_copied': bytes_copied}))
+
+    @staticmethod
+    def _progress_view(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not record or not record.get('progress'):
+            return None
+        try:
+            return json.loads(record['progress'])
+        except ValueError:
+            return None
+
+    def _copy_phase_logged(self, deposit_id: str, record: Dict[str, Any], rows: Dict[str, Dict[str, Any]],
+                           warnings: List[str], user: str) -> None:
+        try:
+            self._copy_phase(deposit_id, record, rows, warnings, user)
+        except DepositError:
+            pass                                       # recorded in complete_error by _undo_complete
+        except Exception as exc:  # noqa: BLE001 - a background worker never raises
+            error = DepositError(502, 's3_error', f'the background copy failed ({_error_code(exc)})')
+            self._undo_complete(deposit_id, {}, error)
+
+    def _copy_phase(self, deposit_id: str, record: Dict[str, Any], rows: Dict[str, Dict[str, Any]],
+                    warnings: List[str], user: str) -> Dict[str, Any]:
+        """Copy the verified staging files into the watched prefix; finish or undo."""
+        copied: Dict[str, str] = {}
+        try:
+            copied_bytes = 0
+            for row in rows.values():
+                try:
+                    copied[row['key']] = self._copy_in(deposit_id, row)
+                except StagingChanged:
+                    raise self._staging_changed_error()
+                except Exception as exc:  # noqa: BLE001
+                    raise DepositError(502, 's3_error', f'moving the files into incoming failed '
+                                                        f'({_error_code(exc)}); try again')
+                copied_bytes += int(row['size'])
+                self._progress(deposit_id, rows, len(copied), copied_bytes)   # also: alive, no stale recovery
+        except DepositError as error:
+            self._undo_complete(deposit_id, copied, error)
             raise
         now = self.clock()
         for row in rows.values():
@@ -1484,23 +1705,53 @@ class DepositService:
             except Exception:  # noqa: BLE001 - the staging sweep removes it later
                 pass
         h5ad_row = next((row for row in rows.values() if row['kind'] == 'h5ad'), None)
-        mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
+        mus_row = next((row for row in rows.values() if row['kind'] == 'mus'), None)
         if not self.store.cas(deposit_id, ('completing',), 'uploaded', completed=now,
                               h5ad_etag=copied[h5ad_row['key']] if h5ad_row else record['h5ad_etag'],
-                              mus_etag=copied[mus_row['key']]):
+                              mus_etag=copied[mus_row['key']] if mus_row else None):
             # expired or withdrawn meanwhile (a recovery that judged the complete stale): not ours to publish
             for key, etag in copied.items():
                 delete_consumed(self.s3, self.bucket, self.settings.prefix, {key: etag})
             raise DepositError(409, 'not_completed', 'the deposit was ended while it was being completed; '
                                                      'start a new deposit')
         self.store.release_keys(deposit_id)
-        self.store.event(deposit_id, identity.user, 'completed', f'{len(rows)} file(s)')
+        self.store.event(deposit_id, user, 'completed', f'{len(rows)} file(s)')
         return {'deposit_id': deposit_id, 'state': 'uploaded',
                 'files': [{'name': row['name'], 'key': row['key'], 'size': row['size'], 'sha256': row['sha256'],
                            'etag': copied[row['key']]} for row in rows.values()],
                 'warnings': warnings,
                 'next': 'The watcher checks the deposit within a few minutes after it settles; follow it with '
                         f'GET /datasets/deposit/{deposit_id}.'}
+
+    def resume_interrupted(self) -> List[str]:
+        """After a restart: complete again the deposits a previous process left ``completing``.
+
+        Their staging files are still there (they are deleted only after every copy succeeded); the copies are
+        verified and made again in the background. Returns the deposit ids resumed.
+        """
+        resumed = []
+        for record in self.store._rows("SELECT * FROM deposits WHERE state = 'completing' AND "
+                                       "COALESCE(worker, '') != ?", (self.worker_id,)):
+            if not self.store.cas(record['id'], ('completing',), 'uploading', worker=None):
+                continue
+            self.store.event(record['id'], 'restart', 'resumed', 'the server restarted during complete')
+            identity = Identity(user=record['user'], name=record.get('name') or '', email=record.get('email') or '',
+                                is_admin=bool(record['is_admin']))
+            fresh = self.store.get(record['id'])
+
+            def run(fresh=fresh, identity=identity):
+                try:
+                    if not self.store.cas(fresh['id'], ('uploading',), 'completing', updated=self.clock(),
+                                          worker=self.worker_id):
+                        return
+                    rows, warnings = self._verify_for_complete(fresh, fresh['id'])
+                except DepositError as error:
+                    self._undo_complete(fresh['id'], {}, error)
+                    return
+                self._copy_phase_logged(fresh['id'], fresh, rows, warnings, identity.user)
+            self.background(run)
+            resumed.append(record['id'])
+        return resumed
 
     # status ----------------------------------------------------------------
 
@@ -1539,7 +1790,15 @@ class DepositService:
             'total_bytes': record['total_bytes'], 'created': _iso(record['created']),
             'updated': _iso(max(float(record['updated'] or 0), float(source.get('updated') or 0))),
             'completed': _iso(record['completed']),
-            'expires': _iso(record['expires']) if record['state'] == 'uploading' else None}
+            'expires': _iso(record['expires']) if record['state'] == 'uploading' else None,
+            'deposit_kind': record.get('deposit_kind') or 'dataset'}
+        if record['state'] == 'completing':
+            view['progress'] = self._progress_view(record)
+        if record.get('complete_error') and record['state'] == 'uploading':
+            try:
+                view['complete_error'] = json.loads(record['complete_error'])
+            except ValueError:
+                pass
         if identity.is_admin:
             view['user'] = record['user']
         if not detail:
@@ -1660,12 +1919,30 @@ class DepositService:
             raise DepositError(409, 'busy', 'the watcher is processing this deposit; withdraw it once it is done')
         if state == 'live':
             raise DepositError(409, 'live', 'the deposit is published; ask an admin to retire the dataset')
-        users = [other['id'] for other in self.store._rows(
-            "SELECT id FROM deposits WHERE continues = ? AND state IN ('uploading', 'completing', 'uploaded') "
-            "AND COALESCE(watch_state, '') NOT IN ('rejected')", (deposit_id,))]
-        if users:
-            raise DepositError(409, 'in_use', f'the deposit {users[0]} (a corrected sidecar) uses this deposit\'s '
-                                              f'h5ad: withdraw that one first')
+        if record.get('continues'):
+            original = self.store.get(record['continues']) or {}
+            if original.get('state') in ('uploading', 'completing', 'uploaded') \
+                    and original.get('watch_state') not in ('live', 'rejected'):
+                raise DepositError(409, 'continuation', f'this deposit corrects {original["id"]}, whose h5ad still '
+                                                        f'waits: withdraw the original deposit {original["id"]} '
+                                                        f'(its corrections are withdrawn with it)')
+        followers = [self.store.get(row['id']) for row in self.store._rows(
+            "SELECT id FROM deposits WHERE continues = ? AND state IN ('uploading', 'completing', 'uploaded')",
+            (deposit_id,))]
+        if any(other['state'] == 'completing' for other in followers):
+            raise DepositError(409, 'busy', 'a correction of this deposit is being completed; try again in a moment')
+        cascaded = []
+        for other in followers:                      # corrections first: they replaced files of this deposit
+            other_row = read_watch_row(self.state_dir, other.get('watch_key'))
+            if public_state(other, other_row if watch_row_matches(other, other_row) else None) in ('checking',
+                                                                                                    'live'):
+                raise DepositError(409, 'busy', f'the correction {other["id"]} is being processed or live')
+            if self.store.cas(other['id'], ('uploading', 'uploaded'), 'withdrawing'):
+                self._abort_and_delete(other, identity.user)
+                self.store.cas(other['id'], ('withdrawing',), 'withdrawn')
+                self.store.release_keys(other['id'])
+                self.store.event(other['id'], identity.user, 'withdrawn', f'with the original deposit {deposit_id}')
+                cascaded.append(other['id'])
         if not self.store.cas(deposit_id, ('uploading', 'uploaded'), 'withdrawing'):
             raise DepositError(409, 'busy', 'the deposit changed state meanwhile; look at it again')
         try:
@@ -1676,7 +1953,7 @@ class DepositService:
         self.store.cas(deposit_id, ('withdrawing',), 'withdrawn')
         self.store.release_keys(deposit_id)
         self.store.event(deposit_id, identity.user, 'withdrawn', '')
-        return {'deposit_id': deposit_id, 'state': 'withdrawn', **result}
+        return {'deposit_id': deposit_id, 'state': 'withdrawn', 'withdrawn_corrections': cascaded, **result}
 
     @staticmethod
     def _require_admin(identity: Identity, what: str = 'approve or reject deposits') -> None:

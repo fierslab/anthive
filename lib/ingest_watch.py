@@ -510,6 +510,12 @@ class Watcher:
                 break
             state = self.process(item, items)
             counts[state] = counts.get(state, 0) + 1
+        if not self.stop_requested():
+            try:
+                for state, number in self.process_de_deposits(objects).items():
+                    counts[state] = counts.get(state, 0) + number
+            except Exception as exc:  # noqa: BLE001 - never stop the poll for the DE route
+                self.log(f'deposits: DE deposits not processed: {exc}')
         self.prune_work_dirs()
         return counts
 
@@ -571,6 +577,17 @@ class Watcher:
                 for item in items:
                     if item.h5ad.key in held or (item.mus is not None and item.mus.key in held):
                         continue
+                    if item.mus is None:
+                        # a deposit's h5ad whose sidecar is gone (e.g. a withdrawn correction) is never ignored
+                        try:
+                            entry = objects.get(item.h5ad.key)
+                            owner = entry[0] if entry and entry[1] == item.h5ad.etag else self._deposit_mark(item.h5ad)
+                        except TransientError as exc:
+                            self.log(f'deposits: {item.key} waits: {exc}')
+                            continue
+                        if owner:
+                            self._orphan_h5ad(item, owner)
+                            continue
                     record = store.find_for_item(item.h5ad.key, item.h5ad.etag, item.mus.key,
                                                  item.mus.etag) if item.mus is not None else None
                     if record:
@@ -603,6 +620,73 @@ class Watcher:
             return kept
         finally:
             store.close()
+
+    def _orphan_h5ad(self, item: Item, deposit_id: str) -> None:
+        """Record an API deposit's h5ad without its sidecar as needs_decision (once per upload)."""
+        row = self.db.get(item.key)
+        signature = item.content_signature()
+        if row and row['state'] == 'needs_decision' and row.get('processed_signature') == signature:
+            return
+        if row and row['state'] == 'live' and row.get('h5ad_etag') == item.h5ad.etag:
+            return                     # what is left of a published deposit (its deletes are retried)
+        message = (f'{item.h5ad.key} of the API deposit {deposit_id} has no sidecar in incoming (withdrawn or '
+                   f'deleted); deposit the sidecar again, or withdraw the deposit')
+        if row is None:
+            self.db.transition(item.key, 'needs_decision', message, data_project=item.data_project,
+                               subfolder=item.subfolder, basename=item.basename, h5ad_etag=item.h5ad.etag,
+                               h5ad_size=item.h5ad.size, content_signature=signature, settle_signature=signature,
+                               processed_signature=signature, error=message, first_seen=self.clock(),
+                               last_seen=self.clock())
+        else:
+            self.db.transition(item.key, 'needs_decision', message, processed_signature=signature,
+                               content_signature=signature, error=message)
+        self.log(f'deposits: {message}')
+        self._notify(item.key)
+
+    def process_de_deposits(self, objects: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+        """Completed API deposits of DE tables for a published dataset (no h5ad): import them."""
+        import dataset_deposit  # noqa: PLC0415
+        from ingest_pipeline import ObjInfo  # noqa: PLC0415
+
+        counts: Dict[str, int] = {}
+        store = dataset_deposit.DepositStore.open_if_exists(self.state_dir)
+        if store is None:
+            return counts
+        try:
+            listing = {obj['Key']: ObjInfo.from_listing(obj) for obj in objects}
+            records = store._rows("SELECT * FROM deposits WHERE deposit_kind = 'de_only' AND state = 'uploaded' "
+                                  "AND COALESCE(watch_state, '') = ''")
+            for record in records:
+                if self.stop_requested():
+                    break
+                files = store.files(record['id'])
+                objs = [listing.get(row['key']) for row in files]
+                roots = self.deposit_roots()
+                if any(obj is None or obj.etag != row['etag'] for obj, row in zip(objs, files)):
+                    outcome_row = {'state': 'needs_decision', 'db_id': record.get('update_of'),
+                                   'error': 'files of this DE deposit are missing or changed in incoming'}
+                    store.record_watch(record['id'], outcome_row, roots)
+                    counts['needs_decision'] = counts.get('needs_decision', 0) + 1
+                    continue
+                self.log(f'DE deposit {record["id"]} for {record.get("update_of")}')
+                outcome = self.pipeline.ingest_de_deposit(record, objs)
+                row = {'state': outcome.state, 'db_id': outcome.db_id, 'version': outcome.version, 'kind': 'de',
+                       'held_reasons': '[]', 'error': None if outcome.state == 'live' else outcome.detail,
+                       'warnings': json.dumps(outcome.warnings)}
+                store.record_watch(record['id'], row, roots)
+                store.event(record['id'], 'watcher', outcome.state, str(dataset_deposit.sanitize_text(
+                    outcome.detail, roots)))
+                if outcome.state == 'live' and outcome.consumed and self.settings.get('delete_incoming_after_ingest'):
+                    delete_consumed(self.s3, self.bucket, self.settings['prefix'], outcome.consumed,
+                                    lambda key, etag, result: self.db.record_deletion(f'deposit:{record["id"]}', key,
+                                                                                       etag, result),
+                                    if_match=self.check_if_match())
+                if outcome.state in dataset_deposit.NOTIFY_DEPOSITOR_ON:
+                    notify_depositor(self.settings, record, {**row, 'held_reasons': '[]'}, None, self.log)
+                counts[outcome.state] = counts.get(outcome.state, 0) + 1
+        finally:
+            store.close()
+        return counts
 
     def _deposit_mark(self, obj: Any) -> str:
         """``x-amz-meta-deposit`` of a listed object ('' when unmarked), cached per key and ETag.

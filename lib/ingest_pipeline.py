@@ -1901,13 +1901,19 @@ class Pipeline:
 
     def _ingest_de(self, item: Item, outcome: Outcome, store_dir: Path, work: Path) -> None:
         """DE tables of the project whose sidecar names this dataset (``de_dataset_id`` / ``de_dataset_h5ad``)."""
-        data_files = [obj for obj in item.de if not obj.key.endswith('.mus')]
-        by_key = {obj.key: obj for obj in item.de}
+        self._ingest_de_tables(item.data_project, item.basename, (outcome.db_id or '/').split('/')[-1], item.de,
+                               outcome, store_dir, work)
+
+    def _ingest_de_tables(self, data_project: str, basename: str, file_id: str, de_objs: Sequence[ObjInfo],
+                          outcome: Outcome, store_dir: Path, work: Path) -> List[str]:
+        """Import the DE tables among ``de_objs`` whose sidecar names the dataset; returns the tables imported."""
+        data_files = [obj for obj in de_objs if not obj.key.endswith('.mus')]
+        by_key = {obj.key: obj for obj in de_objs}
+        imported: List[str] = []
         if not data_files:
-            return
-        file_id = (outcome.db_id or '/').split('/')[-1]
+            return imported
         de_dir = work / '_de'
-        sources_root = self.config.store_root / item.data_project / 'de_sources'
+        sources_root = self.config.store_root / data_project / 'de_sources'
         for obj in data_files:
             mus_obj = by_key.get(obj.key + '.mus')
             name = obj.name
@@ -1923,8 +1929,8 @@ class Pipeline:
                 outcome.warnings.append(f'DE sidecar {mus_obj.key}: {exc}')
                 continue
             meta = parse_sidecar_text(staged_mus.read_text(encoding='utf-8', errors='replace'))
-            if meta.get('de_dataset_id') not in (None, '', file_id) or (
-                    not meta.get('de_dataset_id') and meta.get('de_dataset_h5ad') != f'{item.basename}{H5AD_SUFFIX}'):
+            if str(meta.get('de_dataset_id') or '').upper() not in ('', file_id.upper()) or (
+                    not meta.get('de_dataset_id') and meta.get('de_dataset_h5ad') != f'{basename}{H5AD_SUFFIX}'):
                 continue
             source_dir = sources_root / parent
             ensure_inside(source_dir / name, sources_root)
@@ -1940,12 +1946,85 @@ class Pipeline:
             place_file(staged_data, source_dir / name)
             place_file(staged_mus, source_dir / (name + '.mus'))
             code, tail = self.runner.run('ant-de-ingest', de_ingest_command(
-                store_dir / f'{item.basename}.duckdb', source_dir / name, meta, name), cwd=work)
+                store_dir / f'{basename}.duckdb', source_dir / name, meta, name), cwd=work)
             if code != 0:
                 outcome.warnings.append(f'ant-de-ingest {name} failed (exit {code})')
                 continue
             outcome.consumed[obj.key] = obj.etag
             outcome.consumed[mus_obj.key] = mus_obj.etag
+            imported.append(name)
+        return imported
+
+    def ingest_de_deposit(self, deposit: Dict[str, Any], de_objs: Sequence[ObjInfo]) -> Outcome:
+        """DE tables deposited alone for a published dataset (an API deposit with ``update_of``).
+
+        Every table must be imported, else nothing is consumed and the deposit is ``failed``. Then the dataset
+        gets a patch version with a changelog entry (a curation decision), the ``.de.parquet`` sidecar is pushed
+        to the catalog, the server rescans, and the ``.md`` is committed (when the store is a git checkout).
+        """
+        import dataset_deposit  # noqa: PLC0415  (imports this module: no import at the top)
+        import md_edit  # noqa: PLC0415
+
+        outcome = Outcome(kind='de')
+        db_id = str(deposit.get('update_of') or '')
+        md = dataset_deposit.find_dataset_md(self.config.store_root, db_id)
+        if md is None:
+            outcome.state, outcome.detail = 'failed', f'{db_id} is not in the store'
+            return outcome
+        outcome.db_id = db_id
+        store_dir, basename = md.parent, md.stem
+        data_project = md.relative_to(self.config.store_root).parts[0]
+        if data_project != deposit.get('data_project'):
+            outcome.state, outcome.detail = 'needs_decision', f'{db_id} lives in {data_project}, not ' \
+                                                               f'{deposit.get("data_project")}'
+            return outcome
+        work = self.config.work_root / slug(f'de:{deposit.get("id")}')
+        work.mkdir(parents=True, exist_ok=True)
+        tables = [obj for obj in de_objs if not obj.key.endswith('.mus')]
+        imported = self._ingest_de_tables(data_project, basename, db_id.split('/')[-1], de_objs, outcome,
+                                          store_dir, work)
+        if len(imported) != len(tables):
+            outcome.state = 'failed'
+            outcome.detail = ('DE tables not imported: ' + ', '.join(obj.name for obj in tables
+                                                                      if obj.name not in imported)
+                              + ('; ' + '; '.join(outcome.warnings) if outcome.warnings else ''))
+            outcome.consumed = {}
+            return outcome
+        today = md_fill.today_iso()
+        change = (f'DE tables {", ".join(imported)} added through the deposit {deposit.get("id")} by '
+                  f'{deposit.get("user")}.')
+        try:
+            with writer_lock(store_dir / f'{basename}.duckdb', timeout=600):
+                text = md.read_text(encoding='utf-8')
+                new_text = md_edit.apply_edits(text, [md_edit.bump_version([change], today, 'patch')])
+                partial = md.with_name(f'.{md.name}.de-partial')
+                partial.write_text(new_text, encoding='utf-8')
+                os.replace(partial, md)
+            outcome.version = str(md_fill_version(md))
+        except Exception as exc:  # noqa: BLE001 - imported but not versioned: a person adds the entry
+            outcome.warnings.append(f'version bump of {md.name} failed ({exc}); add the changelog entry by hand')
+        de_parquet = store_dir / f'{basename}.de.parquet'
+        if self.config.push_catalog and de_parquet.exists():
+            rel = store_dir.relative_to(self.config.store_root)
+            try:
+                self._upload(de_parquet, f'{self.config.catalog_prefix}{rel}/{de_parquet.name}')
+            except Exception as exc:  # noqa: BLE001
+                outcome.warnings.append(f'push of {de_parquet.name} failed: {exc}')
+        try:
+            self.api.rescan()
+            outcome.served = True
+        except TransientError as exc:
+            outcome.warnings.append(f'rescan failed: {exc}')
+        if self.config.store_git_commit:
+            name, _, email = self.config.git_identity.partition('<')
+            dataset_deposit._commit_md(self.config.store_root, md, f'deposit {deposit.get("id")}: {change}\n',
+                                       self.config.git_identity,
+                                       lambda cmd: _CompletedRun(*self.runner.run('git', cmd)),
+                                       outcome.warnings.append)
+        outcome.state = 'live'
+        outcome.detail = change
+        shutil.rmtree(work, ignore_errors=True)
+        return outcome
 
     def _git_commit(self, item: Item, outcome: Outcome, store_dir: Path) -> None:
         """Commit the catalogue files the route wrote, and only when they are exactly what it wrote.
@@ -2003,6 +2082,19 @@ class Pipeline:
             code, tail = self.runner.run('git push', ['git', '-C', store, 'push'])
             if code != 0:
                 outcome.warnings.append(f'git push failed: {tail}')
+
+
+class _CompletedRun:
+    """The (code, output) of ``SubprocessRunner.run`` shaped like ``subprocess.CompletedProcess``."""
+
+    def __init__(self, code: int, output: str):
+        self.returncode, self.stdout, self.stderr = code, output if code == 0 else '', '' if code == 0 else output
+
+
+def md_fill_version(md: Path) -> Any:
+    from metadata import parse_md_file  # noqa: PLC0415
+
+    return parse_md_file(md)[0].get('version')
 
 
 def de_ingest_command(target_duckdb: Path, data_file: Path, meta: Dict[str, str], basename: str) -> List[Any]:

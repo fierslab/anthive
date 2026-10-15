@@ -133,6 +133,9 @@ datasets_deposit_max_files: 100
 datasets_deposit_max_per_day: 20
 # URL refresh calls per deposit.
 datasets_deposit_max_refreshes: 500
+# Deposits larger than this (GB) complete in the background: POST .../complete answers 202 and the status
+# shows the copy progress; a restart of ant-serve resumes them.
+datasets_deposit_async_complete_gb: 5
 # Where presigned uploads land (one folder per deposit), outside ingest_watch.prefix: a URL can never
 # write a key the watcher reads. Complete copies the checked files into ingest_watch.prefix.
 datasets_deposit_staging_prefix: __deposits/

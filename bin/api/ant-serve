@@ -16848,6 +16848,13 @@ def _deposit_service():
                          'tmp': get_tmp_dir(cfg, create=False)}
                 _deposit_service_instance = dd.DepositService(settings, dd.DepositStore(state_dir / dd.DB_FILE),
                                                               s3, store_root, state_dir, roots=roots)
+                if settings.active:
+                    try:        # completes a previous process left running continue in the background
+                        resumed = _deposit_service_instance.resume_interrupted()
+                        if resumed:
+                            log.warning("dataset deposits: resumed interrupted completes %s", resumed)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("dataset deposits: resuming interrupted completes failed: %s", exc)
     return _deposit_service_instance
 
 
@@ -16860,7 +16867,10 @@ def _deposit_call(request: Request, action, admin_only: bool = False, status_cod
     if admin_only and not identity.is_admin:
         return JSONResponse({'status': 'forbidden', 'message': 'only admins may do this'}, status_code=403)
     try:
-        return JSONResponse(action(_deposit_service(), identity), status_code=status_code)
+        result = action(_deposit_service(), identity)
+        if isinstance(result, dict) and '_http_status' in result:
+            status_code = int(result.pop('_http_status'))      # e.g. 202 for a complete running in the background
+        return JSONResponse(result, status_code=status_code)
     except DepositError as exc:
         return JSONResponse(exc.body, status_code=exc.status, headers=exc.headers or None)
 
@@ -16894,6 +16904,14 @@ def dataset_deposit_create(request: Request, body: Any = Body(None)):
     """Declare one dataset deposit ``{data_project, basename, files: [{name, size, sha256, kind}],
     update_of?}`` and get presigned upload instructions per file (201)."""
     return _deposit_call(request, lambda service, identity: service.create(identity, body), status_code=201)
+
+
+@app.get("/datasets/deposit/groups/{data_project}", tags=["datasets-deposit"], include_in_schema=False)
+def dataset_deposit_group(request: Request, data_project: str,
+                          basename: Optional[str] = Query(None, description="also: is this dataset published, may I update it")):
+    """Lookup for depositors: ``{data_project, exists, group_id?, may_create?, reason?, dataset_exists?,
+    may_update?, db_id?}`` (``db_id`` only when the caller may deposit a new version)."""
+    return _deposit_call(request, lambda service, identity: service.group_info(identity, data_project, basename))
 
 
 @app.get("/datasets/deposit/{deposit_id}", tags=["datasets-deposit"], include_in_schema=False)

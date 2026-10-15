@@ -626,6 +626,7 @@ def get_dataset_deposit_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[s
         'max_files': number('datasets_deposit_max_files', 100, int),
         'max_per_day': number('datasets_deposit_max_per_day', 20, int),
         'max_refreshes': number('datasets_deposit_max_refreshes', 500, int),
+        'async_complete_gb': number('datasets_deposit_async_complete_gb', 5.0),
         'site_id': deposit_site_id(cfg),
         'staging_prefix': (str(cfg.get('datasets_deposit_staging_prefix') or '__deposits/').strip().lstrip('/')
                            .rstrip('/') + '/' + deposit_site_id(cfg) + '/'),
