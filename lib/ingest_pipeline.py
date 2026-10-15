@@ -144,6 +144,8 @@ class Item:
     #: 'email', 'update_of'}``. Its identity replaces the sidecar's ``depositor`` keys, and its
     #: ``update_of`` is the update marker.
     deposit: Optional[Dict[str, Any]] = None
+    #: Set by the watcher when the item must not be processed (``needs_decision`` with this message).
+    refused: Optional[str] = None
 
     @property
     def key(self) -> str:
@@ -247,6 +249,10 @@ def plan_items(objects: Sequence[Dict[str, Any]], prefix: str) -> Tuple[List[Ite
             malformed.append(f'{key}: expected {prefix}<data_project>/[<subfolder>/]<file>.h5ad')
             continue
         basename = filename[:-len(H5AD_SUFFIX)]
+        if re.match(r'^(index|.*\.index)$', basename, re.IGNORECASE):
+            malformed.append(f'{key}: {basename!r} cannot be a dataset name (index.md and <x>.index.md describe '
+                             f'groups)')
+            continue
         if not valid_segment(basename):
             malformed.append(f'{key}: unsafe dataset name {basename!r}')
             continue

@@ -485,6 +485,7 @@ INGEST_WATCH_DEFAULTS: Dict[str, Any] = {
     'min_free_gb': 50,
     'work_ttl_days': 14,
     'allow_repo_dirs': False,
+    'accept_unlinked': True,
     'notify': {'on': ['live', 'held', 'failed', 'needs_decision'], 'webhook_url': '', 'email_to': '',
                'email_from': 'anthive-ingest@localhost', 'smtp_host': '', 'smtp_port': 25},
 }
@@ -547,9 +548,9 @@ def get_dataset_ingest_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[st
     level new datasets default to."""
     cfg = cfg if cfg is not None else get_config()
     try:
-        max_gb = float(cfg.get('datasets_upload_max_gb') or 50)
+        max_gb = float(cfg.get('datasets_upload_max_gb') or 200)
     except (TypeError, ValueError):
-        max_gb = 50.0
+        max_gb = 200.0
     return {
         'max_upload_gb': max_gb,
         'auto_publish_public': bool(cfg.get('datasets_auto_publish_public', False)),
@@ -608,6 +609,10 @@ def get_dataset_deposit_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[s
         'parts_per_batch': number('datasets_deposit_parts_per_batch', 100, int),
         'single_put_max_mb': number('datasets_deposit_single_put_max_mb', 64, int),
         'max_files': number('datasets_deposit_max_files', 100, int),
+        'max_per_day': number('datasets_deposit_max_per_day', 20, int),
+        'max_refreshes': number('datasets_deposit_max_refreshes', 500, int),
+        'staging_prefix': (str(cfg.get('datasets_deposit_staging_prefix') or '__deposits/').strip().lstrip('/')
+                           .rstrip('/') + '/'),
         'update_policy': policy,
         'prefix': prefix,
         'bucket': str(s3.get('bucket') or ''),

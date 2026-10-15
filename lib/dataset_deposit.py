@@ -57,12 +57,19 @@ MAX_PARTS_PER_CALL = 1000
 #: A new group (data_project) is named like a paper: capital letter first, a year last (mus' rule).
 NEW_GROUP_RE = re.compile(r'^[A-Z][A-Za-z0-9_]*\d{4}$')
 BASENAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$')
+#: Basenames the watch route reads as group seeds (``index.md``, ``<x>.index.md``): never a dataset name.
+RESERVED_BASENAME_RE = re.compile(r'^(index|.*\.index)$', re.IGNORECASE)
 SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
 DEPOSIT_ID_RE = re.compile(r'^dep_[0-9a-f]{20}$')
 DB_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,32}/[A-Za-z0-9._-]{1,64}$')
 
-#: States of the deposit record itself. After ``uploaded`` the watcher's state is shown.
-RECORD_STATES = ('uploading', 'uploaded', 'withdrawn', 'expired')
+#: States of the deposit record itself. After ``uploaded`` the watcher's state is shown. ``completing``,
+#: ``withdrawing`` and ``expiring`` are short locks (compare-and-set) so complete, withdraw and expiry
+#: never run on one deposit at the same time.
+RECORD_STATES = ('uploading', 'completing', 'uploaded', 'withdrawing', 'withdrawn', 'expiring', 'expired')
+OPEN_STATES = ('uploading', 'completing')
+#: A ``completing`` deposit older than this is treated as interrupted and cleaned up like an expired one.
+STALE_COMPLETING_SECONDS = 12 * 3600
 #: Watcher states a depositor sees (``pulled`` / ``checked`` are shown as ``checking``).
 WATCH_FINAL = ('live', 'held', 'failed', 'needs_decision', 'rejected')
 WATCH_BUSY = ('pulled', 'checked')
@@ -75,15 +82,22 @@ CREATE TABLE IF NOT EXISTS deposits (
     created REAL, updated REAL, expires REAL, completed REAL, total_bytes INTEGER DEFAULT 0,
     watch_key TEXT, h5ad_etag TEXT, mus_key TEXT, mus_etag TEXT, continues TEXT,
     watch_state TEXT, db_id TEXT, version TEXT, kind TEXT, held_reasons TEXT, error TEXT, warnings TEXT,
-    report_file TEXT, notified_state TEXT, approval TEXT
+    report_file TEXT, notified_state TEXT, approval TEXT, h5ad_sha256 TEXT, refreshes INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS deposits_user ON deposits(user);
 CREATE INDEX IF NOT EXISTS deposits_watch_key ON deposits(watch_key);
 CREATE TABLE IF NOT EXISTS files (
     deposit_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, size INTEGER,
     sha256 TEXT, method TEXT, upload_id TEXT, part_size INTEGER, part_count INTEGER,
-    state TEXT NOT NULL, etag TEXT, completed REAL,
+    state TEXT NOT NULL, etag TEXT, completed REAL, staging_key TEXT,
     PRIMARY KEY (deposit_id, name)
+);
+-- target keys of open deposits: one deposit at a time per key (the PRIMARY KEY is the lock)
+CREATE TABLE IF NOT EXISTS open_keys (key TEXT PRIMARY KEY, deposit_id TEXT NOT NULL);
+-- owners of datasets published before deposits existed (set by an admin)
+CREATE TABLE IF NOT EXISTS owners (
+    db_id TEXT PRIMARY KEY, user TEXT NOT NULL, assigned_by TEXT, ts REAL, note TEXT,
+    caveat_applied INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS files_key ON files(key);
 CREATE TABLE IF NOT EXISTS events (
@@ -125,10 +139,22 @@ class DepositSettings:
     parts_per_batch: int = 100
     single_put_max_mb: int = 64
     max_files: int = 100
+    max_per_day: int = 20               # deposits a user may start in 24 hours
+    max_refreshes: int = 500            # URL refresh calls per deposit
     update_policy: str = 'own'          # own | any
     prefix: str = '__incoming/'
+    #: Where presigned uploads land: outside the watched prefix, one folder per deposit. Complete copies the
+    #: verified files into ``prefix``; a URL used after that can only write here, never a watched key.
+    staging_prefix: str = '__deposits/'
     bucket: str = ''
     s3: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        prefix, staging = self.prefix or '', self.staging_prefix or ''
+        if not staging.endswith('/') or not prefix.endswith('/') or staging.startswith(prefix) \
+                or prefix.startswith(staging):
+            raise ValueError(f'datasets_deposit_staging_prefix {staging!r} must be a folder outside the watched '
+                             f'prefix {prefix!r} (and the other way round)')
 
     @property
     def credentials_present(self) -> bool:
@@ -144,15 +170,24 @@ class DepositSettings:
 _ABS_PATH = re.compile(r'(?<![\w.:/~>-])/(?:[^\s\'"`,;()<>\[\]{}]+/)+([^\s\'"`,;()<>\[\]{}/]+)')
 
 
-def sanitize_text(text: Any, roots: Optional[Dict[str, Path]] = None) -> Any:
-    """Remove server paths from a message: known roots become ``<label>``, other absolute paths ``<path>/<name>``."""
+_S3_URL = re.compile(r's3://\S+')
+
+
+def sanitize_text(text: Any, roots: Optional[Dict[str, Any]] = None) -> Any:
+    """Remove server paths from a message: known roots become ``<label>``, other absolute paths ``<path>/<name>``,
+    ``s3://`` addresses ``<s3>``; the root ``bucket`` (a bucket name) is replaced where it stands as a word."""
     if not isinstance(text, str):
         return text
-    result = text
-    for label, root in sorted((roots or {}).items(), key=lambda pair: -len(str(pair[1]))):
+    result = _S3_URL.sub('<s3>', text)
+    roots = dict(roots or {})
+    bucket = str(roots.pop('bucket', '') or '')
+    for label, root in sorted(roots.items(), key=lambda pair: -len(str(pair[1]))):
         if root:
             result = result.replace(str(root).rstrip('/'), f'<{label}>')
-    return _ABS_PATH.sub(lambda match: f'<path>/{match.group(1)}', result)
+    result = _ABS_PATH.sub(lambda match: f'<path>/{match.group(1)}', result)
+    if bucket:
+        result = re.sub(rf'(?<![\w.-]){re.escape(bucket)}(?![\w.-])', '<bucket>', result)
+    return result
 
 
 def _sanitize_tree(node: Any, roots: Optional[Dict[str, Path]]) -> Any:
@@ -223,11 +258,14 @@ class DepositStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self.conn = sqlite3.connect(str(self.path), timeout=30, check_same_thread=False)
+        self.conn = sqlite3.connect(str(self.path), timeout=30, check_same_thread=False, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.executescript(SCHEMA)
-        self.conn.commit()
+        for table, column, kind in (('deposits', 'h5ad_sha256', 'TEXT'), ('deposits', 'refreshes', 'INTEGER DEFAULT 0'),
+                                    ('files', 'staging_key', 'TEXT')):
+            if column not in {row[1] for row in self.conn.execute(f'PRAGMA table_info({table})')}:
+                self.conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
 
     @classmethod
     def open_if_exists(cls, state_dir: Path) -> Optional['DepositStore']:
@@ -264,6 +302,112 @@ class DepositStore:
                                   [entry[name] for name in names])
             self.conn.commit()
 
+    def cas(self, deposit_id: str, from_states: Sequence[str], to_state: str, **fields: Any) -> bool:
+        """Move the deposit to ``to_state`` only when it is in one of ``from_states`` (the per-deposit lock)."""
+        fields['updated'] = time.time()
+        assignments = ', '.join(f'{name} = ?' for name in fields)
+        with self._lock:
+            cursor = self.conn.execute(
+                f'UPDATE deposits SET state = ?, {assignments} WHERE id = ? AND state IN ({", ".join("?" * len(from_states))})',
+                [to_state] + list(fields.values()) + [deposit_id] + list(from_states))
+            return cursor.rowcount == 1
+
+    def release_keys(self, deposit_id: str) -> None:
+        with self._lock:
+            self.conn.execute('DELETE FROM open_keys WHERE deposit_id = ?', (deposit_id,))
+
+    def reserve(self, record: Dict[str, Any], files: Sequence[Dict[str, Any]], now: float,
+                settings: 'DepositSettings') -> None:
+        """Check the per-user limits and insert the deposit, its files and its key locks in one transaction.
+
+        ``BEGIN IMMEDIATE`` serialises concurrent creates (also across processes), and the primary key of
+        ``open_keys`` makes a key part of at most one open deposit.
+        """
+        user = record['user']
+        with self._lock:
+            self.conn.execute('BEGIN IMMEDIATE')
+            try:
+                open_count = self.conn.execute(
+                    f"SELECT COUNT(*) FROM deposits WHERE user = ? AND state IN ('uploading', 'completing') "
+                    f"AND expires > ?", (user, now)).fetchone()[0]
+                if open_count >= settings.max_open_per_user:
+                    raise DepositError(429, 'too_many_open_deposits', f'you have {settings.max_open_per_user} open '
+                                                                      f'deposits; complete or withdraw one first')
+                today = self.conn.execute('SELECT COUNT(*) FROM deposits WHERE user = ? AND created > ?',
+                                          (user, now - 86400)).fetchone()[0]
+                if today >= settings.max_per_day:
+                    raise DepositError(429, 'too_many_deposits_today', f'at most {settings.max_per_day} deposits per '
+                                                                       f'user in 24 hours; try again later')
+                pending = self.conn.execute(
+                    "SELECT COALESCE(SUM(total_bytes), 0) FROM deposits WHERE user = ? AND (state IN "
+                    "('uploading', 'completing') OR (state = 'uploaded' AND COALESCE(watch_state, '') NOT IN "
+                    "('live', 'rejected')))", (user,)).fetchone()[0]
+                if pending + record['total_bytes'] > settings.max_pending_gb_per_user * 1024 ** 3:
+                    raise DepositError(413, 'quota_exceeded',
+                                       f'{(pending + record["total_bytes"]) / 1024 ** 3:.1f} GB would be pending for '
+                                       f'you (limit {settings.max_pending_gb_per_user:g} GB); wait until earlier '
+                                       f'deposits are published or withdraw them')
+                # locks of deposits that expired but were not cleaned up yet do not count
+                self.conn.execute("DELETE FROM open_keys WHERE deposit_id IN (SELECT id FROM deposits WHERE "
+                                  "state = 'uploading' AND expires <= ?)", (now,))
+                columns = list(record)
+                self.conn.execute(f'INSERT INTO deposits ({", ".join(columns)}) VALUES ({", ".join("?" * len(columns))})',
+                                  [record[name] for name in columns])
+                for entry in files:
+                    names = list(entry)
+                    self.conn.execute(f'INSERT INTO files ({", ".join(names)}) VALUES ({", ".join("?" * len(names))})',
+                                      [entry[name] for name in names])
+                    try:
+                        self.conn.execute('INSERT INTO open_keys (key, deposit_id) VALUES (?, ?)',
+                                          (entry['key'], record['id']))
+                    except sqlite3.IntegrityError:
+                        holder = self.conn.execute('SELECT d.user, d.id FROM open_keys k JOIN deposits d ON '
+                                                   'd.id = k.deposit_id WHERE k.key = ?', (entry['key'],)).fetchone()
+                        which = holder[1] if holder and holder[0] == user else 'of another user'
+                        hint = (f'; name yours {record["basename"]}.index.md (kind index_md) instead'
+                                if entry['name'] == 'index.md' else '; complete or withdraw it first')
+                        raise DepositError(409, 'key_in_open_deposit',
+                                           f'{entry["name"]} is part of the open deposit {which}{hint}')
+                self.conn.execute('COMMIT')
+            except BaseException:
+                self.conn.execute('ROLLBACK')
+                raise
+
+    def held_keys(self) -> Dict[str, str]:
+        """Target keys of deposits that are uploading or completing: the watcher leaves those items alone."""
+        return {row['key']: row['deposit_id'] for row in self._rows(
+            "SELECT k.key, k.deposit_id FROM open_keys k JOIN deposits d ON d.id = k.deposit_id "
+            "WHERE d.state IN ('uploading', 'completing')")}
+
+    def deposit_objects(self) -> Dict[str, Tuple[str, str]]:
+        """``{incoming key: (deposit id, ETag)}`` of the completed files of every deposit still waiting."""
+        return {row['key']: (row['deposit_id'], row['etag']) for row in self._rows(
+            "SELECT f.key, f.deposit_id, f.etag FROM files f JOIN deposits d ON d.id = f.deposit_id "
+            "WHERE d.state IN ('completing', 'uploaded') AND f.state = 'complete' AND f.etag IS NOT NULL")}
+
+    def chain(self, deposit_id: str) -> List[str]:
+        """The deposit and the deposits it continues (a corrected sidecar continues the h5ad's deposit)."""
+        found: List[str] = []
+        current: Optional[str] = deposit_id
+        while current and current not in found and len(found) < 50:
+            found.append(current)
+            record = self.get(current)
+            current = record.get('continues') if record else None
+        return found
+
+    def set_owner(self, db_id: str, user: str, assigned_by: str, note: str = '') -> None:
+        with self._lock:
+            self.conn.execute('INSERT OR REPLACE INTO owners (db_id, user, assigned_by, ts, note, caveat_applied) '
+                              'VALUES (?, ?, ?, ?, ?, 0)', (db_id.upper(), user, assigned_by, time.time(), note))
+
+    def owners(self, pending_caveat: bool = False) -> List[Dict[str, Any]]:
+        sql = 'SELECT * FROM owners' + (' WHERE caveat_applied = 0' if pending_caveat else '') + ' ORDER BY ts'
+        return self._rows(sql)
+
+    def mark_owner_caveat(self, db_id: str) -> None:
+        with self._lock:
+            self.conn.execute('UPDATE owners SET caveat_applied = 1 WHERE db_id = ?', (db_id.upper(),))
+
     def update(self, deposit_id: str, **fields: Any) -> None:
         fields['updated'] = time.time()
         with self._lock:
@@ -298,16 +442,6 @@ class DepositStore:
             args.append(user)
         return self._rows(sql, args)
 
-    def open_projects(self, now: float) -> Set[str]:
-        """data_projects with an open deposit: the watcher leaves their items alone until it completes."""
-        return {row['data_project'] for row in self.open_deposits(now)}
-
-    def open_keys(self, now: float) -> Dict[str, str]:
-        """``{s3 key: deposit id}`` of every file of an open deposit."""
-        return {row['key']: row['deposit_id'] for row in self._rows(
-            "SELECT f.key, f.deposit_id FROM files f JOIN deposits d ON d.id = f.deposit_id "
-            "WHERE d.state = 'uploading' AND d.expires > ?", (now,))}
-
     def find_for_item(self, h5ad_key: str, h5ad_etag: str, mus_key: Optional[str],
                       mus_etag: Optional[str]) -> Optional[Dict[str, Any]]:
         """The completed deposit whose h5ad and sidecar are exactly the listed objects (newest first)."""
@@ -317,7 +451,10 @@ class DepositStore:
         return rows[0] if rows else None
 
     def owner_of_dataset(self, db_id: str) -> Optional[str]:
-        """User of the newest deposit that published ``db_id`` (None: never published through a deposit)."""
+        """Owner set by an admin, else the user of the newest deposit that published ``db_id``."""
+        assigned = self._rows('SELECT user FROM owners WHERE db_id = ?', (db_id.upper(),))
+        if assigned:
+            return assigned[0]['user']
         rows = self._rows("SELECT user FROM deposits WHERE UPPER(db_id) = UPPER(?) AND watch_state = 'live' "
                           "ORDER BY completed DESC LIMIT 1", (db_id,))
         return rows[0]['user'] if rows else None
@@ -377,16 +514,58 @@ def _head(s3: Any, bucket: str, key: str) -> Optional[Dict[str, Any]]:
 
 
 def dataset_db_id(store_root: Path, data_project: str, basename: str) -> Optional[str]:
-    """``group_id/id`` of ``<store>/<data_project>/<basename>.md`` (None when the dataset is not in the store)."""
+    """``group_id/id`` of ``<store>/<data_project>/<basename>.md`` (None when the dataset is not in the store).
+
+    A ``.md`` or ``index.md`` that does not parse still counts as an existing dataset (``<group>/<basename>``).
+    """
     from metadata import parse_md_file  # noqa: PLC0415
 
     md = Path(store_root) / data_project / f'{basename}.md'
     if not md.exists():
         return None
-    meta = parse_md_file(md)[0]
-    index = Path(store_root) / data_project / 'index.md'
-    group_id = meta.get('group_id') or (parse_md_file(index)[0].get('group_id') if index.exists() else None)
+    try:
+        meta = parse_md_file(md)[0] or {}
+        index = Path(store_root) / data_project / 'index.md'
+        group_id = meta.get('group_id') or (parse_md_file(index)[0].get('group_id') if index.exists() else None)
+    except Exception:  # noqa: BLE001 - a broken .md is still a dataset that exists
+        return f'{data_project}/{basename}'
     return f'{group_id}/{meta["id"]}' if group_id and meta.get('id') else f'{data_project}/{basename}'
+
+
+def find_dataset_md(store_root: Path, db_id: str) -> Optional[Path]:
+    """The ``.md`` of a published dataset by its db id (case-insensitive), or None."""
+    import ingest_versions  # noqa: PLC0415
+
+    for entry in ingest_versions.find_datasets(store_root):
+        if entry['db_id'].upper() == db_id.upper():
+            return Path(entry['dataset_dir']) / f'{entry["basename"]}.md'
+    return None
+
+
+def apply_owner_caveats(store: 'DepositStore', store_root: Path, log: Callable[[str], None] = print) -> int:
+    """Write the caveat of each owner assignment not yet applied into the dataset's ``.md`` (verified edit)."""
+    import md_edit  # noqa: PLC0415
+    from ingest_md_fill import curation_caveat, today_iso  # noqa: PLC0415
+
+    applied = 0
+    for row in store.owners(pending_caveat=True):
+        md = find_dataset_md(store_root, row['db_id'])
+        if md is None:
+            log(f'owner of {row["db_id"]}: no such dataset in {store_root}; caveat not written')
+            continue
+        caveat = curation_caveat(
+            f'Deposits of new versions of this dataset through the API are accepted from {row["user"]} '
+            f'(owner set by {row["assigned_by"]} on {time.strftime("%Y-%m-%d", time.localtime(row["ts"]))})'
+            + (f': {row["note"]}' if row.get('note') else '.'), 'dataset_owner', today_iso(), detected_by='ant-ingest-watch')
+        try:
+            text = md.read_text(encoding='utf-8')
+            md.write_text(md_edit.apply_edits(text, [md_edit.append_top('caveats', caveat)]), encoding='utf-8')
+        except Exception as exc:  # noqa: BLE001 - an unusual .md: a person adds the caveat
+            log(f'owner of {row["db_id"]}: caveat not written ({exc})')
+            continue
+        store.mark_owner_caveat(row['db_id'])
+        applied += 1
+    return applied
 
 
 def public_state(record: Dict[str, Any], watch_row: Optional[Dict[str, Any]]) -> str:
@@ -476,7 +655,8 @@ class DepositService:
         self.state_dir = Path(state_dir)
         self.clock = clock
         self.limiter = RateLimiter(settings.presign_per_minute, clock)
-        self.roots = roots or {'store': self.store_root, 'state': self.state_dir}
+        self.roots = dict(roots or {'store': self.store_root, 'state': self.state_dir})
+        self.roots.setdefault('bucket', settings.bucket)
 
     # small helpers ---------------------------------------------------------
 
@@ -530,11 +710,15 @@ class DepositService:
                        'max_open_per_user': settings.max_open_per_user,
                        'max_pending_gb_per_user': settings.max_pending_gb_per_user,
                        'presign_calls_per_minute': settings.presign_per_minute,
-                       'parts_per_batch': settings.parts_per_batch},
+                       'parts_per_batch': settings.parts_per_batch, 'max_per_day': settings.max_per_day,
+                       'max_refreshes': settings.max_refreshes},
+            'upload': ('URLs write to a staging key of the deposit (upload_key), outside the watched prefix; '
+                       'complete checks the files and copies them to their key under the prefix'),
             'naming': {
                 'segment': '^[A-Za-z0-9][A-Za-z0-9._-]*$ (ASCII letters, digits, dot, dash, underscore; '
                            'not starting with a dot or underscore)',
-                'basename': '^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$ (the h5ad name without .h5ad, at most 50 characters)',
+                'basename': '^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$ (the h5ad name without .h5ad, at most 50 characters; '
+                            'not index and not ending in .index)',
                 'data_project_new': NEW_GROUP_RE.pattern + ' (a new group: capital letter first, a year last, '
                                                            'e.g. Smith2024)',
                 'data_project_existing': 'an existing group folder of the store, spelled exactly as it is',
@@ -602,7 +786,8 @@ class DepositService:
                 'donor_overlap': 'many donors match an existing cohort: an admin decides',
             },
             'update_policy': settings.update_policy,
-            'states': {'uploading': 'URLs handed out, not completed', 'uploaded': 'complete, waiting for the watcher',
+            'states': {'uploading': 'URLs handed out, not completed', 'completing': 'being completed (seconds)',
+                       'withdrawing': 'being withdrawn (seconds)', 'uploaded': 'complete, waiting for the watcher',
                        'seen': 'listed by the watcher', 'stable': 'queued', 'checking': 'being checked and built',
                        'live': 'published', 'held': 'clean, waits for an admin',
                        'failed': 'errors in the checks (see the report)',
@@ -674,80 +859,186 @@ class DepositService:
             raise DepositError(422, 'invalid', f'the sidecar {basename}{MUS_SUFFIX} (kind mus) is required')
         return clean
 
-    def _check_group(self, data_project: str) -> bool:
+    def _group_dirs(self) -> List[Path]:
+        """Group folders of the store: folders with an ``index.md`` (``scripts/`` and the like are not groups)."""
+        if not self.store_root.is_dir():
+            return []
+        return [entry for entry in self.store_root.iterdir() if entry.is_dir() and (entry / 'index.md').exists()]
+
+    def _check_group(self, data_project: str, identity: Identity) -> bool:
         """True when the group exists in the store; raises for a name that cannot be a group."""
         if not isinstance(data_project, str) or not valid_segment(data_project) or len(data_project) > 64:
             raise DepositError(422, 'invalid_data_project', 'data_project: letters, digits, ._- only, at most 64 '
                                                             'characters, not starting with . or _')
-        if (self.store_root / data_project).is_dir():
+        folder = self.store_root / data_project
+        if folder.is_dir() and (folder / 'index.md').exists():
             return True
-        if self.store_root.is_dir():
-            clash = [entry.name for entry in self.store_root.iterdir()
-                     if entry.is_dir() and entry.name.lower() == data_project.lower()]
-            if clash:
-                raise DepositError(422, 'invalid_data_project', f'the store has the group {clash[0]!r}: spell it '
-                                                                f'exactly like that')
+        if folder.exists():
+            raise DepositError(422, 'invalid_data_project', f'{data_project!r} is not available as a group name')
+        clash = [entry.name for entry in (self.store_root.iterdir() if self.store_root.is_dir() else [])
+                 if entry.name.lower() == data_project.lower()]
+        if clash:
+            shown = f' ({clash[0]!r})' if identity.is_admin else ''
+            raise DepositError(422, 'invalid_data_project', f'a group with this name in other letter case exists'
+                                                            f'{shown}: spell it exactly as the catalogue does')
         if not NEW_GROUP_RE.match(data_project):
             raise DepositError(422, 'invalid_data_project', f'{data_project!r} is not an existing group, and a new '
                                                             f'group is named like Smith2024 ({NEW_GROUP_RE.pattern})')
         return False
 
+    # cleanup: expiry, staging, force expiry ---------------------------------
+
+    def _staging_folder(self, deposit_id: str) -> str:
+        if not DEPOSIT_ID_RE.match(deposit_id):
+            raise ValueError(f'not a deposit id: {deposit_id!r}')
+        return f'{self.settings.staging_prefix}{deposit_id}/'
+
+    def _staging_key(self, deposit_id: str, key: str) -> str:
+        """The upload key of a file: its target key below ``<staging_prefix><deposit_id>/``, outside the watch."""
+        return self._staging_folder(deposit_id) + key[len(self.settings.prefix):]
+
+    def _list(self, prefix: str) -> List[Dict[str, Any]]:
+        objects: List[Dict[str, Any]] = []
+        for page in self.s3.get_paginator('list_objects_v2').paginate(Bucket=self.bucket, Prefix=prefix):
+            objects.extend(page.get('Contents', []) or [])
+        return objects
+
+    def _clean_staging(self, deposit_id: str) -> List[str]:
+        """Delete every object below this deposit's staging folder (never outside it)."""
+        folder = self._staging_folder(deposit_id)
+        removed = []
+        for obj in self._list(folder):
+            key = obj['Key']
+            if not key.startswith(folder) or '..' in key.split('/'):
+                continue
+            self.s3.delete_object(Bucket=self.bucket, Key=key)
+            removed.append(key)
+        return removed
+
+    def sweep_staging(self) -> List[str]:
+        """Remove staging objects of deposits that are not open (late replays of old URLs, crashed completes)."""
+        removed: List[str] = []
+        prefix = self.settings.staging_prefix
+        seen: Set[str] = set()
+        for obj in self._list(prefix):
+            deposit_id = obj['Key'][len(prefix):].split('/', 1)[0]
+            if deposit_id in seen:
+                continue
+            seen.add(deposit_id)
+            if not DEPOSIT_ID_RE.match(deposit_id):
+                continue                                   # not ours: never touched
+            record = self.store.get(deposit_id)
+            if record is None or record['state'] not in OPEN_STATES:
+                removed += self._clean_staging(deposit_id)
+        return removed
+
+    def _expire_one(self, record: Dict[str, Any], actor: str, from_states: Sequence[str]) -> bool:
+        if not self.store.cas(record['id'], from_states, 'expiring'):
+            return False
+        try:
+            self._abort_and_delete(record, actor=actor)
+        except Exception as exc:  # noqa: BLE001 - S3 trouble: back to its state, try again on the next call
+            self.store.cas(record['id'], ('expiring',), record['state'])
+            self.store.event(record['id'], actor, 'cleanup_failed', _error_code(exc))
+            return False
+        self.store.cas(record['id'], ('expiring',), 'expired')
+        self.store.release_keys(record['id'])
+        self.store.event(record['id'], actor, 'expired', 'upload window passed; uploads aborted, files removed')
+        return True
+
     def expire_stale(self) -> List[str]:
-        """Abort and clean up deposits whose upload window passed; returns their ids."""
+        """Expire open deposits whose window passed (and interrupted completes), then sweep the staging prefix."""
         now = self.clock()
         expired: List[str] = []
-        for record in self.store._rows("SELECT * FROM deposits WHERE state = 'uploading' AND expires <= ?", (now,)):
-            try:
-                self._abort_and_delete(record, actor='expiry')
-            except Exception as exc:  # noqa: BLE001 - S3 trouble: try again on the next call
-                self.store.event(record['id'], 'expiry', 'cleanup_failed', _error_code(exc))
-                continue
-            self.store.update(record['id'], state='expired')
-            self.store.event(record['id'], 'expiry', 'expired', 'upload window passed; uploads aborted')
-            expired.append(record['id'])
+        for record in self.store._rows("SELECT * FROM deposits WHERE (state = 'uploading' AND expires <= ?) OR "
+                                       "(state = 'completing' AND updated <= ?)", (now, now - STALE_COMPLETING_SECONDS)):
+            if self._expire_one(record, 'expiry', (record['state'],)):
+                expired.append(record['id'])
+        try:
+            self.sweep_staging()
+        except Exception:  # noqa: BLE001 - the sweep runs again on the next call
+            pass
         return expired
 
-    def _pending_bytes(self, user: str) -> int:
-        total = 0
-        for record in self.store.deposits(user):
-            if record['state'] == 'uploading' or (record['state'] == 'uploaded'
-                                                  and record.get('watch_state') not in ('live', 'rejected')):
-                total += int(record['total_bytes'] or 0)
-        return total
+    def force_expire(self, identity: Identity, deposit_id: str) -> Dict[str, Any]:
+        """Admin: end an open deposit now (uploads aborted, its files removed)."""
+        self._require_admin(identity, 'expire deposits')
+        record = self._get_own(identity, deposit_id)
+        if record['state'] != 'uploading' or not self._expire_one(record, identity.user, ('uploading',)):
+            raise DepositError(409, 'not_open', f'the deposit is {record["state"]}, not uploading')
+        return {'deposit_id': deposit_id, 'state': 'expired'}
 
-    def _check_keys(self, identity: Identity, deposit_files: Sequence[Dict[str, Any]], now: float) -> None:
-        open_keys = self.store.open_keys(now)
+    def set_owner(self, identity: Identity, db_id: str, user: str, note: str = '') -> Dict[str, Any]:
+        """Admin: who may deposit new versions of a dataset (for datasets published before deposits existed)."""
+        self._require_admin(identity, 'assign dataset owners')
+        if not isinstance(db_id, str) or not DB_ID_RE.match(db_id):
+            raise DepositError(422, 'invalid', 'db_id is a dataset id like ABC/xyz')
+        if not isinstance(user, str) or not re.match(r'^[A-Za-z0-9._@-]{1,80}$', user):
+            raise DepositError(422, 'invalid', 'user is a login name (letters, digits, ._@-)')
+        if find_dataset_md(self.store_root, db_id) is None:
+            raise DepositError(404, 'not_found', f'no dataset {db_id} in the store')
+        self.store.set_owner(db_id, user, identity.user, str(note or '')[:300])
+        return {'db_id': db_id.upper(), 'user': user, 'assigned_by': identity.user,
+                'caveat': 'written into the dataset .md by the watcher on its next poll'}
+
+    def _check_keys(self, identity: Identity, deposit_files: Sequence[Dict[str, Any]]) -> None:
+        """A non-admin may not replace a waiting object of another user's deposit or of a lab member's upload."""
+        if identity.is_admin:
+            return
         for entry in deposit_files:
-            key = entry['key']
-            if key in open_keys:
-                holder = self.store.get(open_keys[key]) or {}
-                which = open_keys[key] if holder.get('user') == identity.user else 'of another user'
-                raise DepositError(409, 'key_in_open_deposit', f'{entry["name"]} is part of the open deposit '
-                                                               f'{which}: complete or withdraw it first')
-            head = _head(self.s3, self.bucket, key)
-            if head is None or identity.is_admin:
+            head = _head(self.s3, self.bucket, entry['key'])
+            if head is None:
                 continue
             owner_deposit = self.store.get(head['metadata'].get('deposit', '')) if head['metadata'].get('deposit') else None
-            if owner_deposit is None:
-                raise DepositError(409, 'key_taken', f'{entry["name"]} already waits in incoming (not from a deposit '
-                                                     f'of yours); ask an admin')
-            if owner_deposit['user'] != identity.user:
-                raise DepositError(409, 'key_taken', f'{entry["name"]} already waits in incoming from another '
-                                                     f"user's deposit")
+            if owner_deposit is not None and owner_deposit['user'] == identity.user:
+                continue
+            hint = ' Name yours <basename>.index.md (kind index_md) instead.' if entry['name'] == 'index.md' else ''
+            raise DepositError(409, 'key_taken', f'{entry["name"]} already waits in incoming from another upload; '
+                                                 f'ask an admin.{hint}')
+
+    def _existing_dataset(self, identity: Identity, data_project: str, basename: str,
+                          update_of: Optional[str]) -> Optional[str]:
+        """The db id of the published dataset this deposit replaces (None for a new one), after the update rules.
+
+        Callers who may not update the dataset get one message whether or not they named it, and never its id.
+        """
+        existing = dataset_db_id(self.store_root, data_project, basename)
+        if existing is None and (self.store_root / data_project / f'{basename}{H5AD_SUFFIX}').exists():
+            existing = f'{data_project}/{basename}'
+        if existing is None:
+            if update_of:
+                raise DepositError(422, 'update_of_unknown', f'update_of={update_of}, but {data_project}/{basename} '
+                                                             f'is not a published dataset')
+            return None
+        may_update = identity.is_admin or self.settings.update_policy == 'any' \
+            or self.store.owner_of_dataset(existing) == identity.user
+        if not may_update:
+            raise DepositError(409, 'name_taken', f'{data_project}/{basename} cannot be deposited by you: choose '
+                                                  f'another basename (if it is a dataset you published, ask an '
+                                                  f'admin to record you as its owner)')
+        if not update_of:
+            raise DepositError(409, 'update_of_required', f'{data_project}/{basename} is the published dataset '
+                                                          f'{existing}; a new version needs "update_of": '
+                                                          f'"{existing}"', db_id=existing)
+        if update_of.upper() != existing.upper():
+            raise DepositError(409, 'update_of_mismatch', f'{data_project}/{basename} is {existing}, not '
+                                                          f'{update_of}', db_id=existing)
+        return existing
 
     def create(self, identity: Identity, body: Dict[str, Any]) -> Dict[str, Any]:
         """Record a deposit and hand out the upload instructions (``POST /datasets/deposit``)."""
         self._require_active()
         if not isinstance(body, dict):
             raise DepositError(422, 'invalid', 'the body is a JSON object')
-        self.expire_stale()
-        now = self.clock()
         data_project = body.get('data_project')
         basename = body.get('basename')
-        group_exists = self._check_group(data_project)
+        group_exists = self._check_group(data_project, identity)
         if not isinstance(basename, str) or not BASENAME_RE.match(basename) or basename.endswith(H5AD_SUFFIX):
             raise DepositError(422, 'invalid_name', 'basename: the h5ad name without .h5ad; letters, digits, ._-, '
                                                     'at most 50 characters')
+        if RESERVED_BASENAME_RE.match(basename):
+            raise DepositError(422, 'invalid_name', f'{basename!r} cannot be a dataset name: index.md and '
+                                                    f'<x>.index.md are group descriptions')
         deposit_files = self._validate_files(data_project, basename, body.get('files'))
         update_of = body.get('update_of')
         if update_of is not None and (not isinstance(update_of, str) or not DB_ID_RE.match(update_of)):
@@ -756,90 +1047,64 @@ class DepositService:
         if total > self.settings.max_gb * 1024 ** 3:
             raise DepositError(413, 'too_large', f'{total / 1024 ** 3:.1f} GB is over the {self.settings.max_gb:g} GB '
                                                  f'limit of one deposit')
-
-        # an update of a dataset that is in the store
-        existing_db_id = dataset_db_id(self.store_root, data_project, basename) if group_exists else None
-        if (self.store_root / data_project / f'{basename}{H5AD_SUFFIX}').exists() and existing_db_id is None:
-            existing_db_id = f'{data_project}/{basename}'
-        if existing_db_id:
-            if not update_of:
-                raise DepositError(409, 'update_of_required', f'{data_project}/{basename} is the published dataset '
-                                                              f'{existing_db_id}; a new version needs '
-                                                              f'"update_of": "{existing_db_id}"', db_id=existing_db_id)
-            if update_of.upper() != existing_db_id.upper():
-                raise DepositError(409, 'update_of_mismatch', f'{data_project}/{basename} is {existing_db_id}, not '
-                                                              f'{update_of}', db_id=existing_db_id)
-            if self.settings.update_policy != 'any' and not identity.is_admin \
-                    and self.store.owner_of_dataset(existing_db_id) != identity.user:
-                raise DepositError(403, 'not_your_dataset', f'{existing_db_id} was not published by a deposit of '
-                                                            f'yours; ask an admin to deposit the new version')
-        elif update_of:
-            raise DepositError(422, 'update_of_unknown', f'update_of={update_of}, but {data_project}/{basename} is '
-                                                         f'not in the store')
+        existing_db_id = self._existing_dataset(identity, data_project, basename, update_of) if group_exists else None
+        if not group_exists and update_of:
+            raise DepositError(422, 'update_of_unknown', f'update_of={update_of}, but {data_project} is not a group')
+        self.limiter.check(identity.user)              # before any call to the object store
+        self.expire_stale()
+        now = self.clock()
 
         # the h5ad: deposited now, or a corrected sidecar for an h5ad of yours still in incoming
         h5ad_key = self._key(data_project, 'h5ad', f'{basename}{H5AD_SUFFIX}')
-        continues = None
-        h5ad_etag = None
-        if not any(entry['kind'] == 'h5ad' for entry in deposit_files):
+        continues = h5ad_etag = h5ad_sha = None
+        h5ad_entry = next((entry for entry in deposit_files if entry['kind'] == 'h5ad'), None)
+        if h5ad_entry is None:
             head = _head(self.s3, self.bucket, h5ad_key)
             previous = self.store.get(head['metadata'].get('deposit', '')) if head and head['metadata'].get('deposit') else None
-            if head is None or previous is None or (previous['user'] != identity.user and not identity.is_admin):
+            previous_row = next((row for row in self.store.files(previous['id']) if row['kind'] == 'h5ad'
+                                 and row['etag'] == head['etag']), None) if previous else None
+            if head is None or previous is None or previous_row is None \
+                    or (previous['user'] != identity.user and not identity.is_admin):
                 raise DepositError(422, 'h5ad_required', f'no h5ad of yours waits at {data_project}/{basename}'
                                                          f'{H5AD_SUFFIX}: deposit the h5ad with its sidecar')
-            continues, h5ad_etag = previous['id'], head['etag']
-
-        # limits
-        if len(self.store.open_deposits(now, identity.user)) >= self.settings.max_open_per_user:
-            raise DepositError(429, 'too_many_open_deposits', f'you have {self.settings.max_open_per_user} open '
-                                                              f'deposits; complete or withdraw one first')
-        pending = self._pending_bytes(identity.user)
-        if pending + total > self.settings.max_pending_gb_per_user * 1024 ** 3:
-            raise DepositError(413, 'quota_exceeded', f'{(pending + total) / 1024 ** 3:.1f} GB would be pending for '
-                                                      f'you (limit {self.settings.max_pending_gb_per_user:g} GB); wait '
-                                                      f'until earlier deposits are published or withdraw them')
-        self._check_keys(identity, deposit_files, now)
-        self.limiter.check(identity.user)
+            continues, h5ad_etag, h5ad_sha = previous['id'], head['etag'], previous_row['sha256']
+        else:
+            h5ad_sha = h5ad_entry['sha256']
+        self._check_keys(identity, deposit_files)
 
         deposit_id = new_deposit_id()
         expires = now + self._ttl()
         rows: List[Dict[str, Any]] = []
-        instructions: List[Dict[str, Any]] = []
-        created_uploads: List[Tuple[str, str]] = []
-        try:
-            for entry in deposit_files:
-                row = {'deposit_id': deposit_id, 'name': entry['name'], 'kind': entry['kind'], 'key': entry['key'],
-                       'size': entry['size'], 'sha256': entry['sha256'], 'state': 'pending', 'etag': None,
-                       'completed': None, 'upload_id': None, 'part_size': None, 'part_count': None}
-                if entry['size'] <= min(self.settings.single_put_max_mb * MiB, SINGLE_PUT_HARD_MAX):
-                    row['method'] = 'put'
-                else:
-                    row['method'] = 'multipart'
-                    response = self.s3.create_multipart_upload(
-                        Bucket=self.bucket, Key=entry['key'], Metadata=self._metadata(deposit_id, entry['sha256']))
-                    row['upload_id'] = response['UploadId']
-                    created_uploads.append((entry['key'], row['upload_id']))
-                    row['part_size'] = choose_part_size(entry['size'])
-                    row['part_count'] = len(part_sizes(entry['size'], row['part_size']))
-                rows.append(row)
-                instructions.append(self._instructions(deposit_id, row, 1, self.settings.parts_per_batch))
-        except DepositError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - S3 refused: abort what was started
-            for key, upload_id in created_uploads:
-                try:
-                    self.s3.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)
-                except Exception:  # noqa: BLE001
-                    pass
-            raise DepositError(502, 's3_error', f'the object store refused to start the upload ({_error_code(exc)}); '
-                                                f'try again later')
+        for entry in deposit_files:
+            multipart = entry['size'] > min(self.settings.single_put_max_mb * MiB, SINGLE_PUT_HARD_MAX)
+            part_size = choose_part_size(entry['size']) if multipart else None
+            rows.append({'deposit_id': deposit_id, 'name': entry['name'], 'kind': entry['kind'], 'key': entry['key'],
+                         'staging_key': self._staging_key(deposit_id, entry['key']), 'size': entry['size'],
+                         'sha256': entry['sha256'], 'state': 'pending', 'etag': None, 'completed': None,
+                         'method': 'multipart' if multipart else 'put', 'upload_id': None, 'part_size': part_size,
+                         'part_count': len(part_sizes(entry['size'], part_size)) if multipart else None})
         mus_key = self._key(data_project, 'mus', f'{basename}{MUS_SUFFIX}')
         record = {'id': deposit_id, 'user': identity.user, 'name': identity.name, 'email': identity.email,
                   'is_admin': int(identity.is_admin), 'data_project': data_project, 'basename': basename,
                   'update_of': update_of, 'state': 'uploading', 'created': now, 'updated': now, 'expires': expires,
                   'total_bytes': total, 'watch_key': h5ad_key, 'h5ad_etag': h5ad_etag, 'mus_key': mus_key,
-                  'continues': continues}
-        self.store.insert(record, rows)
+                  'continues': continues, 'h5ad_sha256': h5ad_sha, 'refreshes': 0}
+        self.store.reserve(record, rows, now, self.settings)
+        try:
+            for row in rows:
+                if row['method'] == 'multipart':
+                    # x-amz-meta-sha256 is the depositor's attestation only: the pipeline recomputes the sha256
+                    response = self.s3.create_multipart_upload(
+                        Bucket=self.bucket, Key=row['staging_key'], Metadata=self._metadata(deposit_id, row['sha256']))
+                    row['upload_id'] = response['UploadId']
+                    self.store.update_file(deposit_id, row['name'], upload_id=row['upload_id'])
+        except Exception as exc:  # noqa: BLE001 - S3 refused: abort what was started, release the deposit
+            self._abort_and_delete(self.store.get(deposit_id), actor='create')
+            self.store.cas(deposit_id, ('uploading',), 'expired')
+            self.store.release_keys(deposit_id)
+            raise DepositError(502, 's3_error', f'the object store refused to start the upload ({_error_code(exc)}); '
+                                                f'try again later')
+        instructions = [self._instructions(deposit_id, row, 1, self.settings.parts_per_batch, expires) for row in rows]
         self.store.event(deposit_id, identity.user, 'created',
                          f'{len(rows)} file(s), {total} bytes' + (f', update of {update_of}' if update_of else '')
                          + (f', continues {continues}' if continues else ''))
@@ -857,15 +1122,20 @@ class DepositService:
                          'complete': f'/datasets/deposit/{deposit_id}/complete',
                          'status': f'/datasets/deposit/{deposit_id}'}}
 
-    def _instructions(self, deposit_id: str, row: Dict[str, Any], first: int, last: int) -> Dict[str, Any]:
-        """Presigned URL(s) for one file: a single PUT, or UploadPart URLs for parts ``first..last``."""
-        ttl = self._ttl()
-        base = {'name': row['name'], 'kind': row['kind'], 'key': row['key'], 'size': row['size'],
-                'sha256': row['sha256'], 'method': row['method']}
+    def _instructions(self, deposit_id: str, row: Dict[str, Any], first: int, last: int,
+                      expires: float) -> Dict[str, Any]:
+        """Presigned URL(s) for one file (a single PUT, or UploadPart URLs for parts ``first..last``).
+
+        Every URL points at the deposit's staging key and lives no longer than the deposit's window.
+        """
+        ttl = max(1, min(self._ttl(), int(expires - self.clock())))
+        target = row['staging_key']
+        base = {'name': row['name'], 'kind': row['kind'], 'key': row['key'], 'upload_key': target,
+                'size': row['size'], 'sha256': row['sha256'], 'method': row['method']}
         if row['method'] == 'put':
             url = self.s3.generate_presigned_url(
                 'put_object', ExpiresIn=ttl,
-                Params={'Bucket': self.bucket, 'Key': row['key'], 'ContentLength': row['size'],
+                Params={'Bucket': self.bucket, 'Key': target, 'ContentLength': row['size'],
                         'Metadata': self._metadata(deposit_id, row['sha256'])})
             return {**base, 'url': url, 'headers': {'x-amz-meta-sha256': row['sha256'],
                                                     'x-amz-meta-deposit': deposit_id,
@@ -876,7 +1146,7 @@ class DepositService:
         for number in range(first, last + 1):
             url = self.s3.generate_presigned_url(
                 'upload_part', ExpiresIn=ttl,
-                Params={'Bucket': self.bucket, 'Key': row['key'], 'UploadId': row['upload_id'],
+                Params={'Bucket': self.bucket, 'Key': target, 'UploadId': row['upload_id'],
                         'PartNumber': number, 'ContentLength': sizes[number - 1]})
             parts.append({'part_number': number, 'size': sizes[number - 1], 'url': url})
         return {**base, 'upload_id': row['upload_id'], 'part_size': row['part_size'], 'part_count': len(sizes),
@@ -886,7 +1156,7 @@ class DepositService:
         parts: List[Dict[str, Any]] = []
         marker = 0
         while True:
-            response = self.s3.list_parts(Bucket=self.bucket, Key=row['key'], UploadId=row['upload_id'],
+            response = self.s3.list_parts(Bucket=self.bucket, Key=row['staging_key'], UploadId=row['upload_id'],
                                           PartNumberMarker=marker, MaxParts=1000)
             for part in response.get('Parts', []) or []:
                 parts.append({'part_number': int(part['PartNumber']), 'size': int(part['Size']),
@@ -898,54 +1168,65 @@ class DepositService:
                 break
         return sorted(parts, key=lambda part: part['part_number'])
 
-    def _require_uploading(self, record: Dict[str, Any]) -> None:
+    def _require_uploading(self, record: Dict[str, Any]) -> Dict[str, Any]:
         if record['state'] == 'uploading' and record['expires'] <= self.clock():
             self.expire_stale()
             record = self.store.get(record['id']) or record
-        if record['state'] == 'expired':
+        if record['state'] in ('expired', 'expiring'):
             raise DepositError(410, 'expired', 'the upload window of this deposit passed; start a new deposit')
         if record['state'] != 'uploading':
             raise DepositError(409, 'not_uploading', f'the deposit is {record["state"]}')
+        return record
 
-    def refresh_urls(self, identity: Identity, deposit_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    def refresh_urls(self, identity: Identity, deposit_id: str, body: Any) -> Dict[str, Any]:
         """Fresh URLs for one file, and the parts S3 already has (resume) (``POST .../urls``)."""
         self._require_active()
         record = self._get_own(identity, deposit_id)
-        self._require_uploading(record)
-        name = (body or {}).get('name')
+        if not isinstance(body, dict) or not isinstance(body.get('name'), str):
+            raise DepositError(422, 'invalid', 'the body is {"name": <file name>, "first_part"?, "last_part"?}')
+        try:
+            first = int(body.get('first_part') or 1)
+            last = int(body.get('last_part') or first + self.settings.parts_per_batch - 1)
+        except (TypeError, ValueError):
+            raise DepositError(422, 'invalid', 'first_part and last_part are whole numbers')
+        record = self._require_uploading(record)
         rows = {row['name']: row for row in self.store.files(deposit_id)}
+        name = body['name']
         if name not in rows:
             raise DepositError(404, 'not_found', f'{name!r} is not a file of this deposit')
         row = rows[name]
         if row['state'] == 'complete':
             raise DepositError(409, 'already_complete', f'{name} is already complete')
-        self.limiter.check(identity.user)
-        now = self.clock()
-        expires = min(now + self._ttl(), float(record['created']) + self.settings.max_open_days * 86400)
-        if expires <= now:
-            raise DepositError(410, 'expired', 'this deposit has been open too long; start a new deposit')
-        self.store.update(deposit_id, expires=max(float(record['expires']), expires))
-        if row['method'] == 'put':
-            return {**self._instructions(deposit_id, row, 1, 1), 'expires': _iso(max(float(record['expires']), expires))}
-        first = int(body.get('first_part') or 1)
-        last = int(body.get('last_part') or first + self.settings.parts_per_batch - 1)
-        if first < 1 or last < first or last - first + 1 > MAX_PARTS_PER_CALL or first > int(row['part_count']):
+        if int(record.get('refreshes') or 0) >= self.settings.max_refreshes:
+            raise DepositError(429, 'too_many_refreshes', f'this deposit asked for fresh URLs '
+                                                          f'{self.settings.max_refreshes} times; start a new deposit')
+        if row['method'] == 'multipart' and (first < 1 or last < first or last - first + 1 > MAX_PARTS_PER_CALL
+                                             or first > int(row['part_count'])):
             raise DepositError(422, 'invalid', f'parts {first}..{last}: 1 <= first <= last <= {row["part_count"]}, '
                                                f'at most {MAX_PARTS_PER_CALL} per call')
+        self.limiter.check(identity.user)
+        now = self.clock()
+        expires = max(float(record['expires']),
+                      min(now + self._ttl(), float(record['created']) + self.settings.max_open_days * 86400))
+        if expires <= now:
+            raise DepositError(410, 'expired', 'this deposit has been open too long; start a new deposit')
+        self.store.update(deposit_id, expires=expires, refreshes=int(record.get('refreshes') or 0) + 1)
+        if row['method'] == 'put':
+            return {**self._instructions(deposit_id, row, 1, 1, expires), 'expires': _iso(expires)}
         try:
             done = self._uploaded_parts(row)
         except Exception as exc:  # noqa: BLE001
             raise DepositError(502, 's3_error', f'listing the uploaded parts failed ({_error_code(exc)})')
-        return {**self._instructions(deposit_id, row, first, last), 'parts_done': done,
-                'expires': _iso(max(float(record['expires']), expires))}
+        return {**self._instructions(deposit_id, row, first, last, expires), 'parts_done': done,
+                'expires': _iso(expires)}
 
     # complete --------------------------------------------------------------
 
-    def _complete_file(self, deposit_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
-        """Complete one file; returns ``{'name', 'ok': bool, ...}`` without raising for missing parts."""
+    def _finish_upload(self, deposit_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Complete one file in staging and verify it; ``{'name', 'ok', ...}`` (no raise for missing parts)."""
         if row['state'] == 'complete':
             return {'name': row['name'], 'ok': True}
-        if row['method'] == 'multipart':
+        if row['method'] == 'multipart' and row['state'] != 'staged':
             parts = self._uploaded_parts(row)
             sizes = part_sizes(row['size'], row['part_size'])
             have = {part['part_number']: part for part in parts}
@@ -957,10 +1238,11 @@ class DepositService:
                         'wrong_size_parts': sorted(wrong)[:200],
                         'uploaded_bytes': sum(part['size'] for part in parts)}
             self.s3.complete_multipart_upload(
-                Bucket=self.bucket, Key=row['key'], UploadId=row['upload_id'],
+                Bucket=self.bucket, Key=row['staging_key'], UploadId=row['upload_id'],
                 MultipartUpload={'Parts': [{'PartNumber': number, 'ETag': f'"{have[number]["etag"]}"'}
                                            for number in range(1, len(sizes) + 1)]})
-        head = _head(self.s3, self.bucket, row['key'])
+            self.store.update_file(deposit_id, row['name'], state='staged')
+        head = _head(self.s3, self.bucket, row['staging_key'])
         if head is None:
             return {'name': row['name'], 'ok': False, 'missing': True}
         problems = []
@@ -971,29 +1253,43 @@ class DepositService:
         if head['metadata'].get('sha256') != row['sha256']:
             problems.append('x-amz-meta-sha256 differs from the declared sha256')
         if problems:
-            if head['metadata'].get('deposit') == deposit_id:      # ours but wrong: remove it, the URL may be reused
-                delete_consumed(self.s3, self.bucket, self.settings.prefix, {row['key']: head['etag']})
+            self.s3.delete_object(Bucket=self.bucket, Key=row['staging_key'])     # the deposit's own staging key
+            self.store.update_file(deposit_id, row['name'], state='pending')
             return {'name': row['name'], 'ok': False, 'problems': problems}
-        self.store.update_file(deposit_id, row['name'], state='complete', etag=head['etag'], completed=self.clock())
+        self.store.update_file(deposit_id, row['name'], state='staged')
         return {'name': row['name'], 'ok': True}
 
+    def _copy_in(self, deposit_id: str, row: Dict[str, Any]) -> str:
+        """Copy a verified staging object to its watched key (multipart copy above 5 GB); returns the new ETag."""
+        source = {'Bucket': self.bucket, 'Key': row['staging_key']}
+        metadata = self._metadata(deposit_id, row['sha256'])
+        if row['size'] <= SINGLE_PUT_HARD_MAX:
+            self.s3.copy_object(Bucket=self.bucket, Key=row['key'], CopySource=source, Metadata=metadata,
+                                MetadataDirective='REPLACE')
+        else:                                             # managed copy: UploadPartCopy in parts
+            self.s3.copy(source, self.bucket, row['key'], ExtraArgs={'Metadata': metadata,
+                                                                     'MetadataDirective': 'REPLACE'})
+        head = _head(self.s3, self.bucket, row['key'])
+        if head is None or head['size'] != row['size'] or head['metadata'].get('deposit') != deposit_id:
+            raise RuntimeError(f'the copy of {row["name"]} into incoming could not be verified')
+        return head['etag']
+
     def _check_sidecar(self, record: Dict[str, Any], rows: Dict[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
-        """(errors, warnings) of the deposited sidecar against the deposit (read from S3, at most 1 MB)."""
+        """(errors, warnings) of the deposited sidecar against the deposit (read from staging, at most 1 MB)."""
         import mus  # noqa: PLC0415
 
         mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
-        response = self.s3.get_object(Bucket=self.bucket, Key=mus_row['key'])
+        response = self.s3.get_object(Bucket=self.bucket, Key=mus_row['staging_key'])
         text = response['Body'].read(TEXT_MAX_BYTES + 1).decode('utf-8', errors='replace')
         sidecar = parse_sidecar_text(text)
         errors: List[str] = []
         warnings: List[str] = []
-        h5ad_row = next((row for row in rows.values() if row['kind'] == 'h5ad'), None)
-        expected = h5ad_row['sha256'] if h5ad_row else None
+        expected = record.get('h5ad_sha256')            # the deposited h5ad, or the waiting one a continuation names
         declared = sidecar.get('sha256', '').lower()
         if not declared:
             errors.append('the sidecar has no sha256= line')
         elif expected and declared != expected:
-            errors.append(f'the sidecar says sha256={declared[:12]}..., the deposited h5ad is {expected[:12]}...')
+            errors.append(f'the sidecar says sha256={declared[:12]}..., the h5ad is {expected[:12]}...')
         if sidecar.get('data_project') and sidecar['data_project'] != record['data_project']:
             errors.append(f'the sidecar says data_project={sidecar["data_project"]}, the deposit is '
                           f'{record["data_project"]}')
@@ -1024,48 +1320,71 @@ class DepositService:
         return errors, warnings
 
     def complete(self, identity: Identity, deposit_id: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Complete every file, verify sizes and sha256 metadata, record the ETags (``POST .../complete``)."""
+        """Verify every upload in staging, copy the files into the watched prefix, record their ETags.
+
+        The deposit is ``completing`` meanwhile (withdraw and expiry wait); on any refusal it goes back to
+        ``uploading`` and nothing stays in the watched prefix.
+        """
         self._require_active()
-        record = self._get_own(identity, deposit_id)
-        self._require_uploading(record)
-        rows = {row['name']: row for row in self.store.files(deposit_id)}
-        results = []
+        record = self._require_uploading(self._get_own(identity, deposit_id))
+        if not self.store.cas(deposit_id, ('uploading',), 'completing'):
+            raise DepositError(409, 'busy', 'the deposit is being completed, withdrawn or expired right now')
+        copied: Dict[str, str] = {}
         try:
-            for row in rows.values():
-                results.append(self._complete_file(deposit_id, row))
-        except Exception as exc:  # noqa: BLE001
-            raise DepositError(502, 's3_error', f'completing the upload failed ({_error_code(exc)}); try again')
-        incomplete = [entry for entry in results if not entry['ok']]
-        if incomplete:
-            raise DepositError(409, 'incomplete', 'not every file is uploaded completely', files=incomplete)
-        rows = {row['name']: row for row in self.store.files(deposit_id)}
-        try:
-            errors, warnings = self._check_sidecar(record, rows)
-        except Exception as exc:  # noqa: BLE001
-            raise DepositError(502, 's3_error', f'reading the sidecar back failed ({_error_code(exc)})')
-        if errors:
-            mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
-            self.store.update_file(deposit_id, mus_row['name'], state='pending', etag=None, completed=None)
-            head = _head(self.s3, self.bucket, mus_row['key'])
-            if head and head['metadata'].get('deposit') == deposit_id:
-                delete_consumed(self.s3, self.bucket, self.settings.prefix, {mus_row['key']: head['etag']})
-            raise DepositError(422, 'sidecar_mismatch', '; '.join(errors) + '. Upload a corrected sidecar (fresh '
-                                                                            'URL from .../urls) and complete again.')
+            rows = {row['name']: row for row in self.store.files(deposit_id)}
+            try:
+                results = [self._finish_upload(deposit_id, row) for row in rows.values()]
+            except Exception as exc:  # noqa: BLE001
+                raise DepositError(502, 's3_error', f'completing the upload failed ({_error_code(exc)}); try again')
+            incomplete = [entry for entry in results if not entry['ok']]
+            if incomplete:
+                raise DepositError(409, 'incomplete', 'not every file is uploaded completely', files=incomplete)
+            rows = {row['name']: row for row in self.store.files(deposit_id)}
+            try:
+                errors, warnings = self._check_sidecar(record, rows)
+            except Exception as exc:  # noqa: BLE001
+                raise DepositError(502, 's3_error', f'reading the sidecar back failed ({_error_code(exc)})')
+            if errors:
+                mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
+                self.s3.delete_object(Bucket=self.bucket, Key=mus_row['staging_key'])
+                self.store.update_file(deposit_id, mus_row['name'], state='pending')
+                raise DepositError(422, 'sidecar_mismatch', '; '.join(errors) + '. Upload a corrected sidecar '
+                                                                                '(fresh URL from .../urls) and '
+                                                                                'complete again.')
+            if record.get('continues'):            # a sidecar for an h5ad still in incoming: it must not have changed
+                head = _head(self.s3, self.bucket, record['watch_key'])
+                if head is None or head['etag'] != record['h5ad_etag']:
+                    raise DepositError(409, 'h5ad_changed', 'the h5ad this sidecar belongs to changed or is gone; '
+                                                            'withdraw this deposit and deposit the h5ad again')
+            self._check_keys(Identity(user=record['user'], is_admin=bool(record['is_admin'])), list(rows.values()))
+            try:
+                for row in rows.values():
+                    copied[row['key']] = self._copy_in(deposit_id, row)
+            except Exception as exc:  # noqa: BLE001
+                raise DepositError(502, 's3_error', f'moving the files into incoming failed ({_error_code(exc)}); '
+                                                    f'try again')
+        except DepositError:
+            for key, etag in copied.items():           # nothing of a refused complete stays where the watcher looks
+                delete_consumed(self.s3, self.bucket, self.settings.prefix, {key: etag})
+            self.store.cas(deposit_id, ('completing',), 'uploading')
+            raise
+        now = self.clock()
+        for row in rows.values():
+            self.store.update_file(deposit_id, row['name'], state='complete', etag=copied[row['key']], completed=now)
+            try:
+                self.s3.delete_object(Bucket=self.bucket, Key=row['staging_key'])
+            except Exception:  # noqa: BLE001 - the staging sweep removes it later
+                pass
         h5ad_row = next((row for row in rows.values() if row['kind'] == 'h5ad'), None)
         mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
-        h5ad_etag = h5ad_row['etag'] if h5ad_row else record['h5ad_etag']
-        if not h5ad_row:                          # a sidecar for an h5ad still in incoming: it must not have changed
-            head = _head(self.s3, self.bucket, record['watch_key'])
-            if head is None or head['etag'] != record['h5ad_etag']:
-                raise DepositError(409, 'h5ad_changed', 'the h5ad this sidecar belongs to changed or is gone; '
-                                                        'withdraw this deposit and deposit the h5ad again')
-        now = self.clock()
-        self.store.update(deposit_id, state='uploaded', completed=now, h5ad_etag=h5ad_etag,
-                          mus_etag=mus_row['etag'])
+        self.store.cas(deposit_id, ('completing',), 'uploaded', completed=now,
+                       h5ad_etag=copied[h5ad_row['key']] if h5ad_row else record['h5ad_etag'],
+                       mus_etag=copied[mus_row['key']])
+        self.store.release_keys(deposit_id)
         self.store.event(deposit_id, identity.user, 'completed', f'{len(rows)} file(s)')
         return {'deposit_id': deposit_id, 'state': 'uploaded',
                 'files': [{'name': row['name'], 'key': row['key'], 'size': row['size'], 'sha256': row['sha256'],
-                           'etag': row['etag']} for row in rows.values()],
+                           'etag': copied[row['key']]} for row in rows.values()],
                 'warnings': warnings,
                 'next': 'The watcher checks the deposit within a few minutes after it settles; follow it with '
                         f'GET /datasets/deposit/{deposit_id}.'}
@@ -1116,9 +1435,27 @@ class DepositService:
         warnings = json.loads(source['warnings'] or '[]') if source.get('warnings') else json.loads(
             record.get('warnings') or '[]')
         report = self._report(record, row if matches else None)
+        events = self.store.events(record['id'])
+        hidden = set()
+        if not identity.is_admin:            # a depositor sees "an admin", not who
+            hidden = {entry['actor'] for entry in events} - {record['user'], 'watcher', 'expiry', 'create', None, ''}
+            approval_by = json.loads(record['approval']).get('by') if record.get('approval') else None
+            if approval_by and approval_by != record['user']:
+                hidden.add(approval_by)
+
+        def mask(text: Any) -> Any:
+            text = sanitize_text(text, self.roots)
+            if isinstance(text, str):
+                for name in sorted(hidden, key=len, reverse=True):
+                    text = re.sub(rf'(?<![\w.@-]){re.escape(name)}(?![\w.@-])', 'an admin', text)
+            return text
+
+        approval = json.loads(record['approval']) if record.get('approval') else None
+        if approval and hidden:
+            approval = {**approval, 'by': 'an admin'}
         view.update({
-            'error': sanitize_text(error, self.roots),
-            'warnings': [sanitize_text(text, self.roots) for text in warnings],
+            'error': mask(error),
+            'warnings': [mask(text) for text in warnings],
             'files': [{'name': entry['name'], 'kind': entry['kind'], 'key': entry['key'], 'size': entry['size'],
                        'sha256': entry['sha256'], 'method': entry['method'], 'state': entry['state']}
                       for entry in self.store.files(record['id'])],
@@ -1127,10 +1464,11 @@ class DepositService:
                        'incoming_deleted': bool(row.get('deleted'))} if matches else None),
             'report': report_summary(report),
             'report_available': report is not None,
-            'events': [{'time': _iso(entry['ts']), 'action': entry['action'], 'actor': entry['actor'],
-                        'detail': sanitize_text(entry['detail'], self.roots)}
-                       for entry in self.store.events(record['id'])],
-            'approval': json.loads(record['approval']) if record.get('approval') else None,
+            'events': [{'time': _iso(entry['ts']), 'action': entry['action'],
+                        'actor': 'an admin' if entry['actor'] in hidden else entry['actor'],
+                        'detail': mask(entry['detail'])}
+                       for entry in events],
+            'approval': approval,
         })
         return view
 
@@ -1160,18 +1498,19 @@ class DepositService:
     # withdraw / approve / reject ------------------------------------------
 
     def _abort_and_delete(self, record: Dict[str, Any], actor: str) -> Dict[str, Any]:
-        """Abort this deposit's multipart uploads and delete its own objects (metadata and ETag checked)."""
+        """Abort this deposit's multipart uploads, empty its staging folder and delete its own incoming copies
+        (only objects whose ``x-amz-meta-deposit`` is this deposit and whose ETag is the completed one)."""
         aborted, deleted, kept = [], [], []
         for row in self.store.files(record['id']):
-            if row['method'] == 'multipart' and row['state'] != 'complete' and row['upload_id']:
+            if row['method'] == 'multipart' and row['state'] in ('pending',) and row['upload_id']:
                 try:
-                    self.s3.abort_multipart_upload(Bucket=self.bucket, Key=row['key'], UploadId=row['upload_id'])
+                    self.s3.abort_multipart_upload(Bucket=self.bucket, Key=row['staging_key'],
+                                                   UploadId=row['upload_id'])
                 except Exception as exc:  # noqa: BLE001
                     if _error_code(exc) not in ('NoSuchUpload', '404'):
                         raise
                 aborted.append(row['name'])
                 self.store.update_file(record['id'], row['name'], state='aborted')
-                continue
             head = _head(self.s3, self.bucket, row['key'])
             if head is None:
                 continue
@@ -1189,34 +1528,47 @@ class DepositService:
                 self.store.update_file(record['id'], row['name'], state='deleted')
             elif outcomes.get(row['key']) != 'skipped:absent':
                 kept.append({'key': row['key'], 'reason': outcomes.get(row['key'], 'unknown')})
+        staging = self._clean_staging(record['id'])
         self.store.event(record['id'], actor, 'cleanup', json.dumps({'aborted': aborted, 'deleted': deleted,
-                                                                     'kept': kept}))
+                                                                     'kept': kept, 'staging_removed': len(staging)}))
         return {'aborted': aborted, 'deleted': deleted, 'kept': kept}
 
     def withdraw(self, identity: Identity, deposit_id: str) -> Dict[str, Any]:
-        """Abort and delete this deposit's own incoming objects; mark it withdrawn."""
+        """Abort and delete this deposit's own objects (staging and incoming); mark it withdrawn."""
         self._require_active()
         record = self._get_own(identity, deposit_id)
-        if record['state'] in ('withdrawn', 'expired'):
+        if record['state'] in ('withdrawn', 'expired', 'expiring', 'withdrawing'):
             raise DepositError(409, 'not_withdrawable', f'the deposit is already {record["state"]}')
+        if record['state'] == 'completing':
+            raise DepositError(409, 'busy', 'the deposit is being completed right now; try again in a moment')
         row = read_watch_row(self.state_dir, record.get('watch_key'))
         state = public_state(record, row if watch_row_matches(record, row) else None)
         if state == 'checking':
             raise DepositError(409, 'busy', 'the watcher is processing this deposit; withdraw it once it is done')
         if state == 'live':
             raise DepositError(409, 'live', 'the deposit is published; ask an admin to retire the dataset')
+        users = [other['id'] for other in self.store._rows(
+            "SELECT id FROM deposits WHERE continues = ? AND state IN ('uploading', 'completing', 'uploaded') "
+            "AND COALESCE(watch_state, '') NOT IN ('rejected')", (deposit_id,))]
+        if users:
+            raise DepositError(409, 'in_use', f'the deposit {users[0]} (a corrected sidecar) uses this deposit\'s '
+                                              f'h5ad: withdraw that one first')
+        if not self.store.cas(deposit_id, ('uploading', 'uploaded'), 'withdrawing'):
+            raise DepositError(409, 'busy', 'the deposit changed state meanwhile; look at it again')
         try:
             result = self._abort_and_delete(record, identity.user)
         except Exception as exc:  # noqa: BLE001
+            self.store.cas(deposit_id, ('withdrawing',), record['state'])
             raise DepositError(502, 's3_error', f'withdrawing failed ({_error_code(exc)}); try again')
-        self.store.update(deposit_id, state='withdrawn')
+        self.store.cas(deposit_id, ('withdrawing',), 'withdrawn')
+        self.store.release_keys(deposit_id)
         self.store.event(deposit_id, identity.user, 'withdrawn', '')
         return {'deposit_id': deposit_id, 'state': 'withdrawn', **result}
 
     @staticmethod
-    def _require_admin(identity: Identity) -> None:
+    def _require_admin(identity: Identity, what: str = 'approve or reject deposits') -> None:
         if not identity.is_admin:
-            raise DepositError(403, 'forbidden', 'only admins approve or reject deposits')
+            raise DepositError(403, 'forbidden', f'only admins {what}')
 
     def _held_row(self, record: Dict[str, Any]) -> Dict[str, Any]:
         row = read_watch_row(self.state_dir, record.get('watch_key'))
@@ -1262,7 +1614,7 @@ class DepositService:
             raise DepositError(409, 'not_rejectable', str(exc))
         finally:
             watch_db.close()
-        self.store.update(deposit_id, watch_state='rejected', error=f'rejected by {identity.user}'
+        self.store.update(deposit_id, watch_state='rejected', error='rejected by an admin'
                           + (f': {note}' if note else ''))
         self.store.event(deposit_id, identity.user, 'rejected', note or '')
         return {'deposit_id': deposit_id, 'state': 'rejected', 'note': note or ''}

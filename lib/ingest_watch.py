@@ -437,7 +437,8 @@ class Watcher:
 
     def __init__(self, settings: Dict[str, Any], db: StateDB, s3: Any, bucket: str, pipeline: Pipeline,
                  state_dir: Path, log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
-                 max_items: Optional[int] = None, stop_requested: Callable[[], bool] = lambda: False):
+                 max_items: Optional[int] = None, stop_requested: Callable[[], bool] = lambda: False,
+                 deposit_settings: Any = None):
         self.settings = settings
         self.db = db
         self.s3 = s3
@@ -449,6 +450,9 @@ class Watcher:
         self.max_items = max_items
         self.stop_requested = stop_requested
         self.if_match: Optional[bool] = None
+        #: ``dataset_deposit.DepositSettings`` for expiry and the staging sweep (None: no deposit housekeeping)
+        self.deposit_settings = deposit_settings
+        self._deposit_marks: Dict[Tuple[str, str], str] = {}
 
     def check_if_match(self) -> bool:
         """Whether the backend enforces ``IfMatch`` on DeleteObject (self-test, cached a week per bucket and prefix)."""
@@ -514,44 +518,105 @@ class Watcher:
     def deposit_roots(self) -> Dict[str, Path]:
         """Server paths replaced in what a depositor sees."""
         return {'store': self.pipeline.config.store_root, 'state': self.state_dir,
-                'work': self.pipeline.config.work_root}
+                'work': self.pipeline.config.work_root, 'bucket': self.bucket}
 
     def link_deposits(self, items: List[Item]) -> List[Item]:
-        """Attach API deposit records to the items they describe; hold back projects with an open deposit.
+        """Attach API deposit records to their items, hold back items of deposits still completing, and refuse
+        deposit-marked objects that no completed deposit accounts for.
 
-        An item belongs to a deposit when its h5ad and sidecar keys and ETags
-        are exactly the ones the deposit completed. While a deposit of a
-        project is still uploading (and not expired), no item of that project
-        is looked at: its files may be half there.
+        * An item belongs to a deposit when its h5ad and sidecar keys and ETags are exactly the ones the
+          deposit completed. It uses only the static and DE files of its own deposit (and of the deposits a
+          corrected sidecar continues); an unlinked item never uses a deposit's files.
+        * Items whose h5ad or sidecar key is locked by a deposit that is uploading or completing wait.
+        * An unlinked item whose h5ad or sidecar carries ``x-amz-meta-deposit`` is refused
+          (``needs_decision``): only the server writes that mark, so it is a replay or a leftover. With
+          ``ingest_watch.accept_unlinked: false`` every unlinked item is refused (deposits through the API only).
+        * Fails closed: a deposit store that exists but cannot be read stops the poll (TransientError).
+
+        Each poll also expires stale deposits, sweeps the staging prefix and writes pending owner caveats.
         """
         import dataset_deposit  # noqa: PLC0415
 
+        accept_unlinked = bool(self.settings.get('accept_unlinked', True))
         try:
             store = dataset_deposit.DepositStore.open_if_exists(self.state_dir)
-        except Exception as exc:  # noqa: BLE001 - deposits are optional; never stop the watch route
-            self.log(f'deposits: cannot open the deposit store: {exc}')
-            return items
+        except Exception as exc:  # noqa: BLE001
+            raise TransientError(f'the deposit store exists but cannot be opened ({exc}); not polling') from exc
         if store is None:
+            if not accept_unlinked:
+                for item in items:
+                    item.refused = self._unlinked_refusal(item, accept_unlinked)
             return items
         try:
-            busy = store.open_projects(self.clock())
-            kept: List[Item] = []
-            for item in items:
-                if item.data_project in busy:
-                    continue
-                if item.mus is not None:
-                    record = store.find_for_item(item.h5ad.key, item.h5ad.etag, item.mus.key, item.mus.etag)
+            if self.deposit_settings is not None:
+                try:
+                    service = dataset_deposit.DepositService(self.deposit_settings, store, self.s3,
+                                                             self.pipeline.config.store_root, self.state_dir,
+                                                             clock=self.clock)
+                    for deposit_id in service.expire_stale():
+                        self.log(f'deposits: {deposit_id} expired (uploads aborted, its files removed)')
+                except Exception as exc:  # noqa: BLE001 - housekeeping; the next poll retries
+                    self.log(f'deposits: expiry or staging sweep failed: {exc}')
+            try:
+                dataset_deposit.apply_owner_caveats(store, self.pipeline.config.store_root, self.log)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f'deposits: owner caveats not written: {exc}')
+            try:
+                held = store.held_keys()
+                objects = store.deposit_objects()
+                kept: List[Item] = []
+                for item in items:
+                    if item.h5ad.key in held or (item.mus is not None and item.mus.key in held):
+                        continue
+                    record = store.find_for_item(item.h5ad.key, item.h5ad.etag, item.mus.key,
+                                                 item.mus.etag) if item.mus is not None else None
                     if record:
                         item.deposit = {key: record.get(key) for key in
                                         ('id', 'user', 'name', 'email', 'update_of', 'data_project', 'basename')}
-                kept.append(item)
-            skipped = len(items) - len(kept)
-            if skipped:
-                self.log(f'deposits: {skipped} item(s) wait for an open deposit of their project '
-                         f'({", ".join(sorted(busy))})')
+                        chain = set(store.chain(record['id']))
+
+                        def own(obj, chain=chain):
+                            entry = objects.get(obj.key)
+                            return entry is not None and entry[0] in chain and entry[1] == obj.etag
+                        item.static = [obj for obj in item.static if own(obj)]
+                        item.de = [obj for obj in item.de if own(obj)]
+                    else:
+                        def foreign(obj):
+                            entry = objects.get(obj.key)
+                            return entry is not None and entry[1] == obj.etag
+                        item.static = [obj for obj in item.static if not foreign(obj)]
+                        item.de = [obj for obj in item.de if not foreign(obj)]
+                        item.refused = self._unlinked_refusal(item, accept_unlinked)
+                    kept.append(item)
+            except sqlite3.Error as exc:
+                raise TransientError(f'the deposit store cannot be read ({exc}); not polling') from exc
+            if len(kept) < len(items):
+                self.log(f'deposits: {len(items) - len(kept)} item(s) wait for a deposit that is still completing')
             return kept
         finally:
             store.close()
+
+    def _unlinked_refusal(self, item: Item, accept_unlinked: bool) -> Optional[str]:
+        """Why an item that belongs to no completed deposit is refused, or None."""
+        if not accept_unlinked:
+            return ('uploads outside the deposit API are not accepted on this site '
+                    '(ingest_watch.accept_unlinked: false); deposit through the API')
+        for obj in (item.h5ad, item.mus):
+            if obj is None:
+                continue
+            cache_key = (obj.key, obj.etag)
+            if cache_key not in self._deposit_marks:
+                try:
+                    head = self.s3.head_object(Bucket=self.bucket, Key=obj.key)
+                    metadata = {str(k).lower(): str(v) for k, v in (head.get('Metadata') or {}).items()}
+                except Exception:  # noqa: BLE001 - gone or unreadable: the pull decides
+                    continue
+                self._deposit_marks[cache_key] = metadata.get('deposit', '')
+            mark = self._deposit_marks[cache_key]
+            if mark:
+                return (f'{obj.key} carries the mark of API deposit {mark} but is not an upload that deposit '
+                        f'completed (a replayed or left-over object); refused. Deposit again through the API.')
+        return None
 
     def sync_deposit(self, item: Item) -> None:
         """Copy the outcome of an API deposit's item into its record, write its redacted report, mail the depositor."""
@@ -589,6 +654,12 @@ class Watcher:
     def process(self, item: Item, listed: Sequence[Item] = ()) -> str:
         """Run the pipeline for one ready item and record the outcome."""
         key = item.key
+        if getattr(item, 'refused', None):
+            self.db.transition(key, 'needs_decision', item.refused, error=item.refused,
+                               processed_signature=item.content_signature())
+            self.log(f'refused {item.display}: {item.refused}')
+            self._notify(key)
+            return 'needs_decision'
         row = self.db.get(key) or {}
         approval = json.loads(row['approval']) if row.get('approval') else None
         if approval and approval.get('signature') != item.settle_signature():

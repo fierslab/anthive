@@ -36,6 +36,7 @@ Usage:
     ant ingest-watch status [--json]       # items and their states
     ant ingest-watch approve <key|db_id> --by NAME [--note TEXT]   # publish a held item after review
     ant ingest-watch reject <key|db_id> --by NAME [--note TEXT]
+    ant ingest-watch owner set <db_id> <user> --by NAME [--note TEXT]   # who may deposit new versions (API)
     ant ingest-watch --once --store /scratch/store --prefix __incoming_test/ \\
         --catalog-prefix __ingest_test_catalog/ --api-url http://127.0.0.1:18850
 """
@@ -142,8 +143,52 @@ def build(args: argparse.Namespace):
         stop_requested=lambda: _stop)
     db = ingest_watch.StateDB(state_dir / ingest_watch.DB_FILE)
     watcher = ingest_watch.Watcher(settings, db, client, s3_cfg['bucket'], pipeline, state_dir, log=log,
-                                   max_items=args.max_items, stop_requested=lambda: _stop)
+                                   max_items=args.max_items, stop_requested=lambda: _stop,
+                                   deposit_settings=deposit_settings(cfg, settings))
     return settings, state_dir, db, watcher, store_root
+
+
+def deposit_settings(cfg: dict, settings: dict):
+    """DepositSettings for expiry and the staging sweep of API deposits (the watched prefix of this run)."""
+    import dataset_deposit  # noqa: PLC0415
+
+    raw = config.get_dataset_deposit_settings(cfg)
+    fields = {name: raw[name] for name in dataset_deposit.DepositSettings.__dataclass_fields__ if name in raw}
+    fields['prefix'] = settings['prefix']
+    try:
+        return dataset_deposit.DepositSettings(**fields)
+    except ValueError as exc:
+        sys.exit(f'ERROR: {exc}')
+
+
+def cmd_owner(args: argparse.Namespace) -> int:
+    """owner set <db_id> <user> --by NAME: who may deposit new versions of a dataset published before deposits."""
+    import dataset_deposit  # noqa: PLC0415
+
+    if args.item != 'set' or not args.rest or len(args.rest) != 2 or not args.by:
+        print('usage: ant-ingest-watch owner set <db_id> <user> --by <name> [--note TEXT] [--store PATH]',
+              file=sys.stderr)
+        return 2
+    config.require_primary(config.get_config(), tool='ant-ingest-watch owner')
+    db_id, user = args.rest
+    cfg = config.get_config()
+    store_root = Path(args.store).resolve() if args.store else config.get_data_folder(cfg).resolve()
+    state_dir = config.get_ingest_state_dir(cfg)
+    store = dataset_deposit.DepositStore(state_dir / dataset_deposit.DB_FILE)
+    try:
+        service = dataset_deposit.DepositService(dataset_deposit.DepositSettings(), store, None, store_root, state_dir)
+        try:
+            result = service.set_owner(dataset_deposit.Identity(user=args.by, is_admin=True), db_id, user,
+                                       args.note or '')
+        except dataset_deposit.DepositError as exc:
+            print(f'ERROR: {exc.body["message"]}', file=sys.stderr)
+            return 1
+        applied = dataset_deposit.apply_owner_caveats(store, store_root, log)
+        print(f'{result["user"]} may now deposit new versions of {result["db_id"]} '
+              f'({applied} caveat(s) written; commit the .md in the store repository)')
+    finally:
+        store.close()
+    return 0
 
 
 def cmd_review(args: argparse.Namespace) -> int:
@@ -245,8 +290,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0], epilog=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', nargs='?', choices=('run', 'status', 'approve', 'reject'), default='run')
-    parser.add_argument('item', nargs='?', help='approve / reject: the item key (or db id)')
+    parser.add_argument('command', nargs='?', choices=('run', 'status', 'approve', 'reject', 'owner'), default='run')
+    parser.add_argument('item', nargs='?', help='approve / reject: the item key (or db id); owner: set')
+    parser.add_argument('rest', nargs='*', help='owner set: <db_id> <user>')
     parser.add_argument('--by', help='approve / reject: who decided (recorded in the caveat and the state)')
     parser.add_argument('--note', help='approve / reject: a short reason')
     parser.add_argument('--once', action='store_true', help='one poll, then exit')
@@ -265,6 +311,8 @@ def main() -> int:
         return cmd_status(args)
     if args.command in ('approve', 'reject'):
         return cmd_review(args)
+    if args.command == 'owner':
+        return cmd_owner(args)
     config.require_primary(config.get_config(), tool='ant-ingest-watch')
     return cmd_run(args)
 

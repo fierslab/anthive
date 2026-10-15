@@ -24,7 +24,7 @@ MODE_EXISTING = 'existing'
 class Settings:
     """Site settings the checks read (``config.get_dataset_ingest_settings``)."""
 
-    max_upload_gb: float = 50.0
+    max_upload_gb: float = 200.0
     auto_publish_public: bool = False
     default_access: str = 'internal'
 

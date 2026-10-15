@@ -93,8 +93,8 @@ library_index_pull: true
 
 # Dataset ingestion (doc/DESIGN_dataset_ingestion.md). P1 reads these in
 # `ant ingest-check`.
-# Largest h5ad accepted, in GB (check files.size).
-datasets_upload_max_gb: 50
+# Largest h5ad accepted, in GB (check files.size); keep it equal to datasets_deposit_max_gb.
+datasets_upload_max_gb: 200
 # access=public waits for an admin unless this is true.
 datasets_auto_publish_public: false
 # Access level a new dataset gets when its annotation does not say.
@@ -129,6 +129,13 @@ datasets_deposit_parts_per_batch: 100
 datasets_deposit_single_put_max_mb: 64
 # Files per deposit.
 datasets_deposit_max_files: 100
+# Deposits a user may start in 24 hours.
+datasets_deposit_max_per_day: 20
+# URL refresh calls per deposit.
+datasets_deposit_max_refreshes: 500
+# Where presigned uploads land (one folder per deposit), outside ingest_watch.prefix: a URL can never
+# write a key the watcher reads. Complete copies the checked files into ingest_watch.prefix.
+datasets_deposit_staging_prefix: __deposits/
 # Who may deposit a new version of a published dataset: own (the user whose
 # deposit published it, and admins) or any (every depositor).
 datasets_deposit_update_policy: own
@@ -212,6 +219,11 @@ ingest_watch:
   # The watcher refuses to run when its state, tmp or work dir lies inside the
   # repository checkout (runtime writes belong outside it). true allows it.
   allow_repo_dirs: false
+  # Process uploads that no API deposit accounts for (lab members' `mus s3 upload`). Dataset preparation and
+  # upload move to vark and the deposit API (Mark, 2026-10-15): set false once vark ships, so only deposits
+  # made with an Anthive login are published. Objects carrying a deposit's mark that the deposit did not
+  # complete are refused either way.
+  accept_unlinked: true
   # Optional notification when an item goes live, is held, fails or needs a
   # decision. webhook_url gets a JSON POST; email needs smtp_host and email_to.
   notify:
