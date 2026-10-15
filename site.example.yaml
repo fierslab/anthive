@@ -144,6 +144,9 @@ services:
   paper_upload: false # let users in library.upload_groups add papers through the API and
                      # MCP; mounts data.library and data.library_index read-write into
                      # the api container (data.library must be a git checkout)
+  dataset_deposit: false # let users in datasets.upload_groups deposit datasets: the api
+                     # hands out presigned S3 uploads into the incoming prefix (needs
+                     # s3.enabled); ant-ingest-watch on the host checks and publishes them
 
 # Paper library: uploads and the two-way sync (`ant sync library`).
 library:
@@ -160,6 +163,20 @@ library:
   index_pull: true          # `ant sync` may download the shared literature index. Set false on a
                             # site that builds its own from a hand-picked library
                             # (`ant lib-index --library ... --out ...`); always off when s3.enabled is false
+
+# Dataset deposits through the API (services.dataset_deposit). Depositors use their
+# Anthive login and never hold S3 keys. The api presigns with the key pair in
+# <state_dir>/secrets/s3_incoming_access_key_id + s3_incoming_secret_access_key
+# (limit it to the incoming prefix if the object store can), else with the
+# read-write pair (`check` warns). Run ant-ingest-watch on the host with
+# ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest so the api sees its progress.
+datasets:
+  upload_groups: [admins, curators]  # who may deposit (Authelia groups; basic mode: auth.admins)
+  max_gb: 200               # largest deposit, all files together
+  url_ttl_hours: 24         # lifetime of a presigned URL (and of an idle open deposit)
+  max_open_per_user: 5      # deposits uploading at the same time, per user
+  max_pending_gb_per_user: 400   # GB a user may have waiting for publication
+  update_policy: own        # who may deposit a new version: own (the original depositor, admins) | any
 
 mcp:
   token_ttl_days: 90 # lifetime of a per-user MCP link (0 = never expires)

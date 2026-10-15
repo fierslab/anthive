@@ -80,6 +80,9 @@ TLS_MODES = ('internal', 'acme', 'off')
 S3_API_ACCESS = ('none', 'read', 'write')
 S3_KEY_FILES = {'write': ('s3_access_key_id', 's3_secret_access_key'),
                 'read': ('s3_read_access_key_id', 's3_read_secret_access_key')}
+# Optional key pair the api presigns dataset deposits with (services.dataset_deposit);
+# without it the api gets the read-write pair for that purpose (`check` warns).
+S3_INCOMING_KEY_FILES = ('s3_incoming_access_key_id', 's3_incoming_secret_access_key')
 
 # Container-side fixed locations (see docker/Dockerfile + compose.yaml).
 C_STATE = '/var/lib/anthive'
@@ -208,6 +211,12 @@ def validate_site(site: dict, path: Path) -> dict:
     if api_access not in S3_API_ACCESS:
         raise SiteError(f"s3.api_access must be one of {', '.join(S3_API_ACCESS)}")
     s3['api_access'] = api_access
+    datasets = site.get('datasets')
+    if datasets is not None and not isinstance(datasets, dict):
+        raise SiteError("datasets must be a mapping (upload_groups, max_gb, ...)")
+    groups = (datasets or {}).get('upload_groups')
+    if groups is not None and (not isinstance(groups, list) or not all(isinstance(g, str) and g for g in groups)):
+        raise SiteError("datasets.upload_groups must be a list of group names, e.g. [admins, curators]")
     site['_trusted_proxies'] = _trusted_proxies(site)
     library = site.get('library') or {}
     site['_deploy_key'] = _abs(library.get('deploy_key'), 'library.deploy_key', False)
@@ -383,6 +392,34 @@ def _s3_block(site: dict, role: str) -> dict | None:
     }
 
 
+def _deposit_enabled(site: dict) -> bool:
+    return bool((site.get('services') or {}).get('dataset_deposit')) and bool((site.get('s3') or {}).get('enabled'))
+
+
+def _deposit_key_source(site: dict) -> str | None:
+    """'incoming' when the separate presigning pair exists, 'write' when only the read-write pair does, else None."""
+    secrets_dir = site['_state'] / 'secrets'
+    if all(_read_secret(secrets_dir / name) for name in S3_INCOMING_KEY_FILES):
+        return 'incoming'
+    if all(_read_secret(secrets_dir / name) for name in S3_KEY_FILES['write']):
+        return 'write'
+    return None
+
+
+def _deposit_s3_block(site: dict) -> dict | None:
+    """datasets_deposit_s3 of the api config: the key pair the api presigns deposits with."""
+    source = _deposit_key_source(site)
+    if source is None:
+        return None
+    s3 = site.get('s3') or {}
+    names = S3_INCOMING_KEY_FILES if source == 'incoming' else S3_KEY_FILES['write']
+    secrets_dir = site['_state'] / 'secrets'
+    return {'endpoint': s3.get('endpoint'), 'region': s3.get('region') or 'us-east-1', 'bucket': s3.get('bucket'),
+            'use_path_style': bool(s3.get('use_path_style')),
+            'access_key_id': _read_secret(secrets_dir / names[0]),
+            'secret_access_key': _read_secret(secrets_dir / names[1])}
+
+
 def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
     res = site['resources']
     state = site['_state']
@@ -444,6 +481,20 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
         'library_index_pull': _index_pull_enabled(site),
     })
     cfg['mcp']['max_upload_mb'] = int(lib.get('max_pdf_mb') or 25)
+    # Dataset deposits (services.dataset_deposit, datasets: block). Who may deposit
+    # goes to every role (the MCP shows its deposit tools by it); the presigning
+    # key pair only to the api.
+    datasets = site.get('datasets') or {}
+    cfg['datasets_upload_groups'] = [str(g) for g in (datasets.get('upload_groups') or ['admins', 'curators'])]
+    cfg['datasets_deposit_enabled'] = _deposit_enabled(site)
+    for key in ('max_gb', 'url_ttl_hours', 'max_open_days', 'max_open_per_user', 'max_pending_gb_per_user',
+                'update_policy'):
+        if datasets.get(key) is not None:
+            cfg[f'datasets_deposit_{key}'] = datasets[key]
+    if role == 'api' and _deposit_enabled(site):
+        block = _deposit_s3_block(site)
+        if block is not None:
+            cfg['datasets_deposit_s3'] = block
     if site['_starcatstore']:
         cfg['starcat_store'] = str(site['_starcatstore'])
     chat_key = _read_secret(state / 'secrets' / 'chat_api_key')
@@ -962,6 +1013,33 @@ def _check_s3(site: dict) -> list[str]:
     return problems
 
 
+def _check_datasets(site: dict) -> list[str]:
+    """Dataset deposits through the api: one summary line, problems for what cannot work."""
+    problems: list[str] = []
+    datasets = site.get('datasets') or {}
+    groups = ', '.join(datasets.get('upload_groups') or ['admins', 'curators'])
+    if not (site.get('services') or {}).get('dataset_deposit'):
+        _say("dataset deposits: off (services.dataset_deposit)")
+        return problems
+    if not (site.get('s3') or {}).get('enabled'):
+        problems.append("services.dataset_deposit is on but s3.enabled is false: deposits are presigned S3 uploads")
+        return problems
+    if site['auth']['mode'] == 'none':
+        _warn("services.dataset_deposit is on but auth.mode is none: nobody can deposit (a login is required)")
+    source = _deposit_key_source(site)
+    if source is None:
+        problems.append(f"services.dataset_deposit is on but neither secrets/{S3_INCOMING_KEY_FILES[0]} (+ "
+                        f"{S3_INCOMING_KEY_FILES[1]}) nor the read-write pair exists")
+        return problems
+    if source == 'write':
+        _warn(f"dataset deposits presign with the read-write S3 keys, so the api container holds them; put a key "
+              f"pair limited to the incoming prefix in secrets/{S3_INCOMING_KEY_FILES[0]} and "
+              f"{S3_INCOMING_KEY_FILES[1]} if the object store can scope keys")
+    _say(f"dataset deposits: on for {groups}; presigning with the {'read-write' if source == 'write' else source} key pair; run ant-ingest-watch on this "
+         f"host with ANTHIVE_INGEST_STATE_DIR={site['_state'] / 'ingest'} (the api reads its state there)")
+    return problems
+
+
 def _loose_permissions(path: Path) -> bool:
     try:
         return bool(path.stat().st_mode & 0o077)
@@ -1167,6 +1245,7 @@ def check(site: dict, running: bool = False) -> list[str]:
                 if not (state / 'authelia' / 'secrets' / secret).exists():
                     problems.append(f"missing authelia/secrets/{secret} (run `ant-stack init`)")
     problems += _check_s3(site)
+    problems += _check_datasets(site)
     _check_secret_permissions(site)
     _check_proxy_trust(site)
     store = site['_h5adstore']
@@ -1316,6 +1395,7 @@ def print_plan(site: dict) -> None:
   caddy          (in container): {listen}
   trusted proxy  {' '.join(site['_trusted_proxies']) or '-'}
   s3             {('on, api access: ' + site['s3']['api_access']) if site['s3'].get('enabled') else 'off'}
+  deposits       {('on for ' + ', '.join((site.get('datasets') or {}).get('upload_groups') or ['admins', 'curators'])) if _deposit_enabled(site) else 'off'}
   published      {published_summary(site)}
   h5adstore      {site['_h5adstore']}{' (read-only)' if site['data'].get('readonly') else ''}
   genesetstore   {site['_genesetstore'] or '-'}
