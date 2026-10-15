@@ -70,8 +70,8 @@ def test_a_failed_import_changes_nothing(tmp_path):
     payloads = de_files()
     second = b'gene\tlogFC\tpvalue\nAPOE\t2\t0.01\n'
     payloads['deseq/zz_second.tsv'] = second
-    payloads['deseq/zz_second.tsv.mus'] = (f'de_format=deseq2\nde_dataset_id=MIC\nsha256={sha256_bytes(second)}\n'
-                                          ).encode()
+    payloads['deseq/zz_second.tsv.mus'] = (f'de_format=deseq2\nde_dataset_id=MIC\nde_term=t\nde_contrast=c\n'
+                                          f'sha256={sha256_bytes(second)}\n').encode()
     original = env.runner.run
 
     def run(label, cmd, cwd=None, timeout=None):
@@ -88,7 +88,7 @@ def test_a_failed_import_changes_nothing(tmp_path):
     assert (env.store / GROUP / 'micro.duckdb').read_bytes() == duckdb_before
     assert (env.store / GROUP / 'micro.md').read_text() == md_before
     assert not (env.store / GROUP / 'de_sources').exists()
-    assert 'nothing was changed' in service.status(ADMIN, response['deposit_id'])['error']
+    assert 'nothing was changed' in service.status(ADMIN, response['deposit_id'])['error'].lower()
 
 
 def test_de_sources_are_kept_per_dataset(tmp_path):

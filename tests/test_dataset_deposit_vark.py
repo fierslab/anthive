@@ -76,7 +76,7 @@ def test_only_the_sidecar_can_be_declared_again(tmp_path):
 def de_files(dataset_id='MIC', h5ad='micro.h5ad'):
     table = b'gene\tlogFC\tpvalue\nTREM2\t1.2\t0.001\n'
     sidecar = (f'de_format=deseq2\nde_dataset_id={dataset_id}\nde_dataset_h5ad={h5ad}\n'
-               f'sha256={sha256_bytes(table)}\n').encode()
+               f'de_term=treatment\nde_contrast=ad_vs_ctrl\nsha256={sha256_bytes(table)}\n').encode()
     return {'deseq/ad_vs_ctrl.tsv': table, 'deseq/ad_vs_ctrl.tsv.mus': sidecar}
 
 
