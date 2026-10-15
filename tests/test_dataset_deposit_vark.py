@@ -123,10 +123,12 @@ def test_de_only_deposit_is_imported_into_the_published_dataset(tmp_path):
     assert counts.get('live') == 1
     status = service.status(ALICE, response['deposit_id'])
     assert status['state'] == 'live' and status['deposit_kind'] == 'de_only' and status['version'] == '1.0.2'   # 1.0.1 was the owner caveat
-    commands = [cmd for cmd in env.runner.commands if cmd[0].endswith('ant-de-ingest')]
-    assert commands and commands[0][1].endswith(f'{GROUP}/micro.duckdb')
+    commands = [cmd for cmd in env.runner.commands if any(part.endswith('ant-de-ingest') for part in cmd)]
+    assert commands and commands[0][3].endswith(f'store/{GROUP}/micro.duckdb')      # a copy in the work dir
+    assert '--replace' not in commands[0]
     md = yaml.safe_load((env.store / GROUP / 'micro.md').read_text().split('---\n')[1])
-    assert md['version'] == '1.0.2' and 'ad_vs_ctrl.tsv' in ' '.join(md['changelog'][-1]['changes'])
+    assert md['version'] == '1.0.2' and 'added ad_vs_ctrl' in ' '.join(md['changelog'][-1]['changes'])
+    assert (env.store / GROUP / 'de_sources' / 'micro' / 'deseq' / 'ad_vs_ctrl.tsv').exists()
     assert not [key for key in env.s3.objects if '/de/' in key]           # consumed and deleted
     assert env.watcher.poll().get('live') is None                        # processed once
 
@@ -139,7 +141,7 @@ def test_a_failing_de_import_keeps_the_files(tmp_path):
     original = env.runner.run
 
     def run(label, cmd, cwd=None, timeout=None):
-        if str(cmd[0]).endswith('ant-de-ingest'):
+        if any(str(part).endswith('ant-de-ingest') for part in cmd):
             return 1, 'bad table'
         return original(label, cmd, cwd, timeout)
     env.runner.run = run
@@ -230,6 +232,7 @@ def test_a_restart_resumes_an_interrupted_complete(tmp_path):
     upload(first.s3, response, payloads)
     first.complete(ALICE, response['deposit_id'])
     assert first.store.get(response['deposit_id'])['state'] == 'completing'
+    clock[0] += 11 * 60                                # past the lease: nobody refreshed it
     second = dd.DepositService(first.settings, dd.DepositStore(first.store.path), first.s3, first.store_root,
                                first.state_dir, clock=lambda: clock[0], background=lambda work: work())
     assert second.resume_interrupted() == [response['deposit_id']]

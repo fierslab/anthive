@@ -59,6 +59,7 @@ def make_env(tmp_path: Path, report=None):
     clock = [env.clock_value]
     service = make_service(tmp_path, clock, s3=env.s3)
     env.watcher.deposit_settings = service.settings
+    env.pipeline.list_de_studies = lambda path: set()      # the fake duckdb has no DE tables
     return env, service, clock
 
 
