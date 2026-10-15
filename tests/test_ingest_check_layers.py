@@ -56,11 +56,11 @@ def test_x_must_be_log_normalised(submission, x_kind, status):
 
 
 def test_x_on_log_scale_without_library_size_normalisation_warns_and_accepts_a_declaration(submission):
-    submission.build(x_noise=0.5)
+    submission.build(x_noise=0.5, counts=False)
     with submission.context() as ctx:
         outcome = checks_layers.layers_x_lognorm(ctx)
     assert outcome.status == WARN
-    assert 'normalisation' in outcome.fix
+    assert 'layers["counts"]' in outcome.fix and 'only when X uses another method' in outcome.fix
     submission.build(x_noise=0.5, md={'normalisation': 'vst'})
     with submission.context() as ctx:
         declared = checks_layers.layers_x_lognorm(ctx)
@@ -176,3 +176,12 @@ def test_genes_duplicates_fail(submission):
     with submission.context() as ctx:
         outcome = checks_layers.genes_ids(ctx)
     assert outcome.status == FAIL and outcome.details['n_duplicated'] == 4
+
+
+def test_x_row_sums_vary_with_a_counts_layer_defers_to_consistency(submission):
+    """With a counts layer, x_lognorm does not advise declaring normalisation (that skips the comparison)."""
+    submission.build(x_noise=0.5)
+    with submission.context() as ctx:
+        outcome = checks_layers.layers_x_lognorm(ctx)
+    assert outcome.status == PASS and outcome.info
+    assert 'layers.consistency' in outcome.summary and 'declare' not in outcome.summary

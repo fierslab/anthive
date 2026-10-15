@@ -170,10 +170,11 @@ def test_reject_and_withdraw_of_a_held_deposit(tmp_path):
     with pytest.raises(dd.DepositError) as exc:
         service.withdraw(BOB, deposit_id)
     assert exc.value.status == 404
-    assert service.reject(ADMIN, deposit_id, 'wrong cohort')['state'] == 'rejected'
+    rejected = service.reject(ADMIN, deposit_id, 'wrong cohort')
+    assert rejected['state'] == 'rejected' and len(rejected['deleted']) == 4      # a reject deletes the upload
     assert service.status(ALICE, deposit_id)['state'] == 'rejected'
     result = service.withdraw(ALICE, deposit_id)
-    assert result['state'] == 'withdrawn' and len(result['deleted']) == 4
+    assert result['state'] == 'withdrawn' and result['deleted'] == []
     assert not [key for key in env.s3.objects if key.startswith(f'{PREFIX}{GROUP}/')]
     assert service.status(ALICE, deposit_id)['state'] == 'withdrawn'
 

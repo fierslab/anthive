@@ -37,6 +37,7 @@ Usage:
     ant ingest-watch status [--json]       # items and their states
     ant ingest-watch approve <key|db_id> --by NAME [--note TEXT]   # publish a held item after review
     ant ingest-watch reject <key|db_id> --by NAME [--note TEXT]
+    ant ingest-watch retry <key|db_id> --by NAME [--note TEXT]     # run a needs_decision / failed item again
     ant ingest-watch owner set <db_id> <user> --by NAME [--note TEXT]   # who may deposit new versions (API)
     ant ingest-watch --once --store /scratch/store --prefix __incoming_test/ \\
         --catalog-prefix __ingest_test_catalog/ --api-url http://127.0.0.1:18850
@@ -194,8 +195,25 @@ def cmd_owner(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mark_deposit_rejected(state_dir: Path, deposit_id: str, by: str, note: str) -> bool:
+    """Record a host-side reject in the deposit store (the watcher then deletes the incoming objects)."""
+    import dataset_deposit  # noqa: PLC0415
+
+    store = dataset_deposit.DepositStore.open_if_exists(state_dir)
+    if store is None:
+        return False
+    try:
+        if not store.get(deposit_id):
+            return False
+        store.update(deposit_id, watch_state='rejected', error='rejected by an admin' + (f': {note}' if note else ''))
+        store.event(deposit_id, by, 'rejected', note)
+        return True
+    finally:
+        store.close()
+
+
 def cmd_review(args: argparse.Namespace) -> int:
-    """approve / reject one item (an explicit admin action, recorded with the name given)."""
+    """approve / reject / retry one item (an explicit admin action, recorded with the name given)."""
     if not args.item or not args.by:
         print(f'usage: ant-ingest-watch {args.command} <item key or db id> --by <name> [--note TEXT]',
               file=sys.stderr)
@@ -209,9 +227,19 @@ def cmd_review(args: argparse.Namespace) -> int:
                 approval = ingest_watch.approve(db, args.item, args.by, args.note or '')
                 print(f'approved for {", ".join(approval["reasons"]) or "no held reason"}; the next poll publishes it '
                       f'(the caveat names {approval["by"]})')
+            elif args.command == 'retry':
+                result = ingest_watch.retry(db, args.item, args.by, args.note or '')
+                print(f'{result["key"]} ({result["previous_state"]}) goes back to the pipeline; the next poll runs '
+                      f'it again (it stops at the same state if the cause is not fixed)')
             else:
+                row = ingest_watch._find(db, args.item)
                 ingest_watch.reject(db, args.item, args.by, args.note or '')
-                print('rejected; nothing is published or deleted. Remove the deposit from S3 by hand when done.')
+                deposit_id = ingest_watch.deposit_of_row(row)
+                if deposit_id and _mark_deposit_rejected(state_dir, deposit_id, args.by, args.note or ''):
+                    print(f'rejected; nothing is published. {deposit_id} is an API deposit: the next poll deletes '
+                          f'its incoming objects, and it is never continued.')
+                else:
+                    print('rejected; nothing is published or deleted. Remove the upload from S3 by hand when done.')
     except (ValueError, ingest_watch.LockBusy) as exc:
         print(f'ERROR: {exc}', file=sys.stderr)
         return 1
@@ -293,11 +321,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0], epilog=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', nargs='?', choices=('run', 'status', 'approve', 'reject', 'owner'), default='run')
-    parser.add_argument('item', nargs='?', help='approve / reject: the item key (or db id); owner: set')
+    parser.add_argument('command', nargs='?', choices=('run', 'status', 'approve', 'reject', 'retry', 'owner'), default='run')
+    parser.add_argument('item', nargs='?', help='approve / reject / retry: the item key (or db id); owner: set')
     parser.add_argument('rest', nargs='*', help='owner set: <db_id> <user>')
-    parser.add_argument('--by', help='approve / reject: who decided (recorded in the caveat and the state)')
-    parser.add_argument('--note', help='approve / reject: a short reason')
+    parser.add_argument('--by', help='approve / reject / retry: who decided (recorded in the caveat and the state)')
+    parser.add_argument('--note', help='approve / reject / retry: a short reason')
     parser.add_argument('--once', action='store_true', help='one poll, then exit')
     parser.add_argument('--json', action='store_true', help='status: JSON output')
     parser.add_argument('--store', help='h5adstore root (default: configured store)')
@@ -312,7 +340,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == 'status':
         return cmd_status(args)
-    if args.command in ('approve', 'reject'):
+    if args.command in ('approve', 'reject', 'retry'):
         return cmd_review(args)
     if args.command == 'owner':
         return cmd_owner(args)

@@ -47,7 +47,12 @@ def design_designation(ctx) -> Outcome:
     if warnings:
         return warn('; '.join(warnings), 'Use a lower-case slug for donor_group.', warnings=warnings)
     declared = [key for key in ('is_secondary', 'reanalysis_of', 'donor_group') if ctx.md.get(key)]
-    return ok('primary dataset' if not declared else 'designation: ' + ', '.join(declared))
+    if declared:
+        return ok('designation: ' + ', '.join(declared))
+    if 'is_secondary' in ctx.md:
+        return ok('primary dataset (is_secondary: false)')
+    return ok('primary dataset: nothing declared, so a new dataset is published with is_secondary: false '
+              '(a re-analysis of data already in Anthive declares is_secondary: true and reanalysis_of)')
 
 
 @check('design.replicate_unit', needs=('h5ad',))

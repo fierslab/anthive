@@ -43,6 +43,8 @@ from ingest_pipeline import (Item, Outcome, Pipeline, TransientError, delete_con
 
 STATES = ('seen', 'stable', 'pulled', 'checked', 'live', 'held', 'failed', 'needs_decision', 'rejected')
 FINAL_STATES = ('live', 'held', 'failed', 'needs_decision', 'rejected')
+#: states an admin may send back to the pipeline once the cause is fixed (``retry``)
+RETRY_STATES = ('needs_decision', 'failed')
 MAX_ITEM_ATTEMPTS = 8
 STATUS_FILE = 'ingest_watch_status.json'
 LOCK_FILE = 'ingest_watch.lock'
@@ -271,6 +273,9 @@ def approve(db: StateDB, key_or_db_id: str, by: str, note: str = '', channel: st
     row = _find(db, key_or_db_id)
     if not by.strip():
         raise ValueError('approve needs --by <name>')
+    if row['state'] in RETRY_STATES:
+        raise ValueError(f'{row["key"]} is {row["state"]}, not held: nothing to approve. Fix the cause in its '
+                         f'message, then retry it (ant ingest-watch retry), or reject it')
     if row['state'] != 'held':
         raise ValueError(f'{row["key"]} is {row["state"]}, not held')
     approval = {'by': by.strip(), 'os_user': _os_user() if channel == 'cli' else None, 'channel': channel,
@@ -282,8 +287,43 @@ def approve(db: StateDB, key_or_db_id: str, by: str, note: str = '', channel: st
     return approval
 
 
+def retry(db: StateDB, key_or_db_id: str, by: str, note: str = '', channel: str = 'cli') -> Dict[str, Any]:
+    """Send a needs_decision or failed item back to the pipeline (the next poll runs it again).
+
+    For a cause that is fixed outside the deposit (a store ``.md`` edited by hand, a missing reference, a
+    transient error that used up its attempts). An unchanged cause stops the item at the same state again.
+
+    Raises:
+        ValueError: no such item, the item is in another state, or ``by`` is empty.
+    """
+    row = _find(db, key_or_db_id)
+    if not by.strip():
+        raise ValueError('retry needs --by <name>')
+    if row['state'] not in RETRY_STATES:
+        raise ValueError(f'{row["key"]} is {row["state"]}; only needs_decision or failed items are retried')
+    text = f'retry requested by {by} ({_who(by, channel)}) after {row["state"]}' + (f': {note}' if note else '')
+    db.transition(row['key'], 'stable', text, error=None, attempts=0, polls_unchanged=1, next_attempt=0,
+                  approval=None, processed_signature=None)
+    return {'key': row['key'], 'previous_state': row['state']}
+
+
+def deposit_of_row(row: Dict[str, Any]) -> Optional[str]:
+    """The API deposit an item row is linked to (its content signature), or None."""
+    try:
+        parts = json.loads(row.get('content_signature') or '[]')
+    except ValueError:
+        return None
+    for part in parts:
+        if isinstance(part, list) and len(part) == 3 and part[0] == 'deposit':
+            return str(part[1])
+    return None
+
+
 def reject(db: StateDB, key_or_db_id: str, by: str, note: str = '', channel: str = 'cli') -> None:
-    """Mark a held, failed or needs_decision item as rejected (final; nothing is published or deleted)."""
+    """Mark a held, failed or needs_decision item as rejected (final; nothing is published).
+
+    An API deposit's incoming objects are deleted by the deposit service (at once through the API, at the
+    next poll after a reject on the host)."""
     row = _find(db, key_or_db_id)
     if row['state'] not in ('held', 'failed', 'needs_decision'):
         raise ValueError(f'{row["key"]} is {row["state"]}; only held, failed or needs_decision items are rejected')
@@ -561,6 +601,11 @@ class Watcher:
                                                              clock=self.clock)
                     for deposit_id in service.expire_stale():
                         self.log(f'deposits: {deposit_id} expired (uploads aborted, its files removed)')
+                    for deposit_id in service.pending_rejected():
+                        result = service.clean_rejected(deposit_id, 'watcher')
+                        self.log(f'deposits: {deposit_id} rejected: {len(result["deleted"])} incoming object(s) '
+                                 f'deleted' + (f', {len(result["kept"])} kept (not its own any more)'
+                                               if result['kept'] else ''))
                 except Exception as exc:  # noqa: BLE001 - housekeeping; the next poll retries
                     self.log(f'deposits: expiry or staging sweep failed: {exc}')
             try:

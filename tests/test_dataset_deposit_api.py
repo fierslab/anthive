@@ -27,7 +27,7 @@ SERVE_PATH = REPO_ROOT / 'bin' / 'api' / 'ant-serve'
 _SERVE_WANTED = {'_require_dataset_uploader', '_deposit_call', '_caller_is_admin', '_require_admin',
                  'dataset_deposit_vocab', 'dataset_deposit_list', 'dataset_deposit_create', 'dataset_deposit_status',
                  'dataset_deposit_report', 'dataset_deposit_urls', 'dataset_deposit_complete',
-                 'dataset_deposit_withdraw', 'dataset_deposit_approve', 'dataset_deposit_reject',
+                 'dataset_deposit_withdraw', 'dataset_deposit_approve', 'dataset_deposit_reject', 'dataset_deposit_retry',
                  'dataset_deposit_set_owner', 'dataset_deposit_expire', 'dataset_deposit_group'}
 
 CURATOR = {'Remote-User': 'alice', 'Remote-Groups': 'users,curators', 'Remote-Email': 'alice@example.org',
@@ -69,7 +69,8 @@ def test_routes_are_hidden_and_tagged():
                          ('post', '/datasets/deposit/{deposit_id}/approve'),
                          ('post', '/datasets/deposit/{deposit_id}/expire'), ('post', '/datasets/deposit/owners'),
                          ('get', '/datasets/deposit/groups/{data_project}'),
-                         ('post', '/datasets/deposit/{deposit_id}/reject')):
+                         ('post', '/datasets/deposit/{deposit_id}/reject'),
+                         ('post', '/datasets/deposit/{deposit_id}/retry')):
         assert f'@app.{method}("{path}", tags=["datasets-deposit"], include_in_schema=False)' in source
     assert source.index('"/datasets/deposit/vocab"') < source.index('"/datasets/deposit/{deposit_id}"')
     assert source.index('"/datasets/deposit/groups/{data_project}"') < source.index('"/datasets/deposit/{deposit_id}"')
@@ -200,11 +201,13 @@ def test_admin_routes_work_for_admins_outside_the_upload_groups(tmp_path, monkey
     bogus = '/datasets/deposit/dep_' + 'a' * 20
     assert client.post(bogus + '/approve', headers=ADMIN).status_code == 404         # past the gate
     assert client.post(bogus + '/reject', headers=ADMIN).status_code == 404
+    assert client.post(bogus + '/retry', headers=ADMIN, json={'note': 'fixed'}).status_code == 404
     assert client.post(bogus + '/expire', headers=ADMIN).status_code == 404
     assert client.get('/datasets/deposit?all=true', headers=ADMIN).status_code == 200
     assert client.get('/datasets/deposit', headers=ADMIN).status_code == 403          # not a depositor
     depositor = {'Remote-User': 'dee', 'Remote-Groups': 'depositors'}
     assert client.post(bogus + '/approve', headers=depositor).status_code == 403
+    assert client.post(bogus + '/retry', headers=depositor).status_code == 403
     assert client.post('/datasets/deposit/owners', headers=depositor, json={'db_id': 'OL2/mic', 'user': 'dee'}).status_code == 403
     ok = client.post('/datasets/deposit/owners', headers=ADMIN, json={'db_id': 'OL2/mic', 'user': 'dee'})
     assert ok.status_code == 200 and ok.json()['user'] == 'dee'

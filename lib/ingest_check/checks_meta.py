@@ -191,7 +191,7 @@ def mus_vocab(ctx) -> Outcome:
                     **details)
     if verdict['missing_soft']:
         return warn('recommended fields missing: ' + ', '.join(verdict['missing_soft']),
-                    'Fill them in when the paper says (disease, sex, age, doi, year, license...).', **details)
+                    'Fill them in when the paper says (disease, sex, age, doi, year, license...); the form of each field is in GET /datasets/deposit/vocab (mus.field_info).', **details)
     return ok('annotation is complete', **details)
 
 

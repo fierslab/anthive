@@ -227,6 +227,10 @@ _ADMIN_ONLY = [
 _ADMIN_COMMAND = re.compile(r'`?\bant[ -](ingest-index|score-fleet|ingest-check|sync|convert|md-check)\b[^.;)]*`?')
 
 
+#: the "(API login NAME)" / "(OS user NAME)" the watcher records after a decision's author
+ADMIN_WHO_RE = re.compile(r' \((?:API login|OS user) [^)]*\)')
+
+
 def depositor_text(text: Any) -> Any:
     """A check text without instructions only an admin can follow (commands, index builds)."""
     if not isinstance(text, str):
@@ -947,6 +951,7 @@ class DepositService:
                     'schema_version': vocabulary.get('schema_version'),
                     'required': list(vocabulary.get('required') or []),
                     'soft': list(vocabulary.get('soft') or []),
+                    'field_info': mus.field_info(),
                     'vocabulary': {name: list(values) for name, values in (vocabulary.get('vocabulary') or {}).items()},
                     'matching': 'case-insensitive; _ space and - are equivalent'},
             'sidecar_keys': {
@@ -1436,6 +1441,12 @@ class DepositService:
                                  and row['etag'] == head['etag']), None) if previous else None
             waiting = head is not None and previous is not None and previous_row is not None \
                 and (previous['user'] == identity.user or identity.is_admin)
+            if waiting and self._rejected(previous):
+                raise DepositError(409, 'rejected', f'the h5ad at {data_project}/{basename}{H5AD_SUFFIX} belongs to '
+                                                    f'the deposit {previous["id"]}, which an admin rejected; a '
+                                                    f'rejected deposit is final and is not continued. Deposit the '
+                                                    f'h5ad again with its sidecar (or ask an admin to remove the '
+                                                    f'leftover object)')
             if waiting:
                 if not any(entry['kind'] == 'mus' for entry in deposit_files):
                     raise DepositError(422, 'invalid', f'a correction of the waiting h5ad carries the sidecar '
@@ -1451,6 +1462,10 @@ class DepositService:
             h5ad_sha = h5ad_entry['sha256']
         self._check_keys(identity, deposit_files)
 
+        # a correction keeps the kind of the deposit it continues (a metadata update stays one)
+        deposit_kind = 'de_only' if de_only else ('metadata_update' if reuse else 'dataset')
+        if continues:
+            deposit_kind = (self.store.get(continues) or {}).get('deposit_kind') or deposit_kind
         deposit_id = new_deposit_id()
         expires = now + self._ttl()
         rows: List[Dict[str, Any]] = []
@@ -1474,7 +1489,7 @@ class DepositService:
                   'total_bytes': total, 'watch_key': None if de_only else h5ad_key, 'h5ad_etag': h5ad_etag,
                   'mus_key': None if de_only else mus_key, 'continues': continues,
                   'h5ad_sha256': None if de_only else h5ad_sha, 'refreshes': 0,
-                  'deposit_kind': 'de_only' if de_only else ('metadata_update' if reuse else 'dataset')}
+                  'deposit_kind': deposit_kind}
         self.store.reserve(record, rows, now, self.settings)
         try:
             for row in rows:
@@ -1504,7 +1519,7 @@ class DepositService:
             warnings.append('a new group without index.md: the route builds one from the sidecar keys doi, year, '
                             'paper_title and authors, or the check meta.index_md fails')
         return {'deposit_id': deposit_id, 'state': 'uploading', 'data_project': data_project, 'basename': basename,
-                'deposit_kind': 'de_only' if de_only else ('metadata_update' if reuse else 'dataset'),
+                'deposit_kind': deposit_kind,
                 'update_of': update_of, 'continues': continues, 'expires': _iso(expires),
                 'url_ttl_seconds': self._ttl(), 'total_bytes': total, 'files': instructions, 'warnings': warnings,
                 'next': {'urls': f'/datasets/deposit/{deposit_id}/urls',
@@ -2069,6 +2084,8 @@ class DepositService:
             if isinstance(text, str):
                 for name in sorted(hidden, key=len, reverse=True):
                     text = re.sub(rf'(?<![\w.@-]){re.escape(name)}(?![\w.@-])', 'an admin', text)
+                if not identity.is_admin:       # "by NAME (API login NAME)": the login and OS user are admin detail
+                    text = ADMIN_WHO_RE.sub('', text)
             return text
 
         approval = json.loads(record['approval']) if record.get('approval') else None
@@ -2113,7 +2130,12 @@ class DepositService:
         row = read_watch_row(self.state_dir, record.get('watch_key'))
         report = self._report(record, row if watch_row_matches(record, row) else None)
         if report is None:
-            raise DepositError(404, 'no_report', 'no check report for this deposit yet')
+            view = self._view(record, True, identity)
+            if view['state'] in ('needs_decision', 'failed', 'rejected', 'withdrawn', 'expired') and view.get('error'):
+                raise DepositError(404, 'no_report', f'no check report: the deposit stopped as {view["state"]} '
+                                                     f'before the checks ran. Reason: {view["error"]}',
+                                   state=view['state'], reason=view['error'])
+            raise DepositError(404, 'no_report', 'no check report for this deposit yet', state=view['state'])
         return report
 
     # withdraw / approve / reject ------------------------------------------
@@ -2221,6 +2243,13 @@ class DepositService:
             raise DepositError(409, 'not_reviewable', 'the watcher has no current record of this deposit')
         return row
 
+    def _rejected(self, record: Dict[str, Any]) -> bool:
+        """The deposit (or the watcher's current row of it) was rejected: final, never continued."""
+        if record.get('watch_state') == 'rejected':
+            return True
+        row = read_watch_row(self.state_dir, record.get('watch_key'))
+        return bool(row and row.get('state') == 'rejected' and watch_row_matches(record, row))
+
     def approve(self, identity: Identity, deposit_id: str, note: str = '') -> Dict[str, Any]:
         """Admin: publish a held deposit past its held reasons (the watcher's approve)."""
         import ingest_watch  # noqa: PLC0415
@@ -2228,6 +2257,10 @@ class DepositService:
         self._require_admin(identity)
         record = self._get_own(identity, deposit_id)
         row = self._held_row(record)
+        if row['state'] in ('needs_decision', 'failed'):
+            raise DepositError(409, 'not_held', f'the deposit is {row["state"]}, not held, so there is nothing to '
+                                                f'approve: fix the cause named in its status, then retry it '
+                                                f'(POST /datasets/deposit/{deposit_id}/retry), or reject it')
         if row['state'] != 'held':
             raise DepositError(409, 'not_held', f'the deposit is {public_state(record, row)}, not held')
         watch_db = ingest_watch.StateDB(self.state_dir / WATCH_DB_FILE)
@@ -2245,8 +2278,38 @@ class DepositService:
                                                                           'note': note or ''},
                 'next': 'the next poll of the watcher publishes it'}
 
+    def retry(self, identity: Identity, deposit_id: str, note: str = '') -> Dict[str, Any]:
+        """Admin: run a needs_decision or failed deposit again once its cause is fixed (the watcher's retry)."""
+        import ingest_watch  # noqa: PLC0415
+
+        self._require_admin(identity, 'retry deposits')
+        record = self._get_own(identity, deposit_id)
+        row = self._held_row(record)
+        if row['state'] not in ingest_watch.RETRY_STATES:
+            raise DepositError(409, 'not_retryable', f'the deposit is {public_state(record, row)}; only '
+                                                     f'needs_decision or failed deposits are retried'
+                                                     + (' (a held one is approved or rejected)'
+                                                        if row['state'] == 'held' else ''))
+        watch_db = ingest_watch.StateDB(self.state_dir / WATCH_DB_FILE)
+        try:
+            ingest_watch.retry(watch_db, row['key'], identity.user, note or '', channel='api')
+        except ValueError as exc:
+            raise DepositError(409, 'not_retryable', str(exc))
+        finally:
+            watch_db.close()
+        self.store.update(deposit_id, watch_state='stable', error=None)
+        self.store.event(deposit_id, identity.user, 'retry', note or '')
+        return {'deposit_id': deposit_id, 'state': 'checking', 'previous_state': row['state'], 'note': note or '',
+                'next': 'the next poll of the watcher runs the deposit again; if the cause is not fixed it '
+                        'stops at the same state'}
+
     def reject(self, identity: Identity, deposit_id: str, note: str = '') -> Dict[str, Any]:
-        """Admin: reject a held, failed or needs_decision deposit (the watcher's reject)."""
+        """Admin: reject a held, failed or needs_decision deposit (final).
+
+        The watcher's item is marked rejected, then the incoming objects of the deposit and of the deposits it
+        continues are deleted (only objects that are still exactly theirs) and corrections still being uploaded
+        are withdrawn, so a later deposit of the same name starts afresh and never continues this one.
+        """
         import ingest_watch  # noqa: PLC0415
 
         self._require_admin(identity)
@@ -2262,7 +2325,56 @@ class DepositService:
         self.store.update(deposit_id, watch_state='rejected', error='rejected by an admin'
                           + (f': {note}' if note else ''))
         self.store.event(deposit_id, identity.user, 'rejected', note or '')
-        return {'deposit_id': deposit_id, 'state': 'rejected', 'note': note or ''}
+        cleanup = self.clean_rejected(deposit_id, identity.user)
+        return {'deposit_id': deposit_id, 'state': 'rejected', 'note': note or '', **cleanup,
+                'next': 'final: the deposit is not continued; a new deposit of the same name starts afresh'}
+
+    def clean_rejected(self, deposit_id: str, actor: str) -> Dict[str, Any]:
+        """Delete the incoming objects of a rejected deposit and of the deposits it continues; withdraw its
+        open corrections. Idempotent; an object written by someone else, or changed, is kept and reported."""
+        deleted: List[str] = []
+        kept: List[Dict[str, Any]] = []
+        withdrawn: List[str] = []
+        if self.s3 is None:
+            return {'deleted': deleted, 'kept': kept, 'withdrawn_corrections': withdrawn}
+        for chained in self.store.chain(deposit_id):
+            other = self.store.get(chained)
+            if not other:
+                continue
+            result = self._abort_and_delete(other, actor)
+            deleted += result['deleted']
+            kept += result['kept']
+            for entry in result['kept']:
+                name = next((row['name'] for row in self.store.files(chained) if row['key'] == entry['key']), None)
+                if name:
+                    self.store.update_file(chained, name, state='kept')
+            if chained != deposit_id and other.get('watch_state') != 'rejected':
+                self.store.update(chained, watch_state='rejected', error=f'rejected with {deposit_id}')
+                self.store.event(chained, actor, 'rejected', f'with the deposit {deposit_id}, which continues it')
+            self.store.release_keys(chained)
+        followers = self.store._rows("SELECT id FROM deposits WHERE continues = ? AND state IN "
+                                     "('uploading', 'uploaded')", (deposit_id,))
+        for follower in followers:
+            other = self.store.get(follower['id'])
+            if other and other['state'] == 'uploading' and \
+                    self.store.cas(other['id'], ('uploading',), 'withdrawing', not_importing=True):
+                try:
+                    self._abort_and_delete(other, actor)
+                finally:
+                    self.store.cas(other['id'], ('withdrawing',), 'withdrawn')
+                    self.store.release_keys(other['id'])
+                self.store.event(other['id'], actor, 'withdrawn', f'the deposit it corrects, {deposit_id}, '
+                                                                  f'was rejected')
+                withdrawn.append(other['id'])
+        self.store.event(deposit_id, actor, 'cleanup', json.dumps({'deleted': deleted, 'kept': kept,
+                                                                   'withdrawn_corrections': withdrawn}))
+        return {'deleted': deleted, 'kept': kept, 'withdrawn_corrections': withdrawn}
+
+    def pending_rejected(self) -> List[str]:
+        """Rejected deposits whose incoming files are not cleaned up yet (e.g. rejected on the host)."""
+        return [row['id'] for row in self.store._rows(
+            "SELECT DISTINCT d.id FROM deposits d JOIN files f ON f.deposit_id = d.id "
+            "WHERE d.state = 'uploaded' AND d.watch_state = 'rejected' AND f.state = 'complete'")]
 
 
 SEED_MD_TEMPLATE = """---

@@ -16967,6 +16967,14 @@ def dataset_deposit_reject(request: Request, deposit_id: str, body: Optional[Dic
                          admin_only=True)
 
 
+@app.post("/datasets/deposit/{deposit_id}/retry", tags=["datasets-deposit"], include_in_schema=False)
+def dataset_deposit_retry(request: Request, deposit_id: str, body: Optional[Dict[str, Any]] = Body(None)):
+    """Admins: run a needs_decision or failed deposit again once its cause is fixed ``{note?}``."""
+    note = str((body or {}).get('note') or '')[:500]
+    return _deposit_call(request, lambda service, identity: service.retry(identity, deposit_id, note),
+                         admin_only=True)
+
+
 @app.get("/papers", tags=["library"])
 def list_papers(request: Request, role: Optional[str] = None, celltype: Optional[str] = None,
                 tissue: Optional[str] = None, disease: Optional[str] = None,

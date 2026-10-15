@@ -74,10 +74,17 @@ def layers_x_lognorm(ctx) -> Outcome:
         return ok('X is a log1p library-size normalisation', **details)
     if declared:
         return note(f'X is not a plain library-size normalisation; declared: {declared}', normalisation=declared, **details)
+    counts_layer, _ = find_counts_layer(ctx)
+    if counts_layer:
+        # row sums also vary when X is log1p(CP10k) of a gene subset; the comparison with the counts decides
+        return note(f'X is on a log scale; expm1(X) row sums vary (CV {cv:.2f}), which also happens when genes '
+                    f'were removed after normalising. Nothing to do: layers.consistency compares X with the '
+                    f'counts layer {counts_layer!r} and decides', counts_layer=counts_layer, **details)
     return warn('X is on a log scale, but expm1(X) row sums vary '
-                f'(CV {cv:.2f}); the normalisation cannot be confirmed',
-                'If this is intended (SCTransform, vst, another method), declare it with normalisation: <method> '
-                'in the .md.', **details)
+                f'(CV {cv:.2f}) and there is no counts layer to compare with; the normalisation cannot be confirmed',
+                'If X is log1p(counts per 10,000), add the raw counts as adata.layers["counts"] so the check can '
+                'confirm it. Declare normalisation: <method> in the .md only when X uses another method '
+                '(SCTransform, vst, ...).', **details)
 
 
 @check('layers.consistency', needs=('h5ad',))

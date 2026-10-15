@@ -1185,6 +1185,12 @@ class Pipeline:
             if approval_caveat:
                 meta.setdefault('caveats', []).append(approval_caveat)
             meta['changelog'][-1]['changes'].extend(note for note in notes)
+            if not any(meta.get(key) not in (None, '', [], False) for key in
+                       ('is_secondary', 'reanalysis_of', 'donor_group')) and 'is_secondary' not in meta:
+                # design.designation passed as "primary dataset": served as primary, not "unresolved"
+                meta['is_secondary'] = False
+                meta['changelog'][-1]['changes'].append('Designation: primary dataset (no re-analysis declared; '
+                                                        'is_secondary: false).')
             body = seed_body or f'# {meta.get("title", item.basename)}\n\n{meta.get("description", "")}\n'
             md_fill.coerce_year(meta)
             write_md_file(staged_md, meta, body)

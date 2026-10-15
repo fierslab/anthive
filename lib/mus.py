@@ -329,6 +329,50 @@ def soft_fields() -> List[str]:
     return list(load_vocabulary().get('soft', []))
 
 
+#: The expected form of each soft (recommended) field, for clients that help fill a sidecar.
+#: ``organisms``: the organisms the field applies to (None: every organism). Controlled fields add
+#: their vocabulary values in :func:`field_info`.
+FIELD_FORMS: Dict[str, Dict[str, Any]] = {
+    'disease': {'form': 'a vocabulary value (MONDO label), or normal for controls; comma separated for several'},
+    'condition': {'form': 'free text: the compared conditions or treatments, comma separated'},
+    'sex': {'form': 'a vocabulary value; mixed for a dataset with donors or animals of both sexes'},
+    'age': {'form': 'a value or a range with a unit, e.g. "75 years", "33-62 years" for several donors, '
+                    '"8 weeks" or "P30" for animals; state what it is (age at death, at sampling) when known'},
+    'strain': {'form': 'the strain or line of the animals, e.g. C57BL/6J, 5xFAD on C57BL/6J; not for human data',
+               'organisms': ['mouse', 'rat', 'macaque', 'zebrafish', 'drosophila']},
+    'doi': {'form': 'the DOI of the paper without a URL prefix, e.g. 10.1126/science.adh1938'},
+    'pmid': {'form': 'the PubMed id, digits only'},
+    'accession': {'form': 'repository accession(s) of the data, e.g. GSE123456, EGAS00001000001; comma separated'},
+    'year': {'form': 'the publication year, four digits'},
+    'contributor': {'form': 'the people or lab who generated the data, comma separated'},
+    'title': {'form': 'a short title of the dataset (one line)'},
+    'link': {'form': 'a URL to the paper or the data'},
+    'license': {'form': 'an SPDX id (CC-BY-4.0, CC0-1.0, ...) or in-house; never guessed'},
+    'source_description': {'form': 'one sentence: where the data come from and what was done to them'},
+}
+
+
+def field_applies(field: str, organism: Any) -> bool:
+    """The field applies to a dataset of this organism (fields like ``strain`` are for animals only)."""
+    organisms = (FIELD_FORMS.get(field) or {}).get('organisms')
+    if not organisms or organism in (None, '', []):
+        return True
+    values = [str(item) for item in _as_list(organism)]
+    return any(_normalize(value) in {_normalize(name) for name in organisms} for value in values)
+
+
+def field_info() -> Dict[str, Dict[str, Any]]:
+    """``{field: {form, organisms, values?}}`` for every soft field (``organisms`` None: all)."""
+    info: Dict[str, Dict[str, Any]] = {}
+    for field in soft_fields():
+        entry = FIELD_FORMS.get(field) or {'form': 'free text'}
+        info[field] = {'form': entry['form'], 'organisms': entry.get('organisms')}
+        values = allowed_values(field)
+        if values:
+            info[field]['values'] = values
+    return info
+
+
 def is_controlled(field: str) -> bool:
     """True if `field` has a controlled-value list in the vocabulary."""
     return field in load_vocabulary().get('vocabulary', {})
@@ -373,7 +417,7 @@ def validate_annotation(ann: Annotation) -> Dict[str, List[str]]:
             out['missing_required'].append(key)
     for key in soft_fields():
         v = ann.get(key)
-        if v is None or v == '' or v == []:
+        if (v is None or v == '' or v == []) and field_applies(key, ann.get('organism')):
             out['missing_soft'].append(key)
     for key, val in ann.items():
         if not is_controlled(key):
