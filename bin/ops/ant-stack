@@ -406,6 +406,18 @@ def _deposit_key_source(site: dict) -> str | None:
     return None
 
 
+def watch_prefixes(site: dict) -> tuple[str, str]:
+    """(incoming prefix, catalog prefix) the api and the watcher must share. The catalog prefix follows
+    ``s3.prefix`` (where ant-sync keeps the catalogue) unless ``datasets.catalog_prefix`` says otherwise."""
+    datasets = site.get('datasets') or {}
+    incoming = str(datasets.get('incoming_prefix') or '__incoming/').strip().strip('/') + '/'
+    raw = datasets.get('catalog_prefix')
+    if raw is None:
+        raw = (site.get('s3') or {}).get('prefix') or ''
+    catalog = str(raw).strip().strip('/')
+    return incoming, (catalog + '/') if catalog else ''
+
+
 def _deposit_s3_block(site: dict) -> dict | None:
     """datasets_deposit_s3 of the api config: the key pair the api presigns deposits with."""
     source = _deposit_key_source(site)
@@ -488,6 +500,9 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
     cfg['datasets_upload_groups'] = [str(g) for g in (datasets.get('upload_groups') or ['admins', 'curators'])]
     cfg['datasets_deposit_enabled'] = _deposit_enabled(site)
     cfg['datasets_deposit_site_id'] = str(datasets.get('site_id') or site['site']['name'])
+    incoming, catalog = watch_prefixes(site)
+    # the api presigns into / reuses from the prefixes the watcher uses: one source for both
+    cfg['ingest_watch'] = {'prefix': incoming, 'catalog_prefix': catalog}
     for key in ('max_gb', 'url_ttl_hours', 'max_open_days', 'max_open_per_user', 'max_pending_gb_per_user',
                 'update_policy'):
         if datasets.get(key) is not None:
@@ -1044,8 +1059,26 @@ def _check_datasets(site: dict) -> list[str]:
     _say("dataset deposits: give the bucket a lifecycle rule AbortIncompleteMultipartUpload (e.g. after 8 days) "
          "for __deposits/ and __incoming/, so multipart uploads nobody completes do not keep storage "
          "(doc/DEPLOY_CONTAINERS.md)")
-    _say(f"dataset deposits: on for {groups}; presigning with the {'read-write' if source == 'write' else source} key pair; run ant-ingest-watch on this "
-         f"host with ANTHIVE_INGEST_STATE_DIR={site['_state'] / 'ingest'} (the api reads its state there)")
+    incoming, catalog = watch_prefixes(site)
+    _say(f"dataset deposits: on for {groups}; presigning with the {'read-write' if source == 'write' else source} "
+         f"key pair; run ant-ingest-watch on this host with ANTHIVE_CONFIG=$(bin/ops/ant-stack config-path --role "
+         f"ingest) ANTHIVE_INGEST_STATE_DIR={site['_state'] / 'ingest'} ANTHIVE_INGEST_WATCH_PREFIX={incoming} "
+         f"ANTHIVE_INGEST_WATCH_CATALOG_PREFIX={catalog or chr(39) * 2} (the api reads its state there and uses "
+         f"the same prefixes)")
+    watcher_config = datasets.get('watcher_config')
+    if watcher_config:
+        path = Path(str(watcher_config)).expanduser()
+        try:
+            block = (yaml.safe_load(path.read_text()) or {}).get('ingest_watch') or {}
+        except (OSError, yaml.YAMLError) as exc:
+            problems.append(f"datasets.watcher_config {path} cannot be read: {exc}")
+            return problems
+        theirs = (str(block.get('prefix') or '__incoming/').strip('/') + '/',
+                  (str(block.get('catalog_prefix') or '').strip('/') + '/') if str(block.get('catalog_prefix') or '').strip('/') else '')
+        if theirs != (incoming, catalog):
+            problems.append(f"the watcher config {path} uses prefix {theirs[0]!r} and catalog_prefix {theirs[1]!r}, "
+                            f"the api {incoming!r} and {catalog!r}: deposits would never be seen or reused; make "
+                            f"them equal (datasets.incoming_prefix / datasets.catalog_prefix)")
     return problems
 
 

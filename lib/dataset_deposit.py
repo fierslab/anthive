@@ -1324,7 +1324,13 @@ class DepositService:
             if head is None:
                 raise DepositError(409, 'h5ad_unavailable', f'the published {name} is not on the object store; '
                                                             f'deposit it again')
-            if kind == 'h5ad' and head['metadata'].get('sha256') and head['metadata']['sha256'] != sha:
+            if kind == 'h5ad' and not head['metadata'].get('sha256'):
+                # without the recorded hash the copy cannot be matched to the catalogue before a (large) copy;
+                # the watcher stamps it at its next verified push (ant-sync pushes do not): ask an admin
+                raise DepositError(409, 'h5ad_unavailable', f'the published {name} on the object store carries no '
+                                                            f'recorded sha256, so it cannot be reused; deposit the '
+                                                            f'h5ad again, or ask an admin to republish it')
+            if kind == 'h5ad' and head['metadata']['sha256'] != sha:
                 raise DepositError(409, 'h5ad_unavailable', f'the published {name} on the object store is not the '
                                                             f'version in the catalogue; ask an admin')
             entries.append({'name': name, 'kind': kind, 'key': self._key(data_project, kind, name), 'source': source,
@@ -1844,8 +1850,13 @@ class DepositService:
                     raise DepositError(422, 'de_mismatch', '; '.join(de_errors) + '. Withdraw and deposit again '
                                                                                   'with corrected DE sidecars.')
                 errors, warnings = self._check_sidecar(record, rows)
+                mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
+                if errors and mus_row['method'] == 'reuse':
+                    # the published sidecar is not touched and cannot be declared again in this deposit
+                    raise DepositError(422, 'sidecar_mismatch', 'the published sidecar does not match the '
+                                       'catalogue (' + '; '.join(errors) + '): deposit a sidecar file (withdraw '
+                                       'and deposit again, with a sidecar)')
                 if errors:
-                    mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
                     self._delete_staging(deposit_id, mus_row)
                     self.store.update_file(deposit_id, mus_row['name'], state='pending', staging_etag=None)
                     raise DepositError(422, 'sidecar_mismatch', '; '.join(errors) + '. Declare the corrected '
