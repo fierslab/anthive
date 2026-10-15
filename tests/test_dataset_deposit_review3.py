@@ -240,3 +240,25 @@ def test_deploy_guide_recommends_an_abort_incomplete_multipart_rule(tmp_path, ca
         _secret(site, name, 'x')
     ant_stack._check_datasets(site)
     assert 'AbortIncompleteMultipartUpload' in capsys.readouterr().out
+
+
+def test_an_admin_replacement_archives_only_the_replaced_study(tmp_path, monkeypatch):
+    import de_storage
+
+    env, service, _ = published(tmp_path, studies={'ad_vs_ctrl'})
+    (env.store / GROUP / 'micro.de.parquet').write_bytes(b'all studies')
+    calls = []
+
+    def only_study(target, duckdb_path, only_study=None):
+        calls.append((duckdb_path.name, only_study))
+        target.write_bytes(b'just ' + only_study.encode())
+        return 3
+    monkeypatch.setattr(de_storage, 'write_sidecar', only_study)
+    payloads = de_files()
+    response = service.create(ADMIN, de_body(payloads))
+    upload(env.s3, response, payloads)
+    service.complete(ADMIN, response['deposit_id'])
+    assert env.watcher.poll().get('live') == 1
+    assert calls == [('micro.duckdb', 'ad_vs_ctrl')]
+    archived = list((env.store / GROUP / '_versions' / 'micro' / 'de' / 'ad_vs_ctrl').glob('*.de.parquet'))
+    assert [path.read_bytes() for path in archived] == [b'just ad_vs_ctrl']

@@ -1969,11 +1969,28 @@ class Pipeline:
         finally:
             connection.close()
 
+    def archive_de_study(self, served_duckdb: Path, served_sidecar: Path, study: str, target: Path) -> bool:
+        """Keep the previous version of a study an admin replaces: only that study, exported from the served
+        duckdb (``de_storage.write_sidecar(only_study=...)``, restorable with ``DEWriter.restore_from_sidecar``); when that is
+        not possible, the whole ``.de.parquet``. False when there is nothing to archive."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            from de_storage import write_sidecar  # noqa: PLC0415
+
+            if write_sidecar(target, served_duckdb, only_study=study) > 0:
+                return True
+        except Exception:  # noqa: BLE001 - fall back to the whole sidecar
+            target.unlink(missing_ok=True)
+        if served_sidecar.exists():
+            shutil.copy2(served_sidecar, target)
+            return True
+        return False
+
     def ingest_de_deposit(self, deposit: Dict[str, Any], de_objs: Sequence[ObjInfo]) -> Outcome:
         """DE tables deposited alone for a published dataset (an API deposit with ``update_of``). All or nothing.
 
         Under the dataset's writer lock: a study id the dataset already has is refused unless the depositor is
-        an admin (then the previous studies are archived to ``_versions/<basename>/de/<study>/`` and the
+        an admin (then the previous study is archived to ``_versions/<basename>/de/<study>/`` and the
         changelog says "replaced"); the tables are imported into a copy of the duckdb in the work dir; only
         when every table went in, the copy and its ``.de.parquet`` replace the served files (release /
         restore), the sources are placed under ``<group>/de_sources/<basename>/``, and the dataset gets a patch
@@ -2059,13 +2076,11 @@ class Pipeline:
                     shutil.rmtree(work, ignore_errors=True)
                     return outcome
             archived = []
-            for study in clashes:                    # an admin replaces: keep the previous studies
-                if served_sidecar.exists():
-                    target = store_dir / ingest_versions.VERSIONS_DIR / basename / 'de' / study / \
-                        f'{time.strftime("%Y%m%dT%H%M%S")}.de.parquet'
-                    ensure_inside(target, store_dir)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(served_sidecar, target)
+            for study in clashes:                    # an admin replaces: keep the previous study
+                target = store_dir / ingest_versions.VERSIONS_DIR / basename / 'de' / study / \
+                    f'{time.strftime("%Y%m%dT%H%M%S")}.de.parquet'
+                ensure_inside(target, store_dir)
+                if self.archive_de_study(served_duckdb, served_sidecar, study, target):
                     archived.append(str(target.relative_to(self.config.store_root)))
             self.api.release(db_id)
             try:
