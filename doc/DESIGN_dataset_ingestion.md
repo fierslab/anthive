@@ -1192,3 +1192,11 @@ Third review (same day):
 | R4 a DE-only deposit could be withdrawn while the watcher imported it | the watcher claims it (`importing`, compare-and-set); withdraw answers 409 `busy`; a claim of a dead run is retried |
 | R5 a sidecar could be declared again after the deposit left `uploading` | in one transaction, only while `uploading` |
 | nits | the group lookup never offers retired datasets to non-admins and is rate-limited; the API checks DE sidecars with the import's rule; an `AbortIncompleteMultipartUpload` lifecycle rule is recommended and `ant-stack check` says so |
+
+End to end with the real `ant-de-ingest` (2026-10-15, a scratch copy of AZ5/SLM with its study
+`lec_vs_igg1_pseudobulk`, throwaway ant-serve, test prefixes): a new study by the recorded owner went live
+(version bump, listed by `GET /databases/AZ5/SLM/de`, watcher run 3.9 s); the existing study id by the owner
+failed with the duckdb and `.de.parquet` byte-identical; an admin replacement went live with only the replaced
+study archived (`de_storage.write_sidecar(only_study=...)`, 12,962 rows) and "replaced" in the changelog; a
+deposit of a good and a broken table failed with the served duckdb, `.de.parquet` and `.md` byte-identical
+although the good table had been imported into the work copy.

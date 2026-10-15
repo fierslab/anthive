@@ -134,7 +134,8 @@ Added for the vark client (phase 2):
   dataset (`de_dataset_id` decides when present, else `de_dataset_h5ad`). While the watcher imports, the state is
   `importing` and withdraw answers 409 `busy`. The import is all or nothing: a study id the dataset already
   has is `failed` ("already has the DE study ...", give another `de_study_id`) unless an admin deposited it (then
-  it is replaced, the previous studies archived under `_versions/<basename>/de/<study>/`, the changelog says
+  it is replaced, the previous version of that study archived under `_versions/<basename>/de/<study>/` as a
+  one-study `.de.parquet` (the whole sidecar only when the export is not possible), the changelog says
   "replaced"); the tables go into a copy of the duckdb that replaces the served one only when every table went
   in; sources are kept under `<group>/de_sources/<basename>/`. On success the dataset gets a patch version
   with a changelog entry, the `.de.parquet` is pushed, the server rescans and the `.md` is committed; status
