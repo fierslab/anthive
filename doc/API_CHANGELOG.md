@@ -189,6 +189,25 @@ After the skills-only novice test (vark end to end):
 - Depositor reports carry no admin-only instructions (index builds, scoring commands): "not checked on this site
   yet ...; nothing for you to do" instead.
 
+Also for vark:
+
+- `GET /datasets/deposit/vocab` has `de_presets: {<format>: {description, shape, required_keys, default_method,
+  default_reference_type, required_columns, column_map}}` from `lib/de_presets.py` (`required_keys` e.g.
+  `[de_format, de_term, de_contrast]` for deseq2, `[de_format, de_method]` for long) and a `metadata_update`
+  text.
+- Metadata-only update: `POST /datasets/deposit` with `update_of: "<db_id>"`, no h5ad, and the sidecar and/or
+  the seed `.md` (at least one). When no h5ad of the caller waits in incoming, the published h5ad (and the
+  published sidecar when none is deposited) is reused: those files come back with `method: "reuse"`,
+  `upload_key: null`, `note` (nothing to upload; `POST .../urls` answers 409 `nothing_to_upload` for them), and
+  `deposit_kind: "metadata_update"`. A deposited sidecar must say `sha256=` of the published h5ad. `complete`
+  copies the published files (from `ingest_watch.catalog_prefix`, conditional on the ETag recorded at create;
+  a changed copy is 409 `incomplete` with a problem) into incoming; the watcher publishes a patch version (or
+  `unchanged`); access, data_use and license changes still stop at `needs_decision`. Same owner/admin rules
+  as an update. 409 `h5ad_unavailable` when the published files are not on the object store. Withdraw never
+  touches the published copy.
+- DE sidecars: the literal `auto` (mus' placeholder) is never a term or contrast: complete treats it as
+  missing (`de_term= is missing or auto`), and the import never passes it on.
+
 Fix (also a candidate for a 2.45.2 patch release): `GET /health` answers 200 for a running server with an
 empty catalogue (`databases: 0`, `note: "empty catalog"`). Up to 2.45.1 it answered 503 "No databases
 available", so the compose healthcheck never passed on a new site with an empty h5adstore and `ant-stack up`

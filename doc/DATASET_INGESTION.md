@@ -44,6 +44,10 @@ shapes are in `doc/API_CHANGELOG.md` (2.46.0).
    live: the uploads are aborted and the deposit's own files are deleted. A correction is withdrawn together
    with its original, not alone.
 
+To change only the metadata of a published dataset (sidecar keys, new caveats in the seed `.md`), deposit
+the sidecar and/or the seed `.md` with `update_of` and no h5ad: the published h5ad is reused and the dataset
+gets a patch version.
+
 A deposit larger than 5 GB completes in the background: complete answers at once and the status shows how
 many files and bytes are copied. A wrong sidecar can be declared again in the same deposit (`POST .../urls`
 with its new size and sha256). DE tables for a dataset that is already published are deposited alone, with
