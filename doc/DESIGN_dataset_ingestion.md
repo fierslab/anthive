@@ -1159,3 +1159,14 @@ fix.
 | malformed `refresh_urls` body or a broken `.md` gave a 500 | 422; a broken `.md` counts as an existing dataset |
 | a continuation sidecar was not checked against the waiting h5ad | its `sha256=` must equal the waiting h5ad's recorded hash |
 | `x-amz-meta-sha256` could be mistaken for verification | documented as an attestation; the pipeline recomputes the hash |
+
+Second review (same day):
+
+| Finding | Change |
+| --- | --- |
+| N1 a re-PUT of a staging key while the deposit was `completing` replaced a checked file by an unchecked one | the staging ETag is recorded at verification; the sidecar is read with `IfMatch` on it and the copy is `CopySourceIfMatch` (also forwarded to UploadPartCopy by the managed copy); because a store may ignore both, the bytes read must have that MD5 and a single-PUT file's copy must carry that ETag; any mismatch is 409 `staging_changed`, nothing stays in incoming and the single-PUT files are checked again on the next complete |
+| N2 the staging sweep deleted staging objects of deposits another install (shared bucket, a test watcher with its own state dir) did not know | the sweep empties only folders of this install's terminal deposits (`uploaded`, `withdrawn`, `expired`), and folders of unknown ids only when every object is older than `max_open_days`; the staging prefix carries a site id (`__deposits/<site_id>/`, `datasets_deposit_site_id`, default the host name, container sites `site.name`); `ant-stack check` warns that another site on the bucket needs another site id and no watcher on the same incoming prefix |
+| N3 a failed final `completing -> uploaded` still reported success and released the key locks; recovery could fire on a running complete | 409 `not_completed`, its copies removed, no locks released; `updated` is refreshed after each copy |
+| N4 an owner note could break the `.md` front matter; the assignment was neither versioned nor committed | notes are one line without `---`; caveat plus patch version bump and changelog entry through `md_edit`, written to a temp file renamed over the `.md` under the dataset's writer lock, then a git commit of that `.md` alone (skipped when someone has staged it) |
+| N5 unlinked items could use static files locked by an open deposit or carrying a deposit mark | skipped (key lock, deposit file of a `completing` or `uploaded` deposit, or `x-amz-meta-deposit`) |
+| N6 a HEAD error while checking an unlinked item for a deposit mark let it through | the item waits for the next poll |

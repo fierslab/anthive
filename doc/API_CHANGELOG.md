@@ -47,9 +47,12 @@ Errors are JSON `{"status": "<word>", "message": "...", ...}` with the HTTP stat
 `sidecar_mismatch`), 429 (`too_many_open_deposits`, `rate_limited` with `Retry-After`), 502 `s3_error`, 503
 `disabled`. Added after the security review of the same day: 409 `name_taken` (a published dataset you may
 not update; one answer whether or not `update_of` was given, without its id), `in_use`, `not_open`, 429
-`too_many_deposits_today`, `too_many_refreshes`.
+`too_many_deposits_today`, `too_many_refreshes`; after the second review 409 `staging_changed` (a file was
+uploaded again while the deposit was being completed: upload it once more and complete again) and 409
+`not_completed` (the deposit was ended while it was being completed).
 
-Uploads go to a staging key of the deposit (`upload_key` in each file object, `__deposits/<deposit_id>/...`),
+Uploads go to a staging key of the deposit (`upload_key` in each file object,
+`__deposits/<site_id>/<deposit_id>/...`),
 never to the watched prefix: `complete` checks the staged files and copies them to their `key` under the
 prefix. A URL used after complete, withdraw or expiry can only write the staging folder, which is emptied.
 URLs never live past the deposit's window. A `basename` of `index` or `*.index` is refused.
@@ -117,7 +120,7 @@ Config (new keys, `anthive.default.yaml`): `datasets_upload_groups`, `datasets_d
 env `ANTHIVE_DATASETS_DEPOSIT_ENABLED`), `datasets_deposit_max_gb`, `_url_ttl_hours`, `_max_open_days`,
 `_max_open_per_user`, `_max_pending_gb_per_user`, `_presign_per_minute`, `_parts_per_batch`,
 `_single_put_max_mb`, `_max_files`, `_max_per_day` (20), `_max_refreshes` (500), `_staging_prefix`
-(`__deposits/`), `_update_policy` (`own` | `any`), `datasets_deposit_s3` (an optional key pair for
+(`__deposits/`), `_site_id` (default the host name; container sites `site.name`), `_update_policy` (`own` | `any`), `datasets_deposit_s3` (an optional key pair for
 presigning); `ingest_watch.accept_unlinked` (default true; false refuses uploads that no API deposit accounts
 for). `datasets_upload_max_gb` (the check `files.size`) is now 200 GB, like the deposit limit. Container sites:
 `services.dataset_deposit` and the `datasets:` block of `site.yaml`.

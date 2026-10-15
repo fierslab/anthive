@@ -476,6 +476,7 @@ datasets:
   max_open_per_user: 5
   max_pending_gb_per_user: 400
   update_policy: own                  # own | any: who may deposit a new version of a dataset
+  site_id: null                       # staging folder __deposits/<site_id>/; default site.name
 s3:
   enabled: true                       # required
 ```
@@ -484,7 +485,8 @@ s3:
    `<state_dir>/secrets/s3_incoming_access_key_id` and `s3_incoming_secret_access_key` (chmod 600). Limit it
    to `PutObject`, the multipart calls, `CopyObject`, `HeadObject`, `GetObject`, `DeleteObject` and listing on
    `__deposits/*` (where uploads land) and `__incoming/*` (where complete copies them) if your object store
-   can scope keys. Without these files the api presigns with the read-write pair
+   can scope keys. Every site that shares the bucket needs its own `site.name` (or `datasets.site_id`), and
+   only one watcher may read an incoming prefix; `check` reminds you. Without these files the api presigns with the read-write pair
    (`s3_access_key_id`), and `check` warns that the api container then holds the catalogue's write key.
 2. Run the watcher on the host, as the uid the containers run as, with the api's state:
    `ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest`. The api keeps the deposits in
@@ -891,7 +893,7 @@ resolve inside the containers.
 | `mcp.token_ttl_days`, `mcp.max_links_per_user` | how long a link lives (0 = forever) and how many links one user may hold (default 5) |
 | `services.paper_upload` | let `library.upload_groups` add papers through the API and MCP (mounts the library read-write) |
 | `services.dataset_deposit` | let `datasets.upload_groups` deposit datasets through presigned S3 uploads (needs `s3.enabled`; see "Let depositors add datasets") |
-| `datasets.*` | who may deposit (`upload_groups`, default admins and curators), `max_gb`, `url_ttl_hours`, `max_open_per_user`, `max_pending_gb_per_user`, `update_policy` |
+| `datasets.*` | who may deposit (`upload_groups`, default admins and curators), `max_gb`, `url_ttl_hours`, `max_open_per_user`, `max_pending_gb_per_user`, `update_policy`, `site_id` (default `site.name`) |
 | `library.*` | upload groups, PDF size limit, git committer and push, S3 autopush, index publisher, `index_pull` (false: this site never downloads the shared literature index) |
 | `library.deploy_key` | SSH key `ant-stack publish-library` pushes the library with (host path) |
 | `s3.api_access` | what the api may do on S3: `none` (default), `read` (own read-only key pair) or `write` |
