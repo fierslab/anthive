@@ -533,8 +533,8 @@ def _anthive_mcp_class(cfg):
     import contextvars
     from types import SimpleNamespace
     tree = ast.parse(MCP_PATH.read_text())
-    names = {'_is_admin', '_upload_groups', '_may_upload', 'AnthiveMCP'}
-    assigns = {'UPLOAD_TOOLS', 'UPLOADS_DISABLED_MESSAGE', 'ADMIN_ONLY_TOOLS'}
+    names = {'_is_admin', '_upload_groups', '_may_upload', '_deposit_groups', '_may_deposit', 'AnthiveMCP'}
+    assigns = {'UPLOAD_TOOLS', 'UPLOADS_DISABLED_MESSAGE', 'ADMIN_ONLY_TOOLS', 'DEPOSIT_TOOLS'}
     body = [n for n in tree.body if getattr(n, 'name', None) in names
             or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in assigns for t in n.targets))]
 
