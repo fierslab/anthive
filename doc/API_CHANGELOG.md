@@ -214,6 +214,15 @@ without a recorded sha256 (`x-amz-meta-sha256`, stamped by the watcher's verifie
 `h5ad_unavailable`, before any copy). Container sites render `ingest_watch.prefix` and `catalog_prefix` from
 `datasets.incoming_prefix` / `datasets.catalog_prefix` (default `__incoming/` and `s3.prefix`) into every config.
 
+`ant sync push` now sets `x-amz-meta-sha256` on every `.h5ad` it uploads (computed from the file; a `.md`
+or `.h5ad.mus` that records another value is reported). Catalogue objects pushed before this have no such
+metadata, so a metadata-only update of those datasets answers 409 `h5ad_unavailable`. The backfill is
+`ant sync stamp-sha256 [FILTER] [--dry-run]` (primary site only): it stamps an object only when the local
+file has the same size, matches the object's ETag (single or multipart) and agrees with any sha256 the `.md`
+or `.mus` records, by an in-place copy that keeps the other metadata and the content type and is conditional
+on the ETag it checked. It never deletes. Run it with `--dry-run` first; it hashes every local `.h5ad` whose
+object lacks the metadata.
+
 Fix (also a candidate for a 2.45.2 patch release): `GET /health` answers 200 for a running server with an
 empty catalogue (`databases: 0`, `note: "empty catalog"`). Up to 2.45.1 it answered 503 "No databases
 available", so the compose healthcheck never passed on a new site with an empty h5adstore and `ant-stack up`

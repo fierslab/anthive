@@ -46,7 +46,14 @@ plot UI now lives in `web/templates/plot.html` (`./web/ant-browse`).
 
 `ant-sync push [glob]` — `.h5ad` + `.duckdb` only (never `.md`, never
 `.h5ad.mus`). Uses S3 mtime metadata to detect drift on identically-sized
-files.
+files. Every pushed `.h5ad` gets `x-amz-meta-sha256` (computed from the file), which the deposit API needs
+to reuse a published h5ad for a metadata-only update.
+
+`ant-sync stamp-sha256 [glob] [--dry-run]` backfills that metadata on objects pushed before it existed:
+`stamp_plan` (stamp only when the local file has the object's size and ETag, `lib/s3_etag.py`, and agrees with
+the sha256 in the `.md`/`.mus`), `stamp_apply` (in-place `copy_object` with `MetadataDirective: REPLACE` and
+`CopySourceIfMatch`, managed copy above 5 GB, verified by a HEAD). Primary only, never deletes. Tests:
+`tests/test_ant_sync_stamp.py`.
 
 `ant-sync pull` — h5ad only by default (plus `_facet_tests/` results). `.duckdb` is treated as derived
 data; rebuild it locally with `make build-stale`.

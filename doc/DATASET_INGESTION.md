@@ -46,7 +46,8 @@ shapes are in `doc/API_CHANGELOG.md` (2.46.0).
 
 To change only the metadata of a published dataset (sidecar keys, new caveats in the seed `.md`), deposit
 the sidecar and/or the seed `.md` with `update_of` and no h5ad: the published h5ad is reused and the dataset
-gets a patch version.
+gets a patch version. This needs the published h5ad's `x-amz-meta-sha256`, which `ant sync push` sets;
+older objects get it from `ant sync stamp-sha256` (run with `--dry-run` first).
 
 A deposit larger than 5 GB completes in the background: complete answers at once and the status shows how
 many files and bytes are copied. A wrong sidecar can be declared again in the same deposit (`POST .../urls`
