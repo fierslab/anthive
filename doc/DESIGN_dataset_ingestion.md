@@ -1170,3 +1170,14 @@ Second review (same day):
 | N4 an owner note could break the `.md` front matter; the assignment was neither versioned nor committed | notes are one line without `---`; caveat plus patch version bump and changelog entry through `md_edit`, written to a temp file renamed over the `.md` under the dataset's writer lock, then a git commit of that `.md` alone (skipped when someone has staged it) |
 | N5 unlinked items could use static files locked by an open deposit or carrying a deposit mark | skipped (key lock, deposit file of a `completing` or `uploaded` deposit, or `x-amz-meta-deposit`) |
 | N6 a HEAD error while checking an unlinked item for a deposit mark let it through | the item waits for the next poll |
+
+### 22.10 Changes for the vark client (2026-10-15)
+
+| Asked by vark | Done |
+| --- | --- |
+| the whole facet registry and machine-readable requirements in the vocab | `facets` (every registered and deprecated facet with kind, controlled values, range, hint keywords, scopes), `seed_md.required_spec`, `index_md.required_spec` |
+| a corrected sidecar could never pass in the same deposit (URLs sign size and sha256) | `POST .../urls {name, size, sha256}` declares the deposit's own sidecar again while uploading |
+| DE tables for a published dataset | DE-only deposits (`update_of`, only `de` files with sidecars naming the dataset); the watcher imports them, bumps the patch version with a changelog entry, pushes the `.de.parquet`, rescans and commits the `.md` |
+| a group lookup | `GET /datasets/deposit/groups/{data_project}[?basename=]` (db id only for who may update) |
+| withdrawing a correction left the original h5ad without a sidecar | a correction is withdrawn with its original (cascade), not alone (409 `continuation`); the watcher marks a deposit h5ad without sidecar `needs_decision` |
+| large completes block the request | above `datasets_deposit_async_complete_gb` (5) complete answers 202 and copies in a background thread with progress in the status; a restart resumes (worker id per process) |

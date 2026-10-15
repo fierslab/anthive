@@ -41,7 +41,14 @@ shapes are in `doc/API_CHANGELOG.md` (2.46.0).
    incoming needs no new h5ad upload (leave the h5ad out of the file list). A new deposit of byte-identical
    files is checked again.
 7. **Withdraw** with `POST /api/datasets/deposit/<id>/withdraw` while it is not being processed and not yet
-   live: the uploads are aborted and the deposit's own files are deleted.
+   live: the uploads are aborted and the deposit's own files are deleted. A correction is withdrawn together
+   with its original, not alone.
+
+A deposit larger than 5 GB completes in the background: complete answers at once and the status shows how
+many files and bytes are copied. A wrong sidecar can be declared again in the same deposit (`POST .../urls`
+with its new size and sha256). DE tables for a dataset that is already published are deposited alone, with
+`update_of` and only DE files whose sidecars name the dataset; they are imported and the dataset gets a new
+patch version.
 
 Updates: a deposit for a dataset that is already published must say `"update_of": "<db_id>"`, and by default
 only the user whose deposit published the dataset (or an admin) may deposit a new version. For datasets
