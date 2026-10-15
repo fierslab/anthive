@@ -29,6 +29,81 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.46.0 (unreleased)
+
+Minor release: dataset deposits through the API (`doc/DESIGN_dataset_ingestion.md` section 22). A depositor
+signs in to Anthive and gets presigned upload URLs for exact keys under the S3 watch route's incoming prefix;
+the server's S3 keys never leave it; the watcher (`ant ingest-watch`) checks and publishes the deposit, and
+the depositor follows it through the API. New routes only, all under tag `datasets-deposit`. Like the paper
+upload routes they are left out of the public OpenAPI schema and answer 403 `forbidden` to everyone who is not
+a signed-in member of `datasets_upload_groups` (default `admins`, `curators`; basic auth mode: `auth.admins`
+count as admins; `auth.mode: none`: nobody).
+
+Errors are JSON `{"status": "<word>", "message": "...", ...}` with the HTTP status: 403 `forbidden`, 404
+`not_found` (also for another user's deposit id), 409 (`update_of_required`, `update_of_mismatch`,
+`key_in_open_deposit`, `key_taken`, `incomplete`, `not_uploading`, `already_complete`, `busy`, `live`,
+`not_held`, `not_reviewable`, `h5ad_changed`), 410 `expired`, 413 (`too_large`, `quota_exceeded`), 422
+(`invalid`, `invalid_name`, `invalid_data_project`, `update_of_unknown`, `h5ad_required`,
+`sidecar_mismatch`), 429 (`too_many_open_deposits`, `rate_limited` with `Retry-After`), 502 `s3_error`, 503
+`disabled`.
+
+- `GET /datasets/deposit/vocab`: `{schema: "anthive.deposit_vocab/1", uploads_enabled, limits: {max_gb,
+  max_files, text_file_max_kb, single_put_max_mb, min_part_mb, url_ttl_hours, max_open_days,
+  max_open_per_user, max_pending_gb_per_user, presign_calls_per_minute, parts_per_batch}, naming, file_kinds:
+  {h5ad, mus, seed_md, index_md, static, de: {name, key, required}}, prefix, mus: {source, schema_version,
+  required, soft, vocabulary: {field: [values]}, matching}, sidecar_keys: {key: meaning}, seed_md: {format,
+  required, replicate_unit, disease_basis, disease_basis_rule, filled_by_route, leave_out, template},
+  index_md: {required, template}, held_reasons, update_policy, states}`. The vocabulary is the server's
+  snapshot (`lib/_mus_vocab.yaml`); the sidecar keys include `data_use`, `license`, `depositor` (ignored for
+  identity), `update_of`, `previous_sha256` and `override_<key>`.
+- `POST /datasets/deposit` (201): body `{data_project, basename, files: [{name, size, sha256, kind}],
+  update_of?}` with `kind` one of `h5ad` (`<basename>.h5ad`), `mus` (`<basename>.h5ad.mus`, required),
+  `seed_md` (`<basename>.md`), `index_md` (`index.md` or `<basename>.index.md`), `static`, `de`
+  (`<folder>/<file>`). Answer `{deposit_id, state: "uploading", data_project, basename, update_of,
+  continues, expires, url_ttl_seconds, total_bytes, files: [...], warnings, next: {urls, complete, status}}`.
+  Each file is `{name, kind, key, size, sha256, method}` plus, for `method: "put"`, `{url, headers:
+  {"x-amz-meta-sha256", "x-amz-meta-deposit", "Content-Length"}}` (send exactly these headers with the PUT),
+  or for `method: "multipart"`, `{upload_id, part_size, part_count, parts: [{part_number, size, url}],
+  parts_more}` (PUT each part's bytes to its URL; the first `parts_per_batch` parts come here). Every URL
+  signs the exact size. Without an h5ad the deposit carries a corrected sidecar (and seeds) for an h5ad of
+  yours still in incoming; `continues` names that deposit.
+- `POST /datasets/deposit/{id}/urls`: body `{name, first_part?, last_part?}` (at most 1000 parts per call).
+  Answer: the same file object with fresh URLs, `parts_done: [{part_number, size, etag}]` for a multipart
+  file, and the new `expires` (each refresh extends the deposit by `url_ttl_hours`, at most `max_open_days`
+  after it was created).
+- `POST /datasets/deposit/{id}/complete` (no body): completes every file, checks the parts and the stored
+  size and metadata, reads the sidecar back. Answer `{deposit_id, state: "uploaded", files: [{name, key, size,
+  sha256, etag}], warnings, next}`; 409 `incomplete` with `files: [{name, missing_parts, wrong_size_parts,
+  uploaded_bytes}]`; 422 `sidecar_mismatch` (the sidecar is removed; upload a corrected one and complete
+  again).
+- `GET /datasets/deposit` (`?all=true`: admins, every user's): `{deposits: [summary], all}`.
+  `GET /datasets/deposit/{id}`: the summary `{deposit_id, data_project, basename, state, db_id, version, kind,
+  held_reasons, update_of, continues, total_bytes, created, updated, completed, expires}` (admins also
+  `user`) plus `{error, warnings, files: [{name, kind, key, size, sha256, method, state}], watch: {state,
+  served, catalog_verified, incoming_deleted} | null, report: {result, publish, held_reasons, counts,
+  problems: [{id, status, summary, fix}]} | null, report_available, events: [{time, action, actor, detail}],
+  approval}`. `state` is `uploading`, `uploaded` (complete, not yet seen by the watcher), the watcher's `seen`,
+  `stable`, `checking`, `live`, `held`, `failed`, `needs_decision`, `rejected`, or `withdrawn`, `expired`,
+  `superseded`. Errors and warnings carry no server paths.
+- `GET /datasets/deposit/{id}/report`: the redacted `ant-ingest-check` report (schema
+  `anthive.ingest_check/1`, curator audience, no `admin_detail`, no server paths); 404 `no_report` before the
+  check ran.
+- `POST /datasets/deposit/{id}/withdraw` (the depositor or an admin): `{deposit_id, state: "withdrawn",
+  aborted: [names], deleted: [keys], kept: [{key, reason}]}`; refused while the watcher processes it and once
+  it is live.
+- `POST /datasets/deposit/{id}/approve` and `/reject` (admins; body `{note?}`): the watcher's approve / reject
+  on this deposit, recorded with the admin's login. Approve answers `{deposit_id, state: "stable", approval:
+  {by, reasons, note}, next}`; reject `{deposit_id, state: "rejected", note}`.
+
+MCP: `my_deposits(all_users=False)` and `deposit_status(deposit_id)`, read-only, shown only to users in
+`datasets_upload_groups`. Datasets are uploaded with vark, never through MCP.
+
+Config (new keys, `anthive.default.yaml`): `datasets_upload_groups`, `datasets_deposit_enabled` (default off;
+env `ANTHIVE_DATASETS_DEPOSIT_ENABLED`), `datasets_deposit_max_gb`, `_url_ttl_hours`, `_max_open_days`,
+`_max_open_per_user`, `_max_pending_gb_per_user`, `_presign_per_minute`, `_parts_per_batch`,
+`_single_put_max_mb`, `_max_files`, `_update_policy` (`own` | `any`), `datasets_deposit_s3` (an optional key
+pair for presigning). Container sites: `services.dataset_deposit` and the `datasets:` block of `site.yaml`.
+
 ## 2.45.1 (2026-10-14)
 
 Patch release: fixes only, no contract change. Found by the 2.45.0 scratch-site check

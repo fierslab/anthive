@@ -130,6 +130,26 @@ def _may_upload(identity: Optional[dict]) -> bool:
     return bool({g.lower() for g in identity.get('groups', [])} & _upload_groups())
 
 
+# Read-only views of the caller's own dataset deposits (REST 2.46): only
+# visible to users in datasets_upload_groups (ant-serve enforces it again).
+# The data itself is uploaded with vark through presigned URLs, never MCP.
+DEPOSIT_TOOLS = frozenset({'my_deposits', 'deposit_status'})
+
+
+def _deposit_groups() -> set:
+    from config import get_dataset_deposit_settings  # noqa: PLC0415
+    try:
+        return set(get_dataset_deposit_settings(_get_anthive_config())['upload_groups'])
+    except Exception:  # noqa: BLE001 - unreadable config: admins only
+        return {'admins'}
+
+
+def _may_deposit(identity: Optional[dict]) -> bool:
+    if not identity:
+        return False
+    return bool({g.lower() for g in identity.get('groups', [])} & _deposit_groups())
+
+
 class _McpLinkAuthMiddleware:
     """ASGI middleware enforcing personal MCP links in front of FastMCP."""
 
@@ -267,6 +287,8 @@ class AnthiveMCP(FastMCP):
             tools = [tool for tool in tools if tool.name not in ADMIN_ONLY_TOOLS]
         if (self.require_identity and not _may_upload(identity)) or not await self._uploads_enabled(identity):
             tools = [tool for tool in tools if tool.name not in UPLOAD_TOOLS]
+        if not _may_deposit(identity):
+            tools = [tool for tool in tools if tool.name not in DEPOSIT_TOOLS]
         return tools
 
     async def call_tool(self, name, arguments):
@@ -277,6 +299,8 @@ class AnthiveMCP(FastMCP):
             raise PermissionError(f"The '{name}' tool needs permission to upload papers.")
         if name in UPLOAD_TOOLS and not await self._uploads_enabled(identity):
             raise PermissionError(UPLOADS_DISABLED_MESSAGE)
+        if name in DEPOSIT_TOOLS and not _may_deposit(identity):
+            raise PermissionError(f"The '{name}' tool is for users who may deposit datasets.")
         ctx_token = _current_identity.set(identity)
         try:
             return await super().call_tool(name, arguments)
@@ -619,6 +643,10 @@ def main() -> None:
             '  Use search_literature throughout, not only when asked: before interpreting a finding,\n'
             '  before explaining what a gene or cell state does, and again when the topic changes.\n'
             '  No hit means "not in this library", not "unknown in the field".\n'
+            '\n'
+            'DATASET DEPOSITS\n'
+            '  Datasets are uploaded with the vark command line client (presigned uploads), never\n'
+            '  through MCP. Users who may deposit see my_deposits and deposit_status (read-only).\n'
             '\n'
             'DATA LEAVES THE SERVER\n'
             '  Everything these tools return, including passages and notes from library papers, is\n'
@@ -3190,6 +3218,44 @@ def main() -> None:
                 return 'pdf_base64 is not valid base64.'
         code, body = await _post_upload(metadata, pdf, folder=folder, dry_run=False, update=update)
         return _upload_report(code, body)
+
+    # ── dataset deposits (read-only; uploads go through vark) ─────────────────────
+
+    @mcp.tool()
+    async def my_deposits(all_users: bool = False) -> str:
+        """Your dataset deposits on this Anthive server, newest first, with their state:
+        uploading, uploaded (waiting for the watcher), seen, stable, checking, live,
+        held (waits for an admin), failed, needs_decision, rejected, withdrawn, expired.
+        Read-only. A dataset is uploaded with the vark command line client
+        (`vark datasets ...`, presigned uploads), never through MCP; this tool and
+        deposit_status only follow deposits.
+
+        Args:
+            all_users: admins only: every user's deposits.
+        """
+        try:
+            data = await _get('/datasets/deposit', all='true' if all_users else None)
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+        return json.dumps(data, indent=1)
+
+    @mcp.tool()
+    async def deposit_status(deposit_id: str) -> str:
+        """One of your dataset deposits: state, dataset id and version once published,
+        held reasons, the checks that failed or warned with their fix (from the
+        redacted check report), and its events. Read-only; explain held reasons and
+        fixes to the user, who corrects the files and deposits again with vark.
+
+        Args:
+            deposit_id: the id vark printed (dep_...).
+        """
+        if not re.fullmatch(r'dep_[0-9a-f]{20}', str(deposit_id or '')):
+            return 'Not a deposit id: they look like dep_ followed by 20 hex characters (see my_deposits).'
+        try:
+            data = await _get(f'/datasets/deposit/{deposit_id}')
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+        return json.dumps(data, indent=1)
 
     # ── prompts: ready-made starting points in MCP clients ───────────────────────
 
