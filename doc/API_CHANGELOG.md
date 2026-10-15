@@ -171,6 +171,24 @@ presigning); `ingest_watch.accept_unlinked` (default true; false refuses uploads
 for). `datasets_upload_max_gb` (the check `files.size`) is now 200 GB, like the deposit limit. Container sites:
 `services.dataset_deposit` and the `datasets:` block of `site.yaml`.
 
+After the skills-only novice test (vark end to end):
+
+- `GET /datasets/deposit/vocab` has `caller: {user, is_admin, may_replace_de_study, may_list_all_deposits,
+  may_update_any_dataset}` (no need to probe `?all=true`) and `de_sidecar_keys` (every DE sidecar key, which are
+  required). `de_dataset_id` accepts the dataset's file id (`SMI` of `ST6/SMI`) or its full db id,
+  case-insensitive; without it `de_dataset_h5ad=<basename>.h5ad` names the dataset.
+- `complete` refuses (422 `de_mismatch`) a DE table whose sidecar lacks what its `de_format` needs: a known
+  `de_format`, and for formats with one comparison per file (`deseq2`, `edger`, `scanpy`, `seurat`, `glmmseq`,
+  `glmmtmb`) `de_term` and `de_contrast` (`long` needs `de_method`). Also for DE tables deposited with their
+  dataset. A failed import is reported in sidecar keys (`de_term=`), never with the import tool's flags.
+- A completed deposit whose watcher row is still the previous version's (an update before the next poll)
+  reads `uploaded`; `superseded` only when a newer deposit of the same key exists or the watcher saw newer
+  objects after this deposit completed.
+- The watcher writes `year` as a number in the dataset `.md` and a new group's `index.md` (a quoted year broke
+  clients that read it as an integer).
+- Depositor reports carry no admin-only instructions (index builds, scoring commands): "not checked on this site
+  yet ...; nothing for you to do" instead.
+
 Fix (also a candidate for a 2.45.2 patch release): `GET /health` answers 200 for a running server with an
 empty catalogue (`databases: 0`, `note: "empty catalog"`). Up to 2.45.1 it answered 503 "No databases
 available", so the compose healthcheck never passed on a new site with an empty h5adstore and `ant-stack up`

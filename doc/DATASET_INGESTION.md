@@ -47,8 +47,10 @@ shapes are in `doc/API_CHANGELOG.md` (2.46.0).
 A deposit larger than 5 GB completes in the background: complete answers at once and the status shows how
 many files and bytes are copied. A wrong sidecar can be declared again in the same deposit (`POST .../urls`
 with its new size and sha256). DE tables for a dataset that is already published are deposited alone, with
-`update_of` and only DE files whose sidecars name the dataset; they are imported and the dataset gets a new
-patch version.
+`update_of` and only DE files whose sidecars name the dataset (`de_dataset_id=` the file id such as `SMI`, or
+the db id `ST6/SMI`); they are imported and the dataset gets a new patch version. Every DE sidecar needs
+`de_format`, and the formats with one comparison per file (deseq2, edger, scanpy, seurat, glmmseq, glmmtmb)
+also `de_term` and `de_contrast`; complete refuses a table without them.
 
 Updates: a deposit for a dataset that is already published must say `"update_of": "<db_id>"`, and by default
 only the user whose deposit published the dataset (or an admin) may deposit a new version. For datasets
