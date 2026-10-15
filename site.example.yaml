@@ -184,10 +184,13 @@ mcp:
   max_links_per_user: 5 # each user can have this many named links
 
 s3:
+  # The real endpoint, region and bucket of the lab's data come from the
+  # Anthive maintainers together with the keys (doc/DEPLOY_CONTAINERS.md,
+  # "Where the data comes from"). The examples are placeholders.
   enabled: false
-  endpoint: null     # e.g. fsn1.your-objectstorage.com
-  region: null
-  bucket: null
+  endpoint: null     # e.g. s3.example.org (host name only, no https://)
+  region: null       # e.g. example-region
+  bucket: null       # e.g. example-bucket
   prefix: ""
   use_path_style: false
   # Keys: <state_dir>/secrets/s3_access_key_id and s3_secret_access_key.
