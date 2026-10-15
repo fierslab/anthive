@@ -303,7 +303,7 @@ def test_a_refused_complete_leaves_nothing_in_incoming(tmp_path):
     assert service.store.get(response['deposit_id'])['state'] == 'uploading'
 
 
-def test_withdraw_refuses_while_a_continuation_uses_the_h5ad(tmp_path):
+def test_a_correction_is_withdrawn_with_its_original_not_alone(tmp_path):
     service = make_service(tmp_path, [time.time()])
     response, payloads = service.create(ALICE, simple_deposit()[0]), simple_deposit()[1]
     upload(service.s3, response, payloads)
@@ -311,10 +311,17 @@ def test_withdraw_refuses_while_a_continuation_uses_the_h5ad(tmp_path):
     sidecar = sidecar_for(sha256_bytes(payloads['cells.h5ad']), license='CC0-1.0')
     follow = service.create(ALICE, {'data_project': 'New2026', 'basename': 'cells',
                                     'files': [file_entry('cells.h5ad.mus', sidecar, 'mus')]})
+    upload(service.s3, follow, {'cells.h5ad.mus': sidecar})
+    service.complete(ALICE, follow['deposit_id'])
+    # withdrawing the correction alone would leave the original h5ad without a sidecar
     with pytest.raises(dd.DepositError) as exc:
-        service.withdraw(ALICE, response['deposit_id'])
-    assert exc.value.body['status'] == 'in_use' and follow['deposit_id'] in exc.value.body['message']
-    assert f'{PREFIX}New2026/cells.h5ad' in service.s3.objects
+        service.withdraw(ALICE, follow['deposit_id'])
+    assert exc.value.body['status'] == 'continuation' and response['deposit_id'] in exc.value.body['message']
+    assert f'{PREFIX}New2026/cells.h5ad.mus' in service.s3.objects
+    result = service.withdraw(ALICE, response['deposit_id'])
+    assert result['withdrawn_corrections'] == [follow['deposit_id']]
+    assert service.store.get(follow['deposit_id'])['state'] == 'withdrawn'
+    assert not [key for key in service.s3.objects if key.startswith(f'{PREFIX}New2026/')]
 
 
 def test_a_continuation_sidecar_must_name_the_waiting_h5ad(tmp_path):

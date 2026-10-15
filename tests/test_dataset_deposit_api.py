@@ -28,7 +28,7 @@ _SERVE_WANTED = {'_require_dataset_uploader', '_deposit_call', '_caller_is_admin
                  'dataset_deposit_vocab', 'dataset_deposit_list', 'dataset_deposit_create', 'dataset_deposit_status',
                  'dataset_deposit_report', 'dataset_deposit_urls', 'dataset_deposit_complete',
                  'dataset_deposit_withdraw', 'dataset_deposit_approve', 'dataset_deposit_reject',
-                 'dataset_deposit_set_owner', 'dataset_deposit_expire'}
+                 'dataset_deposit_set_owner', 'dataset_deposit_expire', 'dataset_deposit_group'}
 
 CURATOR = {'Remote-User': 'alice', 'Remote-Groups': 'users,curators', 'Remote-Email': 'alice@example.org',
            'Remote-Name': 'Alice Smith'}
@@ -68,9 +68,11 @@ def test_routes_are_hidden_and_tagged():
                          ('post', '/datasets/deposit/{deposit_id}/withdraw'),
                          ('post', '/datasets/deposit/{deposit_id}/approve'),
                          ('post', '/datasets/deposit/{deposit_id}/expire'), ('post', '/datasets/deposit/owners'),
+                         ('get', '/datasets/deposit/groups/{data_project}'),
                          ('post', '/datasets/deposit/{deposit_id}/reject')):
         assert f'@app.{method}("{path}", tags=["datasets-deposit"], include_in_schema=False)' in source
     assert source.index('"/datasets/deposit/vocab"') < source.index('"/datasets/deposit/{deposit_id}"')
+    assert source.index('"/datasets/deposit/groups/{data_project}"') < source.index('"/datasets/deposit/{deposit_id}"')
 
 
 @pytest.mark.parametrize('headers', [
@@ -220,3 +222,22 @@ def test_mcp_basic_mode_admins_may_follow_deposits(monkeypatch):
     cfg_auth = {'datasets_upload_groups': ['admins'], 'auth': {'mode': 'authelia', 'admins': ['boss']}}
     _, namespace = _anthive_mcp_class(cfg_auth)
     assert not namespace['_may_deposit']({'user': 'boss', 'groups': []})
+
+
+def test_group_lookup_and_async_complete_over_http(tmp_path, monkeypatch):
+    client, service = serve_app(tmp_path, monkeypatch)
+    answer = client.get('/datasets/deposit/groups/Old2020?basename=micro', headers=CURATOR).json()
+    assert answer == {'data_project': 'Old2020', 'exists': True, 'group_id': 'OL2', 'dataset_exists': True,
+                      'may_update': False}
+    assert client.get('/datasets/deposit/groups/Old2020', headers=USER).status_code == 403
+    service.settings.async_complete_gb = 1e-9
+    queued = []
+    service.background = queued.append
+    body, payloads = simple_deposit()
+    created = client.post('/datasets/deposit', json=body, headers=CURATOR).json()
+    upload(service.s3, created, payloads)
+    response = client.post(f"/datasets/deposit/{created['deposit_id']}/complete", headers=CURATOR)
+    assert response.status_code == 202 and response.json()['state'] == 'completing'
+    assert '_http_status' not in response.json()
+    queued.pop()()
+    assert client.get(f"/datasets/deposit/{created['deposit_id']}", headers=CURATOR).json()['state'] == 'uploaded'
