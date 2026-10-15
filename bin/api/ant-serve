@@ -16880,7 +16880,7 @@ def dataset_deposit_vocab(request: Request):
     vocabulary (required fields, controlled values), the sidecar keys the
     route reads, the seed .md and index.md rules with templates, held
     reasons, and whether deposits are switched on here."""
-    return _deposit_call(request, lambda service, identity: service.vocab())
+    return _deposit_call(request, lambda service, identity: service.vocab(identity))
 
 
 @app.get("/datasets/deposit", tags=["datasets-deposit"], include_in_schema=False)

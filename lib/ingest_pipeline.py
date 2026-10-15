@@ -1239,6 +1239,7 @@ class Pipeline:
                     index_meta, index_body = md_fill.build_index_md(sidecar, item.data_project, taken_groups,
                                                                     item.basename)
                 index_meta.setdefault('group', item.data_project)
+                md_fill.coerce_year(index_meta)
                 write_md_file(group_dir / 'index.md', index_meta, index_body)
                 index_placed = True
             from md_check import collect_db_ids  # noqa: PLC0415
@@ -1253,6 +1254,7 @@ class Pipeline:
                 meta.setdefault('caveats', []).append(approval_caveat)
             meta['changelog'][-1]['changes'].extend(note for note in notes)
             body = seed_body or f'# {meta.get("title", item.basename)}\n\n{meta.get("description", "")}\n'
+            md_fill.coerce_year(meta)
             write_md_file(staged_md, meta, body)
             seed_md_applied = md_seed is not None
             outcome.kind = 'new'
@@ -1930,7 +1932,7 @@ class Pipeline:
                 outcome.warnings.append(f'DE sidecar {mus_obj.key}: {exc}')
                 continue
             meta = parse_sidecar_text(staged_mus.read_text(encoding='utf-8', errors='replace'))
-            if not de_sidecar_names(meta, file_id, basename):
+            if not de_sidecar_names(meta, file_id, basename, outcome.db_id):
                 continue
             source_dir = sources_root / parent
             ensure_inside(source_dir / name, sources_root)
@@ -2029,7 +2031,7 @@ class Pipeline:
             self._pull(mus_obj, staged_mus)
             self._pull(obj, staged_data)
             meta = parse_sidecar_text(staged_mus.read_text(encoding='utf-8', errors='replace'))
-            if not de_sidecar_names(meta, file_id, basename):
+            if not de_sidecar_names(meta, file_id, basename, db_id):
                 outcome.state, outcome.detail = 'failed', f'{mus_obj.name} does not name {db_id}'
                 return outcome
             if meta.get('sha256') and meta['sha256'] != sha256_file(staged_data):
@@ -2071,8 +2073,9 @@ class Pipeline:
                 code, tail = self.runner.run('ant-de-ingest', cmd, cwd=work)
                 if code != 0:
                     outcome.state = 'failed'
-                    outcome.detail = (f'ant-de-ingest {staged_data.name} failed (exit {code}): {tail[-500:]}; '
-                                      f'nothing was changed')
+                    outcome.detail = (f'the DE table {staged_data.name} could not be imported: '
+                                      f'{friendly_de_error(tail)} Nothing was changed; correct the table or its '
+                                      f'.mus and deposit it again.')
                     shutil.rmtree(work, ignore_errors=True)
                     return outcome
             archived = []
@@ -2205,17 +2208,57 @@ def md_fill_version(md: Path) -> Any:
     return parse_md_file(md)[0].get('version')
 
 
+#: Flags of ``ant-de-ingest`` and the DE sidecar keys that set them (what a depositor can change).
+DE_FLAG_KEYS = {'--term': 'de_term', '--contrast': 'de_contrast', '--method': 'de_method', '--preset': 'de_format',
+                '--study-id': 'de_study_id', '--description': 'de_description', '--covariates': 'de_covariates',
+                '--reference-type': 'de_reference_type', '--map': 'de_map_<column>'}
+
+
+def de_sidecar_problems(meta: Dict[str, str]) -> List[str]:
+    """What a DE table's sidecar lacks for its format (``de_format``): term, contrast, method. Empty: fine."""
+    from de_presets import PRESETS  # noqa: PLC0415
+
+    fmt = str(meta.get('de_format') or '').strip()
+    if fmt not in PRESETS:
+        return [f'de_format must be one of {", ".join(PRESETS)} (it says {fmt or "nothing"})']
+    preset = PRESETS[fmt]
+    problems = []
+    for flag in preset.required_cli_flags:
+        key = DE_FLAG_KEYS.get(flag)
+        if key == 'de_method' and (meta.get('de_method') or preset.default_method):
+            continue
+        if key and not str(meta.get(key) or '').strip():
+            hint = {'de_term': f'{fmt} tables hold one comparison each: the model term it tests, e.g. treatment',
+                    'de_contrast': f'{fmt} tables hold one comparison each: the comparison, e.g. lecanemab_vs_igg1',
+                    'de_method': f'{fmt} has no default method: e.g. lmem or glmm'}.get(key, '')
+            problems.append(f'{key}= is missing ({hint})')
+    return problems
+
+
+def friendly_de_error(output: str) -> str:
+    """``ant-de-ingest`` output in depositor terms: sidecar keys instead of command-line flags."""
+    lines = [line.strip() for line in output.strip().splitlines() if line.strip()]
+    text = ' '.join(lines[-6:])[-700:]
+    for flag, key in sorted(DE_FLAG_KEYS.items(), key=lambda pair: -len(pair[0])):
+        text = re.sub(rf'(?<![\w-]){re.escape(flag)}(?![\w-])', f'{key}=', text)
+    text = re.sub(r'(?i)ant-de-ingest(:)?\s*', '', text).replace('CLI flags', 'sidecar keys')
+    text = re.sub(r'Run\s+`?[^`]*--help-preset[^`]*`?\s*for details\.?', '', text)
+    return text.strip().rstrip('.') + '.'
+
+
 def de_study_id(meta: Dict[str, str], file_name: str) -> str:
     """The study id a DE table is imported under: ``de_study_id``, else the file name without its extension."""
     return meta.get('de_study_id') or next(
         (file_name[:-len(ext)] for ext in DE_DATA_EXTS if file_name.endswith(ext)), file_name.rsplit('.', 1)[0])
 
 
-def de_sidecar_names(meta: Dict[str, str], file_id: str, basename: str) -> bool:
-    """Does a DE table's sidecar name this dataset? ``de_dataset_id`` decides when present, else
-    ``de_dataset_h5ad`` (the rule of the import and of the API's check at complete)."""
-    if str(meta.get('de_dataset_id') or '').strip():
-        return str(meta['de_dataset_id']).strip().upper() == file_id.upper()
+def de_sidecar_names(meta: Dict[str, str], file_id: str, basename: str, db_id: Optional[str] = None) -> bool:
+    """Does a DE table's sidecar name this dataset? ``de_dataset_id`` decides when present: the dataset's file
+    id (``SMI`` of ``ST6/SMI``) or its full db id, case-insensitive; else ``de_dataset_h5ad`` must be
+    ``<basename>.h5ad``. The rule of the import and of the API's check at complete."""
+    declared = str(meta.get('de_dataset_id') or '').strip().upper()
+    if declared:
+        return declared == file_id.upper() or (bool(db_id) and declared == str(db_id).upper())
     return meta.get('de_dataset_h5ad') == f'{basename}{H5AD_SUFFIX}'
 
 

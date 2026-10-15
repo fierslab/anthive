@@ -214,6 +214,26 @@ def _sanitize_tree(node: Any, roots: Optional[Dict[str, Path]]) -> Any:
     return node
 
 
+#: Instructions in check texts that only an admin can follow, and what a depositor reads instead.
+_ADMIN_ONLY = [
+    (re.compile(r'no overlap index; an admin runs `?ant ingest-index build`?'),
+     'not checked on this site yet (its reference index is not built); nothing for you to do'),
+    (re.compile(r'\(no gene universe for organism [^;)]*; run ant ingest-index\)'),
+     '(not judged on this site yet: its gene reference is not built; nothing for you to do)'),
+    (re.compile(r'\(?ant-score-fleet run --only <db_id>\)?'), 'by the site after publication'),
+]
+_ADMIN_COMMAND = re.compile(r'`?\bant[ -](ingest-index|score-fleet|ingest-check|sync|convert|md-check)\b[^.;)]*`?')
+
+
+def depositor_text(text: Any) -> Any:
+    """A check text without instructions only an admin can follow (commands, index builds)."""
+    if not isinstance(text, str):
+        return text
+    for pattern, replacement in _ADMIN_ONLY:
+        text = pattern.sub(replacement, text)
+    return _ADMIN_COMMAND.sub('an admin task', text)
+
+
 def redacted_report(report: Dict[str, Any], roots: Optional[Dict[str, Path]] = None) -> Dict[str, Any]:
     """The curator view of an ``ant-ingest-check`` report without server paths.
 
@@ -223,6 +243,13 @@ def redacted_report(report: Dict[str, Any], roots: Optional[Dict[str, Path]] = N
     """
     view = {key: value for key, value in report.items() if key not in ('admin_detail', 'log', 'paths')}
     view['audience'] = 'curator'
+    checks = []
+    for entry in view.get('checks') or []:
+        if isinstance(entry, dict):
+            entry = {**entry, 'summary': depositor_text(entry.get('summary')), 'fix': depositor_text(entry.get('fix'))}
+        checks.append(entry)
+    if 'checks' in view:
+        view['checks'] = checks
     return _sanitize_tree(view, roots)
 
 
@@ -838,16 +865,23 @@ class DepositService:
 
     # vocabulary ------------------------------------------------------------
 
-    def vocab(self) -> Dict[str, Any]:
-        """What a deposit must contain, from the server's own vocabulary and rules."""
+    def vocab(self, identity: Optional[Identity] = None) -> Dict[str, Any]:
+        """What a deposit must contain, from the server's own vocabulary and rules (``caller``: what the
+        caller may do)."""
         import mus  # noqa: PLC0415
         from disease_rule import DISEASE_BASES  # noqa: PLC0415
         from replicates import REPLICATE_UNITS  # noqa: PLC0415
 
         vocabulary = mus.load_vocabulary()
         settings = self.settings
+        caller = None
+        if identity is not None:
+            caller = {'user': identity.user, 'is_admin': identity.is_admin,
+                      'may_replace_de_study': identity.is_admin, 'may_list_all_deposits': identity.is_admin,
+                      'may_update_any_dataset': identity.is_admin or settings.update_policy == 'any'}
         return {
             'schema': 'anthive.deposit_vocab/1',
+            'caller': caller,
             'uploads_enabled': settings.active,
             'limits': {'max_gb': settings.max_gb, 'max_files': settings.max_files,
                        'text_file_max_kb': TEXT_MAX_BYTES // 1024,
@@ -938,9 +972,22 @@ class DepositService:
                                            'group_id': {'length': 3, 'unique_in_store': True}},
                          'template': INDEX_MD_TEMPLATE},
             'facets': facet_registry_for_vocab(),
-            'de_only': ('a deposit with update_of=<db_id> and only kind de files (each table with its <file>.mus '
-                        'naming the dataset by de_dataset_id=<dataset id> or de_dataset_h5ad=<basename>.h5ad) adds '
-                        'DE tables to that published dataset'),
+            'de_only': ('a deposit with update_of=<db_id> and only kind de files adds DE tables to that published '
+                        'dataset. Each table has its <file>.mus naming the dataset by de_dataset_id=<file id> (the '
+                        'part after the slash of the db id, e.g. SMI for ST6/SMI; the full db id ST6/SMI is accepted '
+                        'too; case-insensitive) or, without de_dataset_id, de_dataset_h5ad=<basename>.h5ad. '
+                        'de_format is one of the DE presets; formats that hold one comparison per file (deseq2, '
+                        'edger, scanpy, seurat, glmmseq, glmmtmb) also need de_term and de_contrast'),
+            'de_sidecar_keys': {'de_format': 'required: deseq2 | edger | scanpy | long | seurat | glmmseq | glmmtmb',
+                                'de_dataset_id': 'the dataset: file id (SMI) or db id (ST6/SMI)',
+                                'de_dataset_h5ad': '<basename>.h5ad, when de_dataset_id is not given',
+                                'de_term': 'the model term, required by one-comparison formats',
+                                'de_contrast': 'the comparison, required by one-comparison formats',
+                                'de_method': 'optional; the format has a default',
+                                'de_study_id': 'optional; default the file name without extension',
+                                'de_description': 'optional', 'de_covariates': 'optional, comma separated',
+                                'de_reference_type': 'optional', 'de_map_<column>': 'optional column renames',
+                                'sha256': 'optional sha256 of the table'},
             'held_reasons': {
                 'public_access': 'access=public: an admin publishes it',
                 'licence_unknown': 'no license= in the sidecar',
@@ -1580,17 +1627,22 @@ class DepositService:
             raise StagingChanged(f'{row["name"]} read back is not the verified one')
         return raw.decode('utf-8', errors='replace')
 
-    def _check_de_sidecars(self, record: Dict[str, Any], rows: Dict[str, Dict[str, Any]]) -> List[str]:
-        """Errors of a DE-only deposit: every table's .mus must name the dataset it is added to."""
+    def _check_de_sidecars(self, record: Dict[str, Any], rows: Dict[str, Dict[str, Any]],
+                           naming: bool = True) -> List[str]:
+        """Errors of the DE tables of a deposit: every table's .mus must have what its format needs (term,
+        contrast, ...) and, for a DE-only deposit (``naming``), name the dataset it is added to."""
+        from ingest_pipeline import de_sidecar_names, de_sidecar_problems  # noqa: PLC0415
+
         errors = []
-        file_id = str(record.get('update_of') or '/').split('/')[-1]
+        db_id = str(record.get('update_of') or '')
+        file_id = db_id.split('/')[-1] if db_id else ''
         for name, row in rows.items():
-            if not name.endswith('.mus'):
+            if row['kind'] != 'de' or not name.endswith('.mus'):
                 continue
             meta = parse_sidecar_text(self._read_staged(row))
-            from ingest_pipeline import de_sidecar_names  # noqa: PLC0415
-            if not de_sidecar_names(meta, file_id, record['basename']):
-                errors.append(f'{name} names neither de_dataset_id={file_id} nor '
+            errors += [f'{name}: {problem}' for problem in de_sidecar_problems(meta)]
+            if naming and not de_sidecar_names(meta, file_id, record['basename'], db_id):
+                errors.append(f'{name} names neither de_dataset_id={file_id} (or {db_id}) nor '
                               f'de_dataset_h5ad={record["basename"]}{H5AD_SUFFIX}')
         return errors
 
@@ -1686,6 +1738,10 @@ class DepositService:
                     raise DepositError(422, 'de_mismatch', '; '.join(errors) + '. Withdraw and deposit the tables '
                                                                                'again with corrected sidecars.')
             else:
+                de_errors = self._check_de_sidecars(record, rows, naming=False)
+                if de_errors:
+                    raise DepositError(422, 'de_mismatch', '; '.join(de_errors) + '. Withdraw and deposit again '
+                                                                                  'with corrected DE sidecars.')
                 errors, warnings = self._check_sidecar(record, rows)
                 if errors:
                     mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
@@ -1844,11 +1900,23 @@ class DepositService:
                 return None
         return None
 
+    def _replaced(self, record: Dict[str, Any], row: Dict[str, Any]) -> bool:
+        """Did a newer upload replace this deposit's objects? A newer deposit of the same key, or a watcher row
+        written after this deposit completed. An older row (the previous version of an update, not polled yet)
+        is not a replacement: the deposit then reads ``uploaded``."""
+        newer = self.store._rows("SELECT id FROM deposits WHERE watch_key = ? AND id != ? AND completed > ? AND "
+                                 "state IN ('uploaded', 'completing')",
+                                 (record.get('watch_key'), record['id'], float(record.get('completed') or 0)))
+        if newer:
+            return True
+        return float(row.get('updated') or 0) > float(record.get('completed') or 0)
+
     def _view(self, record: Dict[str, Any], detail: bool, identity: Identity) -> Dict[str, Any]:
         row = read_watch_row(self.state_dir, record.get('watch_key')) if record['state'] == 'uploaded' else None
         matches = watch_row_matches(record, row)
         state = public_state(record, row if matches else None)
-        if record['state'] == 'uploaded' and row and not matches and not record.get('watch_state'):
+        if record['state'] == 'uploaded' and row and not matches and not record.get('watch_state') \
+                and self._replaced(record, row):
             state = 'superseded'
         source = row if matches else {}
         held = json.loads(source['held_reasons'] or '[]') if source.get('held_reasons') else json.loads(

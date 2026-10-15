@@ -330,6 +330,14 @@ def fill_catalog_fields(meta: Dict[str, Any], profile: H5adProfile, sha256: str,
     return result, filled
 
 
+def coerce_year(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """``year`` as an integer when it is a quoted number (``'2024'``): clients read it as a number."""
+    value = meta.get('year')
+    if isinstance(value, str) and re.fullmatch(r'\s*\d{4}\s*', value):
+        meta['year'] = int(value)
+    return meta
+
+
 def build_index_md(sidecar: Dict[str, Any], group: str, taken_group_ids: Set[str],
                    default_dataset: str) -> Tuple[Dict[str, Any], str]:
     """A minimal ``index.md`` for a **new** group from the sidecar of its first dataset.
