@@ -557,6 +557,65 @@ def get_dataset_ingest_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[st
     }
 
 
+def get_dataset_deposit_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Dataset deposits through the API (doc/DESIGN_dataset_ingestion.md, section 22).
+
+    Who may deposit (``datasets_upload_groups``; basic auth mode: ``auth.admins``
+    count as admins), whether deposits are on (``datasets_deposit_enabled``,
+    env ``ANTHIVE_DATASETS_DEPOSIT_ENABLED``), the limits, the incoming prefix
+    (the S3 watch route's ``ingest_watch.prefix``) and the S3 credentials used
+    for presigning: ``datasets_deposit_s3`` when it holds a key pair, else the
+    ``s3`` block. The credentials never leave the server.
+    """
+    cfg = cfg if cfg is not None else get_config()
+    groups = cfg.get('datasets_upload_groups')
+    if groups is None:
+        groups = ['admins', 'curators']
+    elif not isinstance(groups, list):
+        groups = [groups]
+
+    def number(key: str, default: float, cast=float) -> Any:
+        try:
+            value = cfg.get(key)
+            return cast(default if value is None or value == '' else value)
+        except (TypeError, ValueError):
+            raise ConfigError(f'ERROR: [Config] {key} must be a number, got {cfg.get(key)!r}')
+
+    base_s3 = dict(cfg.get('s3') or {})
+    deposit_s3 = dict(cfg.get('datasets_deposit_s3') or {})
+    if deposit_s3.get('access_key_id') and deposit_s3.get('secret_access_key'):
+        s3 = {**{k: base_s3.get(k) for k in ('endpoint', 'region', 'bucket', 'use_path_style')}, **deposit_s3}
+        credential_source = 'datasets_deposit_s3'
+    else:
+        s3 = base_s3
+        credential_source = 's3'
+    policy = str(cfg.get('datasets_deposit_update_policy') or 'own').strip().lower()
+    if policy not in ('own', 'any'):
+        raise ConfigError("ERROR: [Config] datasets_deposit_update_policy must be 'own' or 'any'")
+    try:
+        prefix = get_ingest_watch_settings(cfg)['prefix']
+    except ConfigError:
+        prefix = '__incoming/'
+    return {
+        'upload_groups': [str(g).strip().lower() for g in groups if str(g).strip()],
+        'enabled': _flag(_setting(cfg, 'datasets_deposit_enabled', 'ANTHIVE_DATASETS_DEPOSIT_ENABLED', False), False),
+        'max_gb': number('datasets_deposit_max_gb', 200.0),
+        'url_ttl_hours': number('datasets_deposit_url_ttl_hours', 24.0),
+        'max_open_days': number('datasets_deposit_max_open_days', 7.0),
+        'max_open_per_user': number('datasets_deposit_max_open_per_user', 5, int),
+        'max_pending_gb_per_user': number('datasets_deposit_max_pending_gb_per_user', 400.0),
+        'presign_per_minute': number('datasets_deposit_presign_per_minute', 30, int),
+        'parts_per_batch': number('datasets_deposit_parts_per_batch', 100, int),
+        'single_put_max_mb': number('datasets_deposit_single_put_max_mb', 64, int),
+        'max_files': number('datasets_deposit_max_files', 100, int),
+        'update_policy': policy,
+        'prefix': prefix,
+        'bucket': str(s3.get('bucket') or ''),
+        's3': s3,
+        'credential_source': credential_source,
+    }
+
+
 def get_model_cache_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
     """Cache for the query-embedding model: model_cache / ANTHIVE_MODEL_CACHE,
     else FASTEMBED_CACHE_PATH (baked into the image), else <state_dir>/models."""

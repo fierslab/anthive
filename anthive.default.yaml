@@ -99,6 +99,43 @@ datasets_upload_max_gb: 50
 datasets_auto_publish_public: false
 # Access level a new dataset gets when its annotation does not say.
 datasets_default_access: internal
+# Dataset deposits through the API (doc/DESIGN_dataset_ingestion.md, section
+# 22): a signed-in depositor gets presigned upload URLs for exact keys under
+# ingest_watch.prefix (no S3 keys of their own), and the S3 watcher checks and
+# publishes the deposit. Who may deposit: Remote-Groups of the caller (basic
+# auth mode: auth.admins count as "admins"). Anonymous callers never.
+datasets_upload_groups:
+  - admins
+  - curators
+# Off by default. Needs S3 credentials that may write the incoming prefix:
+# datasets_deposit_s3 (below) or the s3 block. Env: ANTHIVE_DATASETS_DEPOSIT_ENABLED.
+datasets_deposit_enabled: false
+# Largest deposit (all files together), in GB.
+datasets_deposit_max_gb: 200
+# Lifetime of a presigned URL; an open deposit expires this long after its last
+# URL refresh (uploads aborted, its objects deleted) ...
+datasets_deposit_url_ttl_hours: 24
+# ... and at the latest this many days after it was created.
+datasets_deposit_max_open_days: 7
+# Open (not yet completed) deposits per user.
+datasets_deposit_max_open_per_user: 5
+# Bytes a user may have waiting (uploading, or completed but not yet published), in GB.
+datasets_deposit_max_pending_gb_per_user: 400
+# Calls that hand out presigned URLs (create, refresh) per user and minute.
+datasets_deposit_presign_per_minute: 30
+# UploadPart URLs per batch (refresh for more with POST /datasets/deposit/{id}/urls).
+datasets_deposit_parts_per_batch: 100
+# Files up to this size (MB) are one presigned PUT; larger ones are multipart.
+datasets_deposit_single_put_max_mb: 64
+# Files per deposit.
+datasets_deposit_max_files: 100
+# Who may deposit a new version of a published dataset: own (the user whose
+# deposit published it, and admins) or any (every depositor).
+datasets_deposit_update_policy: own
+# Optional separate key pair for presigning (endpoint, region and bucket are
+# taken from s3 unless given here). Empty: the s3 block's keys.
+datasets_deposit_s3: {}
+
 # Where ingestion keeps its state (submissions, reports, overlap indexes).
 # Empty: <state_dir>/ingest. Env: ANTHIVE_INGEST_STATE_DIR.
 ingest_state_dir: ''
