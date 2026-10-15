@@ -160,6 +160,8 @@ class DepositSettings:
     #: verified files into ``prefix``; a URL used after that can only write here, never a watched key.
     staging_prefix: str = '__deposits/'
     site_id: str = ''
+    #: where the watcher pushes published files (``ingest_watch.catalog_prefix``): metadata updates reuse them
+    catalog_prefix: str = ''
     bucket: str = ''
     s3: Dict[str, Any] = field(default_factory=dict)
 
@@ -644,6 +646,27 @@ def find_dataset_md(store_root: Path, db_id: str) -> Optional[Path]:
     return None
 
 
+def de_presets_for_vocab() -> Dict[str, Dict[str, Any]]:
+    """Every DE format with the sidecar keys it requires (from ``lib/de_presets.py``)."""
+    from de_presets import PRESETS  # noqa: PLC0415
+    from ingest_pipeline import DE_FLAG_KEYS  # noqa: PLC0415
+
+    presets = {}
+    for name, preset in PRESETS.items():
+        required = []
+        for flag in preset.required_cli_flags:
+            key = DE_FLAG_KEYS.get(flag)
+            if key and not (key == 'de_method' and preset.default_method):
+                required.append(key)
+        presets[name] = {'description': preset.description, 'shape': preset.shape,
+                         'required_keys': ['de_format'] + required,
+                         'default_method': preset.default_method,
+                         'default_reference_type': preset.default_reference_type,
+                         'required_columns': list(preset.required_in_file),
+                         'column_map': dict(preset.column_map)}
+    return presets
+
+
 def facet_registry_for_vocab() -> List[Dict[str, Any]]:
     """Every registered (and deprecated) ``ant_*`` facet with what a client needs to propose a mapping."""
     import obscol_tags  # noqa: PLC0415
@@ -978,6 +1001,11 @@ class DepositService:
                         'too; case-insensitive) or, without de_dataset_id, de_dataset_h5ad=<basename>.h5ad. '
                         'de_format is one of the DE presets; formats that hold one comparison per file (deseq2, '
                         'edger, scanpy, seurat, glmmseq, glmmtmb) also need de_term and de_contrast'),
+            'de_presets': de_presets_for_vocab(),
+            'metadata_update': ('a deposit with update_of=<db_id> carrying only the sidecar and/or the seed .md (no '
+                                'h5ad) changes the metadata of a published dataset: the published h5ad (and '
+                                'sidecar, when none is deposited) is reused, the result is a patch version; '
+                                'access, data_use and license changes still wait for an admin'),
             'de_sidecar_keys': {'de_format': 'required: deseq2 | edger | scanpy | long | seurat | glmmseq | glmmtmb',
                                 'de_dataset_id': 'the dataset: file id (SMI) or db id (ST6/SMI)',
                                 'de_dataset_h5ad': '<basename>.h5ad, when de_dataset_id is not given',
@@ -1009,7 +1037,7 @@ class DepositService:
     # create ----------------------------------------------------------------
 
     def _validate_files(self, data_project: str, basename: str, files: Any,
-                        de_only: bool = False) -> List[Dict[str, Any]]:
+                        de_only: bool = False, mus_optional: bool = False) -> List[Dict[str, Any]]:
         if not isinstance(files, list) or not files:
             raise DepositError(422, 'invalid', 'files must be a non-empty list')
         if len(files) > self.settings.max_files:
@@ -1080,8 +1108,10 @@ class DepositService:
             if stray:
                 raise DepositError(422, 'invalid', f'{stray[0]}: a DE deposit holds only tables and their .mus')
             return clean
-        if not counts.get('mus'):
+        if not counts.get('mus') and not mus_optional:
             raise DepositError(422, 'invalid', f'the sidecar {basename}{MUS_SUFFIX} (kind mus) is required')
+        if not counts.get('mus') and not counts.get('seed_md'):
+            raise DepositError(422, 'invalid', 'a metadata update carries the sidecar, the seed .md or both')
         return clean
 
     def _group_dirs(self) -> List[Path]:
@@ -1117,6 +1147,17 @@ class DepositService:
         if not DEPOSIT_ID_RE.match(deposit_id):
             raise ValueError(f'not a deposit id: {deposit_id!r}')
         return f'{self.settings.staging_prefix}{deposit_id}/'
+
+    def _delete_staging(self, deposit_id: str, row: Dict[str, Any]) -> None:
+        """Delete a file's staging object, never anything outside the deposit's staging folder (a reused
+        file's source is the published copy and is never deleted)."""
+        key = str(row.get('staging_key') or '')
+        if row.get('method') == 'reuse' or not key.startswith(self._staging_folder(deposit_id)):
+            return
+        try:
+            self.s3.delete_object(Bucket=self.bucket, Key=key)
+        except Exception:  # noqa: BLE001 - absent is fine; the staging sweep retries
+            pass
 
     def _staging_key(self, deposit_id: str, key: str) -> str:
         """The upload key of a file: its target key below ``<staging_prefix><deposit_id>/``, outside the watch."""
@@ -1257,6 +1298,40 @@ class DepositService:
         return {'db_id': db_id.upper(), 'user': user, 'assigned_by': identity.user,
                 'caveat': 'written into the dataset .md by the watcher on its next poll'}
 
+    def _published_files(self, data_project: str, basename: str,
+                         deposit_files: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], str]:
+        """The catalog copies a metadata-only update reuses: the h5ad, and the sidecar when none is deposited.
+
+        Returns (entries, sha256 of the published h5ad from the store ``.md``). The catalog h5ad must carry that
+        sha256 (its ``x-amz-meta-sha256``, stamped by the catalog push) when it carries one."""
+        from metadata import parse_md_file  # noqa: PLC0415
+
+        try:
+            meta = parse_md_file(self.store_root / data_project / f'{basename}.md')[0] or {}
+        except Exception:  # noqa: BLE001
+            meta = {}
+        sha = str(meta.get('sha256') or '').lower()
+        if not SHA256_RE.match(sha):
+            raise DepositError(409, 'h5ad_unavailable', 'the published dataset has no recorded sha256: a metadata '
+                                                        'update needs the h5ad deposited again')
+        wanted = [('h5ad', f'{basename}{H5AD_SUFFIX}')]
+        if not any(entry['kind'] == 'mus' for entry in deposit_files):
+            wanted.append(('mus', f'{basename}{MUS_SUFFIX}'))
+        entries = []
+        for kind, name in wanted:
+            source = f'{self.settings.catalog_prefix}{data_project}/{name}'
+            head = _head(self.s3, self.bucket, source)
+            if head is None:
+                raise DepositError(409, 'h5ad_unavailable', f'the published {name} is not on the object store; '
+                                                            f'deposit it again')
+            if kind == 'h5ad' and head['metadata'].get('sha256') and head['metadata']['sha256'] != sha:
+                raise DepositError(409, 'h5ad_unavailable', f'the published {name} on the object store is not the '
+                                                            f'version in the catalogue; ask an admin')
+            entries.append({'name': name, 'kind': kind, 'key': self._key(data_project, kind, name), 'source': source,
+                            'etag': head['etag'], 'size': head['size'],
+                            'sha256': sha if kind == 'h5ad' else head['metadata'].get('sha256')})
+        return entries, sha
+
     def _check_keys(self, identity: Identity, deposit_files: Sequence[Dict[str, Any]]) -> None:
         """A non-admin may not replace a waiting object of another user's deposit or of a lab member's upload."""
         if identity.is_admin:
@@ -1324,7 +1399,10 @@ class DepositService:
         if de_only and not update_of:
             raise DepositError(422, 'invalid', 'DE tables alone are added to a published dataset: give '
                                                '"update_of": "<db_id>" (or deposit them with the h5ad)')
-        deposit_files = self._validate_files(data_project, basename, files_in, de_only=de_only)
+        metadata_candidate = bool(update_of) and not de_only and isinstance(files_in, list) and not any(
+            isinstance(entry, dict) and entry.get('kind') == 'h5ad' for entry in files_in)
+        deposit_files = self._validate_files(data_project, basename, files_in, de_only=de_only,
+                                             mus_optional=metadata_candidate)
         total = sum(entry['size'] for entry in deposit_files)
         if total > self.settings.max_gb * 1024 ** 3:
             raise DepositError(413, 'too_large', f'{total / 1024 ** 3:.1f} GB is over the {self.settings.max_gb:g} GB '
@@ -1341,6 +1419,7 @@ class DepositService:
         # the h5ad: deposited now, or a corrected sidecar for an h5ad of yours still in incoming
         h5ad_key = self._key(data_project, 'h5ad', f'{basename}{H5AD_SUFFIX}')
         continues = h5ad_etag = h5ad_sha = None
+        reuse: List[Dict[str, Any]] = []
         h5ad_entry = next((entry for entry in deposit_files if entry['kind'] == 'h5ad'), None)
         if de_only:
             pass
@@ -1349,11 +1428,19 @@ class DepositService:
             previous = self.store.get(head['metadata'].get('deposit', '')) if head and head['metadata'].get('deposit') else None
             previous_row = next((row for row in self.store.files(previous['id']) if row['kind'] == 'h5ad'
                                  and row['etag'] == head['etag']), None) if previous else None
-            if head is None or previous is None or previous_row is None \
-                    or (previous['user'] != identity.user and not identity.is_admin):
+            waiting = head is not None and previous is not None and previous_row is not None \
+                and (previous['user'] == identity.user or identity.is_admin)
+            if waiting:
+                if not any(entry['kind'] == 'mus' for entry in deposit_files):
+                    raise DepositError(422, 'invalid', f'a correction of the waiting h5ad carries the sidecar '
+                                                       f'{basename}{MUS_SUFFIX}')
+                continues, h5ad_etag, h5ad_sha = previous['id'], head['etag'], previous_row['sha256']
+            elif existing_db_id and head is None:
+                # a metadata-only update: the published h5ad (and sidecar, when none is deposited) is reused
+                reuse, h5ad_sha = self._published_files(data_project, basename, deposit_files)
+            else:
                 raise DepositError(422, 'h5ad_required', f'no h5ad of yours waits at {data_project}/{basename}'
                                                          f'{H5AD_SUFFIX}: deposit the h5ad with its sidecar')
-            continues, h5ad_etag, h5ad_sha = previous['id'], head['etag'], previous_row['sha256']
         else:
             h5ad_sha = h5ad_entry['sha256']
         self._check_keys(identity, deposit_files)
@@ -1369,6 +1456,11 @@ class DepositService:
                          'sha256': entry['sha256'], 'state': 'pending', 'etag': None, 'completed': None,
                          'method': 'multipart' if multipart else 'put', 'upload_id': None, 'part_size': part_size,
                          'part_count': len(part_sizes(entry['size'], part_size)) if multipart else None})
+        for entry in reuse:                              # published files copied in at complete
+            rows.append({'deposit_id': deposit_id, 'name': entry['name'], 'kind': entry['kind'], 'key': entry['key'],
+                         'staging_key': entry['source'], 'staging_etag': entry['etag'], 'size': entry['size'],
+                         'sha256': entry['sha256'], 'state': 'staged', 'etag': None, 'completed': None,
+                         'method': 'reuse', 'upload_id': None, 'part_size': None, 'part_count': None})
         mus_key = self._key(data_project, 'mus', f'{basename}{MUS_SUFFIX}')
         record = {'id': deposit_id, 'user': identity.user, 'name': identity.name, 'email': identity.email,
                   'is_admin': int(identity.is_admin), 'data_project': data_project, 'basename': basename,
@@ -1376,7 +1468,7 @@ class DepositService:
                   'total_bytes': total, 'watch_key': None if de_only else h5ad_key, 'h5ad_etag': h5ad_etag,
                   'mus_key': None if de_only else mus_key, 'continues': continues,
                   'h5ad_sha256': None if de_only else h5ad_sha, 'refreshes': 0,
-                  'deposit_kind': 'de_only' if de_only else 'dataset'}
+                  'deposit_kind': 'de_only' if de_only else ('metadata_update' if reuse else 'dataset')}
         self.store.reserve(record, rows, now, self.settings)
         try:
             for row in rows:
@@ -1406,7 +1498,7 @@ class DepositService:
             warnings.append('a new group without index.md: the route builds one from the sidecar keys doi, year, '
                             'paper_title and authors, or the check meta.index_md fails')
         return {'deposit_id': deposit_id, 'state': 'uploading', 'data_project': data_project, 'basename': basename,
-                'deposit_kind': 'de_only' if de_only else 'dataset',
+                'deposit_kind': 'de_only' if de_only else ('metadata_update' if reuse else 'dataset'),
                 'update_of': update_of, 'continues': continues, 'expires': _iso(expires),
                 'url_ttl_seconds': self._ttl(), 'total_bytes': total, 'files': instructions, 'warnings': warnings,
                 'next': {'urls': f'/datasets/deposit/{deposit_id}/urls',
@@ -1423,6 +1515,8 @@ class DepositService:
         target = row['staging_key']
         base = {'name': row['name'], 'kind': row['kind'], 'key': row['key'], 'upload_key': target,
                 'size': row['size'], 'sha256': row['sha256'], 'method': row['method']}
+        if row['method'] == 'reuse':
+            return {**base, 'upload_key': None, 'note': 'nothing to upload: the published file is reused'}
         if row['method'] == 'put':
             url = self.s3.generate_presigned_url(
                 'put_object', ExpiresIn=ttl,
@@ -1488,6 +1582,9 @@ class DepositService:
         row = rows[name]
         if row['state'] == 'complete':
             raise DepositError(409, 'already_complete', f'{name} is already complete')
+        if row['method'] == 'reuse':
+            raise DepositError(409, 'nothing_to_upload', f'{name} is the published file, reused; to change the '
+                                                         f'sidecar, withdraw and deposit again with a sidecar file')
         redeclare = 'size' in body or 'sha256' in body
         if redeclare:
             if row['kind'] != 'mus':
@@ -1516,10 +1613,7 @@ class DepositService:
             if not self.store.redeclare(deposit_id, name, size, sha):
                 raise DepositError(409, 'not_uploading', 'the deposit is no longer uploading (completing or ended)')
             # the old staging object (if any) goes; the new URL signs the new size and sha256
-            try:
-                self.s3.delete_object(Bucket=self.bucket, Key=row['staging_key'])
-            except Exception:  # noqa: BLE001 - absent is fine
-                pass
+            self._delete_staging(deposit_id, row)
             self.store.event(deposit_id, identity.user, 'redeclared', f'{name}: {size} bytes')
             row = {**row, 'size': size, 'sha256': sha, 'method': 'put', 'upload_id': None}
         if row['method'] == 'put':
@@ -1536,6 +1630,12 @@ class DepositService:
     def _finish_upload(self, deposit_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
         """Complete one file in staging and verify it; ``{'name', 'ok', ...}`` (no raise for missing parts)."""
         if row['state'] == 'complete':
+            return {'name': row['name'], 'ok': True}
+        if row['method'] == 'reuse':                   # the published copy, recorded at create: still the same?
+            head = _head(self.s3, self.bucket, row['staging_key'])
+            if head is None or head['etag'] != row['staging_etag']:
+                return {'name': row['name'], 'ok': False,
+                        'problems': ['the published copy changed since this deposit started; deposit again']}
             return {'name': row['name'], 'ok': True}
         if row['method'] == 'multipart' and row['state'] != 'staged':
             parts = self._uploaded_parts(row)
@@ -1564,7 +1664,7 @@ class DepositService:
         if head['metadata'].get('sha256') != row['sha256']:
             problems.append('x-amz-meta-sha256 differs from the declared sha256')
         if problems:
-            self.s3.delete_object(Bucket=self.bucket, Key=row['staging_key'])     # the deposit's own staging key
+            self._delete_staging(deposit_id, row)                                # the deposit's own staging key
             self.store.update_file(deposit_id, row['name'], state='pending')
             return {'name': row['name'], 'ok': False, 'problems': problems}
         # the ETag checked here is the only version that may be read back and copied (N1: a re-PUT of a staging
@@ -1709,7 +1809,8 @@ class DepositService:
         except DepositError as error:
             self._undo_complete(deposit_id, {}, error)
             raise
-        if int(record['total_bytes']) > self.settings.async_complete_gb * 1024 ** 3:
+        copy_bytes = sum(int(row['size'] or 0) for row in rows.values())     # uploads and reused files
+        if copy_bytes > self.settings.async_complete_gb * 1024 ** 3:
             self.store.event(deposit_id, identity.user, 'completing', 'large deposit: copying in the background')
             self._progress(deposit_id, rows, 0, 0)
             self.background(lambda: self._copy_phase_logged(deposit_id, record, rows, warnings, identity.user))
@@ -1745,7 +1846,7 @@ class DepositService:
                 errors, warnings = self._check_sidecar(record, rows)
                 if errors:
                     mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
-                    self.s3.delete_object(Bucket=self.bucket, Key=mus_row['staging_key'])
+                    self._delete_staging(deposit_id, mus_row)
                     self.store.update_file(deposit_id, mus_row['name'], state='pending', staging_etag=None)
                     raise DepositError(422, 'sidecar_mismatch', '; '.join(errors) + '. Declare the corrected '
                                        'sidecar with POST .../urls {"name", "size", "sha256"} (a new URL), upload it '
@@ -1837,10 +1938,7 @@ class DepositService:
             raise DepositError(409, 'not_completed', 'the deposit was ended while it was being completed; '
                                                      'start a new deposit')
         for row in rows.values():                      # only now: the deposit is uploaded
-            try:
-                self.s3.delete_object(Bucket=self.bucket, Key=row['staging_key'])
-            except Exception:  # noqa: BLE001 - the staging sweep removes it later
-                pass
+            self._delete_staging(deposit_id, row)
         self.store.event(deposit_id, user, 'completed', f'{len(rows)} file(s)')
         return {'deposit_id': deposit_id, 'state': 'uploaded',
                 'files': [{'name': row['name'], 'key': row['key'], 'size': row['size'], 'sha256': row['sha256'],

@@ -2227,12 +2227,17 @@ def de_sidecar_problems(meta: Dict[str, str]) -> List[str]:
         key = DE_FLAG_KEYS.get(flag)
         if key == 'de_method' and (meta.get('de_method') or preset.default_method):
             continue
-        if key and not str(meta.get(key) or '').strip():
+        if key and (not str(meta.get(key) or '').strip() or is_auto(meta.get(key))):
             hint = {'de_term': f'{fmt} tables hold one comparison each: the model term it tests, e.g. treatment',
                     'de_contrast': f'{fmt} tables hold one comparison each: the comparison, e.g. lecanemab_vs_igg1',
                     'de_method': f'{fmt} has no default method: e.g. lmem or glmm'}.get(key, '')
-            problems.append(f'{key}= is missing ({hint})')
+            problems.append(f'{key}= is missing or auto ({hint})')
     return problems
+
+
+def is_auto(value: Any) -> bool:
+    """``auto`` is mus' placeholder for a value it did not resolve; it is never a term or contrast."""
+    return str(value or '').strip().lower() == 'auto'
 
 
 def friendly_de_error(output: str) -> str:
@@ -2282,7 +2287,7 @@ def de_ingest_command(target_duckdb: Path, data_file: Path, meta: Dict[str, str]
                       '--preset', meta.get('de_format', ''), '--study-id', study_id] + (['--replace'] if replace else [])
     for flag, key in (('--term', 'de_term'), ('--contrast', 'de_contrast'), ('--description', 'de_description'),
                       ('--covariates', 'de_covariates'), ('--reference-type', 'de_reference_type')):
-        if meta.get(key):
+        if meta.get(key) and not is_auto(meta[key]):        # mus writes 'auto' for values it did not resolve
             cmd += [flag, meta[key]]
     if method:
         cmd += ['--method', method]

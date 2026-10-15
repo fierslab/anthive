@@ -558,6 +558,13 @@ def get_dataset_ingest_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[st
     }
 
 
+def _watch_catalog_prefix(cfg: Dict[str, Any]) -> str:
+    try:
+        return get_ingest_watch_settings(cfg)['catalog_prefix']
+    except ConfigError:
+        return ''
+
+
 def deposit_site_id(cfg: Optional[Dict[str, Any]] = None) -> str:
     """This install's folder below the deposit staging prefix (``datasets_deposit_site_id``, env
     ``ANTHIVE_DATASETS_DEPOSIT_SITE_ID``, default the host name). Two installs sharing a bucket must differ:
@@ -629,6 +636,7 @@ def get_dataset_deposit_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[s
         'async_complete_gb': number('datasets_deposit_async_complete_gb', 5.0),
         'complete_lease_minutes': number('datasets_deposit_complete_lease_minutes', 10.0),
         'site_id': deposit_site_id(cfg),
+        'catalog_prefix': _watch_catalog_prefix(cfg),
         'staging_prefix': (str(cfg.get('datasets_deposit_staging_prefix') or '__deposits/').strip().lstrip('/')
                            .rstrip('/') + '/' + deposit_site_id(cfg) + '/'),
         'update_policy': policy,
