@@ -45,16 +45,16 @@ def test_scratch_dir_is_under_tmp_dir(tmp_path, monkeypatch):
 
 def test_dataset_ingest_settings_defaults_and_overrides():
     defaults = config.get_dataset_ingest_settings({})
-    assert defaults == {'max_upload_gb': 50.0, 'auto_publish_public': False, 'default_access': 'internal'}
+    assert defaults == {'max_upload_gb': 200.0, 'auto_publish_public': False, 'default_access': 'internal'}
     custom = config.get_dataset_ingest_settings({'datasets_upload_max_gb': '12.5', 'datasets_auto_publish_public': True,
                                                  'datasets_default_access': 'public'})
     assert custom == {'max_upload_gb': 12.5, 'auto_publish_public': True, 'default_access': 'public'}
-    assert config.get_dataset_ingest_settings({'datasets_upload_max_gb': 'lots'})['max_upload_gb'] == 50.0
+    assert config.get_dataset_ingest_settings({'datasets_upload_max_gb': 'lots'})['max_upload_gb'] == 200.0
 
 
 def test_default_yaml_carries_the_documented_keys():
     defaults = config.load_default_config()
-    for key, value in (('datasets_upload_max_gb', 50), ('datasets_auto_publish_public', False),
+    for key, value in (('datasets_upload_max_gb', 200), ('datasets_auto_publish_public', False),
                        ('datasets_default_access', 'internal'), ('ingest_state_dir', ''), ('ingest_index_dir', '')):
         assert defaults[key] == value
     documented = (REPO / 'doc' / 'CONFIG.md').read_text()

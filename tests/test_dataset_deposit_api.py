@@ -27,7 +27,8 @@ SERVE_PATH = REPO_ROOT / 'bin' / 'api' / 'ant-serve'
 _SERVE_WANTED = {'_require_dataset_uploader', '_deposit_call', '_caller_is_admin', '_require_admin',
                  'dataset_deposit_vocab', 'dataset_deposit_list', 'dataset_deposit_create', 'dataset_deposit_status',
                  'dataset_deposit_report', 'dataset_deposit_urls', 'dataset_deposit_complete',
-                 'dataset_deposit_withdraw', 'dataset_deposit_approve', 'dataset_deposit_reject'}
+                 'dataset_deposit_withdraw', 'dataset_deposit_approve', 'dataset_deposit_reject',
+                 'dataset_deposit_set_owner', 'dataset_deposit_expire'}
 
 CURATOR = {'Remote-User': 'alice', 'Remote-Groups': 'users,curators', 'Remote-Email': 'alice@example.org',
            'Remote-Name': 'Alice Smith'}
@@ -66,6 +67,7 @@ def test_routes_are_hidden_and_tagged():
                          ('post', '/datasets/deposit/{deposit_id}/complete'),
                          ('post', '/datasets/deposit/{deposit_id}/withdraw'),
                          ('post', '/datasets/deposit/{deposit_id}/approve'),
+                         ('post', '/datasets/deposit/{deposit_id}/expire'), ('post', '/datasets/deposit/owners'),
                          ('post', '/datasets/deposit/{deposit_id}/reject')):
         assert f'@app.{method}("{path}", tags=["datasets-deposit"], include_in_schema=False)' in source
     assert source.index('"/datasets/deposit/vocab"') < source.index('"/datasets/deposit/{deposit_id}"')
@@ -189,3 +191,32 @@ def test_mcp_deposit_tools_only_for_depositors():
     source = (REPO_ROOT / 'bin' / 'api' / 'ant-mcp').read_text()
     assert 'async def my_deposits(' in source and 'async def deposit_status(' in source
     assert 'never through MCP' in source
+
+
+def test_admin_routes_work_for_admins_outside_the_upload_groups(tmp_path, monkeypatch):
+    client, service = serve_app(tmp_path, monkeypatch, cfg_extra={'datasets_upload_groups': ['depositors']})
+    bogus = '/datasets/deposit/dep_' + 'a' * 20
+    assert client.post(bogus + '/approve', headers=ADMIN).status_code == 404         # past the gate
+    assert client.post(bogus + '/reject', headers=ADMIN).status_code == 404
+    assert client.post(bogus + '/expire', headers=ADMIN).status_code == 404
+    assert client.get('/datasets/deposit?all=true', headers=ADMIN).status_code == 200
+    assert client.get('/datasets/deposit', headers=ADMIN).status_code == 403          # not a depositor
+    depositor = {'Remote-User': 'dee', 'Remote-Groups': 'depositors'}
+    assert client.post(bogus + '/approve', headers=depositor).status_code == 403
+    assert client.post('/datasets/deposit/owners', headers=depositor, json={'db_id': 'OL2/mic', 'user': 'dee'}).status_code == 403
+    ok = client.post('/datasets/deposit/owners', headers=ADMIN, json={'db_id': 'OL2/mic', 'user': 'dee'})
+    assert ok.status_code == 200 and ok.json()['user'] == 'dee'
+    assert client.post('/datasets/deposit/owners', headers=ADMIN, json=['x']).status_code == 422
+    assert client.post('/datasets/deposit/x/urls', headers=depositor, json=[1]).status_code == 404
+
+
+def test_mcp_basic_mode_admins_may_follow_deposits(monkeypatch):
+    from tests.test_library_upload import _anthive_mcp_class
+
+    cfg = {'datasets_upload_groups': ['admins', 'curators'], 'auth': {'mode': 'basic', 'admins': ['boss']}}
+    _, namespace = _anthive_mcp_class(cfg)
+    may = namespace['_may_deposit']
+    assert may({'user': 'boss', 'groups': []}) and not may({'user': 'eve', 'groups': []})
+    cfg_auth = {'datasets_upload_groups': ['admins'], 'auth': {'mode': 'authelia', 'admins': ['boss']}}
+    _, namespace = _anthive_mcp_class(cfg_auth)
+    assert not namespace['_may_deposit']({'user': 'boss', 'groups': []})

@@ -58,6 +58,7 @@ def make_env(tmp_path: Path, report=None):
     env.settings['notify'] = {'on': [], 'smtp_host': 'smtp.test', 'email_from': 'anthive@test'}
     clock = [env.clock_value]
     service = make_service(tmp_path, clock, s3=env.s3)
+    env.watcher.deposit_settings = service.settings
     return env, service, clock
 
 
@@ -121,15 +122,16 @@ def test_an_open_deposit_holds_back_its_project(tmp_path):
     assert env.poll_twice() == {'live': 1}
 
 
-def test_an_expired_open_deposit_no_longer_blocks(tmp_path):
+def test_an_expired_open_deposit_is_cleaned_up_by_the_watcher(tmp_path):
     env, service, clock = make_env(tmp_path)
-    deposit(env, service, complete=False)
+    deposit_id = deposit(env, service, complete=False)
+    assert [key for key in env.s3.objects if key.startswith(f'__deposits/{deposit_id}/')]
+    assert not [key for key in env.s3.objects if key.startswith(f'{PREFIX}{GROUP}/')]   # uploads never land there
     env.clock_value += 25 * 3600
     clock[0] = env.clock_value
-    env.watcher.poll()
-    assert env.db.get(f'{PREFIX}{GROUP}/micro.h5ad') is not None          # its objects are seen again ...
-    service.list(ALICE)                                                  # ... until the expiry sweep removes them
-    assert not [key for key in env.s3.objects if key.startswith(f'{PREFIX}{GROUP}/')]
+    assert env.poll_twice() == {}
+    assert service.store.get(deposit_id)['state'] == 'expired'                         # the watcher expired it
+    assert not [key for key in env.s3.objects if key.startswith('__deposits/')]
 
 
 def test_held_deposit_is_approved_through_the_api(tmp_path, mailbox):
@@ -190,7 +192,7 @@ def test_updates_by_deposit_need_update_of_and_the_owner(tmp_path):
     assert env.poll_twice() == {'live': 1}
     with pytest.raises(dd.DepositError) as exc:
         deposit(env, service, BOB, seed=1, index=False, update_of='WT6/MIC')
-    assert exc.value.body['status'] == 'not_your_dataset'
+    assert exc.value.body['status'] == 'name_taken'
     second = deposit(env, service, seed=1, index=False, update_of='WT6/MIC')
     env.clock_value += 10
     clock[0] = env.clock_value

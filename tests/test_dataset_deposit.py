@@ -358,11 +358,16 @@ def test_a_key_in_an_open_deposit_or_owned_by_another_user_is_refused(tmp_path, 
 
 def test_update_rules(tmp_path, clock):
     service = make_service(tmp_path, clock)
-    for update_of, status, word in ((None, 409, 'update_of_required'), ('OL2/xyz', 409, 'update_of_mismatch'),
-                                    (STORE_DB_ID, 403, 'not_your_dataset')):
+    # a non-owner learns nothing about the dataset: one answer whatever update_of says, no db id
+    for update_of in (None, 'OL2/xyz', STORE_DB_ID):
         with pytest.raises(dd.DepositError) as exc:
             created(service, group='Old2020', basename='micro', update_of=update_of)
-        assert (exc.value.status, exc.value.body['status']) == (status, word)
+        assert (exc.value.status, exc.value.body['status']) == (409, 'name_taken')
+        assert 'OL2' not in json.dumps(exc.value.body) and 'db_id' not in exc.value.body
+    for update_of, word in ((None, 'update_of_required'), ('OL2/xyz', 'update_of_mismatch')):
+        with pytest.raises(dd.DepositError) as exc:
+            created(service, ADMIN, group='Old2020', basename='micro', update_of=update_of)
+        assert exc.value.body['status'] == word and exc.value.body['db_id'] == STORE_DB_ID
     with pytest.raises(dd.DepositError) as exc:
         created(service, update_of='NW6/cells')
     assert exc.value.body['status'] == 'update_of_unknown'
