@@ -136,6 +136,10 @@ datasets_deposit_max_refreshes: 500
 # Where presigned uploads land (one folder per deposit), outside ingest_watch.prefix: a URL can never
 # write a key the watcher reads. Complete copies the checked files into ingest_watch.prefix.
 datasets_deposit_staging_prefix: __deposits/
+# This install's folder below the staging prefix (uploads land in <prefix><site_id>/<deposit id>/). Every
+# install that shares the bucket needs its own: each sweeps only its folder. Empty: the host name.
+# Env: ANTHIVE_DATASETS_DEPOSIT_SITE_ID. Container sites: site.name.
+datasets_deposit_site_id: ''
 # Who may deposit a new version of a published dataset: own (the user whose
 # deposit published it, and admins) or any (every depositor).
 datasets_deposit_update_policy: own

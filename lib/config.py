@@ -558,6 +558,21 @@ def get_dataset_ingest_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[st
     }
 
 
+def deposit_site_id(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """This install's folder below the deposit staging prefix (``datasets_deposit_site_id``, env
+    ``ANTHIVE_DATASETS_DEPOSIT_SITE_ID``, default the host name). Two installs sharing a bucket must differ:
+    each one sweeps only its own staging folder."""
+    import re
+    import socket
+
+    configured = str(_setting(cfg, 'datasets_deposit_site_id', 'ANTHIVE_DATASETS_DEPOSIT_SITE_ID', '') or '')
+    raw = configured or socket.gethostname().split('.')[0] or 'site'
+    site_id = re.sub(r'[^A-Za-z0-9._-]+', '-', raw).strip('.-_').lower()[:64]
+    if not site_id:
+        raise ConfigError(f'ERROR: [Config] datasets_deposit_site_id {raw!r} is not usable as a folder name')
+    return site_id
+
+
 def get_dataset_deposit_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Dataset deposits through the API (doc/DESIGN_dataset_ingestion.md, section 22).
 
@@ -611,8 +626,9 @@ def get_dataset_deposit_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[s
         'max_files': number('datasets_deposit_max_files', 100, int),
         'max_per_day': number('datasets_deposit_max_per_day', 20, int),
         'max_refreshes': number('datasets_deposit_max_refreshes', 500, int),
+        'site_id': deposit_site_id(cfg),
         'staging_prefix': (str(cfg.get('datasets_deposit_staging_prefix') or '__deposits/').strip().lstrip('/')
-                           .rstrip('/') + '/'),
+                           .rstrip('/') + '/' + deposit_site_id(cfg) + '/'),
         'update_policy': policy,
         'prefix': prefix,
         'bucket': str(s3.get('bucket') or ''),

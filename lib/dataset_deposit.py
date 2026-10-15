@@ -27,6 +27,7 @@ sidecar is never taken as identity on this route.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -68,6 +69,8 @@ DB_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,32}/[A-Za-z0-9._-]{1,64}$')
 #: never run on one deposit at the same time.
 RECORD_STATES = ('uploading', 'completing', 'uploaded', 'withdrawing', 'withdrawn', 'expiring', 'expired')
 OPEN_STATES = ('uploading', 'completing')
+#: States after which a deposit's staging folder is never needed again.
+TERMINAL_STATES = ('uploaded', 'withdrawn', 'expired')
 #: A ``completing`` deposit older than this is treated as interrupted and cleaned up like an expired one.
 STALE_COMPLETING_SECONDS = 12 * 3600
 #: Watcher states a depositor sees (``pulled`` / ``checked`` are shown as ``checking``).
@@ -89,7 +92,7 @@ CREATE INDEX IF NOT EXISTS deposits_watch_key ON deposits(watch_key);
 CREATE TABLE IF NOT EXISTS files (
     deposit_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, size INTEGER,
     sha256 TEXT, method TEXT, upload_id TEXT, part_size INTEGER, part_count INTEGER,
-    state TEXT NOT NULL, etag TEXT, completed REAL, staging_key TEXT,
+    state TEXT NOT NULL, etag TEXT, completed REAL, staging_key TEXT, staging_etag TEXT,
     PRIMARY KEY (deposit_id, name)
 );
 -- target keys of open deposits: one deposit at a time per key (the PRIMARY KEY is the lock)
@@ -104,6 +107,10 @@ CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT, deposit_id TEXT, ts REAL, actor TEXT, action TEXT, detail TEXT
 );
 """
+
+
+class StagingChanged(RuntimeError):
+    """A staging object changed between its verification and its copy (a re-PUT during complete)."""
 
 
 class DepositError(Exception):
@@ -146,6 +153,7 @@ class DepositSettings:
     #: Where presigned uploads land: outside the watched prefix, one folder per deposit. Complete copies the
     #: verified files into ``prefix``; a URL used after that can only write here, never a watched key.
     staging_prefix: str = '__deposits/'
+    site_id: str = ''
     bucket: str = ''
     s3: Dict[str, Any] = field(default_factory=dict)
 
@@ -263,7 +271,7 @@ class DepositStore:
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.executescript(SCHEMA)
         for table, column, kind in (('deposits', 'h5ad_sha256', 'TEXT'), ('deposits', 'refreshes', 'INTEGER DEFAULT 0'),
-                                    ('files', 'staging_key', 'TEXT')):
+                                    ('files', 'staging_key', 'TEXT'), ('files', 'staging_etag', 'TEXT')):
             if column not in {row[1] for row in self.conn.execute(f'PRAGMA table_info({table})')}:
                 self.conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
 
@@ -304,7 +312,7 @@ class DepositStore:
 
     def cas(self, deposit_id: str, from_states: Sequence[str], to_state: str, **fields: Any) -> bool:
         """Move the deposit to ``to_state`` only when it is in one of ``from_states`` (the per-deposit lock)."""
-        fields['updated'] = time.time()
+        fields.setdefault('updated', time.time())
         assignments = ', '.join(f'{name} = ?' for name in fields)
         with self._lock:
             cursor = self.conn.execute(
@@ -409,7 +417,7 @@ class DepositStore:
             self.conn.execute('UPDATE owners SET caveat_applied = 1 WHERE db_id = ?', (db_id.upper(),))
 
     def update(self, deposit_id: str, **fields: Any) -> None:
-        fields['updated'] = time.time()
+        fields.setdefault('updated', time.time())
         with self._lock:
             assignments = ', '.join(f'{name} = ?' for name in fields)
             self.conn.execute(f'UPDATE deposits SET {assignments} WHERE id = ?', list(fields.values()) + [deposit_id])
@@ -542,30 +550,77 @@ def find_dataset_md(store_root: Path, db_id: str) -> Optional[Path]:
     return None
 
 
-def apply_owner_caveats(store: 'DepositStore', store_root: Path, log: Callable[[str], None] = print) -> int:
-    """Write the caveat of each owner assignment not yet applied into the dataset's ``.md`` (verified edit)."""
+def clean_note(note: Any, limit: int = 300) -> str:
+    """One line of plain text: control characters and newlines become spaces, YAML document markers go."""
+    text = ''.join(char if char.isprintable() else ' ' for char in str(note or ''))
+    text = re.sub(r'-{3,}', '-', text)
+    return re.sub(r'\s+', ' ', text).strip()[:limit]
+
+
+def apply_owner_caveats(store: 'DepositStore', store_root: Path, log: Callable[[str], None] = print,
+                        git_identity: str = 'anthive ingest-watch <noreply@anthive.local>',
+                        run: Optional[Callable[..., Any]] = None, commit: bool = True) -> int:
+    """Record each owner assignment not yet applied in the dataset's ``.md``: a caveat, a patch version bump
+    with a changelog entry (every curation decision), written through verified ``md_edit`` operations to a
+    temp file renamed over the ``.md`` under the dataset's writer lock, then a git commit of that file alone
+    (skipped when the store is no git repository or the path has staged changes of someone else)."""
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
     import md_edit  # noqa: PLC0415
     from ingest_md_fill import curation_caveat, today_iso  # noqa: PLC0415
+    from ingest_pipeline import writer_lock  # noqa: PLC0415
 
+    run = run or (lambda cmd: subprocess.run([str(part) for part in cmd], capture_output=True, text=True))
     applied = 0
     for row in store.owners(pending_caveat=True):
         md = find_dataset_md(store_root, row['db_id'])
         if md is None:
             log(f'owner of {row["db_id"]}: no such dataset in {store_root}; caveat not written')
             continue
-        caveat = curation_caveat(
-            f'Deposits of new versions of this dataset through the API are accepted from {row["user"]} '
-            f'(owner set by {row["assigned_by"]} on {time.strftime("%Y-%m-%d", time.localtime(row["ts"]))})'
-            + (f': {row["note"]}' if row.get('note') else '.'), 'dataset_owner', today_iso(), detected_by='ant-ingest-watch')
+        user, by, note = clean_note(row['user'], 80), clean_note(row['assigned_by'], 80), clean_note(row.get('note'))
+        today = today_iso()
+        message = (f'Deposits of new versions of this dataset through the API are accepted from {user} '
+                   f'(owner set by {by} on {time.strftime("%Y-%m-%d", time.localtime(row["ts"]))})'
+                   + (f': {note}' if note else '.'))
+        caveat = curation_caveat(message, 'dataset_owner', today, detected_by='ant-ingest-watch')
         try:
-            text = md.read_text(encoding='utf-8')
-            md.write_text(md_edit.apply_edits(text, [md_edit.append_top('caveats', caveat)]), encoding='utf-8')
-        except Exception as exc:  # noqa: BLE001 - an unusual .md: a person adds the caveat
+            with writer_lock(md.with_suffix('.duckdb'), timeout=60):
+                text = md.read_text(encoding='utf-8')
+                new_text = md_edit.apply_edits(text, [md_edit.append_top('caveats', caveat),
+                                                      md_edit.bump_version([f'Caveat: {message}'], today, 'patch')])
+                partial = md.with_name(f'.{md.name}.owner-partial')
+                partial.write_text(new_text, encoding='utf-8')
+                os.replace(partial, md)
+        except Exception as exc:  # noqa: BLE001 - an unusual .md or a busy writer: a person or the next poll
             log(f'owner of {row["db_id"]}: caveat not written ({exc})')
             continue
         store.mark_owner_caveat(row['db_id'])
         applied += 1
+        if commit:
+                _commit_md(store_root, md, f'deposit owner of {row["db_id"]}: {user}\n\n{message}\n', git_identity,
+                       run, log)
     return applied
+
+
+def _commit_md(store_root: Path, md: Path, message: str, git_identity: str, run: Callable[..., Any],
+               log: Callable[[str], None]) -> None:
+    """Commit one ``.md`` the route wrote, the way the watcher commits (only that path, never others' staging)."""
+    store_root = Path(store_root)
+    if not (store_root / '.git').exists():
+        log(f'{store_root} is not a git repository: {md.name} not committed')
+        return
+    rel = str(md.relative_to(store_root))
+    staged = run(['git', '-C', store_root, 'diff', '--cached', '--name-only', '--', rel])
+    if staged.returncode != 0 or staged.stdout.strip():
+        log(f'{rel}: staged changes of someone else; not committed, commit by hand')
+        return
+    name, _, email = git_identity.partition('<')
+    result = run(['git', '-C', store_root, '-c', f'user.name={name.strip()}', '-c',
+                  f'user.email={email.rstrip(">").strip()}', 'commit', '--only', '-m', message, '--', rel])
+    if result.returncode != 0:
+        log(f'{rel}: git commit failed: {(result.stdout or "") + (result.stderr or "")}'.strip()[:300])
+        run(['git', '-C', store_root, 'reset', '-q', '--', rel])
 
 
 def public_state(record: Dict[str, Any], watch_row: Optional[Dict[str, Any]]) -> str:
@@ -916,19 +971,30 @@ class DepositService:
         return removed
 
     def sweep_staging(self) -> List[str]:
-        """Remove staging objects of deposits that are not open (late replays of old URLs, crashed completes)."""
+        """Remove staging objects of finished deposits (late replays of old URLs, leftovers of a crash).
+
+        Only folders of deposits this install knows in a terminal state (``uploaded``, ``withdrawn``,
+        ``expired``) are emptied at once. A deposit id this install does not know (another site or a test
+        watcher on the same bucket and prefix) is left alone until all its objects are older than
+        ``max_open_days``: no deposit of any site can still be open then.
+        """
         removed: List[str] = []
         prefix = self.settings.staging_prefix
-        seen: Set[str] = set()
+        newest: Dict[str, float] = {}
         for obj in self._list(prefix):
             deposit_id = obj['Key'][len(prefix):].split('/', 1)[0]
-            if deposit_id in seen:
-                continue
-            seen.add(deposit_id)
             if not DEPOSIT_ID_RE.match(deposit_id):
-                continue                                   # not ours: never touched
+                continue                                   # not a deposit folder: never touched
+            modified = obj.get('LastModified')
+            stamp = modified.timestamp() if hasattr(modified, 'timestamp') else float(modified or 0)
+            newest[deposit_id] = max(newest.get(deposit_id, 0.0), stamp)
+        cutoff = self.clock() - self.settings.max_open_days * 86400
+        for deposit_id, stamp in newest.items():
             record = self.store.get(deposit_id)
-            if record is None or record['state'] not in OPEN_STATES:
+            if record is not None:
+                if record['state'] in TERMINAL_STATES:
+                    removed += self._clean_staging(deposit_id)
+            elif stamp < cutoff:
                 removed += self._clean_staging(deposit_id)
         return removed
 
@@ -977,7 +1043,7 @@ class DepositService:
             raise DepositError(422, 'invalid', 'user is a login name (letters, digits, ._@-)')
         if find_dataset_md(self.store_root, db_id) is None:
             raise DepositError(404, 'not_found', f'no dataset {db_id} in the store')
-        self.store.set_owner(db_id, user, identity.user, str(note or '')[:300])
+        self.store.set_owner(db_id, user, identity.user, clean_note(note))
         return {'db_id': db_id.upper(), 'user': user, 'assigned_by': identity.user,
                 'caveat': 'written into the dataset .md by the watcher on its next poll'}
 
@@ -1256,22 +1322,43 @@ class DepositService:
             self.s3.delete_object(Bucket=self.bucket, Key=row['staging_key'])     # the deposit's own staging key
             self.store.update_file(deposit_id, row['name'], state='pending')
             return {'name': row['name'], 'ok': False, 'problems': problems}
-        self.store.update_file(deposit_id, row['name'], state='staged')
+        # the ETag checked here is the only version that may be read back and copied (N1: a re-PUT of a staging
+        # key during complete must not slip through unchecked)
+        self.store.update_file(deposit_id, row['name'], state='staged', staging_etag=head['etag'])
         return {'name': row['name'], 'ok': True}
 
     def _copy_in(self, deposit_id: str, row: Dict[str, Any]) -> str:
-        """Copy a verified staging object to its watched key (multipart copy above 5 GB); returns the new ETag."""
+        """Copy a verified staging object to its watched key (multipart copy above 5 GB); returns the new ETag.
+
+        The copy is conditional on the staging ETag recorded at verification (``CopySourceIfMatch``, also
+        forwarded to UploadPartCopy by the managed copy). Because an object store may ignore the condition,
+        a single-PUT file (the only kind a URL can overwrite; MD5 ETags) must also arrive with exactly that
+        ETag. A mismatch raises :class:`StagingChanged`.
+        """
+        staged = row.get('staging_etag')
+        if not staged:
+            raise StagingChanged(f'{row["name"]} was not verified')
         source = {'Bucket': self.bucket, 'Key': row['staging_key']}
         metadata = self._metadata(deposit_id, row['sha256'])
-        if row['size'] <= SINGLE_PUT_HARD_MAX:
-            self.s3.copy_object(Bucket=self.bucket, Key=row['key'], CopySource=source, Metadata=metadata,
-                                MetadataDirective='REPLACE')
-        else:                                             # managed copy: UploadPartCopy in parts
-            self.s3.copy(source, self.bucket, row['key'], ExtraArgs={'Metadata': metadata,
-                                                                     'MetadataDirective': 'REPLACE'})
+        condition = f'"{staged}"'
+        try:
+            if row['size'] <= SINGLE_PUT_HARD_MAX:
+                self.s3.copy_object(Bucket=self.bucket, Key=row['key'], CopySource=source, Metadata=metadata,
+                                    MetadataDirective='REPLACE', CopySourceIfMatch=condition)
+            else:                                         # managed copy: UploadPartCopy in parts
+                self.s3.copy(source, self.bucket, row['key'],
+                             ExtraArgs={'Metadata': metadata, 'MetadataDirective': 'REPLACE',
+                                        'CopySourceIfMatch': condition})
+        except Exception as exc:  # noqa: BLE001
+            if _error_code(exc) in ('PreconditionFailed', '412'):
+                raise StagingChanged(f'{row["name"]} changed in staging during complete') from exc
+            raise
         head = _head(self.s3, self.bucket, row['key'])
         if head is None or head['size'] != row['size'] or head['metadata'].get('deposit') != deposit_id:
             raise RuntimeError(f'the copy of {row["name"]} into incoming could not be verified')
+        if row['method'] == 'put' and head['etag'] != staged:
+            delete_consumed(self.s3, self.bucket, self.settings.prefix, {row['key']: head['etag']})
+            raise StagingChanged(f'{row["name"]} changed in staging during complete')
         return head['etag']
 
     def _check_sidecar(self, record: Dict[str, Any], rows: Dict[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
@@ -1279,8 +1366,17 @@ class DepositService:
         import mus  # noqa: PLC0415
 
         mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
-        response = self.s3.get_object(Bucket=self.bucket, Key=mus_row['staging_key'])
-        text = response['Body'].read(TEXT_MAX_BYTES + 1).decode('utf-8', errors='replace')
+        try:
+            response = self.s3.get_object(Bucket=self.bucket, Key=mus_row['staging_key'],
+                                          IfMatch=f'"{mus_row["staging_etag"]}"')
+        except Exception as exc:  # noqa: BLE001
+            if _error_code(exc) in ('PreconditionFailed', '412'):
+                raise StagingChanged('the sidecar changed in staging during complete') from exc
+            raise
+        raw = response['Body'].read(TEXT_MAX_BYTES + 1)
+        if mus_row['method'] == 'put' and hashlib.md5(raw).hexdigest() != mus_row['staging_etag']:
+            raise StagingChanged('the sidecar read back is not the verified one')    # IfMatch ignored by the store
+        text = raw.decode('utf-8', errors='replace')
         sidecar = parse_sidecar_text(text)
         errors: List[str] = []
         warnings: List[str] = []
@@ -1327,9 +1423,12 @@ class DepositService:
         """
         self._require_active()
         record = self._require_uploading(self._get_own(identity, deposit_id))
-        if not self.store.cas(deposit_id, ('uploading',), 'completing'):
+        if not self.store.cas(deposit_id, ('uploading',), 'completing', updated=self.clock()):
             raise DepositError(409, 'busy', 'the deposit is being completed, withdrawn or expired right now')
         copied: Dict[str, str] = {}
+        changed = DepositError(409, 'staging_changed', 'a file was uploaded again while the deposit was being '
+                                                       'completed; nothing was published. Complete again once '
+                                                       'your uploads are finished.')
         try:
             rows = {row['name']: row for row in self.store.files(deposit_id)}
             try:
@@ -1342,6 +1441,8 @@ class DepositService:
             rows = {row['name']: row for row in self.store.files(deposit_id)}
             try:
                 errors, warnings = self._check_sidecar(record, rows)
+            except StagingChanged:
+                raise changed
             except Exception as exc:  # noqa: BLE001
                 raise DepositError(502, 's3_error', f'reading the sidecar back failed ({_error_code(exc)})')
             if errors:
@@ -1360,12 +1461,19 @@ class DepositService:
             try:
                 for row in rows.values():
                     copied[row['key']] = self._copy_in(deposit_id, row)
+                    self.store.update(deposit_id, updated=self.clock())   # alive: no stale-complete recovery
+            except StagingChanged:
+                raise changed
             except Exception as exc:  # noqa: BLE001
                 raise DepositError(502, 's3_error', f'moving the files into incoming failed ({_error_code(exc)}); '
                                                     f'try again')
-        except DepositError:
+        except DepositError as error:
             for key, etag in copied.items():           # nothing of a refused complete stays where the watcher looks
                 delete_consumed(self.s3, self.bucket, self.settings.prefix, {key: etag})
+            if error is changed:                       # every single-PUT file is checked again next time
+                for row in self.store.files(deposit_id):
+                    if row['method'] == 'put' and row['state'] == 'staged':
+                        self.store.update_file(deposit_id, row['name'], state='pending', staging_etag=None)
             self.store.cas(deposit_id, ('completing',), 'uploading')
             raise
         now = self.clock()
@@ -1377,9 +1485,14 @@ class DepositService:
                 pass
         h5ad_row = next((row for row in rows.values() if row['kind'] == 'h5ad'), None)
         mus_row = next(row for row in rows.values() if row['kind'] == 'mus')
-        self.store.cas(deposit_id, ('completing',), 'uploaded', completed=now,
-                       h5ad_etag=copied[h5ad_row['key']] if h5ad_row else record['h5ad_etag'],
-                       mus_etag=copied[mus_row['key']])
+        if not self.store.cas(deposit_id, ('completing',), 'uploaded', completed=now,
+                              h5ad_etag=copied[h5ad_row['key']] if h5ad_row else record['h5ad_etag'],
+                              mus_etag=copied[mus_row['key']]):
+            # expired or withdrawn meanwhile (a recovery that judged the complete stale): not ours to publish
+            for key, etag in copied.items():
+                delete_consumed(self.s3, self.bucket, self.settings.prefix, {key: etag})
+            raise DepositError(409, 'not_completed', 'the deposit was ended while it was being completed; '
+                                                     'start a new deposit')
         self.store.release_keys(deposit_id)
         self.store.event(deposit_id, identity.user, 'completed', f'{len(rows)} file(s)')
         return {'deposit_id': deposit_id, 'state': 'uploaded',

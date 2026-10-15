@@ -487,6 +487,7 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
     datasets = site.get('datasets') or {}
     cfg['datasets_upload_groups'] = [str(g) for g in (datasets.get('upload_groups') or ['admins', 'curators'])]
     cfg['datasets_deposit_enabled'] = _deposit_enabled(site)
+    cfg['datasets_deposit_site_id'] = str(datasets.get('site_id') or site['site']['name'])
     for key in ('max_gb', 'url_ttl_hours', 'max_open_days', 'max_open_per_user', 'max_pending_gb_per_user',
                 'update_policy'):
         if datasets.get(key) is not None:
@@ -1035,6 +1036,11 @@ def _check_datasets(site: dict) -> list[str]:
         _warn(f"dataset deposits presign with the read-write S3 keys, so the api container holds them; put a key "
               f"pair limited to the incoming prefix in secrets/{S3_INCOMING_KEY_FILES[0]} and "
               f"{S3_INCOMING_KEY_FILES[1]} if the object store can scope keys")
+    s3 = site.get('s3') or {}
+    site_id = datasets.get('site_id') or site['site']['name']
+    _warn(f"dataset deposits stage uploads in s3://{s3.get('bucket')}/__deposits/{site_id}/ and the watcher reads "
+          f"__incoming/ of that bucket: another site on the same bucket must have a different site name "
+          f"(datasets.site_id) and must not run a watcher on the same incoming prefix")
     _say(f"dataset deposits: on for {groups}; presigning with the {'read-write' if source == 'write' else source} key pair; run ant-ingest-watch on this "
          f"host with ANTHIVE_INGEST_STATE_DIR={site['_state'] / 'ingest'} (the api reads its state there)")
     return problems

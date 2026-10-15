@@ -558,7 +558,10 @@ class Watcher:
                 except Exception as exc:  # noqa: BLE001 - housekeeping; the next poll retries
                     self.log(f'deposits: expiry or staging sweep failed: {exc}')
             try:
-                dataset_deposit.apply_owner_caveats(store, self.pipeline.config.store_root, self.log)
+                dataset_deposit.apply_owner_caveats(store, self.pipeline.config.store_root, self.log,
+                                                    git_identity=str(self.settings.get('git_identity') or
+                                                                     'anthive ingest-watch <noreply@anthive.local>'),
+                                                    commit=bool(self.settings.get('store_git_commit', True)))
             except Exception as exc:  # noqa: BLE001
                 self.log(f'deposits: owner caveats not written: {exc}')
             try:
@@ -581,12 +584,17 @@ class Watcher:
                         item.static = [obj for obj in item.static if own(obj)]
                         item.de = [obj for obj in item.de if own(obj)]
                     else:
-                        def foreign(obj):
-                            entry = objects.get(obj.key)
-                            return entry is not None and entry[1] == obj.etag
-                        item.static = [obj for obj in item.static if not foreign(obj)]
-                        item.de = [obj for obj in item.de if not foreign(obj)]
-                        item.refused = self._unlinked_refusal(item, accept_unlinked)
+                        try:
+                            def foreign(obj):
+                                entry = objects.get(obj.key)
+                                return (obj.key in held or (entry is not None and entry[1] == obj.etag)
+                                        or bool(self._deposit_mark(obj)))
+                            item.static = [obj for obj in item.static if not foreign(obj)]
+                            item.de = [obj for obj in item.de if not foreign(obj)]
+                            item.refused = self._unlinked_refusal(item, accept_unlinked)
+                        except TransientError as exc:          # fail closed for this item: look again next poll
+                            self.log(f'deposits: {item.key} waits: {exc}')
+                            continue
                     kept.append(item)
             except sqlite3.Error as exc:
                 raise TransientError(f'the deposit store cannot be read ({exc}); not polling') from exc
@@ -596,6 +604,20 @@ class Watcher:
         finally:
             store.close()
 
+    def _deposit_mark(self, obj: Any) -> str:
+        """``x-amz-meta-deposit`` of a listed object ('' when unmarked), cached per key and ETag.
+
+        A HEAD that fails is a TransientError: the item waits for the next poll (fail closed)."""
+        cache_key = (obj.key, obj.etag)
+        if cache_key not in self._deposit_marks:
+            try:
+                head = self.s3.head_object(Bucket=self.bucket, Key=obj.key)
+            except Exception as exc:  # noqa: BLE001
+                raise TransientError(f'HEAD {obj.key} failed ({exc}); its deposit mark is unknown') from exc
+            metadata = {str(k).lower(): str(v) for k, v in (head.get('Metadata') or {}).items()}
+            self._deposit_marks[cache_key] = metadata.get('deposit', '')
+        return self._deposit_marks[cache_key]
+
     def _unlinked_refusal(self, item: Item, accept_unlinked: bool) -> Optional[str]:
         """Why an item that belongs to no completed deposit is refused, or None."""
         if not accept_unlinked:
@@ -604,15 +626,7 @@ class Watcher:
         for obj in (item.h5ad, item.mus):
             if obj is None:
                 continue
-            cache_key = (obj.key, obj.etag)
-            if cache_key not in self._deposit_marks:
-                try:
-                    head = self.s3.head_object(Bucket=self.bucket, Key=obj.key)
-                    metadata = {str(k).lower(): str(v) for k, v in (head.get('Metadata') or {}).items()}
-                except Exception:  # noqa: BLE001 - gone or unreadable: the pull decides
-                    continue
-                self._deposit_marks[cache_key] = metadata.get('deposit', '')
-            mark = self._deposit_marks[cache_key]
+            mark = self._deposit_mark(obj)
             if mark:
                 return (f'{obj.key} carries the mark of API deposit {mark} but is not an upload that deposit '
                         f'completed (a replayed or left-over object); refused. Deposit again through the API.')

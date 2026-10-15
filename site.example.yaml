@@ -177,6 +177,7 @@ datasets:
   max_open_per_user: 5      # deposits uploading at the same time, per user
   max_pending_gb_per_user: 400   # GB a user may have waiting for publication
   update_policy: own        # who may deposit a new version: own (the original depositor, admins) | any
+  site_id: null             # this site's staging folder (__deposits/<site_id>/); default site.name. Unique per bucket
 
 mcp:
   token_ttl_days: 90 # lifetime of a per-user MCP link (0 = never expires)
