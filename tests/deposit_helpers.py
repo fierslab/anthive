@@ -76,10 +76,36 @@ class DepositFakeS3(FakeS3):
         self.calls.append(('abort', Key))
         return {}
 
-    def get_object(self, Bucket: str, Key: str):  # noqa: N803
+    #: True: behave like a store that ignores IfMatch / CopySourceIfMatch (accepts and does the request anyway)
+    ignore_conditions = False
+
+    def _condition(self, key: str, condition: Optional[str]) -> None:
+        if condition is not None and not self.ignore_conditions and \
+                f'"{self.objects[key]["etag"]}"' != condition:
+            raise S3Error('PreconditionFailed')
+
+    def get_object(self, Bucket: str, Key: str, IfMatch: Optional[str] = None):  # noqa: N803
         if Key not in self.objects:
             raise S3Error('NoSuchKey')
+        self._condition(Key, IfMatch)
         return {'Body': io.BytesIO(self.objects[Key]['body'])}
+
+    def copy_object(self, Bucket: str, Key: str, CopySource: dict, Metadata: Optional[dict] = None,  # noqa: N803
+                    MetadataDirective: str = 'COPY', CopySourceIfMatch: Optional[str] = None) -> None:  # noqa: N803
+        self._condition(CopySource['Key'], CopySourceIfMatch)
+        if self.before_copy:
+            self.before_copy(CopySource['Key'])
+        super().copy_object(Bucket=Bucket, Key=Key, CopySource=CopySource, Metadata=Metadata,
+                            MetadataDirective=MetadataDirective)
+
+    def copy(self, CopySource: dict, Bucket: str, Key: str, ExtraArgs: Optional[dict] = None, **kwargs: Any):  # noqa: N803
+        extra = dict(ExtraArgs or {})
+        self.copy_extra_args = extra
+        self.copy_object(Bucket=Bucket, Key=Key, CopySource=CopySource, Metadata=extra.get('Metadata'),
+                         MetadataDirective=extra.get('MetadataDirective', 'COPY'),
+                         CopySourceIfMatch=extra.get('CopySourceIfMatch'))
+
+    before_copy = None
 
     # the depositor's side: what an HTTP PUT to a presigned URL does ---------
     def _signed(self, url: str, operation: str) -> Dict[str, Any]:
