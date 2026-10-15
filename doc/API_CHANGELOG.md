@@ -208,6 +208,12 @@ Also for vark:
 - DE sidecars: the literal `auto` (mus' placeholder) is never a term or contrast: complete treats it as
   missing (`de_term= is missing or auto`), and the import never passes it on.
 
+After the fourth review: a metadata update whose reused (published) sidecar fails the check at complete
+answers 422 `sidecar_mismatch` ("deposit a sidecar file") and leaves the published file alone; a published h5ad
+without a recorded sha256 (`x-amz-meta-sha256`, stamped by the watcher's verified push) is not reused (409
+`h5ad_unavailable`, before any copy). Container sites render `ingest_watch.prefix` and `catalog_prefix` from
+`datasets.incoming_prefix` / `datasets.catalog_prefix` (default `__incoming/` and `s3.prefix`) into every config.
+
 Fix (also a candidate for a 2.45.2 patch release): `GET /health` answers 200 for a running server with an
 empty catalogue (`databases: 0`, `note: "empty catalog"`). Up to 2.45.1 it answered 503 "No databases
 available", so the compose healthcheck never passed on a new site with an empty h5adstore and `ant-stack up`

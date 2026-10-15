@@ -693,10 +693,17 @@ s3:
    can scope keys. Every site that shares the bucket needs its own `site.name` (or `datasets.site_id`), and
    only one watcher may read an incoming prefix; `check` reminds you. Without these files the api presigns with the read-write pair
    (`s3_access_key_id`), and `check` warns that the api container then holds the catalogue's write key.
-2. Run the watcher on the host, as the uid the containers run as, with the api's state:
-   `ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest`. The api keeps the deposits in
-   `<state_dir>/ingest/deposits.sqlite` and reads the watcher's progress and reports from the same folder.
-   See "The S3 ingest watcher" below for the rest of its setup.
+2. Run the watcher on the host, as the uid the containers run as, with the api's state and the same
+   prefixes: `ANTHIVE_CONFIG=$(bin/ops/ant-stack config-path --role ingest)`
+   `ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest`, plus `ANTHIVE_TMP_DIR` / `ANTHIVE_INGEST_WORK_DIR` on host
+   disk. `check` prints the exact line, including `ANTHIVE_INGEST_WATCH_PREFIX` and
+   `ANTHIVE_INGEST_WATCH_CATALOG_PREFIX`. The api keeps the deposits in `<state_dir>/ingest/deposits.sqlite`
+   and reads the watcher's progress and reports from the same folder. The incoming prefix
+   (`datasets.incoming_prefix`, default `__incoming/`) and the catalog prefix (`datasets.catalog_prefix`,
+   default `s3.prefix`, where ant-sync keeps the catalogue) are rendered into every config, so the api presigns
+   into the folder the watcher reads and reuses published files from where the watcher pushes them. If the
+   watcher has an `anthive.yaml` of its own, name it in `datasets.watcher_config`: `check` fails when its
+   prefixes differ. See "The S3 ingest watcher" below for the rest of its setup.
 3. `bin/ops/ant-stack check`, then `bin/ops/ant-stack up`. `check` prints
    `dataset deposits: on for admins, curators; presigning with the incoming key pair; run ant-ingest-watch ...`,
    or the problem (`s3.enabled` off, no key pair).
