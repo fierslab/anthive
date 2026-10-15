@@ -2,8 +2,12 @@
 
 This is the one supported way to run anthive: a docker compose stack,
 described by one file (`site.yaml`) and driven by one tool
-(`bin/ops/ant-stack`). Follow the steps in order. Every command below was run
-end to end on a fresh checkout for release 2.45.1.
+(`bin/ops/ant-stack`). Follow the steps in order.
+
+Every command below was run end to end on a fresh checkout for release 2.45.1.
+
+Parts marked **next release** describe work for 2.46 that is not in 2.45.1
+yet; skip them on a 2.45.1 site.
 
 Plan about an hour, plus the time it takes to download the data.
 
@@ -29,10 +33,9 @@ Tick every box. Most failed installs skip one of these.
 - [ ] `uv` is installed (`ant-stack` runs with it):
       `curl -LsSf https://astral.sh/uv/install.sh | sh`, then open a new shell
       and check `uv --version`.
-- [ ] Disk: about 10 GB for the images, plus the data you pull. The complete
-      catalogue is about 1.7 TB (roughly 0.8 TB the server reads to serve,
-      1 TB of raw `.h5ad`). Start with one or two collections; see step 5.
-- [ ] A free port for the web site (the example uses 8443).
+- [ ] Enough memory, CPU and disk; see "Hardware" below.
+- [ ] A free port for the web site (the example uses 8443), open in the
+      firewall; see "Network" below.
 
 **An address users will type**
 
@@ -63,6 +66,115 @@ Tick every box. Most failed installs skip one of these.
 
 The software itself needs no access: the code and the images are public.
 
+### Where the data comes from
+
+There is no public download of the Anthive data. Everything a site serves
+comes from the lab that maintains Anthive:
+
+- the dataset descriptions (`h5adstore`), the gene sets (`anthive-genesetdb`)
+  and the paper records (`library_store`) are private git repositories on
+  `gitlab.kuleuven.be`;
+- the data files (`.h5ad`, `.duckdb`, parquet) and the paper PDFs are in a
+  private S3 bucket, reachable only with keys the maintainers hand out.
+
+Ask the Anthive maintainers for access through the GitLab project
+(https://gitlab.kuleuven.be/bdslab/anthive/anthive4, open an issue). Say
+which collections you need; you get GitLab access to the repositories and
+an S3 key pair, plus the endpoint, region and bucket name for step 4.
+
+Datasets marked `access: public` are only public in the sense that a site
+may show them to visitors who are not signed in (see "Internal datasets");
+their files still come through the maintainers. `ant sync` has no
+"public only" mode and always needs S3 keys.
+
+**Without access.** You can install and start everything, but with release
+2.45.1 the site does not come up with a completely empty store: the api
+reports itself unhealthy while it has no dataset at all, and `ant-stack up`
+then stops with `container ...-api-1 is unhealthy` before the web site
+starts. To try the software without the lab's data, put at least one
+dataset of your own in the store (an `.h5ad` with log-normalised `X` plus
+its `.md`, converted with `ant convert`; see the table in "Everyday tasks"
+and `doc/DATASET_INGESTION.md`). Keep `genesetstore`, `library` and
+`library_index` at `null` and `s3.enabled: false`. The site then shows the
+login page and your dataset, with empty gene set and paper pages.
+
+### Hardware
+
+Guidance, not measured limits. The numbers come from the settings and the
+current catalogue; your load decides the rest.
+
+| | Trial (one or two collections) | Full catalogue |
+| --- | --- | --- |
+| CPU | 4 cores | 16 cores or more |
+| RAM | 16 GB | 64 GB or more |
+| Disk for data | 20 to 50 GB | about 2 TB |
+| Disk for images and scratch | 20 GB | 100 GB or more |
+
+Where the numbers come from:
+
+- **Memory.** Each dataset that is in use gets its own DuckDB instance.
+  `resources.server_memory_limit: auto` lets one instance use up to 25% of
+  the machine's RAM, capped at 16 GB, and up to `max_open_databases` (48)
+  instances stay open. The cap is a ceiling, not a reservation: a few
+  people browsing use far less. On top of that the facet caches of the api
+  take above 1 GB each for signed-in and for anonymous visitors on a full
+  store (see "Cache warm-up after a start"). On a small machine set
+  `server_memory_limit` to a fixed value (for example `4GB`) and lower
+  `max_open_databases` in `site.yaml` under `resources:`.
+- **CPU.** `resources.server_threads: 8` DuckDB threads per open dataset;
+  plots and facet tests are CPU-bound. More cores mostly help with several
+  users at once.
+- **Data disk.** Per dataset, the files the server reads (`.duckdb` plus
+  parquet) are typically 0.3 GB, 90% are under 5 GB and the largest is
+  about 130 GB. The raw `.h5ad` that `ant sync pull` also brings is
+  typically 0.7 GB, at most about 150 GB. The whole catalogue is about
+  0.8 TB to serve plus 1.1 TB of `.h5ad`. Use local SSD: dataset pages read
+  many small pieces of these files.
+- **Images and scratch.** The images take about 6.5 GB (app 1.7 GB, ingest
+  4.5 GB, Caddy and Authelia small), under `/var/lib/docker` by default.
+  DuckDB spills large queries and `ant convert` stages its work on the
+  scratch disk (`scratch_dir`, by default a docker volume, also under
+  `/var/lib/docker`); a conversion needs room for about the size of the
+  `.h5ad` it converts. `state_dir` stays small (users, links, caches).
+
+### Network
+
+**Ports to open** in the server's firewall and in any network firewall in
+front of it, for the people who will use the site:
+
+| `tls.mode` | Open | Why |
+| --- | --- | --- |
+| `internal` (default) | `ports.https` (8443 in the example), TCP | the only published port |
+| `acme` | 80 and 443, TCP, from the internet | Let's Encrypt checks the name on port 80; users come in on 443 |
+| `off` | nothing extra | the reverse proxy in front reaches `ports.http` on 127.0.0.1 |
+
+`ports.bind` (default `0.0.0.0`) is the host address the port listens on.
+Docker publishes ports through its own firewall rules, which **bypass ufw
+and firewalld**: a port that docker publishes is reachable even when ufw
+says it is closed. To keep the site inside a network, set `ports.bind` to
+an internal address of the server, or filter in the `DOCKER-USER` iptables
+chain, or rely on a firewall outside the server.
+
+**Outgoing connections** the server needs: `registry.gitlab.kuleuven.be`
+and Docker Hub (images, step 5), `gitlab.kuleuven.be` on port 22 (SSH) or
+443 (HTTPS) for the repositories, the S3 endpoint on 443, and for
+`tls.mode: acme` Let's Encrypt.
+
+**The name.** Pick the name users will type and point it at the server:
+an `A` record (IPv4, and `AAAA` for IPv6) in your DNS. For `tls.mode: acme`
+the name must be in public DNS and reach this server from the internet. For
+an intranet site an internal DNS name is fine; an IP address also works,
+but then everyone types the number. Extra names or addresses go in
+`site.hostnames`. `site.public_url` must use exactly the name and port
+people type, or the login fails.
+
+**AI clients.** Terminal agents on a user's computer (Claude Code, Codex,
+Gemini CLI) reach the MCP link from that computer, so a site inside a
+network works for them. Web-based clients that add MCP connectors in their
+own cloud (for example claude.ai connectors) call the link from the
+provider's servers, which only works when the site is reachable from the
+internet.
+
 ---
 
 ## 2. Get the code
@@ -84,6 +196,11 @@ programs themselves run from the images.
 ---
 
 ## 3. Get the catalogue, gene sets and paper library
+
+This step needs the access from step 1. Without it, make an empty folder
+instead (`mkdir -p /srv/anthive/h5adstore`), skip the clones and read
+"Without access" in step 1: the site needs at least one dataset of your own
+before it starts.
 
 ```sh
 cd /srv/anthive
@@ -161,10 +278,14 @@ images:
 
 s3:                                           # skip if you have no S3 keys
   enabled: true
-  endpoint: fsn1.your-objectstorage.com
-  region: eu-central
-  bucket: anthive4a
+  endpoint: s3.example.org                    # host name only, no https://
+  region: example-region
+  bucket: example-bucket
 ```
+
+The S3 values above are placeholders. The real endpoint, region and bucket
+of the lab's data come from the maintainers together with the keys (see
+"Where the data comes from").
 
 `images.tag` must be the release you checked out in step 2 (`git describe
 --tags` prints it). `site.example.yaml` carries the number of its own release,
@@ -331,15 +452,30 @@ If one of these fails, see Troubleshooting at the end.
 
 ---
 
+## 8. After the first login
+
+- **Users of the site** connect their AI app and install the Anthive skills
+  with the client install guide:
+  https://gitlab.kuleuven.be/bdslab/anthive/skills/-/blob/main/INSTALL.md
+  Send them that link together with the site address and their password.
+  The site's own "Connect an MCP client" page also gives each user a
+  setup prompt to paste into their AI agent.
+- **Admins** can let an AI agent with a shell walk them through this guide
+  and through everyday upkeep with the `anthive-server-setup` skill
+  (install it as in the client guide above; it reads this guide live).
+- Add the other people who will use the site; see "Users and groups".
+
+---
+
 ## Everyday tasks
 
 Run these from `/srv/anthive/anthive4`.
 
 | I want to... | Do this |
 | --- | --- |
-| add a person | add them under `auth.users` in `site.yaml`, run `bin/ops/ant-stack init` (prints their password), give it to them. Works without a restart. |
+| add a person | add them under `auth.users` in `site.yaml`, run `bin/ops/ant-stack init` (prints their password), give it to them. Authelia mode: works without a restart; basic mode: then `restart caddy`. See "Users and groups". |
 | reset a password | `bin/ops/ant-stack passwd <name>` (basic mode: then `restart caddy`) |
-| make someone admin | add them to `auth.admins` and give them `groups: [admins]`, then `bin/ops/ant-stack init` |
+| make someone admin | see "Users and groups": a new user gets `groups: [admins]` in `site.yaml`; an existing one is changed in the Authelia user file |
 | get new datasets | `cd ../h5adstore && git pull && cd ../anthive4`, then `bin/ops/ant-stack ingest -- ant sync pull --include-duckdb 'Collection/*'`, then `bin/ops/ant-stack restart api` |
 | see what runs | `bin/ops/ant-stack ps` |
 | read logs | `bin/ops/ant-stack logs api` (or `web`, `mcp`, `caddy`, `authelia`) |
@@ -349,6 +485,71 @@ Run these from `/srv/anthive/anthive4`.
 | start again | `bin/ops/ant-stack up` |
 | convert my own .h5ad | put it in a collection folder with its `.md`, then `bin/ops/ant-stack ingest -- ant convert /srv/anthive/h5adstore/MyStudy/file.h5ad` |
 | publish uploaded papers | `bin/ops/ant-stack publish-library` (better: from a timer, see "Let people add papers") |
+
+### Users and groups
+
+People and their groups are listed under `auth.users` in `site.yaml`:
+
+```yaml
+auth:
+  users:
+    - name: jdoe                  # the login name; basic mode allows letters, digits, . _ @ -
+      displayname: Jane Doe
+      email: jane@mylab.org
+      groups: [librarians]        # [] for an ordinary user
+```
+
+**Add a person.** Add an entry like the one above and run
+`bin/ops/ant-stack init`. It creates a password for every user who has none,
+prints it once and appends it to
+`<state_dir>/secrets/initial-passwords.txt`. Hand the password over
+yourself; change it later with `bin/ops/ant-stack passwd <name>`.
+
+- `auth.mode: authelia`: `init` adds the new user, with the groups from
+  `site.yaml`, to Authelia's user file `<state_dir>/authelia/users_database.yml`.
+  Authelia reloads that file by itself; no restart.
+- `auth.mode: basic`: run `bin/ops/ant-stack restart caddy` after `init`, so
+  Caddy reads the new password list.
+
+**Change the groups of someone who already exists** (authelia mode).
+`init` writes a user to Authelia's file only once, when the user is new;
+after that the file belongs to Authelia, and editing `groups:` in
+`site.yaml` for an existing user changes nothing. Edit the file instead:
+
+```sh
+nano /srv/anthive/state/authelia/users_database.yml
+```
+
+```yaml
+users:
+  jdoe:
+    displayname: Jane Doe
+    email: jane@mylab.org
+    groups:
+      - librarians
+      - curators
+    password: $2b$12$...          # leave as it is
+    disabled: false
+```
+
+Keep `site.yaml` in step with it, so the two do not drift apart. Authelia
+picks up the change within a few minutes, at the next login at the latest.
+To lock someone out, set `disabled: true` there.
+
+**The groups that mean something** in 2.45.1:
+
+| Group | Gives |
+| --- | --- |
+| `admins` | admin pages, rescans, everything; in basic mode also everyone in `auth.admins` |
+| any group in `library.upload_groups` (for example `librarians`) | adding papers, when `services.paper_upload` is on (see "Let people add papers") |
+| `curators` | nothing yet in 2.45.1. **Next release:** with dataset deposits on, the default `datasets.upload_groups` is `[admins, curators]` (see "Let depositors add datasets"). You can create the group now. |
+
+Any other group name is accepted and has no effect.
+
+**Basic mode has no groups.** Caddy only tells the api whether a user is an
+admin: the users in `auth.admins` plus those with `admins` in `groups`. A
+`librarians` or `curators` group does nothing there; use `auth.mode:
+authelia` when you need groups.
 
 ### After editing site.yaml
 
@@ -408,10 +609,12 @@ library:
   upload_groups: [admins, librarians]
 ```
 
-Then `bin/ops/ant-stack init` (writes the Authelia user database) and
-`bin/ops/ant-stack up`. Authelia picks up the new group within a few
-minutes, at the next login at the latest. In `auth.mode: basic` there are no groups: only
-`auth.admins` can upload.
+Then `bin/ops/ant-stack init` and `bin/ops/ant-stack up`. `init` writes
+the group to Authelia's user file only for a user who is new; for someone who
+already exists, add the group in `<state_dir>/authelia/users_database.yml`
+(see "Users and groups"). Authelia picks up the new group within a few
+minutes, at the next login at the latest. In `auth.mode: basic` there are no
+groups: only `auth.admins` can upload.
 
 Getting those commits and PDFs out of the server is done on the host, not
 in the api container, by `bin/ops/ant-stack publish-library`. It takes the
@@ -460,7 +663,9 @@ Other sites get the new papers with their next `ant sync pull` (or `ant sync
 library`), which pulls the records from git and the PDFs from S3. See
 `doc/LIBRARY.md` for conflicts and deletes.
 
-### Let depositors add datasets
+### Let depositors add datasets (next release)
+
+**Next release (2.46).** Not in 2.45.1: skip this section on a 2.45.1 site.
 
 Off by default. With it on, signed-in members of `datasets.upload_groups` deposit datasets without S3 keys of
 their own: the api hands out presigned uploads into the incoming prefix of the S3 watcher, and the watcher
@@ -600,7 +805,7 @@ the command with `bin/ops/ant-cron-run`, which adds the usual uv folders to
 ### The S3 ingest watcher (not in the compose stack yet)
 
 `ant ingest-watch` (the S3 watch route of `doc/DATASET_INGESTION.md`) has no compose service and no
-`site.yaml` key yet. With `services.dataset_deposit` on, start it with
+`site.yaml` key yet. With `services.dataset_deposit` on (next release), start it with
 `ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest` so the api and the watcher share the deposit state. It runs on the dev box as its own systemd unit
 (`config/examples/anthive-ingest-watch.service.example`), off unless `ingest_watch.enabled: true` in that
 host's `anthive.yaml`. Container sites receive what it publishes the usual way, through S3:
@@ -718,14 +923,15 @@ catalogue from git.
 | `check`: port already in use | something else listens there | pick another `ports.https` and change `public_url` to match |
 | `check`: store not readable by uid | the data folder belongs to someone else | `sudo chown -R $USER /srv/anthive`, or set `run_as` |
 | browser: "connection is not private" | the site signs its own certificate | continue once, or trust it (see Certificates), or use `tls.mode: acme` |
+| `up` stops after a few minutes with `container ...-api-1 is unhealthy`, and `logs api` says `Found 0 databases` | the store has no dataset at all; with 2.45.1 the api then never reports healthy | clone the h5adstore and pull a collection, or add a dataset of your own (step 1, "Without access") |
 | `up` waits a long time, then "unhealthy" | the API is still scanning a large, mostly remote catalogue | pull the data you serve (step 5), run `up` again; `logs api` shows progress |
 | 502 right after `up --no-wait` | the API is still starting | wait a minute |
-| logged in but admin pages say 403 | the user is not an admin | add to `auth.admins` and `groups: [admins]`, `ant-stack init` |
+| logged in but admin pages say 403 | the user is not an admin | basic mode: add to `auth.admins`, `ant-stack init`, `restart caddy`; authelia mode: add `admins` to the user's groups (see "Users and groups") |
 | a dataset is listed but its page is very slow | its files are not on this disk | pull that collection with `--include-duckdb` |
 | `check`: library_chunks.parquet is missing | the literature index was not downloaded | `bin/ops/ant-stack ingest -- ant sync pull --library-only` |
 | `check`: index built with another model | the index and the image use different embedding models | literature search still works by keyword; rebuild the index with `ant lib-index --full` or use the matching release |
 | literature search finds nothing in one paper | its PDF has no text layer (a scan) | the index build lists these; rebuild that paper with `ant lib-index --parser docling` (OCR) on a machine with the ingest image |
-| upload returns 403 | the user is not in `library.upload_groups` (basic mode: not in `auth.admins`) | add the group or the user, `ant-stack init` |
+| upload returns 403 | the user is not in `library.upload_groups` (basic mode: not in `auth.admins`) | add the group to `library.upload_groups` and `ant-stack up`, or give the user the group (see "Users and groups") |
 | upload returns 503 with status `disabled` | `services.paper_upload` is off (library mounted read-only) or the checkout is not writable by the site uid | set `services.paper_upload: true` and fix ownership, `ant-stack check`, `ant-stack up` |
 | `check` says "host port ... is already in use" on a running site | another program holds the port (`check` skips this test when the site's own containers are up) | find it with `ss -ltnp`, or run `ant-stack check --running` |
 | `ant sync pull` says "s3.bucket is not set" | S3 is off for this site | set `s3.enabled: true` and put the keys in `<state_dir>/secrets` (see "S3"), or copy the data by hand |
@@ -900,8 +1106,8 @@ resolve inside the containers.
 | `services.mcp` | personal MCP links for AI clients (on by default; the supported way to use AI with anthive) |
 | `mcp.token_ttl_days`, `mcp.max_links_per_user` | how long a link lives (0 = forever) and how many links one user may hold (default 5) |
 | `services.paper_upload` | let `library.upload_groups` add papers through the API and MCP (mounts the library read-write) |
-| `services.dataset_deposit` | let `datasets.upload_groups` deposit datasets through presigned S3 uploads (needs `s3.enabled`; see "Let depositors add datasets") |
-| `datasets.*` | who may deposit (`upload_groups`, default admins and curators), `max_gb`, `url_ttl_hours`, `max_open_per_user`, `max_pending_gb_per_user`, `update_policy`, `site_id` (default `site.name`) |
+| `services.dataset_deposit` | **next release (2.46)**: let `datasets.upload_groups` deposit datasets through presigned S3 uploads (needs `s3.enabled`; see "Let depositors add datasets") |
+| `datasets.*` | **next release (2.46)**: who may deposit (`upload_groups`, default admins and curators), `max_gb`, `url_ttl_hours`, `max_open_per_user`, `max_pending_gb_per_user`, `update_policy`, `site_id` (default `site.name`) |
 | `library.*` | upload groups, PDF size limit, git committer and push, S3 autopush, index publisher, `index_pull` (false: this site never downloads the shared literature index) |
 | `library.deploy_key` | SSH key `ant-stack publish-library` pushes the library with (host path) |
 | `s3.api_access` | what the api may do on S3: `none` (default), `read` (own read-only key pair) or `write` |
