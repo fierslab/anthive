@@ -94,6 +94,14 @@ PULL_DEFAULT_EXTS    = {'.h5ad', '.de.parquet', '.scores.parquet',
                         'gene_stats_index.parquet',
                         'gene_variance_index.parquet'}
 SKIP_SUFFIXES        = {'.wal', '.deleted', '.partial'}
+# Per-dataset sidecars that travel with their .duckdb in priority mode (a duckdb
+# without its layer parquets cannot serve expression; .de/.scores feed the DE and
+# module routes). Matched as '<duckdb stem>.<...><suffix>' in the same folder.
+BUNDLE_SUFFIXES      = ('.by_gene.parquet', '.by_cell.parquet', '.de.parquet', '.scores.parquet')
+# Same-size non-duckdb files whose S3 copy is newer are re-downloaded up to this
+# size (cheap, and a cache JSON/parquet can change without changing size);
+# bigger ones are only re-stamped, like duckdbs.
+CHEAP_REPULL_BYTES   = 16 * 1024 ** 2
 # S3 object metadata key holding the source file's mtime (integer seconds).
 # Set on every push so we can detect content-without-size-change drift
 # (e.g., ant-score adds module-score columns in-place).
@@ -538,9 +546,13 @@ def cmd_push(args, s3_cfg: dict, data_folder: Path) -> None:
     # divergence back to the primary, defeating the point of the mode.
     require_primary(tool='ant-sync push')
 
-    _rebuild_module_variability_if_stale(
-        data_folder, skip=args.no_rebuild_variability,
-    )
+    dry_run = bool(getattr(args, 'dry_run', False))
+    if dry_run:
+        print('Dry run: module_variability aggregate not rebuilt, nothing uploaded.')
+    else:
+        _rebuild_module_variability_if_stale(
+            data_folder, skip=args.no_rebuild_variability,
+        )
 
     client   = _s3_client(s3_cfg)
     bucket   = s3_cfg['bucket']
@@ -577,6 +589,10 @@ def cmd_push(args, s3_cfg: dict, data_folder: Path) -> None:
                 continue
 
         action = 'UPDATE' if s3_size is not None else 'UPLOAD'
+        if dry_run:
+            print(f'[would {action}] {rel}  ({_fmt_size(local_size)})')
+            uploaded += 1
+            continue
         print(f'[{action}] {rel}  ({_fmt_size(local_size)})')
 
         s3_key   = _s3_key(rel, prefix)
@@ -591,7 +607,10 @@ def cmd_push(args, s3_cfg: dict, data_folder: Path) -> None:
         )
         uploaded += 1
 
-    print(f'\nDone.  Uploaded: {uploaded},  skipped (up-to-date): {skipped}')
+    if dry_run:
+        print(f'\nDry run (nothing uploaded).  Would upload: {uploaded},  skipped (up-to-date): {skipped}')
+    else:
+        print(f'\nDone.  Uploaded: {uploaded},  skipped (up-to-date): {skipped}')
 
 
 # ── sync_policy helpers (priority-aware pull + evict) ───────────────────────
@@ -763,27 +782,102 @@ def _s3_index_with_mtime(
     return index
 
 
+def _bundle_owner(rel: str, stems_by_dir: Dict[str, Set[str]]) -> Optional[str]:
+    """The ``.duckdb`` rel a per-dataset sidecar belongs to, or None.
+
+    ``foo.layer.X.by_gene.parquet`` belongs to ``foo.duckdb`` in the same folder.
+    When several stems match (``foo`` and ``foo.v2``) the longest wins.
+    """
+    if not rel.endswith(BUNDLE_SUFFIXES):
+        return None
+    folder, _, name = rel.rpartition('/')
+    best = None
+    for stem in stems_by_dir.get(folder, ()):
+        if name.startswith(stem + '.') and (best is None or len(stem) > len(best)):
+            best = stem
+    if best is None:
+        return None
+    return f"{folder}/{best}.duckdb" if folder else f"{best}.duckdb"
+
+
+def _is_priority_global(rel: str) -> bool:
+    """Files a priority site always mirrors, whatever its dataset budget: the root
+    fleet indexes, the shared caches and facet results (SYNC_PATH_PREFIXES) and
+    per-group static/ files. Never an .h5ad or a .duckdb."""
+    if rel.endswith('.h5ad') or rel.endswith('.duckdb'):
+        return False
+    if rel.startswith(SYNC_PATH_PREFIXES):
+        return True
+    if '/' not in rel:
+        return True
+    return _is_static_path(rel)
+
+
+def _split_priority_index(s3_meta: Dict[str, Tuple[int, int]]
+                          ) -> Tuple[Dict[str, Tuple[int, int]], Dict[str, Dict[str, Tuple[int, int]]],
+                                     Dict[str, Tuple[int, int]]]:
+    """(duckdbs, sidecars per duckdb, global files) of a full S3 index. Everything
+    else (.h5ad, sidecars of datasets without a duckdb on S3) is left out."""
+    duckdbs = {rel: meta for rel, meta in s3_meta.items() if rel.endswith('.duckdb')}
+    stems_by_dir: Dict[str, Set[str]] = {}
+    for rel in duckdbs:
+        folder, _, name = rel.rpartition('/')
+        stems_by_dir.setdefault(folder, set()).add(name[:-len('.duckdb')])
+    bundles: Dict[str, Dict[str, Tuple[int, int]]] = {rel: {} for rel in duckdbs}
+    global_files: Dict[str, Tuple[int, int]] = {}
+    for rel, meta in s3_meta.items():
+        if rel in duckdbs or rel.endswith('.h5ad'):
+            continue
+        if _is_priority_global(rel):
+            global_files[rel] = meta
+            continue
+        owner = _bundle_owner(rel, stems_by_dir)
+        if owner is not None:
+            bundles[owner][rel] = meta
+    return duckdbs, bundles, global_files
+
+
+def _file_status(path: Path, size: int, mtime: int, *, cheap_repull: bool) -> str:
+    """HERE / TOUCH / PULL / PULL* of one file against its S3 (size, LastModified)."""
+    if not path.exists():
+        return 'PULL'
+    stat = path.stat()
+    if stat.st_size != size:
+        return 'PULL*'
+    if int(stat.st_mtime) == mtime:
+        return 'HERE'
+    if cheap_repull and size <= CHEAP_REPULL_BYTES and mtime > int(stat.st_mtime):
+        return 'PULL*'
+    return 'TOUCH'
+
+
 def _build_priority_plan(
     s3_meta: Dict[str, Tuple[int, int]],
     priorities: Dict[str, int],
     data_folder: Path,
     policy: dict,
     free_now: int,
+    bundles: Optional[Dict[str, Dict[str, Tuple[int, int]]]] = None,
 ) -> Tuple[list, int]:
     """Ordered fill plan for mode='priority'.
 
     Datasets are sorted priority desc, then S3 mtime desc (newest first), and
-    greedily kept while projected final free space stays >= min_free. The
-    budget is (free_now + bytes of duckdbs ALREADY local): keeping a file that
-    is already on disk consumes no new space, and evicting one frees it.
+    greedily kept while projected final free space stays >= min_free. A
+    dataset's size is its .duckdb plus its sidecars (``bundles``: layer
+    parquets, .de/.scores parquets). The budget is (free_now + bytes of those
+    files ALREADY local): keeping a file that is already on disk consumes no
+    new space, and evicting one frees it.
 
-    Returns (rows, baseline_free). Per-row status:
+    Returns (rows, baseline_free). Per-row status (of the .duckdb):
       HERE  - target, local, size+mtime match → nothing to do
+      TOUCH - target, local, same size, mtime differs → realign mtime only
       PULL  - target, absent locally → download
-      PULL* - target, local but size/mtime differ → overwrite (S3 canonical)
+      PULL* - target, local but size differs → overwrite (S3 canonical)
       EVICT - below cutoff, local → delete (slave: S3 is the source of truth)
       SKIP  - below cutoff, absent → stays on S3
+    Each row also lists ``sidecars`` as (rel, size, mtime, status, local_size).
     """
+    bundles = bundles or {}
     min_free  = policy['min_free_bytes']
     max_local = policy['max_local_bytes']
     default   = policy['priority_default']
@@ -793,11 +887,12 @@ def _build_priority_plan(
     for rel in s3_meta:
         if not rel.endswith('.duckdb'):
             continue
-        path = data_folder / rel
-        if path.exists():
-            stat = path.stat()
-            local_meta[rel] = (stat.st_size, int(stat.st_mtime))
-            local_bytes += stat.st_size
+        for member in [rel, *bundles.get(rel, {})]:
+            path = data_folder / member
+            if path.exists():
+                stat = path.stat()
+                local_meta[member] = (stat.st_size, int(stat.st_mtime))
+                local_bytes += stat.st_size
     baseline_free = free_now + local_bytes
 
     candidates = []
@@ -815,12 +910,15 @@ def _build_priority_plan(
     for priority, mtime, size, rel in candidates:
         is_local = rel in local_meta
         local_size, local_mtime = local_meta.get(rel, (None, None))
-        tentative = cumulative + size
+        sidecar_meta = bundles.get(rel, {})
+        bundle_size = size + sum(meta[0] for meta in sidecar_meta.values())
+        tentative = cumulative + bundle_size
         fits = True
         if min_free is not None and (baseline_free - tentative) < min_free:
             fits = False
         if max_local is not None and tentative > max_local:
             fits = False
+        sidecars = []
         if fits:
             cumulative = tentative
             in_target = True
@@ -833,13 +931,21 @@ def _build_priority_plan(
                 status = 'PULL*'   # size differs ⇒ content changed ⇒ re-pull
             else:
                 status = 'PULL'
+            for side_rel, (side_size, side_mtime) in sorted(sidecar_meta.items()):
+                side_status = _file_status(data_folder / side_rel, side_size, side_mtime, cheap_repull=True)
+                sidecars.append((side_rel, side_size, side_mtime, side_status,
+                                 local_meta.get(side_rel, (None, None))[0]))
         else:
             in_target = False
             status = 'EVICT' if is_local else 'SKIP'
+            for side_rel, (side_size, side_mtime) in sorted(sidecar_meta.items()):
+                local_side = local_meta.get(side_rel)
+                sidecars.append((side_rel, side_size, side_mtime, 'EVICT' if local_side else 'SKIP',
+                                 local_side[0] if local_side else None))
         rows.append(dict(
-            rel=rel, priority=priority, mtime=mtime, size=size,
+            rel=rel, priority=priority, mtime=mtime, size=size, bundle_size=bundle_size,
             is_local=is_local, local_size=local_size, local_mtime=local_mtime,
-            in_target=in_target, status=status,
+            in_target=in_target, status=status, sidecars=sidecars,
             cumulative=cumulative, projected_free=baseline_free - cumulative,
         ))
     return rows, baseline_free
@@ -851,11 +957,11 @@ def _print_priority_plan(rows: list, policy: dict, free_now: int,
     import datetime
     min_free = policy['min_free_bytes']
     print(f"free now: {_fmt_size(free_now)}    "
-          f"budget (free + local duckdbs): {_fmt_size(baseline_free)}    "
+          f"budget (free + local datasets): {_fmt_size(baseline_free)}    "
           f"min_free: {_fmt_size(min_free) if min_free is not None else 'none'}")
     print()
     header = (f"{'PRIO':>4}  {'UPDATED':>10}  {'SIZE':>9}  {'CUMUL':>9}  "
-              f"{'FREE→':>9}  {'STATUS':6}  DATASET")
+              f"{'FREE→':>9}  {'STATUS':6}  DATASET (+sidecars)")
     print(header)
     print('-' * len(header))
     cutoff_printed = False
@@ -866,11 +972,16 @@ def _print_priority_plan(rows: list, policy: dict, free_now: int,
             print(f"   ── cutoff: {label} — everything below stays on S3 "
                   f"(local copies evicted) ──")
             cutoff_printed = True
-        date = datetime.datetime.utcfromtimestamp(row['mtime']).strftime('%Y-%m-%d')
-        print(f"{row['priority']:>4}  {date:>10}  {_fmt_size(row['size']):>9}  "
+        date = datetime.datetime.fromtimestamp(row['mtime'], datetime.timezone.utc).strftime('%Y-%m-%d')
+        side_note = ''
+        sidecars = row.get('sidecars') or []
+        if sidecars:
+            busy = sum(1 for entry in sidecars if entry[3] in ('PULL', 'PULL*'))
+            side_note = f"  (+{len(sidecars)} sidecars" + (f", {busy} to pull" if busy else '') + ')'
+        print(f"{row['priority']:>4}  {date:>10}  {_fmt_size(row.get('bundle_size', row['size'])):>9}  "
               f"{_fmt_size(row['cumulative']):>9}  "
               f"{_fmt_size(row['projected_free']):>9}  "
-              f"{row['status']:6}  {row['rel']}")
+              f"{row['status']:6}  {row['rel']}{side_note}")
 
     def _count(statuses: set) -> int:
         return sum(1 for row in rows if row['status'] in statuses)
@@ -892,6 +1003,10 @@ def _print_priority_plan(rows: list, policy: dict, free_now: int,
 
 def _ant_serve_url(cfg: dict) -> str:
     """Base URL of this instance's ant-serve, from anthive.yaml."""
+    import os
+    explicit = os.environ.get('ANTHIVE_API_URL') or cfg.get('api_url')
+    if explicit:
+        return str(explicit).rstrip('/')
     host = cfg.get('rest_api_host') or 'localhost'
     if host in ('0.0.0.0', '::'):
         host = 'localhost'
@@ -931,28 +1046,59 @@ def _release_db(base_url: str, rel: str) -> None:
                           "?duration_seconds=3600&drain_timeout_seconds=15")
 
 
+def _global_plan(global_files: Dict[str, Tuple[int, int]], data_folder: Path) -> list:
+    """(rel, size, mtime, status) of every always-mirrored file of a priority site."""
+    return [(rel, size, mtime, _file_status(data_folder / rel, size, mtime, cheap_repull=True))
+            for rel, (size, mtime) in sorted(global_files.items())]
+
+
 def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
-                  do_evict: bool, do_pull: bool, dry_run: bool) -> None:
+                  do_evict: bool, do_pull: bool, dry_run: bool,
+                  git_refresh: Optional[bool] = None) -> None:
     """Unified mode='priority' driver — fill the disk with the highest-priority
-    duckdbs (newest first within a priority) until ~min_free_space remains.
+    datasets (newest first within a priority) until ~min_free_space remains.
+
+    A dataset is its .duckdb plus its sidecars (layer parquets, .de/.scores
+    parquets), pulled and evicted together. The root fleet indexes, the shared
+    caches, `_facet_tests/` and per-group static/ files are always mirrored.
+    Never an .h5ad (use `pull --only .h5ad` for that).
 
     Shared by `pull`(+--evict), `evict`, and `plan`. Slave semantics: S3 is the
     source of truth, so eviction never needs a size/mtime guard and the tool
-    never pushes.
+    never pushes. ``dry_run`` transfers, deletes and re-stamps nothing and
+    does not git pull the h5adstore (``git_refresh`` overrides that, for `plan`).
     """
-    _git_pull_h5adstore(data_folder)
+    if git_refresh is None:
+        git_refresh = not dry_run
+    if git_refresh:
+        _git_pull_h5adstore(data_folder)
+    else:
+        print("h5adstore git pull: skipped (dry run; priorities from the current checkout)")
+    if getattr(args, 'filter', None):
+        print(f"WARNING: filter {args.filter!r} is ignored under sync_policy.mode='priority' "
+              f"(use --only EXTS to bypass the policy for one run)")
     client = _s3_client(s3_cfg)
     bucket = s3_cfg['bucket']
     prefix = s3_cfg.get('prefix', '') or ''
     print('Scanning S3…')
-    s3_meta = _s3_index_with_mtime(client, bucket, prefix, allowed_exts={'.duckdb'})
+    s3_full = _s3_index_with_mtime(client, bucket, prefix)
+    s3_meta, bundles, global_files = _split_priority_index(s3_full)
     priorities = _read_priorities(data_folder, policy['priority_default'])
     free_now = _free_space(data_folder)
     rows, baseline_free = _build_priority_plan(
-        s3_meta, priorities, data_folder, policy, free_now)
+        s3_meta, priorities, data_folder, policy, free_now, bundles=bundles)
     _print_priority_plan(rows, policy, free_now, baseline_free)
+    globals_plan = _global_plan(global_files, data_folder) if do_pull else []
+    if do_pull:
+        busy = [entry for entry in globals_plan if entry[3] in ('PULL', 'PULL*')]
+        print(f"\n  ALWAYS {len(globals_plan)} shared file(s) (fleet indexes, caches, facet results, static): "
+              f"{len(busy)} to pull ({_fmt_size(sum(entry[1] for entry in busy))})")
 
     if dry_run:
+        if do_pull:
+            for entry in globals_plan:
+                if entry[3] in ('PULL', 'PULL*'):
+                    print(f"  would {'OVERWRITE' if entry[3] == 'PULL*' else 'DOWNLOAD'} {entry[0]}  ({_fmt_size(entry[1])})")
         print("\n(dry-run — nothing transferred or deleted)")
         return
 
@@ -967,55 +1113,89 @@ def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
         if row['status'] == 'TOUCH':
             os.utime(data_folder / row['rel'], (row['mtime'], row['mtime']))
             touched += 1
+        if row['in_target']:
+            for side_rel, _size, side_mtime, side_status, _local in row['sidecars']:
+                if side_status == 'TOUCH':
+                    os.utime(data_folder / side_rel, (side_mtime, side_mtime))
+                    touched += 1
+    for rel, _size, mtime, status in globals_plan:
+        if status == 'TOUCH':
+            os.utime(data_folder / rel, (mtime, mtime))
+            touched += 1
     if touched:
-        print(f"Realigned mtime on {touched} unchanged local duckdb(s) (no download).")
+        print(f"Realigned mtime on {touched} unchanged local file(s) (no download).")
 
     if do_evict:
-        print("\nEvicting below-cutoff local duckdbs (slave: S3 is canonical)…")
+        print("\nEvicting below-cutoff local datasets (slave: S3 is canonical)…")
         for row in rows:
-            if row['status'] != 'EVICT':
+            if row['in_target']:
                 continue
             path = data_folder / row['rel']
-            if path.exists():
+            if row['status'] == 'EVICT' and path.exists():
                 _release_db(api_url, row['rel'])   # close ant-serve's fd first
                 path.unlink()
                 evicted += 1
                 freed += row['local_size']
                 print(f"  EVICTED {row['rel']}  ({_fmt_size(row['local_size'])})")
+            for side_rel, _size, _mtime, side_status, local_size in row['sidecars']:
+                side_path = data_folder / side_rel
+                if side_status == 'EVICT' and side_path.exists():
+                    side_path.unlink()
+                    freed += local_size or 0
+                    print(f"  EVICTED {side_rel}")
         if not evicted:
             print("  (nothing below the cutoff)")
 
+    transfer = None
     if do_pull:
         transfer = _transfer_config(
             max_concurrency=args.max_concurrency,
             max_bandwidth=_parse_bandwidth(args.max_bandwidth) if args.max_bandwidth else None,
         )
-        print("\nPulling target duckdbs (highest priority first)…")
+
+    def _download(rel: str, size: int, mtime: int, verb: str) -> None:
+        path = data_folder / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"  {verb} {rel}  ({_fmt_size(size)})")
+        client.download_file(
+            bucket, _s3_key(rel, prefix), str(path),
+            Config=transfer, Callback=_ProgressCallback(rel, size),
+        )
+        # Stamp local mtime to the S3 upload time so size+mtime is stable
+        # next run (idempotent — no re-pull of an unchanged file).
+        os.utime(path, (mtime, mtime))
+
+    if do_pull:
+        print("\nPulling shared files (fleet indexes, caches, facet results, static)…")
+        for rel, size, mtime, status in globals_plan:
+            if status in ('PULL', 'PULL*'):
+                _download(rel, size, mtime, 'OVERWRITE' if status == 'PULL*' else 'DOWNLOAD')
+                pulled += 1
+        print("\nPulling target datasets (highest priority first)…")
         for row in rows:
-            if row['status'] not in ('PULL', 'PULL*'):
+            if not row['in_target']:
                 continue
-            path = data_folder / row['rel']
+            todo_sidecars = [entry for entry in row['sidecars'] if entry[3] in ('PULL', 'PULL*')]
+            if row['status'] not in ('PULL', 'PULL*') and not todo_sidecars:
+                continue
+            need = (row['size'] if row['status'] in ('PULL', 'PULL*') else 0) + sum(entry[1] for entry in todo_sidecars)
             # Without --evict we never delete, so honour the floor.
             if not do_evict and policy['min_free_bytes'] is not None:
-                if (_free_space(data_folder) - row['size']) < policy['min_free_bytes']:
+                if (_free_space(data_folder) - need) < policy['min_free_bytes']:
                     print(f"  SKIP {row['rel']}: would breach min_free "
                           f"— run sync-pull-evict to make room")
                     skipped_no_room += 1
                     continue
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if row['status'] == 'PULL*':
-                _release_db(api_url, row['rel'])   # close handle before overwrite
-                overwritten_ids.append(_db_id_from_rel(row['rel']))
-            verb = 'OVERWRITE' if row['status'] == 'PULL*' else 'DOWNLOAD'
-            print(f"  {verb} {row['rel']}  ({_fmt_size(row['size'])})")
-            client.download_file(
-                bucket, _s3_key(row['rel'], prefix), str(path),
-                Config=transfer, Callback=_ProgressCallback(row['rel'], row['size']),
-            )
-            # Stamp local mtime to the S3 upload time so size+mtime is stable
-            # next run (idempotent — no re-pull of an unchanged file).
-            os.utime(path, (row['mtime'], row['mtime']))
-            pulled += 1
+            if row['status'] in ('PULL', 'PULL*'):
+                if row['status'] == 'PULL*':
+                    _release_db(api_url, row['rel'])   # close handle before overwrite
+                    overwritten_ids.append(_db_id_from_rel(row['rel']))
+                _download(row['rel'], row['size'], row['mtime'],
+                          'OVERWRITE' if row['status'] == 'PULL*' else 'DOWNLOAD')
+                pulled += 1
+            for side_rel, side_size, side_mtime, side_status, _local in todo_sidecars:
+                _download(side_rel, side_size, side_mtime, 'OVERWRITE' if side_status == 'PULL*' else 'DOWNLOAD')
+                pulled += 1
 
     # Reopen overwritten dbs + refresh the catalog so ant-serve serves the
     # fresh files and forgets the evicted ones (best-effort; skipped silently
@@ -1029,8 +1209,8 @@ def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
               + ("ok" if status == 200
                  else f"skipped (ant-serve not reachable / status={status})"))
 
-    print(f"\nDone.  pulled={pulled}  realigned={touched}  "
-          f"evicted={evicted} ({_fmt_size(freed)})"
+    print(f"\nDone.  pulled={pulled} file(s)  realigned={touched}  "
+          f"evicted={evicted} dataset(s) ({_fmt_size(freed)})"
           + (f"  skipped(no room)={skipped_no_room}" if skipped_no_room else ""))
 
 
@@ -1047,13 +1227,19 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
     policy = _load_sync_policy(cfg)
     mode = policy['mode']
 
+    dry_run = bool(getattr(args, 'dry_run', False))
     # mode='priority': dedicated fill driver — keep the highest-priority
-    # duckdbs (newest first within a priority) until ~min_free_space remains.
-    # --only / --include-duckdb are explicit ad-hoc overrides that bypass it.
-    if mode == 'priority' and not args.only and not args.include_duckdb:
+    # datasets (duckdb + sidecars, newest first within a priority) until
+    # ~min_free_space remains, plus the shared files. --only is the explicit
+    # ad-hoc override that bypasses it. --include-duckdb does NOT: on a priority
+    # site it used to switch to the plain path, which pulled every raw .h5ad and
+    # overwrote duckdbs under a live api.
+    if mode == 'priority' and not args.only:
+        if args.include_duckdb:
+            print("(--include-duckdb has no effect under sync_policy.mode='priority': "
+                  "the priority fill already pulls duckdbs with their sidecars)")
         _run_priority(args, policy, s3_cfg, data_folder,
-                      do_evict=args.evict, do_pull=True,
-                      dry_run=getattr(args, 'dry_run', False))
+                      do_evict=args.evict, do_pull=True, dry_run=dry_run)
         return
 
     # Policy mode determines the candidate extension set BEFORE
@@ -1079,10 +1265,6 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
         print(f'(pulling only {sorted(allowed)} per --only)')
     elif args.include_duckdb:
         allowed = SYNC_EXTENSIONS
-    elif mode == 'priority':
-        # priority mode: duckdbs only (h5ads not pulled — the production
-        # disk case). Use _plan_target_local to narrow further by priority.
-        allowed = {'.duckdb'}
     elif mode == 'duckdb':
         allowed = {'.duckdb'}
     else:
@@ -1104,67 +1286,17 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
 
     print(f'Found {len(s3_index)} S3 file(s) to check.\n')
 
-    # Compute target_local + plan eviction set.
+    # Outside mode='priority' nothing is evicted: --evict only acts in the
+    # priority fill (and in `ant-sync evict`).
     target_set: Set[str] = set(s3_index.keys())
-    evict_set: Set[str] = set()
-    # Priority-mode fills are handled by _run_priority (returned above). This
-    # generic path is only reached for explicit --only / --include-duckdb
-    # overrides, which bypass priority gating and pull the requested exts plain.
-    if mode == 'priority' and not args.only and not args.include_duckdb:
-        priorities = _read_priorities(data_folder, policy['priority_default'])
-        free_now = _free_space(data_folder)
-        target_set, warnings = _plan_target_local(
-            s3_index, priorities, policy, free_now,
-        )
-        target_bytes = sum(s3_index[rel] for rel in target_set)
-        _print_policy_summary(policy, len(target_set), target_bytes)
-        for warning in warnings[:5]:
-            print(f"  WARN: {warning}")
-        if len(warnings) > 5:
-            print(f"  WARN: + {len(warnings) - 5} more (rerun with --verbose for full list)")
-
-        # Files currently local that are NOT in target_local — eviction
-        # candidates. Only when --evict is passed do we actually delete.
-        local_inventory = _local_files(data_folder, None, allowed_exts={'.duckdb'})
-        for _path, rel in local_inventory:
-            if rel not in target_set:
-                evict_set.add(rel)
-        if evict_set:
-            print(f"  {len(evict_set)} local .duckdb(s) below the policy cutoff "
-                  f"(use --evict to remove)")
-
+    if args.evict:
+        print("(--evict only acts under sync_policy.mode='priority'; nothing is evicted here)")
     downloaded = skipped = skipped_no_fit = 0
     pull_list = sorted(target_set)
 
-    # --evict: do evictions FIRST so the freed space is available for
-    # subsequent pulls. Safety: only delete when same-name key exists on
-    # S3. On a PRIMARY we also require size-match (local divergence
-    # might be uncommitted work). On a SLAVE size mismatch is exactly
-    # what we expect — local has drifted from S3 and S3 is the source
-    # of truth — so the size check is dropped.
     slave_mode = is_slave(cfg)
-    if args.evict and evict_set:
-        print()
-        print(f"Evicting {len(evict_set)} .duckdb(s) below policy cutoff…")
-        for rel in sorted(evict_set):
-            local_path = data_folder / rel
-            if not local_path.exists():
-                continue
-            local_size = local_path.stat().st_size
-            s3_size = s3_index.get(rel)
-            if s3_size is None:
-                print(f"  SKIP evict {rel}: NOT on S3 — refusing to delete")
-                continue
-            if s3_size != local_size and not slave_mode:
-                print(f"  SKIP evict {rel}: not safely on S3 "
-                      f"(s3_size={s3_size}, local={local_size}; "
-                      f"set sync_policy.role=slave to override)")
-                continue
-            local_path.unlink()
-            note = " (slave: size mismatch ignored)" if (slave_mode and s3_size != local_size) else ""
-            print(f"  EVICTED {rel}  ({_fmt_size(local_size)}){note}")
-
-    slave_mode = is_slave(cfg)
+    api_url = _ant_serve_url(cfg)
+    overwritten_ids: list = []
 
     for rel in pull_list:
         s3_size = s3_index[rel]
@@ -1190,10 +1322,8 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
                 continue
 
         # min_free_space safety: don't pull a file that would push the
-        # filesystem below the configured floor. Without --evict, we
-        # simply skip with a warning. With --evict, room was made
-        # earlier in the evict phase.
-        if policy['min_free_bytes'] is not None and not args.evict:
+        # filesystem below the configured floor.
+        if policy['min_free_bytes'] is not None:
             free_now = _free_space(data_folder)
             if (free_now - s3_size) < policy['min_free_bytes']:
                 print(f"  SKIP {rel}: would push below min_free_space "
@@ -1203,9 +1333,16 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
                 continue
 
         action = 'UPDATE' if local_path.exists() else 'DOWNLOAD'
+        if dry_run:
+            print(f'[would {action}] {rel}  ({_fmt_size(s3_size)})')
+            downloaded += 1
+            continue
         print(f'[{action}] {rel}  ({_fmt_size(s3_size)})')
 
         local_path.parent.mkdir(parents=True, exist_ok=True)
+        if rel.endswith('.duckdb') and local_path.exists():
+            _release_db(api_url, rel)            # never overwrite a duckdb under an open handle
+            overwritten_ids.append(_db_id_from_rel(rel))
         callback = _ProgressCallback(rel, s3_size)
         client.download_file(
             bucket,
@@ -1216,12 +1353,20 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
         )
         downloaded += 1
 
+    if overwritten_ids or (downloaded and not dry_run and any(r.endswith('.duckdb') for r in pull_list)):
+        import urllib.parse
+        for db_id in overwritten_ids:
+            _admin_post(api_url, f"/admin/restore/{urllib.parse.quote(db_id, safe='/')}")
+        status = _admin_post(api_url, "/admin/rescan", timeout=600)
+        print("ant-serve catalog refresh: "
+              + ("ok" if status == 200 else f"skipped (ant-serve not reachable / status={status})"))
+
     print()
-    print(f"Done.  downloaded={downloaded}  skipped (up-to-date)={skipped}", end='')
+    if dry_run:
+        print("(dry-run — nothing transferred or deleted)")
+    print(f"{'Dry run' if dry_run else 'Done'}.  {'would download' if dry_run else 'downloaded'}={downloaded}  skipped (up-to-date)={skipped}", end='')
     if skipped_no_fit:
         print(f"  skipped (no room)={skipped_no_fit}", end='')
-    if args.evict:
-        print(f"  evicted={len(evict_set)}", end='')
     print()
 
 
@@ -1363,7 +1508,8 @@ def _sync_library(args, s3_cfg: dict, push: Optional[bool] = None) -> int:
         print('  index: not pulled (library_index_pull is false: this site builds its own index)')
     elif not publisher:
         try:
-            index_dir.mkdir(parents=True, exist_ok=True)
+            if not dry_run:
+                index_dir.mkdir(parents=True, exist_ok=True)
             pulled = ls.pull_index_if_newer(client, bucket, prefix, index_dir, dry_run=dry_run,
                                             say=lambda msg: print('  ' + msg))
         except OSError as exc:
@@ -1447,6 +1593,9 @@ def main() -> None:
         if with_dry_run:
             sub.add_argument('--dry-run', action='store_true', help='print the plan, change nothing')
 
+    push_sub.add_argument('--dry-run', action='store_true',
+                          help='print what would be uploaded (and the library plan), change nothing')
+
     for sub in (push_sub,):
         sub.add_argument('--no-library', action='store_true',
                          help='skip the library PDFs and the literature index')
@@ -1463,7 +1612,9 @@ def main() -> None:
         '--include-duckdb', action='store_true',
         help=('Also pull .duckdb files. By default only .h5ad and '
               '.de.parquet are pulled — .duckdb should be rebuilt '
-              'locally via `make build-stale`.'),
+              'locally via `make build-stale`. No effect under '
+              "sync_policy.mode='priority', which pulls duckdbs with their "
+              'sidecars and never .h5ad.'),
     )
     pull_sub.add_argument(
         '--only', default=None, metavar='EXTS',
@@ -1491,9 +1642,10 @@ def main() -> None:
     )
     pull_sub.add_argument(
         '--dry-run', action='store_true',
-        help=("mode='priority': print the full ordered fill plan (every "
-              "dataset, size, cumulative, projected free, action) and exit "
-              "without transferring or deleting anything."),
+        help=("Print what would be pulled or evicted and change nothing, on "
+              "every path (mode='priority': the full ordered fill plan; "
+              "library: the PDF plan). No download, delete, mtime change "
+              "or h5adstore git pull."),
     )
 
     pull_sub.add_argument('--no-library', action='store_true',
