@@ -6,6 +6,8 @@ The S3 watch route (`ant ingest-watch`, section 21, 2026-10-14) publishes `mus s
 upload API; it shares the build pipeline the P3/P4 worker should reuse. The deposit API (section 22,
 2026-10-15, REST 2.46.0) replaces sections 3 to 7 for depositors: they sign in to Anthive, get presigned
 uploads into the watch route's incoming prefix and follow their deposit, and the watcher stays the backend.
+The artefact store (section 23, design only, 2026-10-16) extends the deposit API to DE tables, figures and
+other generated files and to collections without datasets; its design is `doc/DESIGN_artefacts.md`.
 It includes Mark's decisions sent mid-task:
 - The role is called `curators`.
 - A submission whose server-side checks pass is published automatically, with a "new, unreviewed" badge. Admins can retire it or send it back afterwards.
@@ -1207,3 +1209,26 @@ failed with the duckdb and `.de.parquet` byte-identical; an admin replacement we
 study archived (`de_storage.write_sidecar(only_study=...)`, 12,962 rows) and "replaced" in the changelog; a
 deposit of a good and a broken table failed with the served duckdb, `.de.parquet` and `.md` byte-identical
 although the good table had been imported into the work copy.
+
+---
+
+## 23. Artefact store (2026-10-16, design only)
+
+Mark decided on 2026-10-16 that custom DE tables and every other generated file (figures, tables, notebooks,
+reports, models) go through the deposit route of section 22, are kept as versioned, immutable artefacts in the
+static area of their dataset or collection on S3, and are served by a redirect to a short-lived signed GET.
+Analysts may also create collections without datasets. The design is in its own document,
+`doc/DESIGN_artefacts.md`, because most of it is outside ingestion (serving from S3, collections without
+datasets, web UI, MCP, ant-sync, its own security checklist) and this document is already long.
+
+What it takes from this document:
+
+- the deposit API unchanged, with two new values of `deposit_kind` (`artefact`, `collection`): the staging
+  prefix, presigned uploads bound to size and metadata, `complete` with `CopySourceIfMatch` and the MD5
+  check, key locks in `BEGIN IMMEDIATE`, the per-user limits and the rate limiter (22.2, 22.3, 22.9);
+- the watcher as the only writer, with a new item type keyed by deposit id, the same states, settle rule,
+  resume markers and approve / reject / retry (21.3, 21.5, 22.4); unlinked artefact objects are always
+  refused;
+- `delete_consumed` for incoming cleanup and for purges, one key at a time and HEAD-compared (21.6);
+- the DE-only import of 22.10 as the import step of artefacts of kind `de_table`; the DE-only deposit becomes
+  an artefact deposit, and `<group>/de_sources/` is migrated into artefacts.
