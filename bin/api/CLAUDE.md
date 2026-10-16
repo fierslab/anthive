@@ -208,7 +208,11 @@ and `lib/config.py` (anthive.yaml loader).
   cross-dataset facet routes call `_facet_warm_gate()` and answer 503
   `{status: "warming_up", retry_after}` with `Retry-After` instead of building
   the same tables on a request thread. Add the gate to any new cross-dataset
-  facet route. A 503 carrying `X-Anthive-Unavailable` (`EXPECTED_UNAVAILABLE_HEADER`:
+  facet route, after its parameter checks (an unknown facet stays a 404); the donor
+  routes gate inside `_donor_units_payload`. The gate opens after
+  `FACET_WARMUP_GATE_MAX_SECONDS` (900). ant-mcp's `api_request` turns the 503 into a
+  plain "warming up" message. ant-serve, ant-browse and ant-mcp call
+  `config.set_unknown_keys_lenient()` before loading the config. A 503 carrying `X-Anthive-Unavailable` (`EXPECTED_UNAVAILABLE_HEADER`:
   warming up, no geneset store) is logged at info once per reason, not as ERROR.
   `facets_visible` (config) only adds `hidden_by_config` to the facet
   listings; nothing is dropped from the API.

@@ -376,7 +376,8 @@ of `site.yaml`, usually with `role: slave`, `max_local_gb` or
 `min_free_space`, for a disk smaller than the catalogue) pulls with plain
 `bin/ops/ant-stack ingest -- ant sync pull` (add `--evict` to drop
 datasets below the cutoff). It keeps the highest-priority datasets, each
-as its `.duckdb` with its layer, DE and score parquets, plus the shared
+as its `.duckdb` with its layer, DE and score parquets (on a primary, local
+sidecars and shared files that differ from S3 are kept, never overwritten), plus the shared
 files every site needs (`gene_stats_index.parquet`,
 `module_variability.parquet` and the other root indexes, `_facet_tests/`,
 the `_*_cache/` folders, `static/`), and never a raw `.h5ad`. There
@@ -864,7 +865,9 @@ the new config (`stack/staging/`) and `up` applies it together with the
 new images. Before 2.46.1 `pull` and `check` wrote the new release's
 config into the running stack at once, and an old api that restarted
 before `up` stopped with "Unknown configuration parameters"; since 2.46.1
-the api also only warns about keys it does not know. Users, passwords, MCP links and caches live in `state_dir` and carry
+the api, web and mcp containers also only warn about keys they do not know
+(except in `auth`, `s3`, `sync_policy` and the access settings, which are
+always checked strictly). Users, passwords, MCP links and caches live in `state_dir` and carry
 over. To go back, check out the old tag, put the old image tag back and run
 the same two commands.
 
@@ -1162,10 +1165,11 @@ resolve inside the containers.
 `ant-stack render` (run by `up`) writes everything derived from `site.yaml`
 to `<state_dir>/stack/`. Do not edit those files; they are rewritten on
 every `up`. Since 2.46.1 every render goes to `<state_dir>/stack/staging/`
-first; only `init`, `render`, `up` and `passwd` put it in place. `pull`,
-`check`, `ingest`, `logs`, `ps`, `restart` and `publish-library` only stage
-it, so containers of the old release never read a config written for the
-new one.
+first; `init` and `render` put it in place, `up` does so only when `check`
+finds nothing blocking (otherwise the running stack keeps its config), and
+`passwd` applies only the login file. `pull`, `check`, `ingest`, `logs`,
+`ps`, `restart` and `publish-library` only stage it, so containers of the
+old release never read a config written for the new one.
 
 Who sees which secret:
 
