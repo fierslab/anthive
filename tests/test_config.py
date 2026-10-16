@@ -71,10 +71,8 @@ class TestValidateConfig:
     @pytest.mark.parametrize("bad, words", [
         ({"internal_require_auth": False}, "did you mean 'internal_requires_auth'"),
         ({"sync_polcy": {"role": "slave"}}, "did you mean 'sync_policy'"),
-        ({"sync_policy": {"rol": "slave"}}, "unknown key(s) in sync_policy: rol"),
         ({"sync_policy": {"role": "slaves"}}, "sync_policy.role must be primary or slave"),
-        ({"auth": {"mod": "basic"}}, "unknown key(s) in auth: mod"),
-        ({"s3": {"bukcet": "b"}}, "unknown key(s) in s3: bukcet"),
+        ({"auth": ["basic"]}, "auth must be a mapping"),
         ({"internal_requires_auth": "no"}, "internal_requires_auth must be true or false"),
         ({"datasets_upload_groups": "curators"}, "datasets_upload_groups must be a list"),
     ])
@@ -158,3 +156,29 @@ class TestLoadConfig:
         config = config_module.load_config()
         assert config["s3"]["bucket"] == "test-bucket"
         assert config["s3"]["region"] == "us-east-1"  # kept from defaults
+
+
+class TestCriticalSubKeys:
+    """Re-review 3: unknown sub-keys of auth/s3/sync_policy are errors in host tools, warnings in servers."""
+
+    @pytest.fixture
+    def defaults(self):
+        return load_default_config()
+
+    @pytest.mark.parametrize("bad, words", [
+        ({"sync_policy": {"rol": "slave"}}, "unknown key(s) in sync_policy: rol"),
+        ({"auth": {"mod": "basic"}}, "unknown key(s) in auth: mod"),
+        ({"s3": {"bukcet": "b"}}, "unknown key(s) in s3: bukcet"),
+    ])
+    def test_host_tools_refuse_servers_warn(self, defaults, monkeypatch, capsys, bad, words):
+        import config
+        monkeypatch.delenv("ANTHIVE_CONFIG_STRICT", raising=False)
+        monkeypatch.delenv("ANTHIVE_CONFIG_LENIENT", raising=False)
+        monkeypatch.setitem(config._UNKNOWN_KEYS_LENIENT, 'on', False)
+        with pytest.raises(ConfigError) as excinfo:
+            validate_config(bad, defaults)
+        assert words in str(excinfo.value)
+        monkeypatch.setitem(config._UNKNOWN_KEYS_LENIENT, 'on', True)
+        monkeypatch.setattr(config, '_WARNED_UNKNOWN', set())
+        validate_config(bad, defaults)
+        assert words in capsys.readouterr().err

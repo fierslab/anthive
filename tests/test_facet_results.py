@@ -1619,6 +1619,8 @@ def test_facet_routes_answer_warming_up_while_the_warmup_builds_their_kind(serve
         # review C4: an unknown facet is still a 404, not a 503
         assert serve.get('/facets/no_such_facet/effects?gene=TREM2').status_code in (400, 404)
         assert serve.get('/genes/TREM2/facet-effects?facet=no_such_facet').status_code in (400, 404)
+        assert serve.get('/facets/sex/donor-values?gene=TREM2&cell_type=microglia&scope=nonsense').status_code in (400, 404)
+        assert serve.get('/facets/sex/donor-values?cell_type=microglia').status_code == 400       # neither gene nor module
         for path in ('/genes/TREM2/facet-effects', '/facets/sex/effects?gene=TREM2', '/facets/sex/effects/top',
                      '/facets/sex/effects/overview', '/facets/sex/tests', '/genes/TREM2/detection',
                      '/facets/cohorts', '/facets/sex/donor-values?gene=TREM2&cell_type=microglia',

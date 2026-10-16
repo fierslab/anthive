@@ -946,6 +946,10 @@ def _atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
             tmp.unlink()
 
 
+# Files Caddy reads from stack/caddy/ (bind-mounted read-only): readable by every uid, because the
+# container's root may be a remapped uid. The 0700 stack/ folder keeps them private on the host.
+CADDY_FILE_MODE = 0o644
+
 _STACK_LOCK_DEPTH = {'depth': 0, 'handle': None}
 
 
@@ -1005,8 +1009,13 @@ def promote(site: dict, only: list[str] | None = None) -> list[str]:
             staged, live = staging / rel, _live_path(site, rel)
             if not staged.exists():
                 continue
-            secret = rel in CONFIG_ROLES.values() or rel == 'caddy/auth.caddy'
-            _atomic_write(live, staged.read_bytes(), 0o600 if secret else 0o644)
+            _atomic_write(live, staged.read_bytes(), 0o600 if rel in CONFIG_ROLES.values() else CADDY_FILE_MODE)
+        if only is None:
+            for role, name in CONFIG_ROLES.items():
+                if role not in _config_roles(site) and (stack_dir(site) / name).exists():
+                    # a watcher config with the full S3 keys must not outlive deposits
+                    (stack_dir(site) / name).unlink()
+                    changed.append(name)
         if site['auth']['mode'] == 'authelia' and only is None:
             seed_authelia_users(site)
         return changed
@@ -1039,16 +1048,18 @@ def _render_locked(site: dict, quiet: bool, apply: bool) -> Path:
     os.chmod(staging, 0o700)
     for role, name in CONFIG_ROLES.items():
         if role not in _config_roles(site):
-            for stale in (staging / name, stack / name):
-                if stale.exists():
-                    stale.unlink()        # a watcher config with full keys must not outlive deposits
+            if (staging / name).exists():
+                (staging / name).unlink()   # the live copy goes when the render is applied (promote)
             continue
         header = ("# Rendered by bin/ops/ant-stack from site.yaml. Do not edit: edit\n"
                   "# site.yaml (or its `anthive:` block) and run `ant-stack render`.\n"
                   f"# Role: {role} ({CONFIG_USERS[role]}).\n")
         _atomic_write(staging / name, (header + yaml.safe_dump(render_anthive_yaml(site, role),
                                                                  sort_keys=False)).encode(), 0o600)
-    _atomic_write(staging / 'caddy' / 'auth.caddy', render_caddy_auth(site).encode(), 0o600)
+    # 0644, not 0600: Caddy runs as root in its container, which is a subordinate uid under docker
+    # userns-remap and could not read a 0600 file of the site user. On the host, stack/ is 0700, so
+    # nobody else reaches the file (it holds bcrypt hashes in basic mode, nothing in the others).
+    _atomic_write(staging / 'caddy' / 'auth.caddy', render_caddy_auth(site).encode(), CADDY_FILE_MODE)
     _atomic_write(staging / 'caddy' / 'tls.caddy', render_caddy_tls(site).encode())
     _atomic_write(staging / 'caddy' / 'servers.caddy', render_caddy_servers(site).encode())
     _atomic_write(staging / 'caddy' / 'tools.caddy', render_caddy_tools(site).encode())
@@ -1504,6 +1515,23 @@ def _check_uv() -> None:
              f"(templates in config/examples/ set it)")
 
 
+def _check_caddy_readable(site: dict) -> None:
+    """Warn when Caddy may not read a file of its mounted snippet folder: in its container it runs as
+    root, which under docker userns-remap is a subordinate uid that only gets the 'other' permissions."""
+    folder = stack_dir(site) / 'caddy'
+    if not folder.is_dir():
+        return
+    problems = []
+    if (folder.stat().st_mode & 0o005) != 0o005:
+        problems.append(f"{folder} (folder needs o+rx)")
+    for path in sorted(p for p in folder.iterdir() if p.is_file()):
+        if not path.stat().st_mode & 0o004:
+            problems.append(str(path))
+    if problems:
+        _warn("Caddy may not be able to read " + ', '.join(problems) + " (under docker userns-remap its root is "
+              "another uid); run `ant-stack render` to reset the modes")
+
+
 def _check_publish_library(site: dict) -> None:
     key = site.get('_deploy_key')
     library = site.get('library') or {}
@@ -1578,6 +1606,7 @@ def check(site: dict, running: bool = False) -> list[str]:
                          "not served (the api has no S3 access, s3.api_access: none)")
                       + "; pull them with `ant-stack ingest -- ant sync pull --include-duckdb` (on a site with "
                         "sync_policy.mode: priority: `ant-stack ingest -- ant sync pull`)")
+    _check_caddy_readable(site)
     problems += _check_extra_mounts(site)
     _check_symlinks(site)
     problems += _check_library(site)
@@ -1782,14 +1811,16 @@ def cmd_up(args: argparse.Namespace) -> int:
     ensure_secrets(site)
     # Stage and validate first; the live config is replaced only when nothing blocks
     # (before, a blocking problem left the running stack with the new config anyway).
-    render(site, quiet=True, apply=False)
-    blocking = [p for p in check(site, running=True) if 'ingest' not in p]
-    if blocking:
-        for problem in blocking:
-            print(f"  PROBLEM  {problem}")
-        _say("nothing applied: the running stack keeps its config (the new one is staged in stack/staging/)")
-        return 1
-    promote(site)
+    # One lock over stage, check and promote: another ant-stack cannot slip a render in between.
+    with _stack_lock(site):
+        render(site, quiet=True, apply=False)
+        blocking = [p for p in check(site, running=True) if 'ingest' not in p]
+        if blocking:
+            for problem in blocking:
+                print(f"  PROBLEM  {problem}")
+            _say("nothing applied: the running stack keeps its config (the new one is staged in stack/staging/)")
+            return 1
+        promote(site)
     _say(f"rendered {stack_dir(site)}")
     extra = ['--wait', '--wait-timeout', str(args.wait_timeout)] if not args.no_wait else []
     # 1. Re-sync the image's static bundles + Caddy config into the shared

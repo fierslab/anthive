@@ -109,8 +109,17 @@ def load_user_config() -> Dict[str, Any]:
 _WARNED_UNKNOWN: set = set()
 _UNKNOWN_KEYS_LENIENT = {'on': False}
 
-# Keys whose mistakes change who sees what or what a sync deletes: validated strictly in every process,
-# lenient or not (an unknown sub-key, a wrong type, or an unknown top-level key that looks like one of them).
+# Validation rule (2.46.1):
+#   * host tools (ant-sync, ant-stack, ant-ingest, ant-ingest-watch, ...): every unknown key is an error,
+#     at the top level and inside the critical blocks below.
+#   * servers (ant-serve, ant-browse, ant-mcp; ``set_unknown_keys_lenient()``): unknown keys, also unknown
+#     sub-keys of the critical blocks, are warnings, so a container of release N never crash-loops on a
+#     config rendered for N+1 (which may add keys).
+#   * everywhere, lenient or not: a wrong type or value of a known security/sync key (sync_policy.role,
+#     internal_requires_auth, datasets_upload_groups, a critical block that is not a mapping) and an
+#     unknown top-level key that looks like a critical one (``internal_require_auth``) are errors: there a
+#     silent fallback would change who sees what or what a sync deletes.
+# Keys whose mistakes change who sees what or what a sync deletes:
 CRITICAL_KEYS = ('sync_policy', 'auth', 'internal_requires_auth', 'datasets_upload_groups', 's3')
 _CRITICAL_BLOCKS = ('sync_policy', 'auth', 's3')
 
@@ -122,7 +131,10 @@ def set_unknown_keys_lenient(lenient: bool = True) -> None:
     _UNKNOWN_KEYS_LENIENT['on'] = bool(lenient)
 
 
-def _critical_problems(config: Dict[str, Any], defaults: Dict[str, Any], unknown: set) -> List[str]:
+def _critical_problems(config: Dict[str, Any], defaults: Dict[str, Any], unknown: set,
+                       sub_key_warnings: Optional[List[str]] = None) -> List[str]:
+    """Errors in the critical keys. Unknown sub-keys of the critical blocks go to ``sub_key_warnings``
+    when that list is given (servers), else they are errors too (host tools)."""
     import difflib  # noqa: PLC0415
     problems = []
     for key in sorted(unknown):
@@ -137,7 +149,8 @@ def _critical_problems(config: Dict[str, Any], defaults: Dict[str, Any], unknown
             continue
         extra = set(config[block]) - set(defaults.get(block) or {})
         if extra:
-            problems.append(f"unknown key(s) in {block}: {', '.join(sorted(extra))}")
+            message = f"unknown key(s) in {block}: {', '.join(sorted(extra))}"
+            (sub_key_warnings if sub_key_warnings is not None else problems).append(message)
     role = (config.get('sync_policy') or {}).get('role') if isinstance(config.get('sync_policy'), dict) else None
     if role is not None and str(role).strip().lower() not in ('primary', 'slave'):
         problems.append(f"sync_policy.role must be primary or slave, not {role!r}")
@@ -175,7 +188,14 @@ def validate_config(config: Dict[str, Any], defaults: Dict[str, Any], strict: Op
             strict = not (_UNKNOWN_KEYS_LENIENT['on']
                           or os.environ.get('ANTHIVE_CONFIG_LENIENT', '').strip() in ('1', 'true', 'yes'))
     unknown_params = set(config.keys()) - set(defaults.keys())
-    critical = _critical_problems(config, defaults, unknown_params)
+    sub_key_warnings: List[str] = []
+    critical = _critical_problems(config, defaults, unknown_params, None if strict else sub_key_warnings)
+    for message in sub_key_warnings:
+        if message not in _WARNED_UNKNOWN:
+            _WARNED_UNKNOWN.add(message)
+            text = f"WARNING: [Config] ignoring {message} (a config written for another release?)"
+            print(text, file=sys.stderr)
+            logging.getLogger('anthive.config').warning(text)
     if critical:
         raise ConfigError(
             f"ERROR: [Config] Invalid security- or sync-relevant configuration\n"

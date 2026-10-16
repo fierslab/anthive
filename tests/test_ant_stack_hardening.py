@@ -978,7 +978,8 @@ def test_passwd_promotes_only_the_auth_files(tmp_path, ant_stack):
     assert ant_stack.cmd_passwd(argparse.Namespace(site=str(path), user='boss', password='a-long-password')) == 0
     assert (stack / '.env').read_bytes() == before_env                        # the upgrade stays staged
     assert (stack / 'caddy' / 'auth.caddy').read_bytes() != before_auth      # the new hash is live
-    assert oct((stack / 'caddy' / 'auth.caddy').stat().st_mode & 0o777) == '0o600'
+    assert oct((stack / 'caddy' / 'auth.caddy').stat().st_mode & 0o777) == '0o644'    # Caddy may be a remapped uid
+    assert oct(stack.stat().st_mode & 0o777) == '0o700'                              # private on the host
 
 
 def test_render_writes_atomically_under_a_lock(tmp_path, ant_stack, monkeypatch):
@@ -1017,7 +1018,36 @@ def test_watcher_config_only_with_deposits(tmp_path, ant_stack):
     assert (stack / 'anthive-watcher.yaml').exists()
     path = _write_site(tmp_path, services={'dataset_deposit': False}, s3=S3_ON)
     site = ant_stack.load_site(path)
+    ant_stack.render(site, quiet=True, apply=False)               # staging only: the running watcher keeps it
+    assert (stack / 'anthive-watcher.yaml').exists() and not (stack / 'staging' / 'anthive-watcher.yaml').exists()
     ant_stack.render(site, quiet=True)
     assert not (stack / 'anthive-watcher.yaml').exists() and not (stack / 'staging' / 'anthive-watcher.yaml').exists()
     with pytest.raises(ant_stack.SiteError, match='dataset_deposit'):
         ant_stack.cmd_config_path(argparse.Namespace(site=str(path), role='watcher'))
+
+
+
+# ── re-review of 2.46.1 ──────────────────────────────────────────────────────
+
+def test_check_warns_when_caddy_cannot_read_its_snippets(tmp_path, ant_stack, capsys):
+    site = _site(ant_stack, tmp_path)
+    ant_stack.ensure_secrets(site)
+    stack = ant_stack.render(site, quiet=True)
+    for path in (stack / 'caddy').iterdir():
+        assert path.stat().st_mode & 0o004, path                   # every snippet readable by any uid
+    ant_stack._check_caddy_readable(site)
+    assert 'Caddy may not be able to read' not in capsys.readouterr().err
+    os.chmod(stack / 'caddy' / 'auth.caddy', 0o600)
+    ant_stack._check_caddy_readable(site)
+    assert 'auth.caddy' in capsys.readouterr().err
+
+
+def test_up_holds_the_stack_lock_from_stage_to_promote(tmp_path, ant_stack, monkeypatch):
+    path = _write_site(tmp_path)
+    ant_stack.ensure_secrets(ant_stack.load_site(path))
+    depth_during_check: list = []
+    monkeypatch.setattr(ant_stack, 'run_compose', lambda site, *args, check=True: 0)
+    monkeypatch.setattr(ant_stack, 'check',
+                        lambda site, running=False: depth_during_check.append(ant_stack._STACK_LOCK_DEPTH['depth']) or [])
+    assert ant_stack.cmd_up(argparse.Namespace(site=str(path), no_wait=True, wait_timeout=10)) == 0
+    assert depth_during_check == [1]

@@ -870,21 +870,31 @@ def _build_priority_plan(
     policy: dict,
     free_now: int,
     bundles: Optional[Dict[str, Dict[str, Tuple[int, int]]]] = None,
+    primary: bool = False,
 ) -> Tuple[list, int]:
     """Ordered fill plan for mode='priority'.
 
     Datasets are sorted priority desc, then S3 mtime desc (newest first), and
     greedily kept while projected final free space stays >= min_free. A
     dataset's size is its .duckdb plus its sidecars (``bundles``: layer
-    parquets, .de/.scores parquets). The budget is (free_now + bytes of those
-    files ALREADY local): keeping a file that is already on disk consumes no
-    new space, and evicting one frees it.
+    parquets, .de/.scores parquets). The budget is (free_now + bytes of the
+    files the plan may delete or replace that are ALREADY local): keeping a
+    file that is already on disk consumes no new space, and evicting one frees it.
+
+    ``primary`` (sync_policy.role is not slave): local sidecars may be work not
+    pushed yet, so they are never replaced, re-stamped or evicted (status
+    KEEP). They are therefore not in the budget (they never free space) and a
+    kept dataset needs new space only for the sidecars it lacks. A dataset
+    whose local sidecars differ from S3 keeps its local duckdb too (status
+    KEEP): a new duckdb next to layer parquets of another version would be
+    inconsistent.
 
     Returns (rows, baseline_free). Per-row status (of the .duckdb):
       HERE  - target, local, size+mtime match → nothing to do
       TOUCH - target, local, same size, mtime differs → realign mtime only
       PULL  - target, absent locally → download
       PULL* - target, local but size differs → overwrite (S3 canonical)
+      KEEP  - primary: target, but its local sidecars differ from S3 → left as it is
       EVICT - below cutoff, local → delete (slave: S3 is the source of truth)
       SKIP  - below cutoff, absent → stays on S3
     Each row also lists ``sidecars`` as (rel, size, mtime, status, local_size).
@@ -904,7 +914,8 @@ def _build_priority_plan(
             if path.exists():
                 stat = path.stat()
                 local_meta[member] = (stat.st_size, int(stat.st_mtime))
-                local_bytes += stat.st_size
+                if member == rel or not primary:
+                    local_bytes += stat.st_size     # a primary never frees its sidecars
     baseline_free = free_now + local_bytes
 
     candidates = []
@@ -923,7 +934,12 @@ def _build_priority_plan(
         is_local = rel in local_meta
         local_size, local_mtime = local_meta.get(rel, (None, None))
         sidecar_meta = bundles.get(rel, {})
-        bundle_size = size + sum(meta[0] for meta in sidecar_meta.values())
+        if primary:
+            # local sidecars stay whatever happens: only the missing ones need room
+            sidecar_need = sum(meta[0] for side, meta in sidecar_meta.items() if side not in local_meta)
+        else:
+            sidecar_need = sum(meta[0] for meta in sidecar_meta.values())
+        bundle_size = size + sidecar_need
         tentative = cumulative + bundle_size
         fits = True
         if min_free is not None and (baseline_free - tentative) < min_free:
@@ -945,14 +961,27 @@ def _build_priority_plan(
                 status = 'PULL'
             for side_rel, (side_size, side_mtime) in sorted(sidecar_meta.items()):
                 side_status = _file_status(data_folder / side_rel, side_size, side_mtime, cheap_repull=True)
+                if primary and side_status in ('PULL*', 'TOUCH'):
+                    side_status = 'KEEP'
                 sidecars.append((side_rel, side_size, side_mtime, side_status,
                                  local_meta.get(side_rel, (None, None))[0]))
+            if primary and status in ('PULL', 'PULL*', 'TOUCH') and any(entry[3] == 'KEEP' for entry in sidecars):
+                # Keep the local version of the whole dataset: no new duckdb and no new
+                # sidecar next to layer parquets of another version. It occupies what is
+                # local now (its local duckdb is in the budget, local sidecars are not).
+                cumulative -= bundle_size - (local_size or 0)
+                bundle_size = local_size or 0
+                status = 'KEEP'
+                sidecars = [(entry[0], entry[1], entry[2],
+                             'SKIP' if entry[4] is None else ('HERE' if entry[3] == 'HERE' else 'KEEP'), entry[4])
+                            for entry in sidecars]
         else:
             in_target = False
             status = 'EVICT' if is_local else 'SKIP'
             for side_rel, (side_size, side_mtime) in sorted(sidecar_meta.items()):
                 local_side = local_meta.get(side_rel)
-                sidecars.append((side_rel, side_size, side_mtime, 'EVICT' if local_side else 'SKIP',
+                side_status = ('KEEP' if primary else 'EVICT') if local_side else 'SKIP'
+                sidecars.append((side_rel, side_size, side_mtime, side_status,
                                  local_side[0] if local_side else None))
         rows.append(dict(
             rel=rel, priority=priority, mtime=mtime, size=size, bundle_size=bundle_size,
@@ -1007,6 +1036,8 @@ def _print_priority_plan(rows: list, policy: dict, free_now: int,
           f"({_fmt_size(_sum_bytes({'PULL*'}, 'size'))})")
     print(f"  HERE  {_count({'HERE'})} already current  "
           f"+  TOUCH {_count({'TOUCH'})} realign mtime only (no download)")
+    if _count({'KEEP'}):
+        print(f"  KEEP  {_count({'KEEP'})} kept in their local version (primary: local sidecars differ from S3)")
     print(f"  EVICT {_count({'EVICT'})} ({_fmt_size(_sum_bytes({'EVICT'}, 'local_size'))})")
     print(f"  SKIP  {_count({'SKIP'})} stay on S3")
     if rows:
@@ -1068,30 +1099,16 @@ def _release_db(base_url: str, rel: str) -> None:
                           "?duration_seconds=3600&drain_timeout_seconds=15")
 
 
-def _global_plan(global_files: Dict[str, Tuple[int, int]], data_folder: Path) -> list:
-    """(rel, size, mtime, status) of every always-mirrored file of a priority site."""
-    return [(rel, size, mtime, _file_status(data_folder / rel, size, mtime, cheap_repull=True))
-            for rel, (size, mtime) in sorted(global_files.items())]
-
-
-def _guard_primary(rows: list, globals_plan: list) -> int:
-    """Drop every overwrite, mtime re-stamp and eviction of a sidecar or shared file (primary sites).
-
-    Rows are changed in place; returns how many files were kept."""
-    kept = 0
-    for row in rows:
-        guarded = []
-        for side_rel, side_size, side_mtime, side_status, local_size in row['sidecars']:
-            if side_status in ('PULL*', 'TOUCH', 'EVICT'):
-                side_status = 'KEEP'
-                kept += 1
-            guarded.append((side_rel, side_size, side_mtime, side_status, local_size))
-        row['sidecars'] = guarded
-    for index, (rel, size, mtime, status) in enumerate(globals_plan):
-        if status in ('PULL*', 'TOUCH'):
-            globals_plan[index] = (rel, size, mtime, 'KEEP')
-            kept += 1
-    return kept
+def _global_plan(global_files: Dict[str, Tuple[int, int]], data_folder: Path, primary: bool = False) -> list:
+    """(rel, size, mtime, status) of every always-mirrored file of a priority site. On a primary a local
+    copy that differs from S3 is KEEP (never overwritten or re-stamped: it may be unpushed work)."""
+    plan = []
+    for rel, (size, mtime) in sorted(global_files.items()):
+        status = _file_status(data_folder / rel, size, mtime, cheap_repull=True)
+        if primary and status in ('PULL*', 'TOUCH'):
+            status = 'KEEP'
+        plan.append((rel, size, mtime, status))
+    return plan
 
 
 def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
@@ -1127,18 +1144,23 @@ def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
     s3_meta, bundles, global_files = _split_priority_index(s3_full)
     priorities = _read_priorities(data_folder, policy['priority_default'])
     free_now = _free_space(data_folder)
+    # A primary is where scores, DE tables, the fleet indexes and the caches are made: a local copy
+    # that differs from S3 may be work not pushed yet. The plan never overwrites, re-stamps or evicts
+    # those there (KEEP) and budgets accordingly; it only fetches what is missing.
+    primary = not is_slave(get_config())
     rows, baseline_free = _build_priority_plan(
-        s3_meta, priorities, data_folder, policy, free_now, bundles=bundles)
+        s3_meta, priorities, data_folder, policy, free_now, bundles=bundles, primary=primary)
+    globals_plan = _global_plan(global_files, data_folder, primary=primary) if do_pull else []
     _print_priority_plan(rows, policy, free_now, baseline_free)
-    globals_plan = _global_plan(global_files, data_folder) if do_pull else []
-    if not is_slave(get_config()):
-        # A primary is where scores, DE tables, the fleet indexes and the caches are made: a local copy
-        # that differs from S3 may be work not pushed yet. Never overwrite, re-stamp or evict those
-        # here; only fetch what is missing. Duckdbs keep the old behaviour.
-        kept = _guard_primary(rows, globals_plan)
-        if kept:
-            print(f"\n  primary site: {kept} local sidecar/shared file(s) that differ from S3 are kept as they are "
-                  f"(not overwritten, re-stamped or evicted; push them, or set sync_policy.role: slave)")
+    kept = sum(1 for row in rows for entry in row['sidecars'] if entry[3] == 'KEEP') \
+        + sum(1 for entry in globals_plan if entry[3] == 'KEEP')
+    kept_datasets = [row['rel'] for row in rows if row['status'] == 'KEEP']
+    if kept:
+        print(f"\n  primary site: {kept} local sidecar/shared file(s) are kept as they are (not overwritten, "
+              f"re-stamped or evicted; push them, or set sync_policy.role: slave)")
+    for rel in kept_datasets:
+        print(f"  KEEP {rel}: its local sidecars differ from S3, so the local version of the whole dataset stays "
+              f"(no new duckdb next to layer parquets of another version)")
     if do_pull:
         busy = [entry for entry in globals_plan if entry[3] in ('PULL', 'PULL*')]
         print(f"\n  ALWAYS {len(globals_plan)} shared file(s) (fleet indexes, caches, facet results, static): "
@@ -1246,6 +1268,10 @@ def _priority_pulls(rows, globals_plan, do_pull, do_evict, policy, data_folder, 
         print("\nPulling shared files (fleet indexes, caches, facet results, static)…")
         for rel, size, mtime, status in globals_plan:
             if status in ('PULL', 'PULL*'):
+                if policy['min_free_bytes'] is not None and (_free_space(data_folder) - size) < policy['min_free_bytes']:
+                    print(f"  SKIP {rel}: would breach min_free_space")
+                    skipped_no_room += 1
+                    continue
                 _download(rel, size, mtime, 'OVERWRITE' if status == 'PULL*' else 'DOWNLOAD')
                 progress['pulled'] += 1
         print("\nPulling target datasets (highest priority first)…")
@@ -1256,11 +1282,13 @@ def _priority_pulls(rows, globals_plan, do_pull, do_evict, policy, data_folder, 
             if row['status'] not in ('PULL', 'PULL*') and not todo_sidecars:
                 continue
             need = (row['size'] if row['status'] in ('PULL', 'PULL*') else 0) + sum(entry[1] for entry in todo_sidecars)
-            # Without --evict we never delete, so honour the floor.
-            if not do_evict and policy['min_free_bytes'] is not None:
+            # The floor is checked against the real free space before every dataset, with or without
+            # --evict (evictions already ran; a plan that counted on space that was not freed must not
+            # fill the disk past min_free_space).
+            if policy['min_free_bytes'] is not None:
                 if (_free_space(data_folder) - need) < policy['min_free_bytes']:
-                    print(f"  SKIP {row['rel']}: would breach min_free "
-                          f"— run sync-pull-evict to make room")
+                    print(f"  SKIP {row['rel']}: would breach min_free_space "
+                          f"(free {_fmt_size(_free_space(data_folder))}, needs {_fmt_size(need)})")
                     skipped_no_room += 1
                     continue
             if row['status'] in ('PULL', 'PULL*'):

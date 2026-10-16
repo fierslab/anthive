@@ -271,8 +271,12 @@ def test_primary_priority_never_evicts_or_overwrites_sidecars_and_shared_files(a
     assert (store / 'module_variability.parquet').read_bytes() == b'LOCAL REBUILT, NOT PUSHED'
     assert int((store / 'gene_stats_index.parquet').stat().st_mtime) == MTIME - 50
     pulled = {call[1] for call in client.writes if call[0] == 'download_file'}
-    assert 'G1/a.de.parquet' in pulled and '_facet_tests/G1/a.facet_tests.parquet' in pulled   # missing: fetched
+    assert '_facet_tests/G1/a.facet_tests.parquet' in pulled and 'G1/b.duckdb' in pulled      # missing: fetched
     assert 'G1/a.scores.parquet' not in pulled and 'module_variability.parquet' not in pulled
+    # dataset a has a kept local sidecar: its local version stays whole (no new duckdb, no new
+    # sidecar next to layers of another version)
+    assert 'G1/a.duckdb' not in pulled and 'G1/a.de.parquet' not in pulled
+    assert (store / 'G1' / 'a.duckdb').read_bytes() == b'old'
     # evict on a primary: the duckdb goes as before, its sidecars stay
     client.writes.clear()
     _patch(ant_sync, monkeypatch, client, store, max_local_gb=80 / 1024 ** 3)
@@ -280,7 +284,39 @@ def test_primary_priority_never_evicts_or_overwrites_sidecars_and_shared_files(a
     ant_sync.cmd_pull(_args(dry_run=False, evict=True), {'bucket': 'bk'}, store)
     assert not (store / 'G1' / 'a.duckdb').exists()
     assert (store / 'G1' / 'a.scores.parquet').read_bytes() == b'LOCAL NEWER SCORES, NOT PUSHED'
-    assert (store / 'G1' / 'a.de.parquet').exists()
+
+
+def test_primary_budget_never_counts_kept_sidecars_as_freed(ant_sync, tmp_path):
+    """Re-review 2: a primary never evicts sidecars, so their bytes are not in the budget."""
+    store = tmp_path / 'store'
+    (store / 'G').mkdir(parents=True)
+    (store / 'G' / 'a.duckdb').write_bytes(b'd' * 10)
+    (store / 'G' / 'a.layer.X.by_gene.parquet').write_bytes(b'L' * 1000)     # big local sidecar
+    s3_meta = {'G/a.duckdb': (10, MTIME), 'G/b.duckdb': (500, MTIME)}
+    bundles = {'G/a.duckdb': {'G/a.layer.X.by_gene.parquet': (1000, MTIME)}, 'G/b.duckdb': {}}
+    policy = {'mode': 'priority', 'max_local_bytes': None, 'min_free_bytes': 100, 'priority_default': 50}
+    priorities = {'G/b.duckdb': 90, 'G/a.duckdb': 10}
+    slave_rows, slave_base = ant_sync._build_priority_plan(s3_meta, priorities, store, policy, 200, bundles)
+    primary_rows, primary_base = ant_sync._build_priority_plan(s3_meta, priorities, store, policy, 200, bundles,
+                                                               primary=True)
+    assert slave_base == 200 + 10 + 1000 and primary_base == 200 + 10
+    # on the slave evicting a's 1 KB layer makes room for b; on the primary it does not
+    assert [r['status'] for r in slave_rows] == ['PULL', 'EVICT']
+    assert slave_rows[1]['sidecars'][0][3] == 'EVICT'
+    assert primary_rows[0]['status'] == 'SKIP' and primary_rows[0]['projected_free'] >= 100
+    assert primary_rows[1]['sidecars'][0][3] == 'KEEP'
+
+
+def test_min_free_is_checked_before_every_pull_even_with_evict(ant_sync, monkeypatch, tmp_path):
+    store = _store(tmp_path)
+    client = RecordingS3(S3_OBJECTS)
+    _patch(ant_sync, monkeypatch, client, store)
+    config = ant_sync.get_config()
+    config['sync_policy']['min_free_space'] = 1                       # GB
+    monkeypatch.setattr(ant_sync, '_free_space', lambda path: 10 ** 12 if not client.writes else 10)
+    ant_sync.cmd_pull(_args(dry_run=False, evict=True), {'bucket': 'bk'}, store)
+    # the plan saw plenty of room; once the disk is "full" every later file is skipped
+    assert len([c for c in client.writes if c[0] == 'download_file']) == 1
 
 
 @pytest.mark.parametrize('mode', ['duckdb', 'priority'])

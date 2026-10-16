@@ -14349,9 +14349,15 @@ def get_geneset_facet_effects(
     ``celltypes`` scope. Exploratory; scopes are never mixed.
     """
     forest = _forest_mode(forest)
-    _facet_warm_gate()   # after the parameter checks (unknown facet: 404); 503 warming_up while the start-up warm-up builds these caches
+    wanted = [_tested_facet(item.strip()) for item in facet.split(',') if item.strip()] if facet \
+        else list(facet_results_lib.FACET_ORDER)
+    scope = _scope_param(scope)
     geneset_id = f"{study}/{experiment}/{name}"
     info = _module_info(geneset_id)
+    # After the parameter checks (400/404 for a bad facet, scope or forest). Whether a set missing from
+    # the registry was scored somewhere needs the module tables the warm-up builds, so such a set gets
+    # the 503 too until then, not a 404.
+    _facet_warm_gate()
     catalog = f"{study}/{experiment}"
     reader = _facet_results()
     modules = _module_results()
@@ -14359,9 +14365,6 @@ def get_geneset_facet_effects(
     scored = modules.scored_in(catalog, name, datasets)
     if info is None and not scored:
         raise HTTPException(status_code=404, detail=f"Geneset {geneset_id} not found")
-    wanted = [_tested_facet(item.strip()) for item in facet.split(',') if item.strip()] if facet \
-        else list(facet_results_lib.FACET_ORDER)
-    scope = _scope_param(scope)
     members = info['genes'] if info else []
 
     def card(facet_name: str, facet_scope: str) -> Dict[str, Any]:
@@ -14777,8 +14780,8 @@ def _donor_units_payload(facet_name: str, gene: Optional[str], module: Optional[
     if bool(gene) == bool(module):
         raise HTTPException(status_code=400, detail='give exactly one of gene or module')
     test_facet = _tested_facet(facet_name)
-    _facet_warm_gate()   # donor-values and donor-plot: 503 warming_up rather than build the gene cards now
     scope = _scope_param(scope)
+    _facet_warm_gate()   # after the 400/404 checks; donor-values and donor-plot: 503 rather than build the cards now
     reader = _facet_results()
     prepared = reader.prepare(_facet_test_datasets())
     values = _donor_values()

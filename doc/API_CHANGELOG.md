@@ -56,12 +56,13 @@ REST:
   `CONVENTIONS.md`).
 - Configuration: in ant-serve, ant-browse and ant-mcp an unknown top-level key in `anthive.yaml` is a
   warning (printed once), not a start failure, so a server of release N never crash-loops on a config
-  rendered for N+1. Host tools (ant-sync, ant-stack, ant-ingest, ant-ingest-watch, ...) stay strict, and
-  `ANTHIVE_CONFIG_STRICT=1` makes every process strict (`ant-stack` validates its renders that way). The
-  security- and sync-relevant keys (`sync_policy`, `auth`, `s3`, `internal_requires_auth`,
-  `datasets_upload_groups`) are checked strictly in every process: an unknown sub-key, a wrong type, a
-  `sync_policy.role` other than primary/slave, or an unknown top-level key that looks like one of them
-  (`internal_require_auth`) stops the start.
+  rendered for N+1; unknown sub-keys of `sync_policy`, `auth` and `s3` are warnings there too. Host tools
+  (ant-sync, ant-stack, ant-ingest, ant-ingest-watch, ...) stay strict on both, and `ANTHIVE_CONFIG_STRICT=1`
+  makes every process strict (`ant-stack` validates its renders that way). In every process a wrong type or
+  value of a security- or sync-relevant key (`sync_policy.role` other than primary/slave,
+  `internal_requires_auth` not a boolean, `datasets_upload_groups` not a list, `auth`/`s3`/`sync_policy` not
+  a mapping) or an unknown top-level key that looks like one of them (`internal_require_auth`) stops the
+  start.
 - Tools reading the internal secret (`config.internal_auth_headers`) warn once when the secret file is
   missing or unreadable instead of silently sending no secret.
 
@@ -79,7 +80,10 @@ REST:
   `gene_variance_index.parquet`), `_facet_tests/`, the `_*_cache/` folders and `static/` are always mirrored;
   `.h5ad` never. A sidecar is bundled only when its exact stem has a duckdb. On a primary (`sync_policy.role`
   not slave) sidecars and shared files that differ from S3 are never overwritten, re-stamped or evicted (they
-  may be work not pushed yet); missing ones are fetched. The S3 catalog manifest (`_catalog/manifest.json`) is still not pulled: nothing on a
+  may be work not pushed yet); missing ones are fetched. Their bytes are not counted as space a plan can free,
+  a dataset with such a kept sidecar stays in its local version as a whole (status KEEP: no new duckdb next to
+  layer parquets of another version), and the min_free_space floor is checked against the real free space
+  before every download, with or without `--evict`. The S3 catalog manifest (`_catalog/manifest.json`) is still not pulled: nothing on a
   site reads it (mus reads it from S3).
 - A pull that overwrites a `.duckdb` releases it in ant-serve first and restores it and asks for a rescan
   after, also when a download fails half-way. The ant-serve URL is `config.get_api_url` (`ANTHIVE_API_URL` /
@@ -92,7 +96,9 @@ REST:
   `<state_dir>/stack/staging/` only; `init` and `render` apply the render, `up` applies it after `check`
   found nothing blocking (else nothing changes), `passwd` applies only `caddy/auth.caddy`. A restarting old
   container no longer reads the config of the new release before `up`. Renders hold a lock on
-  `stack/.lock` and replace files by rename. `pull` ends with "next: ant-stack up". `ports.http`/`https`/`tools`
+  `stack/.lock` (held by `up` from staging to promoting) and replace files by rename. The Caddy snippets
+  (`stack/caddy/*`, `auth.caddy` included) are 0644 inside the 0700 `stack/`, so Caddy can read them also
+  as a remapped root (docker userns-remap); `check` warns when one is not readable. `pull` ends with "next: ant-stack up". `ports.http`/`https`/`tools`
   must be port numbers (null or 0 is an error again).
 - `check` counts datasets with the catalog scan's rule (intern saw CLAUDE.md, CONVENTIONS.md, HANDOFF.md,
   VALIDATION.md, migration_audit.md and `static/*.h5ad.md` reported as datasets without a `.duckdb`) and
@@ -106,7 +112,8 @@ REST:
   `services.dataset_deposit` is on, Caddy listens on `127.0.0.1:<ports.tools>` for host-side tools, drops
   identity headers, refuses requests without `X-Anthive-Internal` and forwards to the api. `check` prints the
   complete command; `config/examples/anthive-ingest-watch-stack.service.example`. The watcher config is
-  rendered only while deposits are on. Caddy's loggers (the default logger with every site's errors, and the
+  rendered only while deposits are on (a stage-only render leaves the live copy; applying the render
+  removes it). Caddy's loggers (the default logger with every site's errors, and the
   access log) drop `X-Anthive-Internal`, `Remote-*` and `X-Forwarded-User` and redact `Cookie` and
   `Authorization` (security review: a 502 on the tools listener logged the internal secret). Before, the printed command
   used the ingest role's container paths (`/scratch/tmp`, `/var/lib/anthive`) and `http://api:8080`, so
