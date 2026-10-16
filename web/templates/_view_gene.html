@@ -424,7 +424,7 @@
   V.cached(V.API + '/genes/' + enc(GENE) + '/facet-effects?include_units=false').then(function (effects) {
     state.effects = effects;
     renderP2();
-  }).catch(function () { p2Host.innerHTML = '<div class="vw-error">The facet effects could not be loaded.</div>'; document.getElementById('vwg-other-body').innerHTML = ''; });
+  }).catch(function (error) { p2Host.innerHTML = V.loadError(error, 'The facet effects could not be loaded.'); document.getElementById('vwg-other-body').innerHTML = ''; });
 
   /* ---------- author DE tab ---------- */
   var deBody = document.getElementById('vwa-body');

@@ -46,9 +46,20 @@ class TestValidateConfig:
     def test_empty_config_valid(self, defaults):
         validate_config({}, defaults)
 
-    def test_unknown_param_raises(self, defaults):
+    def test_unknown_param_raises_when_strict(self, defaults, monkeypatch):
+        with pytest.raises(ConfigError, match="Unknown"):
+            validate_config({"bogus_key": 42}, defaults, strict=True)
+        monkeypatch.setenv("ANTHIVE_CONFIG_STRICT", "1")
         with pytest.raises(ConfigError, match="Unknown"):
             validate_config({"bogus_key": 42}, defaults)
+
+    def test_unknown_param_is_a_warning_by_default(self, defaults, monkeypatch, capsys):
+        """A config rendered for a newer release must not crash-loop an older image (2.46.1)."""
+        monkeypatch.delenv("ANTHIVE_CONFIG_STRICT", raising=False)
+        validate_config({"key_of_a_later_release": 1}, defaults)
+        validate_config({"key_of_a_later_release": 1}, defaults)
+        err = capsys.readouterr().err
+        assert err.count("ignoring unknown configuration parameters: key_of_a_later_release") == 1
 
     def test_valid_override(self, defaults):
         validate_config({"max_obscat_values": 200}, defaults)

@@ -94,7 +94,7 @@
       return Promise.all([Promise.all(calls), testsCall]).then(function (results) {
         render(key, label, groups, focus.celltype_group, results[0], results[1], first);
       });
-    }).catch(function () { answer.innerHTML = '<div class="vw-error">The facet overview could not be loaded.</div>'; });
+    }).catch(function (error) { answer.innerHTML = V.loadError(error, 'The facet overview could not be loaded.'); });
   }
 
   function render(key, label, groups, focusGroup, tops, tests, first) {

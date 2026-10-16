@@ -289,6 +289,12 @@
     }
     function getJson(url) {
         return fetch(url, { credentials: 'same-origin' }).then(function (r) {
+            if (r.status === 503) {
+                // {status: "warming_up"}: the API is still building its facet caches after a restart
+                return r.json().catch(function () { return {}; }).then(function (body) {
+                    throw new Error(body && body.status === 'warming_up' ? 'warming up after a restart, try again in a minute' : 'HTTP 503');
+                });
+            }
             if (!r.ok) throw new Error(r.status === 404 ? 'not available' : 'HTTP ' + r.status);
             return r.json();
         });
@@ -559,6 +565,12 @@ window.antFx = window.antFx || (function () {
                           clinical_dx: 'clinical diagnosis, not combined', author_dx: 'author diagnosis, not combined' };
     function getJson(url) {
         return fetch(url, { credentials: 'same-origin' }).then(function (r) {
+            if (r.status === 503) {
+                // {status: "warming_up"}: the API is still building its facet caches after a restart
+                return r.json().catch(function () { return {}; }).then(function (body) {
+                    throw new Error(body && body.status === 'warming_up' ? 'warming up after a restart, try again in a minute' : 'HTTP 503');
+                });
+            }
             if (!r.ok) throw new Error(r.status === 404 ? 'not available' : 'HTTP ' + r.status);
             return r.json();
         });

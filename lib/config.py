@@ -4,6 +4,7 @@ Configuration management for anthive
 Loads configuration from anthive.yaml or uses defaults from anthive.default.yaml
 """
 
+import logging
 import os
 import re
 import secrets
@@ -105,26 +106,46 @@ def load_user_config() -> Dict[str, Any]:
         )
 
 
-def validate_config(config: Dict[str, Any], defaults: Dict[str, Any]) -> None:
+_WARNED_UNKNOWN: set = set()
+
+
+def validate_config(config: Dict[str, Any], defaults: Dict[str, Any], strict: Optional[bool] = None) -> None:
     """
     Validate configuration values
+
+    Unknown top-level keys are a warning (printed once per process), not an
+    error: a config rendered by a newer ``ant-stack`` must not make an older
+    image crash-loop on start (2.46.1). ``strict=True`` (or the environment
+    variable ``ANTHIVE_CONFIG_STRICT=1``, which ``ant-stack`` sets when it
+    validates a fresh render) turns them back into an error.
 
     Args:
         config: User configuration to validate
         defaults: Default configuration for reference
+        strict: Raise on unknown keys (default: ``ANTHIVE_CONFIG_STRICT``)
 
     Raises:
         ConfigError: If configuration is invalid
     """
+    if strict is None:
+        strict = os.environ.get('ANTHIVE_CONFIG_STRICT', '').strip() in ('1', 'true', 'yes')
     # Check for unknown parameters
     unknown_params = set(config.keys()) - set(defaults.keys())
-    if unknown_params:
+    if unknown_params and strict:
         raise ConfigError(
             f"ERROR: [Config] Unknown configuration parameters\n"
-            f"Details: {', '.join(unknown_params)}\n"
+            f"Details: {', '.join(sorted(unknown_params))}\n"
             f"Location: anthive.yaml\n"
             f"Action: Remove unknown parameters or check anthive.default.yaml for valid options"
         )
+    if unknown_params:
+        key = tuple(sorted(unknown_params))
+        if key not in _WARNED_UNKNOWN:
+            _WARNED_UNKNOWN.add(key)
+            message = (f"WARNING: [Config] ignoring unknown configuration parameters: {', '.join(key)} "
+                       f"(a config written for another release? check anthive.default.yaml)")
+            print(message, file=sys.stderr)
+            logging.getLogger('anthive.config').warning(message)
 
     # Validate specific parameters
     if 'max_obscat_values' in config:
@@ -949,12 +970,36 @@ def internal_auth_headers() -> Dict[str, str]:
     if not value:
         try:
             cfg = load_config()
-        except ConfigError:
+        except ConfigError as exc:
+            _warn_once('internal-secret-config', f"WARNING: [Config] no internal secret: the config does not load ({exc})")
             return {}
         value = cfg.get('internal_secret')
         if not value:
+            secret_path = get_state_dir(cfg, create=False) / 'secrets' / 'internal_secret'
             try:
-                value = (get_state_dir(cfg) / 'secrets' / 'internal_secret').read_text().strip()
-            except OSError:
+                value = secret_path.read_text().strip()
+            except FileNotFoundError:
+                # Normal for a loopback tool on a dev box before ant-serve made one;
+                # fatal for a tool in another container or on a stack host (state_dir
+                # pointing at a container path): say so instead of failing later.
+                _warn_once('internal-secret-missing',
+                           f"WARNING: [Config] no internal secret at {secret_path} (state_dir); calls to ant-serve "
+                           f"from outside its host/container will be refused")
+                value = None
+            except OSError as exc:
+                _warn_once('internal-secret-unreadable',
+                           f"WARNING: [Config] cannot read the internal secret {secret_path}: {exc}")
                 value = None
     return {'X-Anthive-Internal': value} if value else {}
+
+
+_WARNED_ONCE: set = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Print ``message`` to stderr (and the log) once per process."""
+    if key in _WARNED_ONCE:
+        return
+    _WARNED_ONCE.add(key)
+    print(message, file=sys.stderr)
+    logging.getLogger('anthive.config').warning(message)

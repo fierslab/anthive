@@ -118,6 +118,9 @@ ports:
   bind: 0.0.0.0     # host address the published port(s) listen on
   https: 8443       # host port for tls internal (acme always uses 443 + 80)
   http: 8500        # host port for tls off
+  tools: 8079       # 127.0.0.1 port of Caddy's listener for host-side tools (the deposit
+                    # watcher); published only with services.dataset_deposit, requires the
+                    # internal secret, carries no login
 
 run_as:
   # UID/GID the anthive containers run as. Must be able to read the data
@@ -168,12 +171,14 @@ library:
 # Anthive login and never hold S3 keys. The api presigns with the key pair in
 # <state_dir>/secrets/s3_incoming_access_key_id + s3_incoming_secret_access_key
 # (limit it to the incoming prefix if the object store can), else with the
-# read-write pair (`check` warns). Run ant-ingest-watch on the host with
-# ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest so the api sees its progress.
+# read-write pair (`check` warns). Run the watcher on the host with
+# `bin/ops/ant-stack watch` (systemd: config/examples/anthive-ingest-watch-stack.service.example);
+# `check` prints the full command.
 datasets:
   upload_groups: [admins, curators]  # who may deposit (Authelia groups; basic mode: auth.admins)
   max_gb: 200               # largest deposit, all files together
   url_ttl_hours: 24         # lifetime of a presigned URL (and of an idle open deposit)
+  max_open_days: 7          # an open deposit not completed within this many days expires
   max_open_per_user: 5      # deposits uploading at the same time, per user
   max_pending_gb_per_user: 400   # GB a user may have waiting for publication
   update_policy: own        # who may deposit a new version: own (the original depositor, admins) | any

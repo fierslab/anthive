@@ -519,8 +519,9 @@
     }
     headline(model, ranked);
     V.renderPanel2(p2, model, ctx);
-  }).catch(function () {
-    p2.innerHTML = '<div class="vw-placeholder">The facet effects of this set are not available from this API version.</div>';
+  }).catch(function (error) {
+    p2.innerHTML = error && error.warmingUp ? V.loadError(error, '')
+      : '<div class="vw-placeholder">The facet effects of this set are not available from this API version.</div>';
     document.getElementById('vws-other-body').innerHTML = '';
     renderGenes(genesHost, null);
   });

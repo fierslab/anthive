@@ -1220,64 +1220,38 @@ class DatabaseRegistry:
                     s3_keys = set()
             return str(duckdb_rel) in s3_keys
 
-        # Walk the directory tree, following symlinks
-        def scan_recursive(path: Path, base: Path):
-            """Recursively scan for .md files (excluding index.md), following symlinks"""
-            try:
-                for item in path.iterdir():
-                    resolved_item = item.resolve()
+        # The dataset .md files (lib/h5adstore.catalog_dataset_mds: follows
+        # symlinks, skips _-prefixed folders, store-root documents, static/
+        # documents, index.md / README.md and inactive datasets). ant-stack
+        # check counts datasets with the same helper.
+        from h5adstore import catalog_dataset_mds  # noqa: PLC0415
+        for _item, resolved_item, rel_path in catalog_dataset_mds(self.data_folder):
+            local_duckdb = resolved_item.with_suffix('.duckdb')
+            if local_duckdb.exists():
+                db_url = str(local_duckdb)
+            elif s3_enabled:
+                duckdb_rel = rel_path.with_suffix('.duckdb')
+                if not s3_has(duckdb_rel):
+                    continue  # not on S3 either
+                db_url = self._build_s3_url(duckdb_rel)
+            else:
+                continue  # no .duckdb available locally or on S3
 
-                    if (resolved_item.is_file()
-                            and resolved_item.suffix == '.md'
-                            and resolved_item.name != 'index.md'):
-                        try:
-                            rel_path = item.relative_to(base)
+            db_id, group_id, file_id = self._resolve_db_id(resolved_item, rel_path)
 
-                            # Skip datasets marked inactive via sidecar file
-                            if resolved_item.with_suffix('.inactive').exists():
-                                continue
+            if db_id in databases:
+                existing = db_extra[db_id]['rel_path']
+                print(f"  WARNING: ID collision '{db_id}': "
+                      f"{existing} vs {rel_path} — using path fallback")
+                db_id = str(rel_path.with_suffix(''))
 
-                            local_duckdb = resolved_item.with_suffix('.duckdb')
-                            if local_duckdb.exists():
-                                db_url = str(local_duckdb)
-                            elif s3_enabled:
-                                duckdb_rel = rel_path.with_suffix('.duckdb')
-                                if not s3_has(duckdb_rel):
-                                    continue  # not on S3 either
-                                db_url = self._build_s3_url(duckdb_rel)
-                            else:
-                                continue  # no .duckdb available locally or on S3
-
-                            db_id, group_id, file_id = self._resolve_db_id(resolved_item, rel_path)
-
-                            if db_id in databases:
-                                existing = db_extra[db_id]['rel_path']
-                                print(f"  WARNING: ID collision '{db_id}': "
-                                      f"{existing} vs {rel_path} — using path fallback")
-                                db_id = str(rel_path.with_suffix(''))
-
-                            databases[db_id] = db_url
-                            md_bases[db_id] = resolved_item
-                            db_extra[db_id] = {
-                                'group_id': group_id,
-                                'file_id': file_id,
-                                'rel_path': str(rel_path.with_suffix('.duckdb')),
-                            }
-                        except ValueError:
-                            # Skip if can't make relative path
-                            pass
-                    elif resolved_item.is_dir():
-                        # Skip _-prefixed folders (e.g. _synapse_raw) —
-                        # staging / archive areas, not served datasets.
-                        if item.name.startswith('_'):
-                            continue
-                        # Recursively scan subdirectories
-                        scan_recursive(item, base)
-            except (PermissionError, OSError):
-                # Skip directories we can't access
-                pass
-
-        scan_recursive(self.data_folder, self.data_folder)
+            databases[db_id] = db_url
+            md_bases[db_id] = resolved_item
+            db_extra[db_id] = {
+                'group_id': group_id,
+                'file_id': file_id,
+                'rel_path': str(rel_path.with_suffix('.duckdb')),
+            }
 
         self._db_md_bases = md_bases
         self._db_extra = db_extra
@@ -2102,6 +2076,23 @@ async def _http_exception_scrubber(request: Request, exc: _StarletteHTTPExceptio
     return await _default_http_exception_handler(request, exc)
 
 
+class FacetCachesWarmingUp(Exception):
+    """A facet route was asked for a cache the start-up warm-up is still building (``_facet_warm_gate``)."""
+
+
+# Seconds a client is asked to wait (Retry-After) while the facet caches warm up.
+FACET_WARMUP_RETRY_AFTER = 30
+
+
+@app.exception_handler(FacetCachesWarmingUp)
+async def _facet_warming_up_handler(request: Request, exc: FacetCachesWarmingUp):
+    return JSONResponse(
+        status_code=503,
+        content={"status": "warming_up", "retry_after": FACET_WARMUP_RETRY_AFTER,
+                 "message": "The facet caches are being built after a server start; try again in a minute."},
+        headers={"Retry-After": str(FACET_WARMUP_RETRY_AFTER), EXPECTED_UNAVAILABLE_HEADER: "warming_up"})
+
+
 @app.exception_handler(UnknownDatabaseError)
 async def _unknown_database_handler(request: Request, exc: UnknownDatabaseError):
     return JSONResponse(status_code=404, content={"detail": str(exc)})
@@ -2187,6 +2178,12 @@ def _timing_snapshot() -> dict:
     }
 
 
+# A 503 carrying this header is an expected, known state (no geneset store, caches
+# still warming up): logged at info once per reason, not as an ERROR on every page.
+EXPECTED_UNAVAILABLE_HEADER = 'X-Anthive-Unavailable'
+_EXPECTED_UNAVAILABLE_LOGGED: set = set()
+
+
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Log every request and record latency into the global ring buffer."""
 
@@ -2199,7 +2196,12 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
             elapsed = time.time() - start
             status = response.status_code
-            if status >= 500:
+            expected = response.headers.get(EXPECTED_UNAVAILABLE_HEADER) if status == 503 else None
+            if expected:
+                if expected not in _EXPECTED_UNAVAILABLE_LOGGED:
+                    _EXPECTED_UNAVAILABLE_LOGGED.add(expected)
+                    log.info('%s %s → 503 %s (expected; logged once per reason)', method, path, expected)
+            elif status >= 500:
                 log.error('%s %s → %d (%.2fs)', method, path, status, elapsed)
             elif status >= 400:
                 log.warning('%s %s → %d (%.2fs)', method, path, status, elapsed)
@@ -2208,7 +2210,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             else:
                 log.debug('%s %s → %d (%.2fs)', method, path, status, elapsed)
             if not skip_timing:
-                _record_timing(elapsed * 1000.0, is_error=(status >= 500))
+                _record_timing(elapsed * 1000.0, is_error=(status >= 500 and not expected))
             return response
         except Exception as exc:
             elapsed = time.time() - start
@@ -2880,7 +2882,9 @@ def revoke_my_mcp_link(request: Request):
 
 
 class McpLinkCreateRequest(BaseModel):
+    """``label`` names the link; ``name`` is accepted as an alias (2.46.1: it used to be dropped silently)."""
     label: Optional[str] = Field(None, max_length=200)
+    name: Optional[str] = Field(None, max_length=200)
 
 
 @app.post("/me/mcp/links", tags=["mcp"])
@@ -2891,7 +2895,7 @@ def create_my_mcp_link(request: Request, body: Optional[McpLinkCreateRequest] = 
     from mcp_tokens import LinkLimitError  # noqa: PLC0415
     store = _get_mcp_link_store()
     try:
-        record = store.create(user, (body.label if body else None), _request_groups(request))
+        record = store.create(user, ((body.label or body.name) if body else None), _request_groups(request))
     except LinkLimitError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     log.info("mcp-link create user=%s id=%s", user, record.id)
@@ -4311,7 +4315,7 @@ def _warmup_visitor_kinds(anonymous: bool) -> List[Tuple[str, frozenset]]:
     settings = _access_settings()
     hidden = registry.internal_db_ids() if (registry is not None and settings['requires_auth']) else frozenset()
     if not hidden:
-        return [('every caller', frozenset())]
+        return [('all', frozenset())]
     kinds: List[Tuple[str, frozenset]] = []
     if settings['auth_mode'] != 'none':
         kinds.append(('signed-in', frozenset()))
@@ -4385,6 +4389,29 @@ def _warm_module_ranks(db_ids: Sequence[str], workers: int, pause: float) -> int
         return sum(pool.map(one, db_ids))
 
 
+# Visitor kinds (their hidden db_id sets, ``_warmup_visitor_kinds``) whose facet caches the start-up warm-up
+# has not finished yet. While a caller's kind is in here, the facet routes answer 503 ``warming_up``
+# (``_facet_warm_gate``) instead of building the same tables on a request thread and blocking it for a
+# minute or more (2.46.1). A kind leaves the set when its warm-up finished or failed.
+_FACET_WARMUP_PENDING: set = set()
+_FACET_WARMUP_LOCK = threading.Lock()
+
+
+def _facet_warm_gate() -> None:
+    """Raise ``FacetCachesWarmingUp`` while the warm-up still builds the facet caches of this caller's kind."""
+    with _FACET_WARMUP_LOCK:
+        if not _FACET_WARMUP_PENDING:
+            return
+        pending = frozenset(_hidden_db_ids()) in _FACET_WARMUP_PENDING
+    if pending:
+        raise FacetCachesWarmingUp()
+
+
+def _facet_warmup_done(hidden: frozenset) -> None:
+    with _FACET_WARMUP_LOCK:
+        _FACET_WARMUP_PENDING.discard(frozenset(hidden))
+
+
 def _warm_caches() -> None:
     """The background warm-up after a start (``warmup`` in anthive.yaml, ``config.get_warmup_settings``).
 
@@ -4395,13 +4422,20 @@ def _warm_caches() -> None:
     _lower_thread_priority()
     try:
         settings = get_warmup_settings()
+        kinds = _warmup_visitor_kinds(settings['anonymous'])
     except Exception as exc:  # noqa: BLE001 - a bad block must not stop the server
         log.warning("warm-up skipped: %s", exc)
+        with _FACET_WARMUP_LOCK:
+            _FACET_WARMUP_PENDING.clear()
         return
-    kinds = _warmup_visitor_kinds(settings['anonymous'])
     for label, hidden in kinds:
         log.info("warm-up: facet caches for %s callers", label)
-        _as_visitor(hidden, _warm_facet_results)
+        try:
+            _as_visitor(hidden, _warm_facet_results)
+        finally:
+            _facet_warmup_done(hidden)
+    with _FACET_WARMUP_LOCK:
+        _FACET_WARMUP_PENDING.clear()      # kinds that changed since the start build on demand again
     for label, hidden in kinds:
         started = time.monotonic()
         try:
@@ -4429,6 +4463,14 @@ def _start_warmup() -> None:
         log.warning("warm-up skipped: %s", exc)
         return
     if enabled:
+        try:
+            kinds = _warmup_visitor_kinds(get_warmup_settings()['anonymous'])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("warm-up: visitor kinds unknown (%s); facet routes will not wait for it", exc)
+            kinds = []
+        with _FACET_WARMUP_LOCK:
+            _FACET_WARMUP_PENDING.clear()
+            _FACET_WARMUP_PENDING.update(frozenset(hidden) for _label, hidden in kinds)
         threading.Thread(target=_warm_caches, name='cache-warmup', daemon=True).start()
 
 
@@ -12998,7 +13040,10 @@ def gene_stats_cache_gc():
 
 def _require_geneset_registry() -> GenesetRegistry:
     if geneset_registry is None:
-        raise HTTPException(status_code=503, detail="Geneset store is not configured")
+        # An expected state (data.genesetstore not set), not a server error: the
+        # header makes the request log say so at info, once (RequestLoggingMiddleware).
+        raise HTTPException(status_code=503, detail="Geneset store is not configured",
+                            headers={EXPECTED_UNAVAILABLE_HEADER: 'geneset_store'})
     return geneset_registry
 
 
@@ -13973,6 +14018,7 @@ def get_facet_tests_across_datasets(
     braak, age, app_nlgf). ``graft_sex`` (alias ``ant_graft_sex``; the test of ``ant_sex`` in xenografts, sex of the grafted cells' donor line) and ``host_sex`` (``ant_host_sex``) are the xenograft sex facets; ``sex`` is human post-mortem only. Other names return 404. ``scope`` selects the facet scope
     (``scope`` and ``scopes`` in the response; ``all`` returns every scope).
     """
+    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     facet_name = canonical_facet(facet_name)
     test_facet = _tested_facet(facet_name)
     overview = _facet_results().facet_overview(test_facet, _facet_test_datasets(), top_genes=top_genes,
@@ -14151,6 +14197,7 @@ def get_gene_detection(gene: str):
     modality. Secondary datasets and datasets below ``min_cells`` are left out. Numbers come from the precomputed
     gene statistics and the per-gene cache only (never a live scan); ``n_missing`` counts datasets without one.
     """
+    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     candidates = gene_detection_lib.candidate_datasets(registry.metadata_cache)
     result = gene_detection_lib.gene_detection(gene.strip(), candidates, _detection_lookup)
     return {**result, 'partial': result['n_missing'] > 0}
@@ -14173,6 +14220,7 @@ def get_facet_effects_overview(
     one where it is strongest and names the others in ``also_in``. ``quiet_groups`` are groups without a
     replicated gene (``low_power``: at most 2 cohorts), for one summary line.
     """
+    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     test_facet = _tested_facet(facet_name)
     result = _facet_results().effects_overview(
         test_facet, _facet_test_datasets(), exclude_secondary=exclude_secondary,
@@ -14215,6 +14263,7 @@ def get_facet_top_modules(
     ``quality_sensitive`` (mitochondrial or ribosomal genes dominate the set) and ``directionless``. ``n_matching`` is the
     number of rows the filters keep; ``cell_types`` lists the groups with their counts. Exploratory.
     """
+    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     test_facet = _tested_facet(facet_name)
     result = _module_results().top_modules(
         test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n, offset=offset,
@@ -14283,6 +14332,7 @@ def get_geneset_facet_effects(
     ``directionless_note`` (a mean score is not suited to GWAS-like sets; read the member counts) and the gene set's
     ``celltypes`` scope. Exploratory; scopes are never mixed.
     """
+    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     forest = _forest_mode(forest)
     geneset_id = f"{study}/{experiment}/{name}"
     info = _module_info(geneset_id)
@@ -14395,6 +14445,7 @@ def get_facet_recurring_genes(
     DRAFT cohort selection table; cohorts flagged ``overlap_unknown`` never had
     their donor overlap checked.
     """
+    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     test_facet = _tested_facet(facet_name)
     result = _facet_results().recurring_genes(
         test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n, offset=offset, effect_gate=effect_gate,
@@ -14458,6 +14509,7 @@ def get_facet_gene_effects(
     percent of cells expressing the gene in this cell type and scope; low below 5). Unit cards add ``anchor_counted``,
     ``cohort_display`` (``unassigned`` for a dataset outside the cohort table) and ``modality``.
     """
+    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     facet_name = canonical_facet(facet_name)
     test_facet = _tested_facet(facet_name)
     card = _facet_results().gene_effects(
@@ -14517,6 +14569,7 @@ def get_gene_facet_effects(
     percent of cells expressing the gene in this cell type and scope; low below 5). Unit cards add ``anchor_counted``,
     ``cohort_display`` (``unassigned`` for a dataset outside the cohort table) and ``modality``.
     """
+    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     wanted = [name.strip() for name in facet.split(',') if name.strip()] if facet else list(facet_results_lib.FACET_ORDER)
     wanted = [_tested_facet(name) for name in wanted]
     reader = _facet_results()

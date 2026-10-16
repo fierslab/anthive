@@ -49,12 +49,17 @@ def test_anthive_config_env_points_at_external_file(clean_env, tmp_path):
     assert config.get_state_dir(cfg, create=False) == Path('/srv/x/state')
 
 
-def test_unknown_key_in_external_config_still_rejected(clean_env, tmp_path):
+def test_unknown_key_in_external_config_rejected_when_strict(clean_env, tmp_path):
+    """2.46.1: unknown keys only warn by default (mixed releases must not crash-loop); ant-stack
+    validates its renders with ANTHIVE_CONFIG_STRICT=1, which still rejects them."""
     cfg_file = tmp_path / 'bad.yaml'
     cfg_file.write_text('not_a_real_key: 1\n')
     clean_env.setenv('ANTHIVE_CONFIG', str(cfg_file))
+    clean_env.setenv('ANTHIVE_CONFIG_STRICT', '1')
     with pytest.raises(config.ConfigError):
         config.load_config()
+    clean_env.delenv('ANTHIVE_CONFIG_STRICT')
+    assert 'not_a_real_key' in config.load_config()
 
 
 def test_defaults_keep_the_historical_layout(clean_env):

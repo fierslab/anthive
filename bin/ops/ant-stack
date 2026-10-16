@@ -16,30 +16,39 @@ Commands:
     render               write <state_dir>/stack/: .env, compose.site.yaml,
                          anthive.yaml, Caddy snippets, Authelia config
     up / down / ps / logs [service] / restart [service...]
-                         docker compose wrappers (each renders first)
-    pull [--no-ingest]   render, then pull every image site.yaml names (app,
-                         ingest, caddy, authelia) and report what changed
+                         docker compose wrappers; only `up` applies a new
+                         render, the others stage it (stack/staging/)
+    pull [--no-ingest]   stage a render, then pull every image site.yaml names
+                         (app, ingest, caddy, authelia) and report what
+                         changed; run `up` right after it
     build                build the app and ingest images locally
     passwd USER          set a user's password (basic + authelia accounts)
     ingest -- CMD...     one-off command in the ingest image with the site's
                          mounts, e.g. `ant-stack ingest -- ant convert /data/x.h5ad`
     publish-library      host-side: git pull --rebase + push of data.library
                          with library.deploy_key, then `ant sync library
-                         --no-git` in the ingest container, under the upload
-                         lock (run it from cron or a systemd timer)
-    config-path [--role serve|api|ingest]
+                         --no-git` in the ingest container (or on the host
+                         with --s3-host-config PATH), under the upload lock
+                         (run it from cron or a systemd timer)
+    watch [-- ARGS]      run the deposit watcher on this host (services.dataset_deposit)
+                         with the watcher config and environment `check` prints
+    config-path [--role serve|api|ingest|watcher]
                          print a rendered anthive.yaml path
 
 Inputs:
     site.yaml            --site PATH, $ANTHIVE_SITE, or ./site.yaml
     docker/compose.yaml  the static part of the stack (this repo)
 
-Outputs (all under state_dir; nothing is written into the repo or images):
+Outputs (all under state_dir; nothing is written into the repo or images;
+every render goes to stack/staging/ first and init, render, up and passwd
+put it in place):
     stack/.env                  compose variables (images, uid, paths, listen)
     stack/compose.site.yaml     bind mounts, ports, profiles for this site
     stack/anthive.yaml          config for web + mcp (0600, no S3 or chat keys)
     stack/anthive-api.yaml      config for api (S3 keys only per s3.api_access)
     stack/anthive-ingest.yaml   config for ingest + host-side sync (full S3 keys)
+    stack/anthive-watcher.yaml  config for the host-side deposit watcher (full S3
+                                keys, host paths, api via 127.0.0.1:<ports.tools>)
     stack/caddy/{auth,tls,servers}.caddy
     authelia/configuration.yml  (+ users_database.yml seeded once, secrets/)
     secrets/                    internal_secret, mcp_token_secret, users.yaml,
@@ -202,8 +211,8 @@ def validate_site(site: dict, path: Path) -> dict:
     site['_uid'] = int(run_as.get('uid') if run_as.get('uid') is not None else os.getuid())
     site['_gid'] = int(run_as.get('gid') if run_as.get('gid') is not None else os.getgid())
     site['_public'] = public
-    for key in ('https', 'http'):
-        site['ports'][key] = int(site['ports'][key])
+    for key in ('https', 'http', 'tools'):
+        site['ports'][key] = int(site['ports'].get(key) or (PORT_TOOLS if key == 'tools' else 0))
     if not isinstance(site.get('s3'), dict):
         site['s3'] = {}
     s3 = site['s3']
@@ -326,7 +335,10 @@ def ensure_secrets(site: dict) -> list[str]:
         passwords_file = state / 'secrets' / 'initial-passwords.txt'
         existing = passwords_file.read_text() if passwords_file.exists() else ''
         _write_secret(passwords_file, existing + '\n'.join(new_passwords) + '\n', overwrite=True)
-        created.append('secrets/initial-passwords.txt')
+        if not existing:
+            created.append('secrets/initial-passwords.txt')
+        else:
+            _say(f"added {len(new_passwords)} initial password(s) to secrets/initial-passwords.txt")
         for line in new_passwords:
             user, password = line.split('\t')
             _say(f"initial password for {user}: {password}  (also in secrets/initial-passwords.txt)")
@@ -364,9 +376,17 @@ def _listen_and_ports(site: dict) -> tuple[str, list[str], str]:
 #   serve   web + mcp: no S3 keys, no chat key
 #   api     ant-serve: S3 keys only as s3.api_access allows, the chat key
 #   ingest  `ant-stack ingest` and host-side sync: the full S3 keys
-CONFIG_ROLES = {'serve': 'anthive.yaml', 'api': 'anthive-api.yaml', 'ingest': 'anthive-ingest.yaml'}
+CONFIG_ROLES = {'serve': 'anthive.yaml', 'api': 'anthive-api.yaml', 'ingest': 'anthive-ingest.yaml',
+                'watcher': 'anthive-watcher.yaml'}
 CONFIG_USERS = {'serve': 'web and mcp containers', 'api': 'api container',
-                'ingest': 'ingest container and host-side sync'}
+                'ingest': 'ingest container and host-side sync',
+                'watcher': 'host-side ingest watcher: host paths, full S3 keys, api via the tools listener'}
+# Caddy's listener for host-side tools (container port; published on
+# 127.0.0.1:<ports.tools> only while services.dataset_deposit is on). It
+# drops every identity header, refuses requests without X-Anthive-Internal
+# and forwards to the api, which checks the secret: the watcher on the host
+# reaches /admin/rescan etc. without a login and nobody else gets in.
+PORT_TOOLS = 8079
 
 
 def config_file(site: dict, role: str) -> Path:
@@ -378,7 +398,7 @@ def _s3_block(site: dict, role: str) -> dict | None:
     s3 = site.get('s3') or {}
     if not s3.get('enabled'):
         return None
-    access = 'write' if role == 'ingest' else (s3['api_access'] if role == 'api' else 'none')
+    access = 'write' if role in ('ingest', 'watcher') else (s3['api_access'] if role == 'api' else 'none')
     if access == 'none':
         return None
     key_id, secret_key = S3_KEY_FILES[access]
@@ -524,7 +544,92 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
     s3_block = _s3_block(site, role)
     if s3_block is not None:
         cfg['s3'] = s3_block
-    return _deep_merge(cfg, site.get('anthive') or {})
+    cfg = _deep_merge(cfg, site.get('anthive') or {})
+    if role == 'watcher':
+        # The watcher runs on the host: host paths everywhere (the ingest role's
+        # /scratch and /var/lib/anthive exist only in containers), the real
+        # state_dir (internal secret, deposits.sqlite), and the api through
+        # Caddy's tools listener on 127.0.0.1 (http://api:8080 resolves only
+        # inside the compose network).
+        dirs = watcher_dirs(site)
+        cfg.update({
+            'state_dir': str(state), 'ingest_state_dir': str(state / 'ingest'),
+            'tmp_dir': str(dirs['tmp']), 'log_dir': str(dirs['logs']),
+            'convert_staging_dir': str(dirs['convert']), 'ingest_work_dir': str(dirs['work']),
+            'duckdb_temp_directory': str(dirs['spill']), 'webapp_dir': str(dirs['webapp']),
+            'api_url': watcher_api_url(site),
+        })
+        if not site['_library']:
+            cfg['library'] = str(state / 'no-library')
+        if not site['_library_index']:
+            cfg['library_index'] = str(state / 'no-library-index')
+        cfg['ingest_watch'] = {**cfg['ingest_watch'], 'enabled': True, 'api_url': watcher_api_url(site)}
+        cfg['mcp']['plots_dir'] = str(dirs['webapp'] / 'plots')
+        cfg['chat']['history_path'] = str(state / 'chat_history.db')
+    return cfg
+
+
+def watcher_env(site: dict) -> dict[str, str]:
+    """Environment of the host-side watcher. Every value is also in the watcher
+    config; the environment repeats them because env wins over anthive.yaml, so a
+    stray ANTHIVE_TMP_DIR from the shell cannot point the watcher at a container path."""
+    dirs = watcher_dirs(site)
+    incoming, catalog = watch_prefixes(site)
+    return {
+        'ANTHIVE_CONFIG': str(config_file(site, 'watcher')),
+        'ANTHIVE_STATE_DIR': str(site['_state']),
+        'ANTHIVE_INGEST_STATE_DIR': str(site['_state'] / 'ingest'),
+        'ANTHIVE_INGEST_WORK_DIR': str(dirs['work']),
+        'ANTHIVE_TMP_DIR': str(dirs['tmp']),
+        'ANTHIVE_LOG_DIR': str(dirs['logs']),
+        'ANTHIVE_CONVERT_STAGING_DIR': str(dirs['convert']),
+        'ANTHIVE_DUCKDB_TEMP_DIR': str(dirs['spill']),
+        'ANTHIVE_API_URL': watcher_api_url(site),
+        'ANTHIVE_INGEST_WATCH_PREFIX': incoming,
+        'ANTHIVE_INGEST_WATCH_CATALOG_PREFIX': catalog,
+    }
+
+
+def watcher_command(site: dict) -> str:
+    """The complete shell command that runs the deposit watcher on the host."""
+    import shlex  # noqa: PLC0415
+    env = ' '.join(f"{key}={shlex.quote(value) if value else chr(39) * 2}" for key, value in watcher_env(site).items())
+    return f"{env} {REPO / 'bin' / 'ingest' / 'ant-ingest-watch'}"
+
+
+def watcher_dirs(site: dict) -> dict[str, Path]:
+    """Host folders of the host-side watcher (under scratch_dir when set, else state_dir/watcher)."""
+    base = (site['_scratch'] or site['_state']) / 'watcher'
+    return {name: base / name for name in ('tmp', 'logs', 'convert', 'work', 'spill', 'webapp')}
+
+
+def watcher_api_url(site: dict) -> str:
+    return f"http://127.0.0.1:{site['ports']['tools']}"
+
+
+def render_caddy_tools(site: dict) -> str:
+    """Top-level Caddy site block for host-side tools (only with services.dataset_deposit)."""
+    head = ("# Rendered by bin/ops/ant-stack. Do not edit; edit site.yaml.\n"
+            "# Imported by config/Caddyfile at top level (ANTHIVE_HTTP_REDIRECT_SNIPPET).\n")
+    if not _deposit_enabled(site):
+        return head + "# no tools listener: services.dataset_deposit is off\n"
+    return head + f"""# Listener for host-side tools (the ingest watcher), published on 127.0.0.1:{site['ports']['tools']}.
+# Identity headers are dropped; a request without X-Anthive-Internal is refused
+# here, a wrong one by the api (401).
+http://:{PORT_TOOLS} {{
+\tbind 0.0.0.0
+\t@nosecret not header X-Anthive-Internal *
+\trespond @nosecret "X-Anthive-Internal required" 403
+\trequest_header -Remote-User
+\trequest_header -Remote-Groups
+\trequest_header -Remote-Name
+\trequest_header -Remote-Email
+\trequest_header -X-Remote-User
+\trequest_header -X-Remote-Groups
+\trequest_header -X-Anthive-Anonymous
+\treverse_proxy {{$ANTHIVE_API_HOST:api}}:8080
+}}
+"""
 
 
 def render_caddy_auth(site: dict) -> str:
@@ -710,26 +815,30 @@ def _state_mounts(site: dict, secret_names: tuple[str, ...], whole_state: bool) 
 CONFIG_HASHED_SERVICES = ('api', 'web', 'mcp')
 
 
-def config_digest(volumes: list[dict]) -> str:
+def config_digest(volumes: list[dict], read_from=None) -> str:
     """sha256 over the path and content of every bind-mounted regular file
     (rendered config, secret files) in a service's volume list. Folders
-    (stores, state_dir) are not hashed: their content is data, not config."""
+    (stores, state_dir) are not hashed: their content is data, not config.
+    ``read_from(path)`` names the file to read the content from (the staged
+    copy of a live config, so the digest matches the files `up` will put
+    in place); the live path is what enters the hash."""
     import hashlib  # noqa: PLC0415
     digest = hashlib.sha256()
     for mount in sorted((m for m in volumes if m.get('type') == 'bind'), key=lambda m: m['target']):
         source = Path(mount['source'])
-        if source.is_dir():
+        content_path = read_from(source) if read_from else source
+        if content_path.is_dir():
             continue
         digest.update(f"{mount['target']}\0{source}\0".encode())
         try:
-            digest.update(source.read_bytes())
+            digest.update(content_path.read_bytes())
         except OSError:
             digest.update(b'<missing>')
         digest.update(b'\0')
     return digest.hexdigest()
 
 
-def render_compose_site(site: dict) -> dict:
+def render_compose_site(site: dict, read_from=None) -> dict:
     state = site['_state']
     stack = stack_dir(site)
     h5ad = site['_h5adstore']
@@ -774,42 +883,128 @@ def render_compose_site(site: dict) -> dict:
         # ingest is the operator's own tool: the whole state_dir and the full S3 keys
         'ingest': {'volumes': data_rw + library_rw + [config_mount('ingest'), state_mount, scratch, webapp_rw]},
         'caddy': {
-            'ports': _listen_and_ports(site)[1],
+            'ports': _listen_and_ports(site)[1]
+                     + ([f"127.0.0.1:{site['ports']['tools']}:{PORT_TOOLS}"] if _deposit_enabled(site) else []),
             'volumes': [_bind(stack / 'caddy', C_CADDY_SNIPPETS, read_only=True)],
+            'environment': {'ANTHIVE_HTTP_REDIRECT_SNIPPET': f"{C_CADDY_SNIPPETS}/tools.caddy"},
         },
         'authelia': {'volumes': [_bind(state / 'authelia', '/config')]},
     }
     for name in CONFIG_HASHED_SERVICES:
-        services[name]['environment'] = {'ANTHIVE_CONFIG_SHA': config_digest(services[name]['volumes'])}
+        services[name]['environment'] = {'ANTHIVE_CONFIG_SHA': config_digest(services[name]['volumes'], read_from)}
     doc: dict[str, Any] = {'services': services}
     if not site['_scratch']:
         doc['volumes'] = {'scratch': {}}
     return doc
 
 
-def render(site: dict, quiet: bool = False) -> Path:
+def staging_dir(site: dict) -> Path:
+    """Where `render` writes first (inside stack/, which the containers never see)."""
+    return stack_dir(site) / 'staging'
+
+
+# Files `render` produces, relative to stack/ (configs are 0600 secrets).
+def _rendered_files(site: dict) -> list[str]:
+    files = list(CONFIG_ROLES.values()) + ['caddy/auth.caddy', 'caddy/tls.caddy', 'caddy/servers.caddy',
+                                           'caddy/tools.caddy', 'compose.site.yaml', '.env']
+    if site['auth']['mode'] == 'authelia':
+        files.append('authelia/configuration.yml')
+    return files
+
+
+def _live_path(site: dict, rel: str) -> Path:
+    if rel.startswith('authelia/'):
+        return site['_state'] / rel
+    return stack_dir(site) / rel
+
+
+def staged_changes(site: dict) -> list[str]:
+    """Rendered files whose staged content differs from what the running stack uses."""
+    staging = staging_dir(site)
+    changed = []
+    for rel in _rendered_files(site):
+        staged, live = staging / rel, _live_path(site, rel)
+        if not staged.exists():
+            continue
+        try:
+            if not live.exists() or live.read_bytes() != staged.read_bytes():
+                changed.append(rel)
+        except OSError:
+            changed.append(rel)
+    return changed
+
+
+def promote(site: dict) -> list[str]:
+    """Put the staged render in place (only `init`, `render`, `up` and `passwd` do this).
+
+    Files are rewritten in place (same inode), as before staging existed, so
+    bind mounts of running containers keep pointing at them; `up` recreates
+    the services whose config digest changed."""
+    staging = staging_dir(site)
+    changed = staged_changes(site)
+    for rel in _rendered_files(site):
+        staged, live = staging / rel, _live_path(site, rel)
+        if not staged.exists():
+            continue
+        live.parent.mkdir(parents=True, exist_ok=True)
+        if rel in CONFIG_ROLES.values():
+            _write_secret(live, staged.read_text(), overwrite=True)
+        else:
+            live.write_bytes(staged.read_bytes())
+    if site['auth']['mode'] == 'authelia':
+        seed_authelia_users(site)
+    return changed
+
+
+def render(site: dict, quiet: bool = False, apply: bool = True) -> Path:
+    """Render site.yaml into stack/staging/, validate it, and (``apply``) put it in place.
+
+    ``apply=False`` (pull, check, ingest, logs, restart, publish-library) only
+    stages: the running stack keeps the config that matches its images until
+    `ant-stack up` applies the new one. Before staging existed, `pull` wrote
+    the new release's keys into the live config, and an old api that
+    restarted before `up` crash-looped on them (2.46.1). With no live render
+    yet (first run) the staged one is applied anyway."""
     state = site['_state']
     stack = stack_dir(site)
+    staging = staging_dir(site)
+    (staging / 'caddy').mkdir(parents=True, exist_ok=True)
     (stack / 'caddy').mkdir(parents=True, exist_ok=True)
     (state / 'authelia').mkdir(parents=True, exist_ok=True)
     listen, _ports, auto_https = _listen_and_ports(site)
 
     os.chmod(stack, 0o700)
+    os.chmod(staging, 0o700)
     for role, name in CONFIG_ROLES.items():
         header = ("# Rendered by bin/ops/ant-stack from site.yaml. Do not edit: edit\n"
                   "# site.yaml (or its `anthive:` block) and run `ant-stack render`.\n"
                   f"# Role: {role} ({CONFIG_USERS[role]}).\n")
-        _write_secret(stack / name, header + yaml.safe_dump(render_anthive_yaml(site, role), sort_keys=False),
+        _write_secret(staging / name, header + yaml.safe_dump(render_anthive_yaml(site, role), sort_keys=False),
                       overwrite=True)
-    (stack / 'caddy' / 'auth.caddy').write_text(render_caddy_auth(site))
-    (stack / 'caddy' / 'tls.caddy').write_text(render_caddy_tls(site))
-    (stack / 'caddy' / 'servers.caddy').write_text(render_caddy_servers(site))
+    (staging / 'caddy' / 'auth.caddy').write_text(render_caddy_auth(site))
+    (staging / 'caddy' / 'tls.caddy').write_text(render_caddy_tls(site))
+    (staging / 'caddy' / 'servers.caddy').write_text(render_caddy_servers(site))
+    (staging / 'caddy' / 'tools.caddy').write_text(render_caddy_tools(site))
+    if _deposit_enabled(site):
+        for folder in [*watcher_dirs(site).values(), state / 'ingest']:
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                _warn(f"cannot create the watcher folder {folder}: {exc}")
     if site['auth']['mode'] == 'authelia':
-        (state / 'authelia' / 'configuration.yml').write_text(render_authelia(site))
-        seed_authelia_users(site)
-    (stack / 'compose.site.yaml').write_text(
+        (staging / 'authelia').mkdir(exist_ok=True)
+        (staging / 'authelia' / 'configuration.yml').write_text(render_authelia(site))
+
+    def read_from(source: Path) -> Path:
+        try:
+            rel = source.relative_to(stack)
+        except ValueError:
+            return source
+        return staging / rel if not rel.parts or rel.parts[0] != 'staging' else source
+
+    (staging / 'compose.site.yaml').write_text(
         "# Rendered by bin/ops/ant-stack from site.yaml. Do not edit.\n"
-        + yaml.safe_dump(render_compose_site(site), sort_keys=False))
+        + yaml.safe_dump(render_compose_site(site, read_from), sort_keys=False))
 
     profiles = []
     if site['services'].get('mcp'):
@@ -837,11 +1032,17 @@ def render(site: dict, quiet: bool = False) -> Path:
     for key, value in env.items():
         escaped = value.replace('\\', '\\\\').replace('"', '\\"')
         lines.append(f'{key}="{escaped}"')
-    (stack / '.env').write_text('\n'.join(lines) + '\n')
+    (staging / '.env').write_text('\n'.join(lines) + '\n')
     for name in CONFIG_ROLES.values():
-        _validate_rendered_config(stack / name)
-    if not quiet:
-        _say(f"rendered {stack}")
+        _validate_rendered_config(staging / name)
+    if apply or not (stack / '.env').exists():
+        promote(site)
+        if not quiet:
+            _say(f"rendered {stack}")
+    else:
+        pending = staged_changes(site)
+        if pending and not quiet:
+            _say(f"staged in {staging} (not applied; `ant-stack up` applies it): {', '.join(pending)}")
     return stack
 
 
@@ -851,7 +1052,7 @@ def _validate_rendered_config(path: Path) -> None:
             "cfg = config.load_config(); config.get_auth_settings(cfg); "
             "config.get_coordinate_mode(cfg); config.get_catalog_scan_mode(cfg); "
             "config.get_facets_visible(cfg); config.get_log_stderr_level(cfg)")
-    env = {**os.environ, 'ANTHIVE_CONFIG': str(path)}
+    env = {**os.environ, 'ANTHIVE_CONFIG': str(path), 'ANTHIVE_CONFIG_STRICT': '1'}
     result = subprocess.run([sys.executable, '-c', code, str(REPO / 'lib')],
                             env=env, capture_output=True, text=True)
     if result.returncode != 0:
@@ -1060,11 +1261,16 @@ def _check_datasets(site: dict) -> list[str]:
          "for __deposits/ and __incoming/, so multipart uploads nobody completes do not keep storage "
          "(doc/DEPLOY_CONTAINERS.md)")
     incoming, catalog = watch_prefixes(site)
+    secret = site['_state'] / 'secrets' / 'internal_secret'
     _say(f"dataset deposits: on for {groups}; presigning with the {'read-write' if source == 'write' else source} "
-         f"key pair; run ant-ingest-watch on this host with ANTHIVE_CONFIG=$(bin/ops/ant-stack config-path --role "
-         f"ingest) ANTHIVE_INGEST_STATE_DIR={site['_state'] / 'ingest'} ANTHIVE_INGEST_WATCH_PREFIX={incoming} "
-         f"ANTHIVE_INGEST_WATCH_CATALOG_PREFIX={catalog or chr(39) * 2} (the api reads its state there and uses "
-         f"the same prefixes)")
+         f"key pair")
+    _say(f"dataset deposits: run the watcher on this host as uid {site['_uid']}: `bin/ops/ant-stack watch` (systemd: "
+         f"config/examples/anthive-ingest-watch-stack.service.example), which is the same as:\n"
+         f"    {watcher_command(site)}\n"
+         f"  it reaches the api at {watcher_api_url(site)} (Caddy's tools listener, ports.tools) with the internal "
+         f"secret {secret}, shares {site['_state'] / 'ingest'} with the api and watches {incoming!r}")
+    if secret.is_file() and not _readable_by(secret, site['_uid'], site['_gid']):
+        problems.append(f"{secret} is not readable by uid {site['_uid']}: the watcher cannot call the api")
     watcher_config = datasets.get('watcher_config')
     if watcher_config:
         path = Path(str(watcher_config)).expanduser()
@@ -1292,7 +1498,7 @@ def check(site: dict, running: bool = False) -> list[str]:
     _check_proxy_trust(site)
     store = site['_h5adstore']
     if store and store.is_dir():
-        mds = [p for p in store.glob('*/*.md') if p.name != 'index.md' and not p.parent.name.startswith('_')]
+        mds = [resolved for _item, resolved, _rel in _catalog_dataset_mds(store)]
         if not mds:
             _warn(f"{store} has no dataset .md files: the catalog will be empty "
                   f"(clone the h5adstore repo there first, see doc/DEPLOY_CONTAINERS.md)")
@@ -1303,7 +1509,8 @@ def check(site: dict, running: bool = False) -> list[str]:
                 _warn(f"{len(missing)} of {len(mds)} datasets have no local .duckdb: they are "
                       + ("served from S3 (slow)" if remote else
                          "not served (the api has no S3 access, s3.api_access: none)")
-                      + "; pull them with `ant-stack ingest -- ant sync pull --include-duckdb`")
+                      + "; pull them with `ant-stack ingest -- ant sync pull --include-duckdb` (on a site with "
+                        "sync_policy.mode: priority: `ant-stack ingest -- ant sync pull`)")
     problems += _check_extra_mounts(site)
     _check_symlinks(site)
     problems += _check_library(site)
@@ -1316,6 +1523,8 @@ def check(site: dict, running: bool = False) -> list[str]:
         running = True
     if not running:
         _listen, ports, _ = _listen_and_ports(site)
+        if _deposit_enabled(site):
+            ports = ports + [f"127.0.0.1:{site['ports']['tools']}:{PORT_TOOLS}"]
         for spec in ports:
             bind, host_port, _container = spec.rsplit(':', 2)
             if not _port_free(bind, int(host_port)):
@@ -1351,17 +1560,22 @@ def check(site: dict, running: bool = False) -> list[str]:
     return problems
 
 
+def _catalog_dataset_mds(store: Path):
+    """The dataset .md files of a store as ant-serve's catalog scan sees them (lib/h5adstore.py)."""
+    if str(REPO / 'lib') not in sys.path:
+        sys.path.insert(0, str(REPO / 'lib'))
+    from h5adstore import catalog_dataset_mds  # noqa: PLC0415  (pure python, yaml only)
+    return catalog_dataset_mds(store)
+
+
 def _internal_dataset_count(store: Path) -> tuple[int, int]:
     """(datasets whose resolved annotation is not access: public, all datasets) of an h5adstore."""
     if str(REPO / 'lib') not in sys.path:
         sys.path.insert(0, str(REPO / 'lib'))
     import mus  # noqa: PLC0415  (lib/mus.py: pure python, yaml only)
     total = internal = 0
-    for md in store.rglob('*.md'):
-        rel = md.relative_to(store)
-        if md.name == 'index.md' or any(part.startswith(('_', '.')) for part in rel.parts):
-            continue
-        if md.with_suffix('.inactive').exists():
+    for _item, md, rel in _catalog_dataset_mds(store):
+        if any(part.startswith('.') for part in rel.parts):
             continue
         total += 1
         try:
@@ -1382,6 +1596,8 @@ def internal_access_summary(site: dict, internal: int, total: int) -> tuple[str,
     mode = site['auth']['mode']
     requires_auth = bool(site['auth'].get('internal_requires_auth', True))
     head = f"{internal} of {total} datasets are internal"
+    if not total:
+        return "no datasets yet (the store has no dataset .md files)", None
     if not internal:
         return f"{head}: every dataset is access: public", None
     if not requires_auth:
@@ -1477,7 +1693,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     site = load_site(site_path(args))
-    render(site, quiet=True)
+    render(site, quiet=True, apply=False)
     print_plan(site)
     problems = check(site, running=args.running)
     for problem in problems:
@@ -1527,10 +1743,8 @@ def cmd_up(args: argparse.Namespace) -> int:
             run_compose(site, '--profile', service, 'rm', '--stop', '--force', service, check=False)
     # 4. Caddy reads its config only at start (admin API is off): recreate
     #    it so the synced config and re-rendered snippets take effect.
-    # Authelia too: its config is re-rendered on every up, and a container
-    # stuck in crash-loop backoff would otherwise keep the old failure.
-    recreate = ['caddy'] + (['authelia'] if active['authelia'] else [])
-    run_compose(site, 'up', '-d', '--no-deps', '--force-recreate', *extra, *recreate)
+    # (Authelia was already recreated with its new config in step 2.)
+    run_compose(site, 'up', '-d', '--no-deps', '--force-recreate', *extra, 'caddy')
     _say(f"up: {site['site']['public_url']}")
     return 0
 
@@ -1541,11 +1755,15 @@ def cmd_simple(args: argparse.Namespace) -> int:
     # images (this is how `pull` once fetched 2.37.2 again after the tag
     # had been set to 2.40.0).
     try:
-        render(site, quiet=True)
+        render(site, quiet=True, apply=False)
     except SiteError as error:
         if not (stack_dir(site) / '.env').exists():
             raise
         _warn(f"render failed, using the previous one: {error}")
+    pending = staged_changes(site)
+    if pending and args.command in ('restart', 'ps'):
+        _say(f"site.yaml changes are staged but not applied ({', '.join(pending)}): `ant-stack up` applies them; "
+             f"`{args.command}` uses the running config")
     compose_args = {
         'down': ['down'] + (['--volumes'] if getattr(args, 'volumes', False) else []),
         'ps': ['ps', '--all'],
@@ -1557,9 +1775,9 @@ def cmd_simple(args: argparse.Namespace) -> int:
     return run_compose(site, *compose_args, check=False)
 
 
-def _rendered_images(site: dict) -> dict[str, str]:
-    """Image refs the current <state_dir>/stack/.env names (before a render)."""
-    env_file = stack_dir(site) / '.env'
+def _rendered_images(site: dict, env_file: Path | None = None) -> dict[str, str]:
+    """Image refs <state_dir>/stack/.env (what the running stack uses) or ``env_file`` names."""
+    env_file = env_file or stack_dir(site) / '.env'
     found: dict[str, str] = {}
     if not env_file.exists():
         return found
@@ -1595,11 +1813,13 @@ def cmd_pull(args: argparse.Namespace) -> int:
     the ingest image, whose profile is off) and reports what changed."""
     site = load_site(site_path(args))
     before = _rendered_images(site)
-    render(site, quiet=True)
-    after = _rendered_images(site)
+    # Stage only: the running stack keeps its config until `up` (an old api that
+    # restarts must not read keys of the new release).
+    render(site, quiet=True, apply=False)
+    after = _rendered_images(site, staging_dir(site) / '.env')
     for key, ref in after.items():
         if before.get(key) and before[key] != ref:
-            _say(f"{key}: the previous render named {before[key]}, site.yaml now names {ref}")
+            _say(f"{key}: the running stack uses {before[key]}, site.yaml now names {ref}")
     failed = 0
     report: list[str] = []
     for role, ref in images_to_pull(site, include_ingest=not args.no_ingest):
@@ -1619,6 +1839,8 @@ def cmd_pull(args: argparse.Namespace) -> int:
     if failed:
         _warn(f"{failed} image(s) failed to pull; `ant-stack up` will refuse a missing app image")
         return 1
+    _say("next: `ant-stack up` now. The new config is staged in stack/staging/ and is applied by `up`; "
+         "until then the running containers keep the old images and the old config.")
     return 0
 
 
@@ -1671,6 +1893,13 @@ def cmd_publish_library(args: argparse.Namespace) -> int:
     upload lock throughout so no upload commits halfway."""
     site = load_site(site_path(args))
     library = site['_library']
+    host_config = getattr(args, 's3_host_config', None)
+    if host_config:
+        host_config = Path(host_config).expanduser().resolve()
+        if args.no_s3:
+            raise SiteError("--s3-host-config and --no-s3 exclude each other")
+        if not host_config.is_file():
+            raise SiteError(f"--s3-host-config {host_config} does not exist")
     if library is None:
         raise SiteError("data.library is not set: nothing to publish")
     if not (library / '.git').is_dir():
@@ -1689,9 +1918,10 @@ def cmd_publish_library(args: argparse.Namespace) -> int:
     try:
         _say(f"locked {library_lock_path(library)}")
         if args.dry_run:
-            s3_step = (not args.no_s3) and site['s3'].get('enabled')
+            s3_step = (not args.no_s3) and (host_config or site['s3'].get('enabled'))
             _say(f"dry run: would git pull --rebase{'' if args.no_push else ' and git push'} in {library}"
-                 + (', then `ant sync library --no-git --dry-run`' if s3_step else ''))
+                 + (', then `ant sync library --no-git --dry-run`' if s3_step else '')
+                 + (f' on this host with ANTHIVE_CONFIG={host_config}' if s3_step and host_config else ''))
             # Contact the remote with the deploy key, so the dry run proves
             # the key, the host key and the remote URL actually work.
             probe = _git(library, env, 'ls-remote', '--heads', 'origin')
@@ -1708,18 +1938,38 @@ def cmd_publish_library(args: argparse.Namespace) -> int:
         elif pulled is not None:
             _say("records: pulled")
             if not args.no_push:
-                pushed = _git(library, env, 'push')
-                if pushed.returncode != 0:
-                    errors += 1
-                    _warn("git push failed:\n" + _git_output(pushed))
+                ahead = _git(library, env, 'rev-list', '--count', '@{upstream}..HEAD')
+                if ahead.returncode == 0 and ahead.stdout.strip() == '0':
+                    _say("records: up to date (nothing to push)")
                 else:
-                    _say("records: pushed")
+                    pushed = _git(library, env, 'push')
+                    if pushed.returncode != 0:
+                        errors += 1
+                        _warn("git push failed:\n" + _git_output(pushed))
+                    elif 'Everything up-to-date' in (pushed.stderr or '') + (pushed.stdout or ''):
+                        _say("records: up to date (nothing to push)")
+                    else:
+                        count = ahead.stdout.strip() if ahead.returncode == 0 else ''
+                        _say(f"records: pushed{f' {count} commit(s)' if count else ''}")
         if args.no_s3:
             _say("PDFs: skipped (--no-s3)")
+        elif host_config:
+            sync = [str(REPO / 'bin' / 'ops' / 'ant-sync'), 'library', '--no-git'] + (['--dry-run'] if args.dry_run else [])
+            _say(f"PDFs: {' '.join(sync)} (on this host, ANTHIVE_CONFIG={host_config})")
+            host_env = {**os.environ, 'ANTHIVE_CONFIG': str(host_config)}
+            try:
+                result = subprocess.run(sync, env=host_env, cwd=str(REPO))
+                failed = result.returncode != 0
+            except OSError as exc:
+                failed = True
+                _warn(f"cannot run ant-sync on this host: {exc} (is uv on PATH? see `ant-stack check`)")
+            if failed:
+                errors += 1
+                _warn("the library S3 sync failed; see the output above")
         elif not site['s3'].get('enabled'):
             _say("PDFs: skipped (s3.enabled is false)")
         else:
-            render(site, quiet=True)
+            render(site, quiet=True, apply=False)
             sync = ['ant', 'sync', 'library', '--no-git'] + (['--dry-run'] if args.dry_run else [])
             _say("PDFs: " + ' '.join(sync) + " (ingest container)")
             if run_compose(site, '--profile', 'ingest', 'run', '--rm', '--no-deps', '-T', 'ingest',
@@ -1779,6 +2029,10 @@ def cmd_passwd(args: argparse.Namespace) -> int:
     if args.user not in names:
         raise SiteError(f"{args.user!r} is not in auth.users of site.yaml")
     password = args.password or os.environ.get('ANTHIVE_NEW_PASSWORD')
+    if not password and not sys.stdin.isatty():
+        # getpass would print "Warning: Password input may be echoed" before failing
+        raise SiteError("no terminal to read the password from: pass --password PASSWORD "
+                        "or set ANTHIVE_NEW_PASSWORD")
     if not password:
         import getpass  # noqa: PLC0415
         try:
@@ -1811,7 +2065,7 @@ def cmd_passwd(args: argparse.Namespace) -> int:
 
 def cmd_ingest(args: argparse.Namespace) -> int:
     site = load_site(site_path(args))
-    render(site, quiet=True)
+    render(site, quiet=True, apply=False)
     command = list(args.cmd)
     if command and command[0] == '--':
         command = command[1:]
@@ -1819,6 +2073,23 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         raise SiteError("usage: ant-stack ingest -- <command...>")
     return run_compose(site, '--profile', 'ingest', 'run', '--rm', '--no-deps', 'ingest',
                        *command, check=False)
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    """Run the deposit watcher (bin/ingest/ant-ingest-watch) on this host with the
+    watcher config and environment `check` prints. Extra arguments go to the
+    watcher (`ant-stack watch -- status`, `-- --once`)."""
+    site = load_site(site_path(args))
+    if not _deposit_enabled(site):
+        raise SiteError("services.dataset_deposit is off: there is no deposit watcher to run")
+    render(site, quiet=True, apply=False)
+    extra = list(args.cmd or [])
+    if extra and extra[0] == '--':
+        extra = extra[1:]
+    tool = REPO / 'bin' / 'ingest' / 'ant-ingest-watch'
+    env = {**os.environ, **watcher_env(site)}
+    os.execvpe(str(tool), [str(tool), *extra], env)
+    return 0  # not reached
 
 
 def cmd_config_path(args: argparse.Namespace) -> int:
@@ -1854,6 +2125,10 @@ def main() -> int:
     p_publish.add_argument('--no-push', action='store_true', help='pull the records, do not push')
     p_publish.add_argument('--no-s3', action='store_true', help='records only, no PDF/index sync')
     p_publish.add_argument('--dry-run', action='store_true', help='print the plan, change nothing')
+    p_publish.add_argument('--s3-host-config', metavar='PATH', default=None,
+                           help='run the PDF/index sync on this host (bin/ops/ant-sync library --no-git) with '
+                                'ANTHIVE_CONFIG=PATH instead of in the ingest container: for sites that keep the '
+                                'S3 keys out of the containers')
     p_publish.add_argument('--lock-timeout', type=float, default=600,
                            help='seconds to wait for a running upload (default 600)')
     p_logs = sub.add_parser('logs')
@@ -1870,16 +2145,20 @@ def main() -> int:
     p_passwd.add_argument('--password', help='non-interactive (or $ANTHIVE_NEW_PASSWORD)')
     p_ingest = sub.add_parser('ingest')
     p_ingest.add_argument('cmd', nargs=argparse.REMAINDER)
+    p_watch = sub.add_parser('watch', help='run the deposit watcher on this host with the watcher config '
+                                           '(systemd: config/examples/anthive-ingest-watch-stack.service.example)')
+    p_watch.add_argument('cmd', nargs=argparse.REMAINDER, help='arguments for ant-ingest-watch, after --')
     p_config = sub.add_parser('config-path')
     p_config.add_argument('--role', choices=sorted(CONFIG_ROLES), default='serve',
-                          help='serve (web, mcp), api, or ingest (full S3 keys; host-side sync)')
+                          help='serve (web, mcp), api, ingest (full S3 keys; container paths) or watcher '
+                               '(full S3 keys; host paths, for the host-side deposit watcher)')
     args = parser.parse_args()
     handlers = {
         'init': cmd_init, 'check': cmd_check, 'render': cmd_render, 'up': cmd_up,
         'down': cmd_simple, 'ps': cmd_simple, 'pull': cmd_pull, 'logs': cmd_simple,
         'publish-library': cmd_publish_library,
         'restart': cmd_simple, 'build': cmd_build, 'passwd': cmd_passwd,
-        'ingest': cmd_ingest, 'config-path': cmd_config_path,
+        'ingest': cmd_ingest, 'config-path': cmd_config_path, 'watch': cmd_watch,
     }
     try:
         return handlers[args.command](args)

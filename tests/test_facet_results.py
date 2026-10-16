@@ -657,6 +657,9 @@ _SERVE_WANTED = {
     'get_gene_donor_variability', 'get_geneset_donor_variability', 'get_donor_variability_top', '_dv_resolve_unit',
     # 2.45: one 404 for an unknown dataset, access=internal datasets hidden from anonymous callers
     'UnknownDatabaseError', 'unknown_database_detail', '_HIDDEN_DB_IDS', '_hidden_db_ids', '_visible_db_ids',
+    # 2.46.1: 503 warming_up while the start-up warm-up builds the facet caches
+    'FacetCachesWarmingUp', 'FACET_WARMUP_RETRY_AFTER', '_facet_warming_up_handler', 'EXPECTED_UNAVAILABLE_HEADER',
+    '_FACET_WARMUP_PENDING', '_FACET_WARMUP_LOCK', '_facet_warm_gate', '_facet_warmup_done',
 }
 
 
@@ -717,7 +720,8 @@ def build_serve(results: Path, geneset_registry: Any = None, stats_rows: Optiona
     ``geneset_registry`` stands in for the geneset store, ``stats_rows`` for the gene statistics index (dicts with
     ``dataset``, ``gene``, ``n_cells``, ``pct_nonzero``), ``metadata`` is merged into the registry metadata cache.
     """
-    from fastapi import FastAPI, HTTPException, Query, Response
+    from fastapi import FastAPI, HTTPException, Query, Request, Response
+    from fastapi.responses import JSONResponse
     from fastapi.testclient import TestClient
 
     store = results.parent
@@ -746,7 +750,7 @@ def build_serve(results: Path, geneset_registry: Any = None, stats_rows: Optiona
         'canonical_facet': canonical_facet, 'Response': Response, 'HTTPException': HTTPException, 'Query': Query,
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,
         'donor_values_lib': donor_values, 'donor_variability_lib': donor_variability, 'plotting': plotting, 'OrderedDict': OrderedDict, 'urlencode': urlencode,
-        'duckdb': duckdb, 'dataset_access': dataset_access,
+        'duckdb': duckdb, 'dataset_access': dataset_access, 'Request': Request, 'JSONResponse': JSONResponse,
     }
     namespace['_pooled_db'] = pooled_db if pooled_db is not None else _no_pooled_db
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
@@ -1375,7 +1379,8 @@ def test_endpoint_facet_tests_scope_and_reason_come_from_the_dataset(serve):
 
 
 _WARMUP_FUNCTIONS = {'_lower_thread_priority', '_warm_facet_results', '_warmup_visitor_kinds', '_as_visitor',
-                     '_warm_donor_values', '_module_rank_warm_ids', '_warm_module_ranks', '_warm_caches', '_start_warmup'}
+                     '_warm_donor_values', '_module_rank_warm_ids', '_warm_module_ranks', '_warm_caches', '_start_warmup',
+                     '_facet_warm_gate', '_facet_warmup_done'}
 
 
 class _WarmRegistry:
@@ -1433,7 +1438,9 @@ def _warmup_namespace(calls: List[Any], fail: bool = False, hidden: frozenset = 
         '_access_settings': lambda: {'requires_auth': requires_auth, 'auth_mode': auth_mode},
         '_facet_results': lambda: _Reader(), '_module_results': lambda: _Modules(), '_facet_test_datasets': lambda: [],
         '_detection_tables': lambda: calls.append(('detection', dataset_access.current_hidden())),
-        'facet_results_lib': fr, '_donor_units_payload': donor_payload, '_module_rank_means': rank_means}
+        'facet_results_lib': fr, '_donor_units_payload': donor_payload, '_module_rank_means': rank_means,
+        '_FACET_WARMUP_PENDING': set(), '_FACET_WARMUP_LOCK': threading.Lock(),
+        '_hidden_db_ids': dataset_access.current_hidden, 'FacetCachesWarmingUp': type('FacetCachesWarmingUp', (Exception,), {})}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     return namespace
 
@@ -1493,8 +1500,8 @@ def test_warmup_visitor_kinds_follow_the_site(warm_env):
     def kinds(anonymous: bool = True, **options) -> List[str]:
         return [label for label, _ in _warmup_namespace([], **options)['_warmup_visitor_kinds'](anonymous)]
 
-    assert kinds() == ['every caller']                                        # nothing hidden: one kind
-    assert kinds(hidden=hidden, requires_auth=False) == ['every caller']
+    assert kinds() == ['all']                                                 # nothing hidden: one kind
+    assert kinds(hidden=hidden, requires_auth=False) == ['all']
     assert kinds(hidden=hidden) == ['signed-in', 'anonymous']
     assert kinds(hidden=hidden, auth_mode='none') == ['anonymous']           # nobody signs in on auth.mode none
     assert kinds(False, hidden=hidden) == ['signed-in']
@@ -1597,3 +1604,53 @@ def test_module_counts_use_the_parametric_q_when_residual_df_is_large(tmp_path):
     summary = fr.FacetResults(tmp_path).summary('G9/big', 'G9', 'big')
     methods = {(m['method'], m['source']): m for m in summary['units'][0]['modules']}
     assert {k: methods[('pseudobulk', 'gene_list')][k] for k in ('n_q05', 'n_up', 'n_down')} == {'n_q05': 1, 'n_up': 0, 'n_down': 1}
+
+
+# ── 2.46.1: facet routes answer 503 warming_up instead of blocking during the warm-up ──
+
+def test_facet_routes_answer_warming_up_while_the_warmup_builds_their_kind(serve):
+    pending = serve.namespace['_FACET_WARMUP_PENDING']
+    pending.add(frozenset())                                   # signed-in / everyone: still warming up
+    try:
+        for path in ('/genes/TREM2/facet-effects', '/facets/sex/effects?gene=TREM2', '/facets/sex/effects/top',
+                     '/facets/sex/effects/overview', '/facets/sex/tests', '/genes/TREM2/detection'):
+            response = serve.get(path)
+            assert response.status_code == 503, path
+            assert response.json() == {'status': 'warming_up', 'retry_after': 30,
+                                       'message': 'The facet caches are being built after a server start; '
+                                                  'try again in a minute.'}
+            assert response.headers['Retry-After'] == '30'
+        # another kind of caller (anonymous with hidden internal data) is not held back by this kind
+        pending.clear()
+        pending.add(frozenset({'G2/ds2'}))
+        assert serve.get('/genes/TREM2/facet-effects').status_code == 200
+    finally:
+        pending.clear()
+    assert serve.get('/genes/TREM2/facet-effects').status_code == 200
+    assert serve.get('/databases/G1/ds1/facet-tests').status_code == 200     # per-dataset routes never wait
+
+
+def test_warmup_marks_each_kind_ready_when_its_facet_caches_are_built(warm_env):
+    calls: List[Any] = []
+    hidden = frozenset({'B/b'})
+    namespace = _warmup_namespace(calls, hidden=hidden)
+    pending = namespace['_FACET_WARMUP_PENDING']
+    seen: List[Any] = []
+    original_warm = namespace['_warm_facet_results']
+
+    def watching_warm():
+        seen.append(set(pending))
+        return original_warm()
+    namespace['_warm_facet_results'] = watching_warm
+    namespace['_start_warmup']()
+    _join_warmup()
+    assert seen == [{frozenset(), hidden}, {hidden}]        # signed-in done before the anonymous kind starts
+    assert pending == set()
+
+
+def test_warmup_failure_still_releases_the_gate(warm_env):
+    namespace = _warmup_namespace([], fail=True)
+    namespace['_start_warmup']()
+    _join_warmup()
+    assert namespace['_FACET_WARMUP_PENDING'] == set()
+    namespace['_facet_warm_gate']()                          # does not raise

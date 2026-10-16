@@ -255,7 +255,9 @@ def test_archived_versions_are_skipped_by_scan_sync_and_md_check(tmp_path):
     md_check_source = (ROOT / 'lib' / 'md_check.py').read_text()
     assert "if any(part.startswith('_') for part in md_path.relative_to(folder).parts[:-1]):" in md_check_source
     serve_source = (ROOT / 'bin' / 'api' / 'ant-serve').read_text()
-    assert "if item.name.startswith('_'):" in serve_source
+    assert 'catalog_dataset_mds(self.data_folder)' in serve_source       # 2.46.1: the shared walker
+    from h5adstore import catalog_dataset_mds
+    assert [str(rel) for _item, _resolved, rel in catalog_dataset_mds(tmp_path / 'store')] == ['G/d.md']
 
 
 @pytest.mark.parametrize('keep, remaining', [(1, []), (2, ['3.0.0']), (3, ['2.0.0', '3.0.0']), (9, ['1.0.0', '2.0.0', '3.0.0'])])

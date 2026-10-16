@@ -323,12 +323,23 @@ window.antViews = window.antViews || (function () {
   function pill(text, cls, title, slug) {
     return '<span class="fx-pill vw-pill ' + (cls || '') + '"' + (slug ? ' data-glossary="' + slug + '"' : '') + ' tabindex="0" role="button" title="' + esc(title || '') + '">' + esc(text) + '</span>';
   }
+  // A 503 {status: "warming_up"} means the API is still building its facet caches after a restart.
+  var WARMING_UP_TEXT = 'The server is warming up after a restart; try again in a minute.';
   function getJson(url) {
     return fetch(url, { credentials: 'same-origin' }).then(function (response) {
+      if (response.status === 503) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          var error = new Error(body && body.status === 'warming_up' ? WARMING_UP_TEXT : 'HTTP 503');
+          error.warmingUp = !!(body && body.status === 'warming_up');
+          throw error;
+        });
+      }
       if (!response.ok) throw new Error('HTTP ' + response.status);
       return response.json();
     });
   }
+  // the text of a load error: the warming-up note, else `fallback`
+  function loadError(error, fallback) { return '<div class="vw-error">' + esc(error && error.warmingUp ? WARMING_UP_TEXT : fallback) + '</div>'; }
   var memo = {};
   function cached(url) {
     if (!memo[url]) memo[url] = getJson(url).catch(function (error) { delete memo[url]; throw error; });
@@ -867,7 +878,7 @@ window.antViews = window.antViews || (function () {
   return {
     API: API, GROUPS: GROUPS, SHORT: SHORT, SCOPES: SCOPES, HUMAN_FACETS: HUMAN_FACETS, XENO_FACETS: XENO_FACETS, FACETS: FACETS,
     LOW_DETECTION_PCT: LOW_DETECTION_PCT, esc: esc, num: num, signed: signed, pfmt: pfmt, plural: plural, arrow: arrow, plain: plain, median: median,
-    gl: gl, pill: pill, GENE_FLAGS: GENE_FLAGS, getJson: getJson, cached: cached, docBlock: docBlock, afterRender: afterRender, facetMeta: facetMeta, geneFlagPills: geneFlagPills,
+    gl: gl, pill: pill, GENE_FLAGS: GENE_FLAGS, getJson: getJson, cached: cached, loadError: loadError, docBlock: docBlock, afterRender: afterRender, facetMeta: facetMeta, geneFlagPills: geneFlagPills,
     info: info, helpBtn: helpBtn, compact: compact, CELLS: CELLS, cellFromRep: cellFromRep, cellKind: cellKind, cellHtml: cellHtml, forestHtml: forestHtml, bindForest: bindForest,
     replicationLine: replicationLine, sameDirection: sameDirection, isTwoGroup: isTwoGroup, pointStats: pointStats, smallPill: smallPill, informativeCount: informativeCount, MIN_GROUP: MIN_GROUP, MIN_TREND: MIN_TREND,
     linksHtml: linksHtml, bindDonorPlot: bindDonorPlot, dbLink: dbLink, apiUrl: apiUrl, renderPanel2: renderPanel2, legendHtml: legendHtml, preselect: preselect, initTabs: initTabs, setDatasets: setDatasets, dsName: dsName, unitsTable: unitsTable, otherDatasetsHtml: otherDatasetsHtml

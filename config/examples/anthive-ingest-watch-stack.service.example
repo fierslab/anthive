@@ -1,0 +1,49 @@
+# EXAMPLE: systemd unit for the dataset deposit watcher of a CONTAINER site
+# (ant-stack, services.dataset_deposit: true). For a host install without
+# containers use anthive-ingest-watch.service.example instead.
+#
+# `ant-stack watch` runs bin/ingest/ant-ingest-watch on the host with the
+# rendered watcher config (stack/anthive-watcher.yaml: host paths, the full S3
+# keys, the site's state_dir and internal secret) and reaches the api through
+# Caddy's tools listener on 127.0.0.1:<ports.tools> (default 8079), which
+# `ant-stack up` publishes while deposits are on. `ant-stack check` prints the
+# same command with every variable spelled out.
+#
+#   sudo cp anthive-ingest-watch-stack.service.example /etc/systemd/system/anthive-ingest-watch.service
+#   (fill the <PLACEHOLDERS>)
+#   sudo systemctl daemon-reload && sudo systemctl enable --now anthive-ingest-watch
+#   journalctl -u anthive-ingest-watch -f                       # the log
+#   <REPO_PATH>/bin/ops/ant-stack --site <SITE_YAML> watch -- status   # items and their states
+#
+# Keep the filled-in copy in your private server-config repo, NOT in anthive4.
+
+[Unit]
+Description=Anthive dataset deposit watcher (<SITE_NAME>)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The run_as user of site.yaml: it owns state_dir and can read
+# state_dir/secrets/internal_secret and the S3 key files.
+User=<USER>
+WorkingDirectory=<REPO_PATH>
+# uv must be on PATH (ant-stack and the tools are `uv run --script`); HOME holds the uv cache.
+Environment=HOME=<HOME>
+Environment=PATH=<HOME>/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=<REPO_PATH>/bin/ops/ant-stack --site <SITE_YAML> watch
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+# Size MemoryMax for the largest h5ad you expect: ant-convert holds a dataset in RAM.
+CPUQuota=400%
+MemoryHigh=40G
+MemoryMax=48G
+# See anthive-ingest-watch.service.example for how a stop is handled.
+KillMode=control-group
+TimeoutStopSec=600
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

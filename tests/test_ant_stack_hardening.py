@@ -429,11 +429,14 @@ def test_pull_uses_the_current_tag_not_a_stale_render(tmp_path, ant_stack, monke
     assert not any('2.37.2' in ref for ref in pulled)
     assert any(ref.startswith('caddy:') for ref in pulled)
     assert any(ref.startswith('authelia/') for ref in pulled)
-    env = (site['_state'] / 'stack' / '.env').read_text()
-    assert 'anthive-app:2.40.0' in env and '2.37.2' not in env
+    # 2.46.1: pull only stages; the running stack keeps its .env until `up`
+    staged = (site['_state'] / 'stack' / 'staging' / '.env').read_text()
+    assert 'anthive-app:2.40.0' in staged and '2.37.2' not in staged
+    live = (site['_state'] / 'stack' / '.env').read_text()
+    assert 'anthive-app:2.37.2' in live
     out = capsys.readouterr()
     assert 'new' in out.out and 'anthive-app:2.40.0' in out.out
-    assert 'previous render named' in out.out
+    assert 'the running stack uses' in out.out and 'ant-stack up' in out.out
 
 
 def test_pull_reports_failure(tmp_path, ant_stack, monkeypatch):
@@ -666,3 +669,226 @@ def test_container_config_copies_info_logs_to_stderr(tmp_path, ant_stack):
     assert config.get_log_stderr_level({}) == 'warning'          # dev supervisor: no duplicate INFO lines
     with pytest.raises(config.ConfigError):
         config.get_log_stderr_level({'log_stderr_level': 'loud'})
+
+
+# ── 2.46.1: pull/check stage the render, only up applies it ──────────────────
+
+def test_pull_and_check_stage_and_up_applies(tmp_path, ant_stack, monkeypatch):
+    """A restarting old api must keep reading the config of its own release until `up`."""
+    path = _write_site(tmp_path, images={'tag': '2.46.0'})
+    site = ant_stack.load_site(path)
+    ant_stack.ensure_secrets(site)
+    ant_stack.render(site, quiet=True)
+    stack = site['_state'] / 'stack'
+    live_before = {name: (stack / name).read_bytes() for name in ('anthive-api.yaml', 'anthive.yaml', '.env',
+                                                                     'compose.site.yaml')}
+    _write_site(tmp_path, images={'tag': '2.46.1'}, anthive={'max_obscat_values': 77})
+    site = ant_stack.load_site(path)
+    ant_stack.render(site, quiet=True, apply=False)            # what pull, check, ingest, logs do
+    assert {name: (stack / name).read_bytes() for name in live_before} == live_before
+    assert 'max_obscat_values: 77' in (stack / 'staging' / 'anthive-api.yaml').read_text()
+    assert set(ant_stack.staged_changes(site)) >= {'anthive-api.yaml', '.env', 'compose.site.yaml'}
+    ant_stack.render(site, quiet=True)                         # what up does
+    assert 'max_obscat_values: 77' in (stack / 'anthive-api.yaml').read_text()
+    assert 'anthive-app:2.46.1' in (stack / '.env').read_text()
+    assert ant_stack.staged_changes(site) == []
+    assert oct((stack / 'anthive-api.yaml').stat().st_mode & 0o777) == '0o600'
+
+
+def test_staged_compose_digest_matches_the_applied_files(tmp_path, ant_stack):
+    """`up` recreates exactly the services whose config changed: the digest in the staged
+    compose file must equal the digest of the files once they are in place."""
+    path = _write_site(tmp_path)
+    site = ant_stack.load_site(path)
+    ant_stack.ensure_secrets(site)
+    ant_stack.render(site, quiet=True)
+    _write_site(tmp_path, anthive={'max_obscat_values': 55})
+    site = ant_stack.load_site(path)
+    ant_stack.render(site, quiet=True, apply=False)
+    staged = yaml.safe_load((site['_state'] / 'stack' / 'staging' / 'compose.site.yaml').read_text())
+    ant_stack.render(site, quiet=True)
+    live = ant_stack.render_compose_site(site)
+    for name in ant_stack.CONFIG_HASHED_SERVICES:
+        assert staged['services'][name]['environment'] == live['services'][name]['environment']
+
+
+def test_first_render_is_applied_even_when_only_staging(tmp_path, ant_stack):
+    path = _write_site(tmp_path)
+    site = ant_stack.load_site(path)
+    ant_stack.ensure_secrets(site)
+    ant_stack.render(site, quiet=True, apply=False)
+    assert (site['_state'] / 'stack' / '.env').exists()
+    assert (site['_state'] / 'stack' / 'anthive-api.yaml').exists()
+
+
+def test_render_validation_is_strict_but_the_api_only_warns(tmp_path, ant_stack, monkeypatch):
+    """ant-stack still refuses a typo in site.yaml's anthive: block (strict validation of a fresh
+    render), while a running api reading a config with a key it does not know only warns."""
+    path = _write_site(tmp_path, anthive={'no_such_key_anywhere': 1})
+    site = ant_stack.load_site(path)
+    ant_stack.ensure_secrets(site)
+    with pytest.raises(ant_stack.SiteError, match='no_such_key_anywhere'):
+        ant_stack.render(site, quiet=True)
+    config_path = tmp_path / 'anthive.yaml'
+    config_path.write_text('no_such_key_anywhere: 1\n')
+    env = {**os.environ, 'ANTHIVE_CONFIG': str(config_path)}
+    env.pop('ANTHIVE_CONFIG_STRICT', None)
+    result = subprocess.run(['python3', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); import config; '
+                             'config.load_config(); print("loaded")', str(REPO / 'lib')],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0 and 'loaded' in result.stdout
+    assert 'ignoring unknown configuration parameters: no_such_key_anywhere' in result.stderr
+
+
+# ── 2.46.1: fixes from the anthive-intern report and the 2.46.0 scratch site ──
+
+def test_check_counts_datasets_like_the_catalog_scan(tmp_path, ant_stack):
+    """Store-root documents and static/*.h5ad.md are not datasets (they made `check` report
+    'N datasets have no local .duckdb' on intern)."""
+    store = tmp_path / 'store'
+    for rel in ('CLAUDE.md', 'CONVENTIONS.md', 'HANDOFF.md', 'G/index.md', 'G/README.md', 'G/ds.md', 'G/ds2.md',
+                'G/static/atlas.h5ad.md', '_archive/G/old.md', 'G/_versions/ds/1.0.0/ds.md', 'H/sub/deep.md'):
+        (store / rel).parent.mkdir(parents=True, exist_ok=True)
+        (store / rel).write_text('---\nid: x\n---\n')
+    (store / 'G' / 'ds2.inactive').write_text('')
+    found = sorted(str(rel) for _item, _resolved, rel in ant_stack._catalog_dataset_mds(store))
+    assert found == ['G/ds.md', 'H/sub/deep.md']
+    assert ant_stack._internal_dataset_count(store) == (2, 2)
+
+
+def test_internal_access_line_for_an_empty_store(tmp_path, ant_stack):
+    site = _site(ant_stack, tmp_path)
+    line, warning = ant_stack.internal_access_summary(site, 0, 0)
+    assert line.startswith('no datasets yet') and warning is None
+
+
+def test_publish_library_says_up_to_date_when_nothing_was_pushed(tmp_path, ant_stack, library_repo, capsys):
+    library, _remote = library_repo
+    path = _write_site(tmp_path, data={'h5adstore': str(tmp_path / 'store'), 'library': str(library)})
+    args = argparse.Namespace(site=str(path), no_push=False, no_s3=True, dry_run=False, lock_timeout=5)
+    assert ant_stack.cmd_publish_library(args) == 0
+    out = capsys.readouterr().out
+    assert 'records: up to date' in out and 'records: pushed' not in out
+    (library / 'papers' / 'c.md').write_text('---\ntitle: C\n---\n')
+    _git('add', '.', cwd=library)
+    _git('commit', '-m', 'upload c', cwd=library)
+    assert ant_stack.cmd_publish_library(args) == 0
+    assert 'records: pushed 1 commit(s)' in capsys.readouterr().out
+
+
+def test_publish_library_s3_host_config_runs_ant_sync_on_the_host(tmp_path, ant_stack, library_repo, monkeypatch):
+    library, _remote = library_repo
+    host_config = tmp_path / 'host-anthive.yaml'
+    host_config.write_text('s3: {bucket: b}\n')
+    # S3 is off for the containers: the keys live only in the host config
+    path = _write_site(tmp_path, data={'h5adstore': str(tmp_path / 'store'), 'library': str(library)})
+    seen: list = []
+    real_run = subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if str(cmd[0]).endswith('ant-sync'):
+            seen.append((cmd, kwargs.get('env', {}).get('ANTHIVE_CONFIG')))
+            return subprocess.CompletedProcess(cmd, 0)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(ant_stack.subprocess, 'run', fake_run)
+    monkeypatch.setattr(ant_stack, 'run_compose', lambda *a, **k: pytest.fail('ingest container used'))
+    code = ant_stack.cmd_publish_library(argparse.Namespace(
+        site=str(path), no_push=True, no_s3=False, dry_run=True, lock_timeout=5, s3_host_config=str(host_config)))
+    assert code == 0
+    assert seen == [([str(REPO / 'bin/ops/ant-sync'), 'library', '--no-git', '--dry-run'], str(host_config))]
+    with pytest.raises(ant_stack.SiteError, match='exclude'):
+        ant_stack.cmd_publish_library(argparse.Namespace(
+            site=str(path), no_push=True, no_s3=True, dry_run=False, lock_timeout=5, s3_host_config=str(host_config)))
+    with pytest.raises(ant_stack.SiteError, match='does not exist'):
+        ant_stack.cmd_publish_library(argparse.Namespace(
+            site=str(path), no_push=True, no_s3=False, dry_run=False, lock_timeout=5,
+            s3_host_config=str(tmp_path / 'missing.yaml')))
+
+
+def _deposit_site(ant_stack, tmp_path, **overrides):
+    path = _write_site(tmp_path, services={'dataset_deposit': True}, s3=S3_ON, **overrides)
+    site = ant_stack.load_site(path)
+    ant_stack.ensure_secrets(site)
+    _put_s3_keys(site['_state'])
+    return site
+
+
+def test_watcher_config_uses_host_paths_and_the_tools_listener(tmp_path, ant_stack):
+    site = _deposit_site(ant_stack, tmp_path)
+    stack = ant_stack.render(site, quiet=True)
+    watcher = yaml.safe_load((stack / 'anthive-watcher.yaml').read_text())
+    state = str(site['_state'])
+    for key in ('state_dir', 'ingest_state_dir', 'tmp_dir', 'log_dir', 'convert_staging_dir', 'ingest_work_dir',
+                'duckdb_temp_directory', 'webapp_dir'):
+        assert str(watcher[key]).startswith(state), (key, watcher[key])
+    text = (stack / 'anthive-watcher.yaml').read_text()
+    assert '/scratch' not in text and '/var/lib/anthive' not in text and 'http://api:8080' not in text
+    assert watcher['api_url'] == 'http://127.0.0.1:8079' and watcher['ingest_watch']['enabled'] is True
+    assert watcher['s3']['secret_access_key'] == 'RW-SECRET'
+    caddy = yaml.safe_load((stack / 'compose.site.yaml').read_text())['services']['caddy']
+    assert '127.0.0.1:8079:8079' in caddy['ports']
+    assert caddy['environment']['ANTHIVE_HTTP_REDIRECT_SNIPPET'] == '/etc/anthive-caddy/tools.caddy'
+    tools = (stack / 'caddy' / 'tools.caddy').read_text()
+    assert 'not header X-Anthive-Internal *' in tools and 'request_header -Remote-User' in tools
+    assert 'request_header -Remote-Groups' in tools and 'reverse_proxy' in tools
+    command = ant_stack.watcher_command(site)
+    for name in ('ANTHIVE_CONFIG=', 'ANTHIVE_TMP_DIR=', 'ANTHIVE_INGEST_WORK_DIR=', 'ANTHIVE_LOG_DIR=',
+                 'ANTHIVE_CONVERT_STAGING_DIR=', 'ANTHIVE_API_URL=http://127.0.0.1:8079', 'ANTHIVE_INGEST_STATE_DIR=',
+                 'ANTHIVE_INGEST_WATCH_PREFIX=__incoming/', 'bin/ingest/ant-ingest-watch'):
+        assert name in command, name
+    # the config loads on the host: the internal secret comes from the host state_dir
+    env = {**os.environ, **ant_stack.watcher_env(site)}
+    result = subprocess.run(['python3', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); import config; '
+                             'print(config.internal_auth_headers()["X-Anthive-Internal"]); print(config.get_tmp_dir())',
+                             str(REPO / 'lib')], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    secret, tmp_dir = result.stdout.split()
+    assert secret == (site['_state'] / 'secrets' / 'internal_secret').read_text().strip()
+    assert tmp_dir.startswith(state)
+
+
+def test_no_tools_listener_without_deposits(tmp_path, ant_stack):
+    site = _site(ant_stack, tmp_path)
+    ant_stack.ensure_secrets(site)
+    stack = ant_stack.render(site, quiet=True)
+    caddy = yaml.safe_load((stack / 'compose.site.yaml').read_text())['services']['caddy']
+    assert not any(':8079' in port for port in caddy['ports'])
+    assert 'no tools listener' in (stack / 'caddy' / 'tools.caddy').read_text()
+
+
+def test_check_prints_the_watcher_command(tmp_path, ant_stack, capsys):
+    site = _deposit_site(ant_stack, tmp_path)
+    assert ant_stack._check_datasets(site) == []
+    out = capsys.readouterr().out
+    assert 'ant-stack watch' in out and 'ANTHIVE_LOG_DIR=' in out and 'ANTHIVE_API_URL=http://127.0.0.1:8079' in out
+
+
+def test_internal_secret_read_problems_are_warned(tmp_path, monkeypatch, capsys):
+    import config as config_module
+    monkeypatch.delenv('ANTHIVE_INTERNAL_SECRET', raising=False)
+    monkeypatch.setattr(config_module, 'load_config', lambda: {'state_dir': str(tmp_path / 'nowhere')})
+    monkeypatch.setattr(config_module, '_WARNED_ONCE', set())
+    assert config_module.internal_auth_headers() == {}
+    assert 'no internal secret at' in capsys.readouterr().err
+
+
+def test_second_init_does_not_claim_to_create_the_passwords_file(tmp_path, ant_stack, capsys):
+    path = _write_site(tmp_path)
+    site = ant_stack.load_site(path)
+    assert 'secrets/initial-passwords.txt' in ant_stack.ensure_secrets(site)
+    path = _write_site(tmp_path, auth={'users': [{'name': 'boss', 'groups': ['admins']}, {'name': 'new'}]})
+    created = ant_stack.ensure_secrets(ant_stack.load_site(path))
+    assert 'secrets/initial-passwords.txt' not in created
+    assert 'added 1 initial password(s)' in capsys.readouterr().out
+
+
+def test_up_recreates_authelia_once(tmp_path, ant_stack, monkeypatch):
+    site_path_ = _write_site(tmp_path)
+    ant_stack.ensure_secrets(ant_stack.load_site(site_path_))
+    calls: list = []
+    monkeypatch.setattr(ant_stack, 'run_compose', lambda site, *args, check=True: calls.append(args) or 0)
+    monkeypatch.setattr(ant_stack, 'check', lambda site, running=False: [])
+    assert ant_stack.cmd_up(argparse.Namespace(site=str(site_path_), no_wait=True, wait_timeout=10)) == 0
+    recreated = [args for args in calls if '--force-recreate' in args and 'authelia' in args]
+    assert len(recreated) == 1

@@ -618,3 +618,11 @@ def test_client_snippets_cover_common_clients():
     # Every key is in the template the web page fills in, and has a {url} slot.
     assert set(mcp_tokens.SNIPPETS_TEMPLATE) == set(snippets)
     assert all('{url}' in tpl for tpl in mcp_tokens.SNIPPETS_TEMPLATE.values())
+
+
+def test_me_mcp_links_accepts_name_as_an_alias_of_label(tmp_path, monkeypatch):
+    """2.46.1: {"name": ...} used to be dropped silently (the field is `label`)."""
+    app, _ = _serve_app(tmp_path, monkeypatch, {'max_links_per_user': 3})
+    client = _client(app)
+    body = client.post('/me/mcp/links', json={'name': 'workstation'}, headers=ALICE).json()
+    assert [link['label'] for link in body['links']] == ['workstation']

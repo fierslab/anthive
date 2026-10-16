@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 try:
     from metadata import parse_md_file
@@ -33,6 +33,64 @@ class H5adEntry:
     def readable_id(self) -> str:
         """The path-style id, e.g. Sierksma2025/Pharmacogenomics."""
         return f"{self.study}/{self.stem}"
+
+
+# Folder-level documents that are never datasets (catalog_manifest uses the same rule).
+NON_DATASET_MD_NAMES = frozenset({'index.md', 'README.md'})
+
+
+def is_dataset_md_rel(rel: Path) -> bool:
+    """True when a store-relative ``.md`` path can describe a dataset.
+
+    Not a dataset: files at the store root (CLAUDE.md, CONVENTIONS.md,
+    HANDOFF.md, ...), anything under a ``static/`` folder (documents such as
+    ``static/<name>.h5ad.md`` that ship with a collection), ``index.md`` and
+    ``README.md``, and anything inside a ``_``-prefixed folder.
+    """
+    parts = Path(rel).parts
+    if len(parts) < 2 or not parts[-1].endswith('.md'):
+        return False
+    if parts[-1] in NON_DATASET_MD_NAMES:
+        return False
+    if 'static' in parts[:-1]:
+        return False
+    return not any(part.startswith('_') for part in parts[:-1])
+
+
+def catalog_dataset_mds(root: Path, include_inactive: bool = False) -> Iterator[Tuple[Path, Path, Path]]:
+    """The dataset ``.md`` files of a store, as ant-serve's catalog scan sees them.
+
+    Walks ``root`` following symlinks, skips ``_``-prefixed folders and keeps
+    the ``.md`` files ``is_dataset_md_rel`` accepts; datasets with a
+    ``.inactive`` sidecar are skipped unless ``include_inactive``. Yields
+    ``(path as walked, resolved path, path relative to root)``. Shared by
+    ant-serve (``_scan_databases``) and ``ant-stack check``, so both count
+    the same datasets.
+    """
+    root = Path(root)
+
+    def walk(folder: Path) -> Iterator[Tuple[Path, Path, Path]]:
+        try:
+            items = sorted(folder.iterdir())
+        except (PermissionError, OSError):
+            return
+        for item in items:
+            try:
+                resolved = item.resolve()
+                if resolved.is_file() and resolved.suffix == '.md':
+                    rel = item.relative_to(root)
+                    if not is_dataset_md_rel(rel):
+                        continue
+                    if not include_inactive and resolved.with_suffix('.inactive').exists():
+                        continue
+                    yield item, resolved, rel
+                elif resolved.is_dir() and not item.name.startswith('_'):
+                    yield from walk(item)
+            except (PermissionError, OSError, ValueError):
+                continue
+
+    if root.is_dir():
+        yield from walk(root)
 
 
 def iter_h5adstore(root: Path) -> Iterator[H5adEntry]:
