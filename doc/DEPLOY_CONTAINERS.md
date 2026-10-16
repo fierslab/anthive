@@ -195,9 +195,9 @@ programs themselves run from the images.
 ## 3. Get the catalogue, gene sets and paper library
 
 This step needs the access from step 1. Without it, make an empty folder
-instead (`mkdir -p /srv/anthive/h5adstore`), skip the clones and read
-"Without access" in step 1: the site needs at least one dataset of your own
-before it starts.
+instead (`mkdir -p /srv/anthive/h5adstore`) and skip the clones. Since
+2.46.0 the site starts with an empty store; `check` then says "no datasets
+yet". Add a dataset of your own later ("Without access" in step 1).
 
 ```sh
 cd /srv/anthive
@@ -369,7 +369,21 @@ bin/ops/ant-stack ingest -- ant sync pull --include-duckdb     # the whole catal
 ```
 
 `--include-duckdb` matters: without it only the raw `.h5ad` files come down
-and the site has nothing it can serve quickly. A dataset whose files are not
+and the site has nothing it can serve quickly.
+
+**A site with `sync_policy.mode: priority`** (set in the `anthive:` block
+of `site.yaml`, usually with `role: slave`, `max_local_gb` or
+`min_free_space`, for a disk smaller than the catalogue) pulls with plain
+`bin/ops/ant-stack ingest -- ant sync pull` (add `--evict` to drop
+datasets below the cutoff). It keeps the highest-priority datasets, each
+as its `.duckdb` with its layer, DE and score parquets, plus the shared
+files every site needs (`gene_stats_index.parquet`,
+`module_variability.parquet` and the other root indexes, `_facet_tests/`,
+the `_*_cache/` folders, `static/`), and never a raw `.h5ad`. There
+`--include-duckdb` has no effect (before 2.46.1 it switched the policy
+off and pulled every `.h5ad`; do not use it on such a site with an older
+release). Try any pull first with `--dry-run`: it lists what would be
+downloaded or evicted and changes nothing. A dataset whose files are not
 local is only listed with `s3.api_access: read` (step 4); it is then read
 from S3 over the network, which is slow. Running the same pull again only
 downloads what changed.
@@ -473,15 +487,15 @@ Run these from `/srv/anthive/anthive4`.
 | add a person | add them under `auth.users` in `site.yaml`, run `bin/ops/ant-stack init` (prints their password), give it to them. Authelia mode: works without a restart; basic mode: then `restart caddy`. See "Users and groups". |
 | reset a password | `bin/ops/ant-stack passwd <name>` (basic mode: then `restart caddy`) |
 | make someone admin | see "Users and groups": a new user gets `groups: [admins]` in `site.yaml`; an existing one is changed in the Authelia user file |
-| get new datasets | `cd ../h5adstore && git pull && cd ../anthive4`, then `bin/ops/ant-stack ingest -- ant sync pull --include-duckdb 'Collection/*'`, then `bin/ops/ant-stack restart api` |
+| get new datasets | `cd ../h5adstore && git pull && cd ../anthive4`, then `bin/ops/ant-stack ingest -- ant sync pull --include-duckdb 'Collection/*'` (a `sync_policy.mode: priority` site: `ant sync pull` without a filter or `--include-duckdb`); the pull asks the api to rescan, else `bin/ops/ant-stack restart api` |
 | see what runs | `bin/ops/ant-stack ps` |
 | read logs | `bin/ops/ant-stack logs api` (or `web`, `mcp`, `caddy`, `authelia`) |
 | restart one part | `bin/ops/ant-stack restart api` (several: `restart api web mcp`) |
 | change a setting | edit `site.yaml`, then `bin/ops/ant-stack check` and `bin/ops/ant-stack up` (see "After editing site.yaml") |
 | stop everything | `bin/ops/ant-stack down` (keeps data, users and settings) |
 | start again | `bin/ops/ant-stack up` |
-| convert my own .h5ad | put it in a collection folder with its `.md`, then `bin/ops/ant-stack ingest -- ant convert /srv/anthive/h5adstore/MyStudy/file.h5ad` |
-| publish uploaded papers | `bin/ops/ant-stack publish-library` (better: from a timer, see "Let people add papers") |
+| convert my own .h5ad | put it in a collection folder with its `.md`, then `bin/ops/ant-stack ingest -- ant convert /srv/anthive/h5adstore/MyStudy/file.h5ad`, then `bin/ops/ant-stack restart api` (or, as an admin, `POST /api/admin/rescan`) so the api lists it |
+| publish uploaded papers | `bin/ops/ant-stack publish-library` (better: from a timer, see "Let people add papers"; S3 keys only on the host: `--s3-host-config <path>`) |
 
 ### Users and groups
 
@@ -643,6 +657,16 @@ This is the recommended setup. Do it once:
    (instructions inside); with cron, use
    `config/examples/anthive-publish-library.cron.example`.
 
+**S3 keys only on the host.** A site that keeps the S3 keys out of every
+container (`s3.enabled: false` in `site.yaml`, the keys in an
+`anthive.yaml` of the host's own) runs the PDF step on the host instead
+of in the ingest container:
+`bin/ops/ant-stack publish-library --s3-host-config /etc/anthive/anthive-host.yaml`.
+It runs `bin/ops/ant-sync library --no-git` (needs `uv` on `PATH`) with
+`ANTHIVE_CONFIG` set to that file, under the same lock, after the git
+step. This replaces the older two steps (`publish-library --no-s3`
+followed by a separate `ANTHIVE_CONFIG=... ant-sync library --no-git`).
+
 Run it as the user that owns the library checkout (the `run_as` uid);
 otherwise git refuses the checkout as "dubious ownership". The command exits
 non-zero when the pull, the push or the S3 sync fails, so the timer shows up
@@ -688,11 +712,19 @@ s3:
    can scope keys. Every site that shares the bucket needs its own `site.name` (or `datasets.site_id`), and
    only one watcher may read an incoming prefix; `check` reminds you. Without these files the api presigns with the read-write pair
    (`s3_access_key_id`), and `check` warns that the api container then holds the catalogue's write key.
-2. Run the watcher on the host, as the uid the containers run as, with the api's state and the same
-   prefixes: `ANTHIVE_CONFIG=$(bin/ops/ant-stack config-path --role ingest)`
-   `ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest`, plus `ANTHIVE_TMP_DIR` / `ANTHIVE_INGEST_WORK_DIR` on host
-   disk. `check` prints the exact line, including `ANTHIVE_INGEST_WATCH_PREFIX` and
-   `ANTHIVE_INGEST_WATCH_CATALOG_PREFIX`. The api keeps the deposits in `<state_dir>/ingest/deposits.sqlite`
+2. Run the watcher on the host, as the uid the containers run as: `bin/ops/ant-stack watch` (since 2.46.1;
+   systemd: fill in `config/examples/anthive-ingest-watch-stack.service.example`). It starts
+   `bin/ingest/ant-ingest-watch` with the watcher config (`stack/anthive-watcher.yaml`, printed by
+   `bin/ops/ant-stack config-path --role watcher`): host paths under `scratch_dir/watcher` (else
+   `state_dir/watcher`) for `ANTHIVE_TMP_DIR`, `ANTHIVE_LOG_DIR`, `ANTHIVE_CONVERT_STAGING_DIR` and
+   `ANTHIVE_INGEST_WORK_DIR`, the real `state_dir` (so the internal secret in `state_dir/secrets/internal_secret`
+   is found), `ANTHIVE_INGEST_STATE_DIR=<state_dir>/ingest`, the S3 prefixes and
+   `ANTHIVE_API_URL=http://127.0.0.1:<ports.tools>`. `check` prints the same command with every variable spelled
+   out. The api is reached through Caddy's tools listener: `up` publishes it on `127.0.0.1:<ports.tools>`
+   (default 8079) while deposits are on; it drops every identity header and refuses requests without the
+   internal secret, which the api then checks, so it is no way in for other users of the host. Do not use the
+   ingest role's config on the host (it has container paths and `http://api:8080`: the publication then fails
+   at the rescan). The api keeps the deposits in `<state_dir>/ingest/deposits.sqlite`
    and reads the watcher's progress and reports from the same folder. The incoming prefix
    (`datasets.incoming_prefix`, default `__incoming/`) and the catalog prefix (`datasets.catalog_prefix`,
    default `s3.prefix`, where ant-sync keeps the catalogue) are rendered into every config, so the api presigns
@@ -822,12 +854,17 @@ cd /srv/anthive/anthive4
 git fetch --tags
 git checkout vX.Y.Z             # the new release
 nano site.yaml                  # images: tag: X.Y.Z
+bin/ops/ant-stack check         # flags new settings the release needs
 bin/ops/ant-stack pull
-bin/ops/ant-stack up
+bin/ops/ant-stack up            # right after pull
 ```
 
-Run `bin/ops/ant-stack check` before `up`: it flags new settings a release
-needs. Users, passwords, MCP links and caches live in `state_dir` and carry
+Run `up` right after `pull`. Since 2.46.1 `pull` and `check` only stage
+the new config (`stack/staging/`) and `up` applies it together with the
+new images. Before 2.46.1 `pull` and `check` wrote the new release's
+config into the running stack at once, and an old api that restarted
+before `up` stopped with "Unknown configuration parameters"; since 2.46.1
+the api also only warns about keys it does not know. Users, passwords, MCP links and caches live in `state_dir` and carry
 over. To go back, check out the old tag, put the old image tag back and run
 the same two commands.
 
@@ -852,6 +889,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.45.0** | (1) **Internal datasets need a login**: datasets that are not `access: public` (also those without an `access` value) are hidden from callers without an identity: absent from every listing, 404 on their routes (new `auth.internal_requires_auth`, default true; see "Internal datasets"). Sites with a login see no change; on `auth.mode: none` internal datasets disappear, and a `trusted-proxy` site behind a vhost without a login must drop the `Remote-*` headers there. (2) `X-Remote-User` / `X-Remote-Groups` are ignored everywhere and dropped by the Caddy snippets. (3) Cache, index and rescan routes (`/admin/*-cache/*`, `/admin/*-index/*`, `/admin/api-config/*`, `POST /genesets/rescan`, `/module-variability/rescan`, `/catalogs/rescan`) need an admin, a host-local tool or the internal secret; other signed-in users get 403. (4) The web, mcp and api containers must run the same release (the web now forwards the visitor's identity to the api). (5) **Cache warm-up**: after a start the api fills the facet caches for signed-in and anonymous visitors, per-donor values and the gene set rank tables in the background (new `warmup` block of anthive.yaml, default on; see "Cache warm-up after a start"). The first start builds the rank tables (up to a minute per dataset with scores, one at a time). | `ant-stack check` (it prints how many datasets are internal and who sees them, and warns only for `internal_requires_auth: false` or `trusted-proxy`), set `images: tag: 2.45.0`, `ant-stack pull`, `ant-stack up`; then `ant-stack restart api web mcp` (2.45.0's `up` does not recreate them when only the config changed; fixed in 2.45.1). If your upstream proxy sends identity as `X-Remote-*` only, switch it to `Remote-User` / `Remote-Groups`. If you copied an nginx vhost from `config/examples/`, add the new `proxy_set_header ... ""` lines (the public vhost must drop `Remote-*`). Scripts that call the rescan routes need an admin account. |
 | **2.45.1** | Fixes in `ant-stack`: `up` recreates api, web and mcp when their rendered config or secrets changed (before, a changed `auth.internal_requires_auth` or `auth.mode` did not take effect until a restart); `restart` takes several services; `passwd` without a terminal points to `--password`; `check` labels Caddy's in-container listener, prints the published host address and always prints the internal dataset count; `ant-stack logs api` shows the warm-up progress. | set `images: tag: 2.45.1`, `ant-stack pull`, `ant-stack up` |
 | **2.46.0** | Dataset deposits through the API: signed-in members of `datasets.upload_groups` get presigned uploads into the S3 watcher's incoming prefix and follow their deposit in the API (and two read-only MCP tools). Off by default; nothing changes for a site that leaves it off. `ant sync push` now sets `x-amz-meta-sha256` on uploaded `.h5ad` objects. | optional: `services: dataset_deposit: true`, the `datasets:` block, a presigning key pair and the watcher on the host (see "Let depositors add datasets"); `ant-stack check`. The primary site, once, for metadata-only updates of datasets pushed before: `bin/ops/ant-stack ingest -- ant sync stamp-sha256 --dry-run`, then without `--dry-run` |
+| **2.46.1** | Fixes. (1) `ant sync pull --dry-run` changes nothing on every path (before, with `--include-duckdb` or `--only` it downloaded and overwrote files); `ant sync push --dry-run` exists. (2) `sync_policy.mode: priority` pulls each kept dataset with its layer, DE and score parquets plus the shared indexes, caches, `_facet_tests/` and `static/`, never `.h5ad`; `--include-duckdb` no longer bypasses it. (3) `pull` and `check` stage the rendered config, `up` applies it; the api warns about unknown config keys instead of stopping. (4) `check` counts datasets like the api (store-root documents and `static/*.md` are not datasets) and says "no datasets yet" for an empty store. (5) Facet routes answer 503 `warming_up` with `Retry-After` while the start-up warm-up builds their caches, instead of blocking for a minute; the web says "warming up, try again in a minute". (6) `publish-library --s3-host-config <path>`; it says "records: up to date" when there was nothing to push. (7) Deposit watcher: `ant-stack watch`, a watcher config with host paths (`config-path --role watcher`), the api reachable through Caddy's tools listener on `127.0.0.1:<ports.tools>`, and the full command in `check`. (8) `POST /api/me/mcp/links` also accepts `{"name": ...}`. | `git checkout v2.46.1`, set `images: tag: 2.46.1`, `ant-stack check`, `ant-stack pull`, then `ant-stack up` at once. A priority site: replace any `ant sync pull --include-duckdb` in cron with `ant sync pull` (add `--evict` if wanted), try it with `--dry-run`. A deposit site: replace the watcher's `ANTHIVE_CONFIG=... --role ingest` setup with `ant-stack watch` (`config/examples/anthive-ingest-watch-stack.service.example`); `up` publishes `127.0.0.1:8079` (`ports.tools`). A site with S3 keys only on the host: replace the two-step library publishing with `publish-library --s3-host-config <path>`. |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.
@@ -929,7 +967,10 @@ catalogue from git.
 | `up` waits a long time, then "unhealthy" | the API is still scanning a large, mostly remote catalogue | pull the data you serve (step 5), run `up` again; `logs api` shows progress |
 | 502 right after `up --no-wait` | the API is still starting | wait a minute |
 | logged in but admin pages say 403 | the user is not an admin | basic mode: add to `auth.admins`, `ant-stack init`, `restart caddy`; authelia mode: add `admins` to the user's groups (see "Users and groups") |
-| a dataset is listed but its page is very slow | its files are not on this disk | pull that collection with `--include-duckdb` |
+| a dataset is listed but its page is very slow | its files are not on this disk | pull that collection with `--include-duckdb` (priority site: `ant sync pull`) |
+| `logs api` says "Unknown configuration parameters" and the api restarts over and over | before 2.46.1: `pull` or `check` of a newer release rewrote the config while the old images still ran | run `ant-stack up` (or go back to the old tag and run `ant-stack render`); from 2.46.1 the config is only staged until `up`, and unknown keys are a warning |
+| a facet panel says "warming up, try again in a minute" | the api was just restarted and builds its facet caches in the background (a minute or two) | wait; `ant-stack logs api` shows "warm-up: facet caches ..." lines |
+| the deposit watcher fails at the rescan, or with PermissionError on `/scratch/...` | it runs with the ingest role's config (container paths, `http://api:8080`) | use `bin/ops/ant-stack watch` (2.46.1) |
 | `check`: library_chunks.parquet is missing | the literature index was not downloaded | `bin/ops/ant-stack ingest -- ant sync pull --library-only` |
 | `check`: index built with another model | the index and the image use different embedding models | literature search still works by keyword; rebuild the index with `ant lib-index --full` or use the matching release |
 | literature search finds nothing in one paper | its PDF has no text layer (a scan) | the index build lists these; rebuild that paper with `ant lib-index --parser docling` (OCR) on a machine with the ingest image |
@@ -1109,7 +1150,8 @@ resolve inside the containers.
 | `mcp.token_ttl_days`, `mcp.max_links_per_user` | how long a link lives (0 = forever) and how many links one user may hold (default 5) |
 | `services.paper_upload` | let `library.upload_groups` add papers through the API and MCP (mounts the library read-write) |
 | `services.dataset_deposit` | since 2.46.0: let `datasets.upload_groups` deposit datasets through presigned S3 uploads (needs `s3.enabled`; see "Let depositors add datasets") |
-| `datasets.*` | since 2.46.0: who may deposit (`upload_groups`, default admins and curators), `max_gb`, `url_ttl_hours`, `max_open_per_user`, `max_pending_gb_per_user`, `update_policy`, `site_id` (default `site.name`) |
+| `datasets.*` | since 2.46.0: who may deposit (`upload_groups`, default admins and curators), `max_gb`, `url_ttl_hours`, `max_open_days` (an open deposit not completed within this many days expires, default 7), `max_open_per_user`, `max_pending_gb_per_user`, `update_policy`, `site_id` (default `site.name`) |
+| `ports.tools` | since 2.46.1: the `127.0.0.1` port of Caddy's listener for the host-side deposit watcher (default 8079; published only with `services.dataset_deposit`; requires the internal secret) |
 | `library.*` | upload groups, PDF size limit, git committer and push, S3 autopush, index publisher, `index_pull` (false: this site never downloads the shared literature index) |
 | `library.deploy_key` | SSH key `ant-stack publish-library` pushes the library with (host path) |
 | `s3.api_access` | what the api may do on S3: `none` (default), `read` (own read-only key pair) or `write` |
@@ -1119,7 +1161,11 @@ resolve inside the containers.
 
 `ant-stack render` (run by `up`) writes everything derived from `site.yaml`
 to `<state_dir>/stack/`. Do not edit those files; they are rewritten on
-every `up`.
+every `up`. Since 2.46.1 every render goes to `<state_dir>/stack/staging/`
+first; only `init`, `render`, `up` and `passwd` put it in place. `pull`,
+`check`, `ingest`, `logs`, `ps`, `restart` and `publish-library` only stage
+it, so containers of the old release never read a config written for the
+new one.
 
 Who sees which secret:
 

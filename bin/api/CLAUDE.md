@@ -202,9 +202,19 @@ and `lib/config.py` (anthive.yaml loader).
   (`module_ranks: all | priority | off`, `module_rank_datasets` first,
   `workers` 1 or 2 against the store's 2 build slots). `ANTHIVE_WARMUP=0` or
   the older `ANTHIVE_FACET_WARMUP=0` skips it. Tests: the `warmup` tests in
-  `tests/test_facet_results.py`.
+  `tests/test_facet_results.py`. 2.46.1: while the warm-up has not finished the
+  facet phase of a caller's visitor kind (`_FACET_WARMUP_PENDING`, filled by
+  `_start_warmup`, emptied per kind in `_warm_caches`, also on failure), the
+  cross-dataset facet routes call `_facet_warm_gate()` and answer 503
+  `{status: "warming_up", retry_after}` with `Retry-After` instead of building
+  the same tables on a request thread. Add the gate to any new cross-dataset
+  facet route. A 503 carrying `X-Anthive-Unavailable` (`EXPECTED_UNAVAILABLE_HEADER`:
+  warming up, no geneset store) is logged at info once per reason, not as ERROR.
   `facets_visible` (config) only adds `hidden_by_config` to the facet
   listings; nothing is dropped from the API.
+- **Catalog scan** walks the store with `lib/h5adstore.catalog_dataset_mds` (2.46.1), the same helper
+  `ant-stack check` counts with: store-root documents, `static/` documents, `index.md`/`README.md`,
+  `_` folders and inactive datasets are never datasets.
 
 - **Facet engine v2** (2026-10-05): dataset metadata (`/databases`, info) also carries
   `replicate_unit`, `replicate_column`, `replicate_basis`, `disease_basis` (`_lineage_fields`); the

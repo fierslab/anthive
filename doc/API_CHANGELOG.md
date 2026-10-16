@@ -29,6 +29,76 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.46.1 (unreleased)
+
+Patch release: operational fixes reported by the anthive-intern site and found on the 2.46.0 scratch site.
+No endpoint, parameter or field is removed or renamed. Two response changes a client may see: the facet
+routes can answer 503 `warming_up` (below), and `POST /me/mcp/links` accepts `name`.
+
+REST:
+
+- Facet routes no longer block while the start-up warm-up builds their caches. Until the warm-up has
+  finished the facet tables of the caller's kind (signed-in or anonymous), `/genes/{gene}/facet-effects`,
+  `/facets/{facet}/effects`, `/facets/{facet}/effects/top`, `/facets/{facet}/effects/overview`,
+  `/facets/{facet}/tests`, `/facets/{facet}/modules/top`, `/genesets/{study}/{experiment}/{name}/facet-effects`
+  and `/genes/{gene}/detection` answer **503** `{"status": "warming_up", "retry_after": 30, "message": ...}` with
+  a `Retry-After: 30` header (on intern, `/genes/{g}/facet-effects` held a request thread for more than 60 s
+  after a restart). Clients should retry after `retry_after` seconds. Per-dataset facet routes
+  (`/databases/{id}/facet-tests...`) never wait. The web UI shows "warming up, try again in a minute".
+- `POST /me/mcp/links` takes the link name as `label` (as documented) or `name` (it was silently dropped).
+- Expected 503s (warming up, no geneset store configured) are logged at info once per reason instead of an
+  ERROR line on every page, and do not count as errors in `/health` / `/metrics`.
+- The catalog scan uses `lib/h5adstore.catalog_dataset_mds`: documents at the store root and under
+  `static/`, `index.md` and `README.md` are never datasets (no change for a store whose datasets follow
+  `CONVENTIONS.md`).
+- Configuration: an unknown top-level key in `anthive.yaml` is a warning (printed once), not a start
+  failure, so an api of release N never crash-loops on a config rendered for N+1. `ANTHIVE_CONFIG_STRICT=1`
+  restores the error; `ant-stack` validates its renders that way.
+- Tools reading the internal secret (`config.internal_auth_headers`) warn once when the secret file is
+  missing or unreadable instead of silently sending no secret.
+
+`ant-sync`:
+
+- `--dry-run` is honoured on every path: `pull` (priority driver, `--only`, `--include-duckdb`, modes `all`
+  and `duckdb`), the new `push --dry-run`, `evict`, `plan` and the library. Nothing is downloaded, uploaded,
+  deleted or re-stamped, ant-serve is not called and the h5adstore is not `git pull`ed. Before, on intern,
+  `pull --include-duckdb --no-library --evict --dry-run` on a priority site pulled every raw `.h5ad` and
+  overwrote duckdb and parquet files under the running api.
+- `sync_policy.mode: priority`: `--include-duckdb` no longer bypasses the policy (only `--only` does). Each
+  kept dataset is its `.duckdb` plus its sidecars (`.layer.*.by_gene/by_cell.parquet`, `.de.parquet`,
+  `.scores.parquet`), counted in the budget and evicted together; the root fleet indexes
+  (`gene_stats_index.parquet`, `module_variability.parquet`, `scores_index.parquet`,
+  `gene_variance_index.parquet`), `_facet_tests/`, the `_*_cache/` folders and `static/` are always mirrored;
+  `.h5ad` never. The S3 catalog manifest (`_catalog/manifest.json`) is still not pulled: nothing on a
+  site reads it (mus reads it from S3).
+- A generic pull that overwrites a `.duckdb` releases it in ant-serve first and asks for a rescan after.
+  The ant-serve URL follows `ANTHIVE_API_URL` / `api_url` (the ingest container reaches `http://api:8080`).
+
+`ant-stack`:
+
+- `pull`, `check`, `ingest`, `logs`, `ps`, `restart` and `publish-library` render into
+  `<state_dir>/stack/staging/` only; `init`, `render`, `up` and `passwd` apply the render. A restarting old
+  container no longer reads the config of the new release before `up`. `pull` ends with "next: ant-stack up".
+- `check` counts datasets with the catalog scan's rule (intern saw CLAUDE.md, CONVENTIONS.md, HANDOFF.md,
+  VALIDATION.md, migration_audit.md and `static/*.h5ad.md` reported as datasets without a `.duckdb`) and
+  says "no datasets yet" for an empty store.
+- `publish-library --s3-host-config <path>` runs `ant-sync library --no-git` on the host with
+  `ANTHIVE_CONFIG=<path>` (sites that keep S3 keys out of the containers), replacing a two-step setup. It
+  prints "records: up to date" when there was nothing to push.
+- Deposit watcher on a container site: new config role `watcher` (`config-path --role watcher`: host
+  paths under `scratch_dir/watcher` or `state_dir/watcher`, the real `state_dir` and its internal secret,
+  full S3 keys), new `ant-stack watch [-- ARGS]`, new site key `ports.tools` (default 8079): while
+  `services.dataset_deposit` is on, Caddy listens on `127.0.0.1:<ports.tools>` for host-side tools, drops
+  identity headers, refuses requests without `X-Anthive-Internal` and forwards to the api. `check` prints the
+  complete command; `config/examples/anthive-ingest-watch-stack.service.example`. Before, the printed command
+  used the ingest role's container paths (`/scratch/tmp`, `/var/lib/anthive`) and `http://api:8080`, so
+  publication failed at the rescan.
+- Cosmetic: a second `init` no longer says "created initial-passwords.txt" when it appends; `passwd` without
+  a terminal fails with the `--password` hint before getpass prints its echo warning; `up` recreates
+  Authelia once instead of twice; the api log says "facet caches for all callers".
+
+---
+
 ## 2.46.0 (2026-10-16)
 
 Minor release: dataset deposits through the API (`doc/DESIGN_dataset_ingestion.md` section 22). A depositor
