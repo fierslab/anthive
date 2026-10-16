@@ -29,7 +29,7 @@ the spec drifting away from the running code.
 
 ---
 
-## 2.46.0 (unreleased)
+## 2.46.0 (2026-10-16)
 
 Minor release: dataset deposits through the API (`doc/DESIGN_dataset_ingestion.md` section 22). A depositor
 signs in to Anthive and gets presigned upload URLs for exact keys under the S3 watch route's incoming prefix;
