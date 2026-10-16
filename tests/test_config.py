@@ -46,20 +46,45 @@ class TestValidateConfig:
     def test_empty_config_valid(self, defaults):
         validate_config({}, defaults)
 
-    def test_unknown_param_raises_when_strict(self, defaults, monkeypatch):
+    def test_unknown_param_raises_by_default(self, defaults, monkeypatch):
+        """Host tools (ant-sync, ant-stack, ant-ingest-watch) stay strict."""
+        import config
+        monkeypatch.setitem(config._UNKNOWN_KEYS_LENIENT, 'on', False)
+        monkeypatch.delenv("ANTHIVE_CONFIG_LENIENT", raising=False)
         with pytest.raises(ConfigError, match="Unknown"):
-            validate_config({"bogus_key": 42}, defaults, strict=True)
+            validate_config({"bogus_key": 42}, defaults)
+        monkeypatch.setitem(config._UNKNOWN_KEYS_LENIENT, 'on', True)
         monkeypatch.setenv("ANTHIVE_CONFIG_STRICT", "1")
         with pytest.raises(ConfigError, match="Unknown"):
             validate_config({"bogus_key": 42}, defaults)
 
-    def test_unknown_param_is_a_warning_by_default(self, defaults, monkeypatch, capsys):
-        """A config rendered for a newer release must not crash-loop an older image (2.46.1)."""
+    def test_unknown_param_is_a_warning_in_a_server(self, defaults, monkeypatch, capsys):
+        """A config rendered for a newer release must not crash-loop an older api/web/mcp (2.46.1)."""
+        import config
         monkeypatch.delenv("ANTHIVE_CONFIG_STRICT", raising=False)
+        monkeypatch.setitem(config._UNKNOWN_KEYS_LENIENT, 'on', True)
         validate_config({"key_of_a_later_release": 1}, defaults)
         validate_config({"key_of_a_later_release": 1}, defaults)
         err = capsys.readouterr().err
         assert err.count("ignoring unknown configuration parameters: key_of_a_later_release") == 1
+
+    @pytest.mark.parametrize("bad, words", [
+        ({"internal_require_auth": False}, "did you mean 'internal_requires_auth'"),
+        ({"sync_polcy": {"role": "slave"}}, "did you mean 'sync_policy'"),
+        ({"sync_policy": {"rol": "slave"}}, "unknown key(s) in sync_policy: rol"),
+        ({"sync_policy": {"role": "slaves"}}, "sync_policy.role must be primary or slave"),
+        ({"auth": {"mod": "basic"}}, "unknown key(s) in auth: mod"),
+        ({"s3": {"bukcet": "b"}}, "unknown key(s) in s3: bukcet"),
+        ({"internal_requires_auth": "no"}, "internal_requires_auth must be true or false"),
+        ({"datasets_upload_groups": "curators"}, "datasets_upload_groups must be a list"),
+    ])
+    def test_critical_keys_are_strict_even_in_a_server(self, defaults, monkeypatch, bad, words):
+        import config
+        monkeypatch.delenv("ANTHIVE_CONFIG_STRICT", raising=False)
+        monkeypatch.setitem(config._UNKNOWN_KEYS_LENIENT, 'on', True)
+        with pytest.raises(ConfigError) as excinfo:
+            validate_config(bad, defaults)
+        assert words in str(excinfo.value)
 
     def test_valid_override(self, defaults):
         validate_config({"max_obscat_values": 200}, defaults)

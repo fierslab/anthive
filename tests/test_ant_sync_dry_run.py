@@ -240,9 +240,75 @@ def test_priority_budget_counts_sidecars_and_evicts_them(ant_sync, monkeypatch, 
     assert (store / 'gene_stats_index.parquet').exists()   # shared files ignore the budget
 
 
-def test_bundle_owner_prefers_the_longest_stem(ant_sync):
+def test_bundle_owner_needs_the_exact_stem(ant_sync):
     stems = {'G': {'foo', 'foo.v2'}}
     assert ant_sync._bundle_owner('G/foo.v2.layer.X.by_gene.parquet', stems) == 'G/foo.v2.duckdb'
+    assert ant_sync._bundle_owner('G/foo.layer.counts.by_cell.parquet', stems) == 'G/foo.duckdb'
     assert ant_sync._bundle_owner('G/foo.de.parquet', stems) == 'G/foo.duckdb'
+    assert ant_sync._bundle_owner('G/foo.v2.scores.parquet', stems) == 'G/foo.v2.duckdb'
     assert ant_sync._bundle_owner('G/foobar.de.parquet', stems) is None
     assert ant_sync._bundle_owner('G/foo.h5ad', stems) is None
+    # review C5: a sidecar of another dataset (no foo.sub.duckdb) is never given to foo
+    assert ant_sync._bundle_owner('G/foo.sub.de.parquet', stems) is None
+    split = ant_sync._split_priority_index({'G/foo.duckdb': (1, 1), 'G/foo.sub.de.parquet': (1, 1)})
+    assert split[1]['G/foo.duckdb'] == {}
+
+
+# ── security review of 2.46.1 ────────────────────────────────────────────────
+
+def test_primary_priority_never_evicts_or_overwrites_sidecars_and_shared_files(ant_sync, monkeypatch, tmp_path):
+    """S2: on a primary the local scores / DE / fleet indexes / caches may be work not pushed yet."""
+    store = _store(tmp_path)
+    (store / 'G1' / 'a.scores.parquet').write_bytes(b'LOCAL NEWER SCORES, NOT PUSHED')
+    (store / 'module_variability.parquet').write_bytes(b'LOCAL REBUILT, NOT PUSHED')
+    (store / 'gene_stats_index.parquet').write_bytes(b'gsi')       # same size as S3, older: would be re-stamped
+    os.utime(store / 'gene_stats_index.parquet', (MTIME - 50, MTIME - 50))
+    client = RecordingS3(S3_OBJECTS)
+    _patch(ant_sync, monkeypatch, client, store)
+    monkeypatch.setattr(ant_sync, 'is_slave', lambda cfg=None: False)
+    ant_sync.cmd_pull(_args(dry_run=False), {'bucket': 'bk'}, store)
+    assert (store / 'G1' / 'a.scores.parquet').read_bytes() == b'LOCAL NEWER SCORES, NOT PUSHED'
+    assert (store / 'module_variability.parquet').read_bytes() == b'LOCAL REBUILT, NOT PUSHED'
+    assert int((store / 'gene_stats_index.parquet').stat().st_mtime) == MTIME - 50
+    pulled = {call[1] for call in client.writes if call[0] == 'download_file'}
+    assert 'G1/a.de.parquet' in pulled and '_facet_tests/G1/a.facet_tests.parquet' in pulled   # missing: fetched
+    assert 'G1/a.scores.parquet' not in pulled and 'module_variability.parquet' not in pulled
+    # evict on a primary: the duckdb goes as before, its sidecars stay
+    client.writes.clear()
+    _patch(ant_sync, monkeypatch, client, store, max_local_gb=80 / 1024 ** 3)
+    monkeypatch.setattr(ant_sync, 'is_slave', lambda cfg=None: False)
+    ant_sync.cmd_pull(_args(dry_run=False, evict=True), {'bucket': 'bk'}, store)
+    assert not (store / 'G1' / 'a.duckdb').exists()
+    assert (store / 'G1' / 'a.scores.parquet').read_bytes() == b'LOCAL NEWER SCORES, NOT PUSHED'
+    assert (store / 'G1' / 'a.de.parquet').exists()
+
+
+@pytest.mark.parametrize('mode', ['duckdb', 'priority'])
+def test_a_failed_download_restores_the_released_duckdb_and_rescans(ant_sync, monkeypatch, tmp_path, mode):
+    """C2: release/restore always pair up."""
+    store = _store(tmp_path)
+    client = RecordingS3(S3_OBJECTS)
+    admin_calls, _git = _patch(ant_sync, monkeypatch, client, store, mode=mode)
+
+    def failing_download(bucket, key, filename, **_):
+        if key == 'G1/a.duckdb':
+            raise OSError('network')
+        Path(filename).parent.mkdir(parents=True, exist_ok=True)
+        Path(filename).write_bytes(S3_OBJECTS[key])
+    client.download_file = failing_download
+    with pytest.raises(OSError):
+        ant_sync.cmd_pull(_args(dry_run=False), {'bucket': 'bk'}, store)
+    paths = [call[1] for call in admin_calls]
+    release = next(i for i, p in enumerate(paths) if p.startswith('/admin/release/G1/a'))
+    assert '/admin/restore/G1/a' in paths[release:]
+    assert paths[-1] == '/admin/rescan'
+
+
+def test_container_only_api_url_is_warned_on_the_host(ant_sync, monkeypatch, capsys):
+    monkeypatch.delenv('ANTHIVE_API_URL', raising=False)
+    monkeypatch.setitem(ant_sync._API_URL_WARNED, 'done', False)
+    assert ant_sync._ant_serve_url({'api_url': 'http://api:8080'}) == 'http://api:8080'
+    assert 'resolves only inside the container network' in capsys.readouterr().err
+    monkeypatch.setitem(ant_sync._API_URL_WARNED, 'done', False)
+    assert ant_sync._ant_serve_url({'rest_api_port': 9000}) == 'http://localhost:9000'
+    assert capsys.readouterr().err == ''

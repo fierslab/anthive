@@ -80,7 +80,7 @@ S3_ON = {'enabled': True, 'endpoint': 's3.example.org', 'bucket': 'b', 'region':
 
 def _rendered(ant_stack, site) -> dict[str, str]:
     stack = ant_stack.render(site, quiet=True)
-    return {role: (stack / name).read_text() for role, name in ant_stack.CONFIG_ROLES.items()}
+    return {role: (stack / name).read_text() for role, name in ant_stack._config_roles(site).items()}
 
 
 # ── 1. secrets only where they are used ─────────────────────────────────────
@@ -96,9 +96,10 @@ def test_s3_keys_only_in_ingest_config_by_default(tmp_path, ant_stack):
     ingest = yaml.safe_load(texts['ingest'])
     assert ingest['s3']['access_key_id'] == 'RW-KEY-ID'
     assert ingest['s3']['secret_access_key'] == 'RW-SECRET'
-    for name in ant_stack.CONFIG_ROLES.values():
+    for name in ant_stack._config_roles(site).values():
         assert oct((site['_state'] / 'stack' / name).stat().st_mode & 0o777) == '0o600'
     assert oct((site['_state'] / 'stack').stat().st_mode & 0o777) == '0o700'
+    assert not (site['_state'] / 'stack' / 'anthive-watcher.yaml').exists()     # only with deposits on
 
 
 def test_api_read_access_uses_the_read_only_keys(tmp_path, ant_stack):
@@ -734,10 +735,17 @@ def test_render_validation_is_strict_but_the_api_only_warns(tmp_path, ant_stack,
     env = {**os.environ, 'ANTHIVE_CONFIG': str(config_path)}
     env.pop('ANTHIVE_CONFIG_STRICT', None)
     result = subprocess.run(['python3', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); import config; '
-                             'config.load_config(); print("loaded")', str(REPO / 'lib')],
-                            env=env, capture_output=True, text=True)
+                             'config.set_unknown_keys_lenient(); config.load_config(); print("loaded")',
+                             str(REPO / 'lib')], env=env, capture_output=True, text=True)
     assert result.returncode == 0 and 'loaded' in result.stdout
     assert 'ignoring unknown configuration parameters: no_such_key_anywhere' in result.stderr
+    # a host tool (no set_unknown_keys_lenient) stays strict
+    result = subprocess.run(['python3', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); import config; '
+                             'config.load_config()', str(REPO / 'lib')], env=env, capture_output=True, text=True)
+    assert result.returncode != 0 and 'Unknown configuration parameters' in result.stderr
+    # every server calls set_unknown_keys_lenient before it loads its config
+    for script in ('bin/api/ant-serve', 'bin/api/ant-mcp', 'web/ant-browse'):
+        assert '_anthive_config_module.set_unknown_keys_lenient()' in (REPO / script).read_text(), script
 
 
 # ── 2.46.1: fixes from the anthive-intern report and the 2.46.0 scratch site ──
@@ -892,3 +900,124 @@ def test_up_recreates_authelia_once(tmp_path, ant_stack, monkeypatch):
     assert ant_stack.cmd_up(argparse.Namespace(site=str(site_path_), no_wait=True, wait_timeout=10)) == 0
     recreated = [args for args in calls if '--force-recreate' in args and 'authelia' in args]
     assert len(recreated) == 1
+
+
+# ── security review of 2.46.1 ────────────────────────────────────────────────
+
+def test_caddy_logs_never_contain_the_internal_secret(tmp_path, ant_stack):
+    """S1: a 502 on the tools listener logged every request header, X-Anthive-Internal included."""
+    caddy = _caddy()
+    if caddy is None:
+        pytest.skip('caddy not installed')
+    import urllib.error  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+    site = _deposit_site(ant_stack, tmp_path, tls={'mode': 'off'}, ports={'bind': '127.0.0.1'})
+    stack = ant_stack.render(site, quiet=True)
+    _host_snippets(ant_stack, stack)
+    tools_port, dead_port = _free_port(), _free_port()
+    env = _caddy_env(ant_stack, site, stack, _free_port(), dead_port, dead_port)
+    env.update({'ANTHIVE_HTTP_REDIRECT_SNIPPET': str(stack / 'caddy' / 'tools.caddy'),
+                'ANTHIVE_TOOLS_PORT': str(tools_port), 'ANTHIVE_API_PORT': str(dead_port)})
+    proc = subprocess.Popen([caddy, 'run', '--config', str(REPO / 'config' / 'Caddyfile'), '--adapter', 'caddyfile'],
+                            env=env, cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    statuses = []
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and len(statuses) < 2:
+            try:
+                for headers in ({'X-Anthive-Internal': 'SUPERSECRET123', 'Remote-User': 'boss'}, {}):
+                    request = urllib.request.Request(f"http://127.0.0.1:{tools_port}/admin/rescan", headers=headers)
+                    try:
+                        urllib.request.urlopen(request, timeout=3)
+                    except urllib.error.HTTPError as error:
+                        statuses.append(error.code)
+            except OSError:
+                if proc.poll() is not None:
+                    pytest.fail(proc.stderr.read().decode()[-2000:])
+                statuses.clear()
+                time.sleep(0.3)
+    finally:
+        proc.terminate()
+        out, err = proc.communicate(timeout=10)
+    assert statuses == [502, 403]                 # with the secret: forwarded (dead upstream); without: refused
+    log = (out + err).decode()
+    assert '502' in log and '/admin/rescan' in log
+    assert 'SUPERSECRET123' not in log and 'X-Anthive-Internal' not in log
+    assert '"Remote-User"' not in log
+
+
+def test_up_applies_nothing_when_check_blocks(tmp_path, ant_stack, monkeypatch):
+    """S3: the live config changes only when `up` goes ahead."""
+    path = _write_site(tmp_path)
+    site = ant_stack.load_site(path)
+    ant_stack.ensure_secrets(site)
+    ant_stack.render(site, quiet=True)
+    stack = site['_state'] / 'stack'
+    before = (stack / 'anthive-api.yaml').read_bytes()
+    _write_site(tmp_path, anthive={'max_obscat_values': 66})
+    calls: list = []
+    monkeypatch.setattr(ant_stack, 'run_compose', lambda site, *args, check=True: calls.append(args) or 0)
+    monkeypatch.setattr(ant_stack, 'check', lambda site, running=False: ['port in use'])
+    assert ant_stack.cmd_up(argparse.Namespace(site=str(path), no_wait=True, wait_timeout=10)) == 1
+    assert (stack / 'anthive-api.yaml').read_bytes() == before and calls == []
+    assert b'max_obscat_values: 66' in (stack / 'staging' / 'anthive-api.yaml').read_bytes()
+    monkeypatch.setattr(ant_stack, 'check', lambda site, running=False: [])
+    assert ant_stack.cmd_up(argparse.Namespace(site=str(path), no_wait=True, wait_timeout=10)) == 0
+    assert b'max_obscat_values: 66' in (stack / 'anthive-api.yaml').read_bytes()
+
+
+def test_passwd_promotes_only_the_auth_files(tmp_path, ant_stack):
+    path = _write_site(tmp_path, auth={'mode': 'basic', 'admins': ['boss'], 'users': [{'name': 'boss'}]})
+    site = ant_stack.load_site(path)
+    ant_stack.ensure_secrets(site)
+    ant_stack.render(site, quiet=True)
+    stack = site['_state'] / 'stack'
+    before_env, before_auth = (stack / '.env').read_bytes(), (stack / 'caddy' / 'auth.caddy').read_bytes()
+    _write_site(tmp_path, auth={'mode': 'basic', 'admins': ['boss'], 'users': [{'name': 'boss'}]},
+                images={'tag': '9.9.9'})                                    # a staged upgrade
+    assert ant_stack.cmd_passwd(argparse.Namespace(site=str(path), user='boss', password='a-long-password')) == 0
+    assert (stack / '.env').read_bytes() == before_env                        # the upgrade stays staged
+    assert (stack / 'caddy' / 'auth.caddy').read_bytes() != before_auth      # the new hash is live
+    assert oct((stack / 'caddy' / 'auth.caddy').stat().st_mode & 0o777) == '0o600'
+
+
+def test_render_writes_atomically_under_a_lock(tmp_path, ant_stack, monkeypatch):
+    """C1: no partial file is ever visible; two renders do not interleave."""
+    path = _write_site(tmp_path)
+    site = ant_stack.load_site(path)
+    ant_stack.ensure_secrets(site)
+    ant_stack.render(site, quiet=True)
+    stack = site['_state'] / 'stack'
+    inode = (stack / 'anthive-api.yaml').stat().st_ino
+    _write_site(tmp_path, anthive={'max_obscat_values': 61})
+    ant_stack.render(ant_stack.load_site(path), quiet=True)
+    assert (stack / 'anthive-api.yaml').stat().st_ino != inode               # replaced by rename, not rewritten
+    assert not list(stack.rglob('.*.tmp'))
+    import fcntl  # noqa: PLC0415
+    with open(stack / '.lock', 'a+') as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        done = []
+        thread = threading.Thread(target=lambda: done.append(ant_stack.render(ant_stack.load_site(path), quiet=True)))
+        thread.start()
+        thread.join(1.0)
+        assert not done                                                     # waits for the lock
+    thread.join(20)
+    assert done
+
+
+def test_ports_must_be_numbers(tmp_path, ant_stack):
+    for bad in (None, 0, 'x', 70000):
+        with pytest.raises(ant_stack.SiteError, match='ports.http'):
+            _site(ant_stack, tmp_path, ports={'http': bad})
+
+
+def test_watcher_config_only_with_deposits(tmp_path, ant_stack):
+    site = _deposit_site(ant_stack, tmp_path)
+    stack = ant_stack.render(site, quiet=True)
+    assert (stack / 'anthive-watcher.yaml').exists()
+    path = _write_site(tmp_path, services={'dataset_deposit': False}, s3=S3_ON)
+    site = ant_stack.load_site(path)
+    ant_stack.render(site, quiet=True)
+    assert not (stack / 'anthive-watcher.yaml').exists() and not (stack / 'staging' / 'anthive-watcher.yaml').exists()
+    with pytest.raises(ant_stack.SiteError, match='dataset_deposit'):
+        ant_stack.cmd_config_path(argparse.Namespace(site=str(path), role='watcher'))

@@ -107,30 +107,82 @@ def load_user_config() -> Dict[str, Any]:
 
 
 _WARNED_UNKNOWN: set = set()
+_UNKNOWN_KEYS_LENIENT = {'on': False}
+
+# Keys whose mistakes change who sees what or what a sync deletes: validated strictly in every process,
+# lenient or not (an unknown sub-key, a wrong type, or an unknown top-level key that looks like one of them).
+CRITICAL_KEYS = ('sync_policy', 'auth', 'internal_requires_auth', 'datasets_upload_groups', 's3')
+_CRITICAL_BLOCKS = ('sync_policy', 'auth', 's3')
+
+
+def set_unknown_keys_lenient(lenient: bool = True) -> None:
+    """Long-running servers (ant-serve, ant-browse, ant-mcp) call this before loading the config: an
+    unknown top-level key is then a warning, so a container of release N never crash-loops on a config
+    rendered for N+1 (2.46.1). Host tools stay strict: a typo there is an error."""
+    _UNKNOWN_KEYS_LENIENT['on'] = bool(lenient)
+
+
+def _critical_problems(config: Dict[str, Any], defaults: Dict[str, Any], unknown: set) -> List[str]:
+    import difflib  # noqa: PLC0415
+    problems = []
+    for key in sorted(unknown):
+        close = difflib.get_close_matches(key, CRITICAL_KEYS, n=1, cutoff=0.8)
+        if close:
+            problems.append(f"unknown key {key!r} (did you mean {close[0]!r}?)")
+    for block in _CRITICAL_BLOCKS:
+        if block not in config or config[block] is None:
+            continue
+        if not isinstance(config[block], dict):
+            problems.append(f"{block} must be a mapping")
+            continue
+        extra = set(config[block]) - set(defaults.get(block) or {})
+        if extra:
+            problems.append(f"unknown key(s) in {block}: {', '.join(sorted(extra))}")
+    role = (config.get('sync_policy') or {}).get('role') if isinstance(config.get('sync_policy'), dict) else None
+    if role is not None and str(role).strip().lower() not in ('primary', 'slave'):
+        problems.append(f"sync_policy.role must be primary or slave, not {role!r}")
+    if 'internal_requires_auth' in config and not isinstance(config['internal_requires_auth'], bool):
+        problems.append(f"internal_requires_auth must be true or false, not {config['internal_requires_auth']!r}")
+    groups = config.get('datasets_upload_groups')
+    if groups is not None and (not isinstance(groups, list) or not all(isinstance(g, str) for g in groups)):
+        problems.append("datasets_upload_groups must be a list of group names")
+    return problems
 
 
 def validate_config(config: Dict[str, Any], defaults: Dict[str, Any], strict: Optional[bool] = None) -> None:
     """
     Validate configuration values
 
-    Unknown top-level keys are a warning (printed once per process), not an
-    error: a config rendered by a newer ``ant-stack`` must not make an older
-    image crash-loop on start (2.46.1). ``strict=True`` (or the environment
-    variable ``ANTHIVE_CONFIG_STRICT=1``, which ``ant-stack`` sets when it
-    validates a fresh render) turns them back into an error.
+    Unknown top-level keys are an error, except in a process that called
+    ``set_unknown_keys_lenient()`` (the api, web and mcp servers) or runs
+    with ``ANTHIVE_CONFIG_LENIENT=1``: there they are a warning printed once,
+    so mixed releases cannot crash-loop. ``ANTHIVE_CONFIG_STRICT=1`` (set by
+    ``ant-stack`` when it validates a render) always makes them an error.
+    ``CRITICAL_KEYS`` are checked strictly everywhere.
 
     Args:
         config: User configuration to validate
         defaults: Default configuration for reference
-        strict: Raise on unknown keys (default: ``ANTHIVE_CONFIG_STRICT``)
+        strict: Raise on unknown keys (default: from the process setting and environment)
 
     Raises:
         ConfigError: If configuration is invalid
     """
     if strict is None:
-        strict = os.environ.get('ANTHIVE_CONFIG_STRICT', '').strip() in ('1', 'true', 'yes')
-    # Check for unknown parameters
+        if os.environ.get('ANTHIVE_CONFIG_STRICT', '').strip() in ('1', 'true', 'yes'):
+            strict = True
+        else:
+            strict = not (_UNKNOWN_KEYS_LENIENT['on']
+                          or os.environ.get('ANTHIVE_CONFIG_LENIENT', '').strip() in ('1', 'true', 'yes'))
     unknown_params = set(config.keys()) - set(defaults.keys())
+    critical = _critical_problems(config, defaults, unknown_params)
+    if critical:
+        raise ConfigError(
+            f"ERROR: [Config] Invalid security- or sync-relevant configuration\n"
+            f"Details: {'; '.join(critical)}\n"
+            f"Location: anthive.yaml\n"
+            f"Action: fix these keys (they decide access and what a sync may delete; checked in every process)"
+        )
     if unknown_params and strict:
         raise ConfigError(
             f"ERROR: [Config] Unknown configuration parameters\n"

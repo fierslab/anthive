@@ -85,6 +85,10 @@ from pydantic import BaseModel, Field
 script_dir = Path(__file__).parent.resolve()
 lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
+import config as _anthive_config_module  # noqa: E402
+# A server warns about unknown config keys instead of stopping, so a container of an older
+# release never crash-loops on a config rendered for a newer one (lib/config.py).
+_anthive_config_module.set_unknown_keys_lenient()
 
 from anthive_db import AnthiveDB, install_portable_layer_views, safe_ident
 from canonical_columns import BACKCOMPAT_LEGACY_NAMES  # type: ignore
@@ -4397,10 +4401,21 @@ _FACET_WARMUP_PENDING: set = set()
 _FACET_WARMUP_LOCK = threading.Lock()
 
 
+# After this many seconds the gate opens whatever the warm-up does (a stuck or very slow warm-up must not
+# keep the facet routes at 503 forever; requests then build what they need, as without a warm-up).
+FACET_WARMUP_GATE_MAX_SECONDS = 900
+_FACET_WARMUP_STARTED = {'at': 0.0}
+
+
 def _facet_warm_gate() -> None:
     """Raise ``FacetCachesWarmingUp`` while the warm-up still builds the facet caches of this caller's kind."""
     with _FACET_WARMUP_LOCK:
         if not _FACET_WARMUP_PENDING:
+            return
+        if time.monotonic() - _FACET_WARMUP_STARTED['at'] > FACET_WARMUP_GATE_MAX_SECONDS:
+            log.warning("facet warm-up still running after %d s: facet routes no longer wait for it",
+                        FACET_WARMUP_GATE_MAX_SECONDS)
+            _FACET_WARMUP_PENDING.clear()
             return
         pending = frozenset(_hidden_db_ids()) in _FACET_WARMUP_PENDING
     if pending:
@@ -4471,6 +4486,7 @@ def _start_warmup() -> None:
         with _FACET_WARMUP_LOCK:
             _FACET_WARMUP_PENDING.clear()
             _FACET_WARMUP_PENDING.update(frozenset(hidden) for _label, hidden in kinds)
+            _FACET_WARMUP_STARTED['at'] = time.monotonic()
         threading.Thread(target=_warm_caches, name='cache-warmup', daemon=True).start()
 
 
@@ -14018,9 +14034,9 @@ def get_facet_tests_across_datasets(
     braak, age, app_nlgf). ``graft_sex`` (alias ``ant_graft_sex``; the test of ``ant_sex`` in xenografts, sex of the grafted cells' donor line) and ``host_sex`` (``ant_host_sex``) are the xenograft sex facets; ``sex`` is human post-mortem only. Other names return 404. ``scope`` selects the facet scope
     (``scope`` and ``scopes`` in the response; ``all`` returns every scope).
     """
-    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     facet_name = canonical_facet(facet_name)
     test_facet = _tested_facet(facet_name)
+    _facet_warm_gate()   # after the parameter checks (unknown facet: 404); 503 warming_up while the start-up warm-up builds these caches
     overview = _facet_results().facet_overview(test_facet, _facet_test_datasets(), top_genes=top_genes,
                                                exclude_secondary=exclude_secondary,
                                                scope=_scope_param(scope, allow_all=True))
@@ -14197,7 +14213,7 @@ def get_gene_detection(gene: str):
     modality. Secondary datasets and datasets below ``min_cells`` are left out. Numbers come from the precomputed
     gene statistics and the per-gene cache only (never a live scan); ``n_missing`` counts datasets without one.
     """
-    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
+    _facet_warm_gate()   # after the parameter checks (unknown facet: 404); 503 warming_up while the start-up warm-up builds these caches
     candidates = gene_detection_lib.candidate_datasets(registry.metadata_cache)
     result = gene_detection_lib.gene_detection(gene.strip(), candidates, _detection_lookup)
     return {**result, 'partial': result['n_missing'] > 0}
@@ -14220,8 +14236,8 @@ def get_facet_effects_overview(
     one where it is strongest and names the others in ``also_in``. ``quiet_groups`` are groups without a
     replicated gene (``low_power``: at most 2 cohorts), for one summary line.
     """
-    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     test_facet = _tested_facet(facet_name)
+    _facet_warm_gate()   # after the parameter checks (unknown facet: 404); 503 warming_up while the start-up warm-up builds these caches
     result = _facet_results().effects_overview(
         test_facet, _facet_test_datasets(), exclude_secondary=exclude_secondary,
         scope=_scope_param(scope), n_per_group=n)
@@ -14263,8 +14279,8 @@ def get_facet_top_modules(
     ``quality_sensitive`` (mitochondrial or ribosomal genes dominate the set) and ``directionless``. ``n_matching`` is the
     number of rows the filters keep; ``cell_types`` lists the groups with their counts. Exploratory.
     """
-    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     test_facet = _tested_facet(facet_name)
+    _facet_warm_gate()   # after the parameter checks (unknown facet: 404); 503 warming_up while the start-up warm-up builds these caches
     result = _module_results().top_modules(
         test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n, offset=offset,
         exclude_secondary=exclude_secondary, scope=_scope_param(scope), effect_gate=effect_gate,
@@ -14332,8 +14348,8 @@ def get_geneset_facet_effects(
     ``directionless_note`` (a mean score is not suited to GWAS-like sets; read the member counts) and the gene set's
     ``celltypes`` scope. Exploratory; scopes are never mixed.
     """
-    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     forest = _forest_mode(forest)
+    _facet_warm_gate()   # after the parameter checks (unknown facet: 404); 503 warming_up while the start-up warm-up builds these caches
     geneset_id = f"{study}/{experiment}/{name}"
     info = _module_info(geneset_id)
     catalog = f"{study}/{experiment}"
@@ -14445,8 +14461,8 @@ def get_facet_recurring_genes(
     DRAFT cohort selection table; cohorts flagged ``overlap_unknown`` never had
     their donor overlap checked.
     """
-    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     test_facet = _tested_facet(facet_name)
+    _facet_warm_gate()   # after the parameter checks (unknown facet: 404); 503 warming_up while the start-up warm-up builds these caches
     result = _facet_results().recurring_genes(
         test_facet, _facet_test_datasets(), cell_type=cell_type, limit=n, offset=offset, effect_gate=effect_gate,
         strict=strict, exclude_secondary=exclude_secondary, scope=_scope_param(scope))
@@ -14509,9 +14525,9 @@ def get_facet_gene_effects(
     percent of cells expressing the gene in this cell type and scope; low below 5). Unit cards add ``anchor_counted``,
     ``cohort_display`` (``unassigned`` for a dataset outside the cohort table) and ``modality``.
     """
-    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     facet_name = canonical_facet(facet_name)
     test_facet = _tested_facet(facet_name)
+    _facet_warm_gate()   # after the parameter checks (unknown facet: 404); 503 warming_up while the start-up warm-up builds these caches
     card = _facet_results().gene_effects(
         test_facet, gene, _facet_test_datasets(), cell_type=cell_type,
         exclude_secondary=exclude_secondary, scope=_scope_param(scope))
@@ -14569,9 +14585,9 @@ def get_gene_facet_effects(
     percent of cells expressing the gene in this cell type and scope; low below 5). Unit cards add ``anchor_counted``,
     ``cohort_display`` (``unassigned`` for a dataset outside the cohort table) and ``modality``.
     """
-    _facet_warm_gate()   # 503 warming_up instead of blocking while the start-up warm-up builds these caches
     wanted = [name.strip() for name in facet.split(',') if name.strip()] if facet else list(facet_results_lib.FACET_ORDER)
     wanted = [_tested_facet(name) for name in wanted]
+    _facet_warm_gate()   # after the parameter checks (unknown facet: 404); 503 warming_up while the start-up warm-up builds these caches
     reader = _facet_results()
     datasets = reader.prepare(_facet_test_datasets())     # resolved once: the files are stat-ed once per request
     scope = _scope_param(scope)
@@ -14761,6 +14777,7 @@ def _donor_units_payload(facet_name: str, gene: Optional[str], module: Optional[
     if bool(gene) == bool(module):
         raise HTTPException(status_code=400, detail='give exactly one of gene or module')
     test_facet = _tested_facet(facet_name)
+    _facet_warm_gate()   # donor-values and donor-plot: 503 warming_up rather than build the gene cards now
     scope = _scope_param(scope)
     reader = _facet_results()
     prepared = reader.prepare(_facet_test_datasets())
@@ -15094,6 +15111,7 @@ def get_facet_cohorts():
     Only rows of datasets this site serves to the caller: a dataset the site
     lacks or hides (internal access) is absent, and so is a donor-pooled
     ``pool:`` row with such a member (``facet_results.pool_is_visible``)."""
+    _facet_warm_gate()   # the cohort table shares the facet reader the warm-up holds
     hidden = _hidden_db_ids()
     served = set(registry.databases) if registry is not None else set()
     table = {db_id: record for db_id, record in _facet_results().cohorts().items()

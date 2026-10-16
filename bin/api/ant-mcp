@@ -458,9 +458,48 @@ also holds other documents: `entrytype` plus `type` say which (for example
 
 _script_dir = Path(__file__).parent.resolve()
 sys.path.insert(0, str(_script_dir.parent.parent / 'lib'))
+import config as _anthive_config_module  # noqa: E402
+# A server warns about unknown config keys instead of stopping, so a container of an older
+# release never crash-loops on a config rendered for a newer one (lib/config.py).
+_anthive_config_module.set_unknown_keys_lenient()
 from config import get_config as _get_anthive_config  # noqa: E402
 
 _anthive_cfg = _get_anthive_config().get('mcp', {})
+
+
+WARMING_UP_MESSAGE = ("The Anthive server is warming up after a restart (it builds its facet caches in the "
+                      "background); try again in a minute.")
+# A 503 warming_up whose retry_after is at most this many seconds is retried once before giving up.
+WARMING_UP_RETRY_MAX_SECONDS = 10
+
+
+class ServerWarmingUp(Exception):
+    """ant-serve answered 503 {status: warming_up}; str() is the message for the user."""
+
+
+async def api_request(client, method: str, url: str, **kwargs):
+    """One ant-serve request; a 503 ``warming_up`` is retried once when ``retry_after`` is short, else it
+    raises ``ServerWarmingUp`` with a plain message instead of a bare HTTP error. Other errors as before
+    (``raise_for_status``)."""
+    for attempt in (0, 1):
+        response = await client.request(method, url, **kwargs)
+        if response.status_code == 503:
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            if isinstance(body, dict) and body.get('status') == 'warming_up':
+                try:
+                    wait = float(body.get('retry_after') or response.headers.get('Retry-After') or 30)
+                except (TypeError, ValueError):
+                    wait = 30.0
+                if attempt == 0 and wait <= WARMING_UP_RETRY_MAX_SECONDS:
+                    await asyncio.sleep(wait)
+                    continue
+                raise ServerWarmingUp(WARMING_UP_MESSAGE)
+        response.raise_for_status()
+        return response
+    raise ServerWarmingUp(WARMING_UP_MESSAGE)
 
 
 def _internal_secret() -> str:
@@ -812,9 +851,9 @@ def main() -> None:
     async def _get(path: str, **params) -> dict:
         """GET JSON from ant-serve."""
         url = f"{api_base_url}{path}"
-        response = await _http_client.get(url, params={k: v for k, v in params.items() if v is not None},
-                                          headers=_identity_headers())
-        response.raise_for_status()
+        response = await api_request(_http_client, 'GET', url,
+                                     params={k: v for k, v in params.items() if v is not None},
+                                     headers=_identity_headers())
         return response.json()
 
     _uploads_state = {'enabled': True, 'checked': 0.0}
@@ -842,16 +881,15 @@ def main() -> None:
     async def _get_post(path: str, body: dict) -> dict:
         """POST JSON body to ant-serve and return JSON response."""
         url = f"{api_base_url}{path}"
-        response = await _http_client.post(url, json=body, headers=_identity_headers())
-        response.raise_for_status()
+        response = await api_request(_http_client, 'POST', url, json=body, headers=_identity_headers())
         return response.json()
 
     async def _get_image(path: str, **params) -> bytes:
         """GET image bytes from an ant-serve plot endpoint (legacy)."""
         url = f"{api_base_url}{path}"
-        response = await _http_client.get(url, params={k: v for k, v in params.items() if v is not None},
-                                          headers=_identity_headers())
-        response.raise_for_status()
+        response = await api_request(_http_client, 'GET', url,
+                                     params={k: v for k, v in params.items() if v is not None},
+                                     headers=_identity_headers())
         return response.content
 
     async def _get_plot(path: str, **params) -> tuple:
@@ -872,8 +910,7 @@ def main() -> None:
                     query.append((k, item))
             else:
                 query.append((k, v))
-        response = await _http_client.get(url, params=query, headers=_identity_headers())
-        response.raise_for_status()
+        response = await api_request(_http_client, 'GET', url, params=query, headers=_identity_headers())
         return response.content, dict(response.headers)
 
     def _save_plot_url(image_bytes: bytes, output_format: str = 'png', caption: str = '') -> str:

@@ -476,3 +476,59 @@ def test_every_explain_call_in_the_mcp_is_tested():
     named = set(re.findall(r"""explain\(['"]([a-z0-9-]+)['"]\)""", MCP_SOURCE))
     tested = set(test_every_explain_target_named_in_the_mcp_exists.pytestmark[0].args[1])
     assert named <= tested, named - tested
+
+
+# ── 2.46.1: a 503 warming_up becomes a plain message (and one short retry) ──
+
+def _warmup_helpers() -> Dict[str, Any]:
+    names = ('WARMING_UP_MESSAGE', 'WARMING_UP_RETRY_MAX_SECONDS', 'ServerWarmingUp', 'api_request')
+    nodes = [node for node in ast.parse(MCP_SOURCE).body
+             if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in names)
+             or (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in names for t in node.targets))]
+    sleeps: List[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+    namespace: Dict[str, Any] = {'asyncio': type('A', (), {'sleep': staticmethod(fake_sleep)})}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(MCP_PATH), 'exec'), namespace)
+    namespace['sleeps'] = sleeps
+    return namespace
+
+
+class _FakeResponse:
+    def __init__(self, status: int, body: Any):
+        self.status_code, self._body, self.headers = status, body, {}
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise StatusError(self.status_code, 'error')
+
+
+class _FakeClient:
+    def __init__(self, responses):
+        self.responses, self.calls = list(responses), 0
+
+    async def request(self, method, url, **kwargs):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+def test_mcp_turns_warming_up_into_a_plain_message():
+    helpers = _warmup_helpers()
+    warming = {'status': 'warming_up', 'retry_after': 30}
+    client = _FakeClient([_FakeResponse(503, warming)])
+    with pytest.raises(helpers['ServerWarmingUp']) as excinfo:
+        _run(helpers['api_request'](client, 'GET', 'http://api/genes/TREM2/facet-effects'))
+    assert 'warming up' in str(excinfo.value) and 'try again in a minute' in str(excinfo.value)
+    assert client.calls == 1 and helpers['sleeps'] == []                 # 30 s is too long to wait in a tool call
+    short = {'status': 'warming_up', 'retry_after': 2}
+    client = _FakeClient([_FakeResponse(503, short), _FakeResponse(200, {'ok': True})])
+    response = _run(helpers['api_request'](client, 'GET', 'http://api/x'))
+    assert response.json() == {'ok': True} and helpers['sleeps'] == [2.0]
+    client = _FakeClient([_FakeResponse(503, {'detail': 'Geneset store is not configured'})])
+    with pytest.raises(StatusError):                                      # other 503s stay HTTP errors
+        _run(helpers['api_request'](client, 'GET', 'http://api/genesets'))
+    assert 'await api_request(_http_client' in MCP_SOURCE and '_http_client.get(url' not in MCP_SOURCE

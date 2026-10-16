@@ -36,6 +36,10 @@ from fastapi.middleware.cors import CORSMiddleware
 script_dir = Path(__file__).parent.resolve()      # → repo/web/
 lib_dir = script_dir.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
+import config as _anthive_config_module  # noqa: E402
+# A server warns about unknown config keys instead of stopping, so a container of an older
+# release never crash-loops on a config rendered for a newer one (lib/config.py).
+_anthive_config_module.set_unknown_keys_lenient()
 
 from config import get_config
 

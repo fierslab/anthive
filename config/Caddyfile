@@ -42,6 +42,25 @@
 	# X-Forwarded-Proto to http and Authelia refuses the request as
 	# insecure. ant-stack renders it from tls.trusted_proxies; dev: none.
 	import {$ANTHIVE_SERVERS_SNIPPET:caddy-servers.dev}
+
+	# The default logger (errors of every site, e.g. a 502 from reverse_proxy,
+	# which log ALL request headers) never writes credentials: the internal
+	# secret the tools listener requires, the identity headers, cookies and
+	# Authorization. Access logs (`log` in the site block) filter the same.
+	log default {
+		output stderr
+		format filter {
+			wrap json
+			request>headers>X-Anthive-Internal delete
+			request>headers>Remote-User delete
+			request>headers>Remote-Groups delete
+			request>headers>Remote-Name delete
+			request>headers>Remote-Email delete
+			request>headers>X-Forwarded-User delete
+			request>headers>Authorization replace REDACTED
+			request>headers>Cookie replace REDACTED
+		}
+	}
 }
 
 # HTTP companion block — dev: :8500 → 301 to https://…:8501. Prod:
@@ -270,6 +289,12 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 			request>uri regexp amcp_[A-Za-z0-9_-]+ amcp_REDACTED
 			request>headers>Authorization replace REDACTED
 			request>headers>Cookie replace REDACTED
+			request>headers>X-Anthive-Internal delete
+			request>headers>Remote-User delete
+			request>headers>Remote-Groups delete
+			request>headers>Remote-Name delete
+			request>headers>Remote-Email delete
+			request>headers>X-Forwarded-User delete
 		}
 	}
 }

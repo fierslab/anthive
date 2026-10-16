@@ -660,6 +660,7 @@ _SERVE_WANTED = {
     # 2.46.1: 503 warming_up while the start-up warm-up builds the facet caches
     'FacetCachesWarmingUp', 'FACET_WARMUP_RETRY_AFTER', '_facet_warming_up_handler', 'EXPECTED_UNAVAILABLE_HEADER',
     '_FACET_WARMUP_PENDING', '_FACET_WARMUP_LOCK', '_facet_warm_gate', '_facet_warmup_done',
+    'FACET_WARMUP_GATE_MAX_SECONDS', '_FACET_WARMUP_STARTED',
 }
 
 
@@ -751,6 +752,7 @@ def build_serve(results: Path, geneset_registry: Any = None, stats_rows: Optiona
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,
         'donor_values_lib': donor_values, 'donor_variability_lib': donor_variability, 'plotting': plotting, 'OrderedDict': OrderedDict, 'urlencode': urlencode,
         'duckdb': duckdb, 'dataset_access': dataset_access, 'Request': Request, 'JSONResponse': JSONResponse,
+        'time': time,
     }
     namespace['_pooled_db'] = pooled_db if pooled_db is not None else _no_pooled_db
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
@@ -1440,6 +1442,7 @@ def _warmup_namespace(calls: List[Any], fail: bool = False, hidden: frozenset = 
         '_detection_tables': lambda: calls.append(('detection', dataset_access.current_hidden())),
         'facet_results_lib': fr, '_donor_units_payload': donor_payload, '_module_rank_means': rank_means,
         '_FACET_WARMUP_PENDING': set(), '_FACET_WARMUP_LOCK': threading.Lock(),
+        '_FACET_WARMUP_STARTED': {'at': 0.0}, 'FACET_WARMUP_GATE_MAX_SECONDS': 900,
         '_hidden_db_ids': dataset_access.current_hidden, 'FacetCachesWarmingUp': type('FacetCachesWarmingUp', (Exception,), {})}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     return namespace
@@ -1611,9 +1614,15 @@ def test_module_counts_use_the_parametric_q_when_residual_df_is_large(tmp_path):
 def test_facet_routes_answer_warming_up_while_the_warmup_builds_their_kind(serve):
     pending = serve.namespace['_FACET_WARMUP_PENDING']
     pending.add(frozenset())                                   # signed-in / everyone: still warming up
+    serve.namespace['_FACET_WARMUP_STARTED']['at'] = time.monotonic()
     try:
+        # review C4: an unknown facet is still a 404, not a 503
+        assert serve.get('/facets/no_such_facet/effects?gene=TREM2').status_code in (400, 404)
+        assert serve.get('/genes/TREM2/facet-effects?facet=no_such_facet').status_code in (400, 404)
         for path in ('/genes/TREM2/facet-effects', '/facets/sex/effects?gene=TREM2', '/facets/sex/effects/top',
-                     '/facets/sex/effects/overview', '/facets/sex/tests', '/genes/TREM2/detection'):
+                     '/facets/sex/effects/overview', '/facets/sex/tests', '/genes/TREM2/detection',
+                     '/facets/cohorts', '/facets/sex/donor-values?gene=TREM2&cell_type=microglia',
+                     '/facets/sex/donor-plot.png?gene=TREM2&cell_type=microglia'):
             response = serve.get(path)
             assert response.status_code == 503, path
             assert response.json() == {'status': 'warming_up', 'retry_after': 30,
@@ -1654,3 +1663,15 @@ def test_warmup_failure_still_releases_the_gate(warm_env):
     _join_warmup()
     assert namespace['_FACET_WARMUP_PENDING'] == set()
     namespace['_facet_warm_gate']()                          # does not raise
+
+
+def test_the_warm_gate_opens_after_its_time_limit(serve):
+    """C4: a stuck warm-up cannot keep the facet routes at 503 forever."""
+    namespace = serve.namespace
+    namespace['_FACET_WARMUP_PENDING'].add(frozenset())
+    namespace['_FACET_WARMUP_STARTED']['at'] = time.monotonic() - namespace['FACET_WARMUP_GATE_MAX_SECONDS'] - 1
+    try:
+        assert serve.get('/genes/TREM2/facet-effects').status_code == 200
+        assert namespace['_FACET_WARMUP_PENDING'] == set()
+    finally:
+        namespace['_FACET_WARMUP_PENDING'].clear()

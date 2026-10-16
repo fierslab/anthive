@@ -212,7 +212,14 @@ def validate_site(site: dict, path: Path) -> dict:
     site['_gid'] = int(run_as.get('gid') if run_as.get('gid') is not None else os.getgid())
     site['_public'] = public
     for key in ('https', 'http', 'tools'):
-        site['ports'][key] = int(site['ports'].get(key) or (PORT_TOOLS if key == 'tools' else 0))
+        value = site['ports'].get(key)
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            raise SiteError(f"ports.{key} must be a port number, not {value!r}") from None
+        if not 0 < port < 65536:
+            raise SiteError(f"ports.{key} must be between 1 and 65535, not {port}")
+        site['ports'][key] = port
     if not isinstance(site.get('s3'), dict):
         site['s3'] = {}
     s3 = site['s3']
@@ -616,7 +623,7 @@ def render_caddy_tools(site: dict) -> str:
     return head + f"""# Listener for host-side tools (the ingest watcher), published on 127.0.0.1:{site['ports']['tools']}.
 # Identity headers are dropped; a request without X-Anthive-Internal is refused
 # here, a wrong one by the api (401).
-http://:{PORT_TOOLS} {{
+http://:{{$ANTHIVE_TOOLS_PORT:{PORT_TOOLS}}} {{
 \tbind 0.0.0.0
 \t@nosecret not header X-Anthive-Internal *
 \trespond @nosecret "X-Anthive-Internal required" 403
@@ -627,7 +634,8 @@ http://:{PORT_TOOLS} {{
 \trequest_header -X-Remote-User
 \trequest_header -X-Remote-Groups
 \trequest_header -X-Anthive-Anonymous
-\treverse_proxy {{$ANTHIVE_API_HOST:api}}:8080
+\trequest_header -X-Forwarded-User
+\treverse_proxy {{$ANTHIVE_API_HOST:api}}:{{$ANTHIVE_API_PORT:8080}}
 }}
 """
 
@@ -903,10 +911,15 @@ def staging_dir(site: dict) -> Path:
     return stack_dir(site) / 'staging'
 
 
+def _config_roles(site: dict) -> dict[str, str]:
+    """The config roles this site renders (the watcher config only with deposits on)."""
+    return {role: name for role, name in CONFIG_ROLES.items() if role != 'watcher' or _deposit_enabled(site)}
+
+
 # Files `render` produces, relative to stack/ (configs are 0600 secrets).
 def _rendered_files(site: dict) -> list[str]:
-    files = list(CONFIG_ROLES.values()) + ['caddy/auth.caddy', 'caddy/tls.caddy', 'caddy/servers.caddy',
-                                           'caddy/tools.caddy', 'compose.site.yaml', '.env']
+    files = list(_config_roles(site).values()) + ['caddy/auth.caddy', 'caddy/tls.caddy', 'caddy/servers.caddy',
+                                                  'caddy/tools.caddy', 'compose.site.yaml', '.env']
     if site['auth']['mode'] == 'authelia':
         files.append('authelia/configuration.yml')
     return files
@@ -916,6 +929,49 @@ def _live_path(site: dict, rel: str) -> Path:
     if rel.startswith('authelia/'):
         return site['_state'] / rel
     return stack_dir(site) / rel
+
+
+def _atomic_write(path: Path, data: bytes, mode: int = 0o644) -> None:
+    """Write ``data`` to a temporary file next to ``path`` and rename it into place."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        with os.fdopen(fd, 'wb') as handle:
+            handle.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+_STACK_LOCK_DEPTH = {'depth': 0, 'handle': None}
+
+
+class _stack_lock:
+    """flock on <state_dir>/stack/.lock around render and promote (re-entrant within this process),
+    so two ant-stack commands never interleave their writes."""
+
+    def __init__(self, site: dict):
+        self.path = stack_dir(site) / '.lock'
+
+    def __enter__(self):
+        import fcntl  # noqa: PLC0415
+        if _STACK_LOCK_DEPTH['depth'] == 0:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            handle = open(self.path, 'a+')
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            _STACK_LOCK_DEPTH['handle'] = handle
+        _STACK_LOCK_DEPTH['depth'] += 1
+        return self
+
+    def __exit__(self, *exc):
+        _STACK_LOCK_DEPTH['depth'] -= 1
+        if _STACK_LOCK_DEPTH['depth'] == 0:
+            _STACK_LOCK_DEPTH['handle'].close()
+            _STACK_LOCK_DEPTH['handle'] = None
+        return False
 
 
 def staged_changes(site: dict) -> list[str]:
@@ -934,37 +990,43 @@ def staged_changes(site: dict) -> list[str]:
     return changed
 
 
-def promote(site: dict) -> list[str]:
-    """Put the staged render in place (only `init`, `render`, `up` and `passwd` do this).
+def promote(site: dict, only: list[str] | None = None) -> list[str]:
+    """Put the staged render in place (`init`, `render` and `up`; `passwd` only the auth files).
 
-    Files are rewritten in place (same inode), as before staging existed, so
-    bind mounts of running containers keep pointing at them; `up` recreates
+    Each file is written to a temporary name and renamed into place, under the
+    stack lock. Running containers keep the file they mounted; `up` recreates
     the services whose config digest changed."""
-    staging = staging_dir(site)
-    changed = staged_changes(site)
-    for rel in _rendered_files(site):
-        staged, live = staging / rel, _live_path(site, rel)
-        if not staged.exists():
-            continue
-        live.parent.mkdir(parents=True, exist_ok=True)
-        if rel in CONFIG_ROLES.values():
-            _write_secret(live, staged.read_text(), overwrite=True)
-        else:
-            live.write_bytes(staged.read_bytes())
-    if site['auth']['mode'] == 'authelia':
-        seed_authelia_users(site)
-    return changed
+    with _stack_lock(site):
+        staging = staging_dir(site)
+        changed = [rel for rel in staged_changes(site) if only is None or rel in only]
+        for rel in _rendered_files(site):
+            if only is not None and rel not in only:
+                continue
+            staged, live = staging / rel, _live_path(site, rel)
+            if not staged.exists():
+                continue
+            secret = rel in CONFIG_ROLES.values() or rel == 'caddy/auth.caddy'
+            _atomic_write(live, staged.read_bytes(), 0o600 if secret else 0o644)
+        if site['auth']['mode'] == 'authelia' and only is None:
+            seed_authelia_users(site)
+        return changed
 
 
 def render(site: dict, quiet: bool = False, apply: bool = True) -> Path:
     """Render site.yaml into stack/staging/, validate it, and (``apply``) put it in place.
 
-    ``apply=False`` (pull, check, ingest, logs, restart, publish-library) only
-    stages: the running stack keeps the config that matches its images until
-    `ant-stack up` applies the new one. Before staging existed, `pull` wrote
-    the new release's keys into the live config, and an old api that
-    restarted before `up` crash-looped on them (2.46.1). With no live render
-    yet (first run) the staged one is applied anyway."""
+    ``apply=False`` (pull, check, ingest, logs, restart, publish-library; `up`
+    and `passwd` promote themselves after their checks) only stages: the
+    running stack keeps the config that matches its images until `ant-stack
+    up` applies the new one. Before staging existed, `pull` wrote the new
+    release's keys into the live config, and an old api that restarted before
+    `up` crash-looped on them (2.46.1). With no live render yet (first run)
+    the staged one is applied anyway."""
+    with _stack_lock(site):
+        return _render_locked(site, quiet, apply)
+
+
+def _render_locked(site: dict, quiet: bool, apply: bool) -> Path:
     state = site['_state']
     stack = stack_dir(site)
     staging = staging_dir(site)
@@ -976,15 +1038,20 @@ def render(site: dict, quiet: bool = False, apply: bool = True) -> Path:
     os.chmod(stack, 0o700)
     os.chmod(staging, 0o700)
     for role, name in CONFIG_ROLES.items():
+        if role not in _config_roles(site):
+            for stale in (staging / name, stack / name):
+                if stale.exists():
+                    stale.unlink()        # a watcher config with full keys must not outlive deposits
+            continue
         header = ("# Rendered by bin/ops/ant-stack from site.yaml. Do not edit: edit\n"
                   "# site.yaml (or its `anthive:` block) and run `ant-stack render`.\n"
                   f"# Role: {role} ({CONFIG_USERS[role]}).\n")
-        _write_secret(staging / name, header + yaml.safe_dump(render_anthive_yaml(site, role), sort_keys=False),
-                      overwrite=True)
-    (staging / 'caddy' / 'auth.caddy').write_text(render_caddy_auth(site))
-    (staging / 'caddy' / 'tls.caddy').write_text(render_caddy_tls(site))
-    (staging / 'caddy' / 'servers.caddy').write_text(render_caddy_servers(site))
-    (staging / 'caddy' / 'tools.caddy').write_text(render_caddy_tools(site))
+        _atomic_write(staging / name, (header + yaml.safe_dump(render_anthive_yaml(site, role),
+                                                                 sort_keys=False)).encode(), 0o600)
+    _atomic_write(staging / 'caddy' / 'auth.caddy', render_caddy_auth(site).encode(), 0o600)
+    _atomic_write(staging / 'caddy' / 'tls.caddy', render_caddy_tls(site).encode())
+    _atomic_write(staging / 'caddy' / 'servers.caddy', render_caddy_servers(site).encode())
+    _atomic_write(staging / 'caddy' / 'tools.caddy', render_caddy_tools(site).encode())
     if _deposit_enabled(site):
         for folder in [*watcher_dirs(site).values(), state / 'ingest']:
             try:
@@ -993,7 +1060,7 @@ def render(site: dict, quiet: bool = False, apply: bool = True) -> Path:
                 _warn(f"cannot create the watcher folder {folder}: {exc}")
     if site['auth']['mode'] == 'authelia':
         (staging / 'authelia').mkdir(exist_ok=True)
-        (staging / 'authelia' / 'configuration.yml').write_text(render_authelia(site))
+        _atomic_write(staging / 'authelia' / 'configuration.yml', render_authelia(site).encode())
 
     def read_from(source: Path) -> Path:
         try:
@@ -1002,9 +1069,9 @@ def render(site: dict, quiet: bool = False, apply: bool = True) -> Path:
             return source
         return staging / rel if not rel.parts or rel.parts[0] != 'staging' else source
 
-    (staging / 'compose.site.yaml').write_text(
+    _atomic_write(staging / 'compose.site.yaml', (
         "# Rendered by bin/ops/ant-stack from site.yaml. Do not edit.\n"
-        + yaml.safe_dump(render_compose_site(site, read_from), sort_keys=False))
+        + yaml.safe_dump(render_compose_site(site, read_from), sort_keys=False)).encode())
 
     profiles = []
     if site['services'].get('mcp'):
@@ -1032,8 +1099,8 @@ def render(site: dict, quiet: bool = False, apply: bool = True) -> Path:
     for key, value in env.items():
         escaped = value.replace('\\', '\\\\').replace('"', '\\"')
         lines.append(f'{key}="{escaped}"')
-    (staging / '.env').write_text('\n'.join(lines) + '\n')
-    for name in CONFIG_ROLES.values():
+    _atomic_write(staging / '.env', ('\n'.join(lines) + '\n').encode())
+    for name in _config_roles(site).values():
         _validate_rendered_config(staging / name)
     if apply or not (stack / '.env').exists():
         promote(site)
@@ -1304,7 +1371,7 @@ def secret_files(site: dict) -> list[Path]:
         if folder.is_dir():
             files += sorted(p for p in folder.iterdir() if p.is_file())
     files.append(state / 'authelia' / 'users_database.yml')
-    files += [config_file(site, role) for role in CONFIG_ROLES]
+    files += [config_file(site, role) for role in CONFIG_ROLES]      # missing ones are dropped below
     if site.get('_deploy_key'):
         files.append(site['_deploy_key'])
     return [p for p in files if p.exists()]
@@ -1713,12 +1780,17 @@ def cmd_render(args: argparse.Namespace) -> int:
 def cmd_up(args: argparse.Namespace) -> int:
     site = load_site(site_path(args))
     ensure_secrets(site)
-    render(site)
+    # Stage and validate first; the live config is replaced only when nothing blocks
+    # (before, a blocking problem left the running stack with the new config anyway).
+    render(site, quiet=True, apply=False)
     blocking = [p for p in check(site, running=True) if 'ingest' not in p]
     if blocking:
         for problem in blocking:
             print(f"  PROBLEM  {problem}")
+        _say("nothing applied: the running stack keeps its config (the new one is staged in stack/staging/)")
         return 1
+    promote(site)
+    _say(f"rendered {stack_dir(site)}")
     extra = ['--wait', '--wait-timeout', str(args.wait_timeout)] if not args.no_wait else []
     # 1. Re-sync the image's static bundles + Caddy config into the shared
     #    volumes (a new image or edited config must not be masked by the
@@ -2054,7 +2126,10 @@ def cmd_passwd(args: argparse.Namespace) -> int:
         if args.user in (doc.get('users') or {}):
             doc['users'][args.user]['password'] = hashes[args.user]
             _write_secret(users_db, yaml.safe_dump(doc, sort_keys=True), overwrite=True)
-    render(site, quiet=True)
+    # Only the auth files go live (the basic-auth list in auth.caddy; Authelia's user
+    # database was written above): a staged release upgrade stays staged.
+    render(site, quiet=True, apply=False)
+    promote(site, only=['caddy/auth.caddy'])
     if site['auth']['mode'] == 'basic':
         _say(f"password for {args.user} updated; run `ant-stack restart caddy` to apply it (basic mode)")
     else:
@@ -2094,6 +2169,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
 def cmd_config_path(args: argparse.Namespace) -> int:
     site = load_site(site_path(args))
+    if args.role == 'watcher' and not _deposit_enabled(site):
+        raise SiteError("the watcher config exists only with services.dataset_deposit: true")
     print(config_file(site, args.role))
     return 0
 
