@@ -17137,25 +17137,44 @@ _deposit_service_instance = None
 _deposit_service_lock = Lock()
 
 
-def _require_dataset_uploader(request: Request, admin_ok: bool = False):
-    """(Identity, None) for a signed-in caller in datasets_upload_groups, else (None, a 403 JSONResponse).
+def _require_dataset_uploader(request: Request, admin_ok: bool = False, kinds: Tuple[str, ...] = ('dataset',)):
+    """(Identity, None) for a signed-in caller allowed to deposit one of ``kinds``, else (None, a 403 JSONResponse).
 
-    ``admin_ok``: admin routes (approve, reject, expire, owners, every deposit) also let in admins who are
-    not in the upload groups."""
-    from config import get_dataset_deposit_settings  # noqa: PLC0415
+    ``dataset``: datasets_upload_groups; ``artefact``: artefacts_upload_groups and datasets_upload_groups (the
+    design's default, curators included); ``collection``: collections_create_groups. The generic routes
+    (status, urls, complete, withdraw, list, vocab) accept any of them; the service only shows a caller their
+    own deposits. ``admin_ok``: admin routes (approve, reject, expire, owners, every deposit) also let in
+    admins who are not in the upload groups."""
+    from config import get_artefact_settings, get_dataset_deposit_settings  # noqa: PLC0415
     from dataset_deposit import Identity  # noqa: PLC0415
-    allowed = set(get_dataset_deposit_settings(get_config())['upload_groups'])
+    cfg = get_config()
+    dataset_groups = set(get_dataset_deposit_settings(cfg)['upload_groups'])
+    allowed: set = set()
+    if 'dataset' in kinds:
+        allowed |= dataset_groups
+    artefact_settings = get_artefact_settings(cfg)
+    # the artefact groups count only where artefacts are switched on: a site without them keeps the 2.46 rules
+    if ('artefact' in kinds or 'collection' in kinds) and artefact_settings['artefacts_enabled']:
+        if 'artefact' in kinds:
+            allowed |= set(artefact_settings['artefacts_upload_groups']) | dataset_groups
+        if 'collection' in kinds:
+            allowed |= set(artefact_settings['collections_create_groups'])
     raw_groups = request.headers.get('Remote-Groups') or ''
     groups = {g.strip().lower() for g in raw_groups.split(',') if g.strip()}
     user = (request.headers.get('Remote-User') or '').strip()
     if get_auth_settings()['mode'] != 'none' and user:
         is_admin = _caller_is_admin(request)
-        if groups & allowed or (is_admin and ('admins' in allowed or admin_ok)):
+        # admins may always deposit artefacts and create collections (design 4.1) where artefacts are on
+        artefact_admin = is_admin and artefact_settings['artefacts_enabled'] and bool(
+            {'artefact', 'collection'} & set(kinds))
+        if groups & allowed or (is_admin and ('admins' in allowed or admin_ok)) or artefact_admin:
             return Identity(user=user, name=(request.headers.get('Remote-Name') or '').strip(),
                             email=(request.headers.get('Remote-Email') or '').strip(), is_admin=is_admin), None
+    what = {('dataset',): 'deposit datasets', ('artefact',): 'deposit artefacts',
+            ('collection',): 'create collections'}.get(tuple(kinds), 'deposit')
     return None, JSONResponse(
         {'status': 'forbidden',
-         'message': f"Only signed-in users in {', '.join(sorted(allowed))} can deposit datasets."},
+         'message': f"Only signed-in users in {', '.join(sorted(allowed))} can {what}."},
         status_code=403)
 
 
@@ -17181,9 +17200,10 @@ def _deposit_service():
     if _deposit_service_instance is None:
         with _deposit_service_lock:
             if _deposit_service_instance is None:
+                import artefact_deposit  # noqa: PLC0415
                 import dataset_deposit as dd  # noqa: PLC0415
-                from config import (get_dataset_deposit_settings, get_ingest_state_dir,  # noqa: PLC0415
-                                    get_ingest_work_dir, get_tmp_dir)
+                from config import (get_artefact_settings, get_dataset_deposit_settings,  # noqa: PLC0415
+                                    get_ingest_state_dir, get_ingest_work_dir, get_tmp_dir)
                 cfg = get_config()
                 raw = get_dataset_deposit_settings(cfg)
                 fields = {name: raw[name] for name in dd.DepositSettings.__dataclass_fields__ if name in raw}
@@ -17193,8 +17213,9 @@ def _deposit_service():
                 s3 = _deposit_s3_client(raw['s3']) if settings.credentials_present else None
                 roots = {'store': store_root, 'state': state_dir, 'work': get_ingest_work_dir(cfg, create=False),
                          'tmp': get_tmp_dir(cfg, create=False)}
-                _deposit_service_instance = dd.DepositService(settings, dd.DepositStore(state_dir / dd.DB_FILE),
-                                                              s3, store_root, state_dir, roots=roots)
+                _deposit_service_instance = artefact_deposit.ArtefactDepositService(
+                    settings, dd.DepositStore(state_dir / dd.DB_FILE), s3, store_root, state_dir, roots=roots,
+                    artefact_settings=get_artefact_settings(cfg))
                 if settings.active:
                     try:        # completes a previous process left running continue in the background
                         resumed = _deposit_service_instance.resume_interrupted()
@@ -17205,10 +17226,11 @@ def _deposit_service():
     return _deposit_service_instance
 
 
-def _deposit_call(request: Request, action, admin_only: bool = False, status_code: int = 200):
-    """Run ``action(service, identity)`` for an uploader; DepositError becomes its JSON answer."""
+def _deposit_call(request: Request, action, admin_only: bool = False, status_code: int = 200,
+                  kinds: Tuple[str, ...] = ('dataset', 'artefact', 'collection')):
+    """Run ``action(service, identity)`` for an uploader of ``kinds``; DepositError becomes its JSON answer."""
     from dataset_deposit import DepositError  # noqa: PLC0415
-    identity, forbidden = _require_dataset_uploader(request, admin_ok=admin_only)
+    identity, forbidden = _require_dataset_uploader(request, admin_ok=admin_only, kinds=kinds)
     if forbidden is not None:
         return forbidden
     if admin_only and not identity.is_admin:
@@ -17246,11 +17268,46 @@ def dataset_deposit_set_owner(request: Request, body: Any = Body(None)):
         identity, body.get('db_id'), body.get('user'), str(body.get('note') or '')), admin_only=True)
 
 
+def _artefact_context(request: Request):
+    """What an artefact or collection deposit is checked against: the registry, the index and the caller's view."""
+    import artefact_deposit  # noqa: PLC0415
+    import artefacts as artefacts_lib  # noqa: PLC0415
+    folders = {db_id: Path(str(extra.get('rel_path') or '')).parts[0]
+               for db_id, extra in registry._db_extra.items() if Path(str(extra.get('rel_path') or '')).parts}
+    return artefact_deposit.ArtefactContext(
+        store_root=registry.data_folder, collections=registry.collection_registry(),
+        index=registry.artefact_index(), policy=_artefact_policy(), viewer=_artefact_viewer(request),
+        dataset_md=dict(registry._db_md_bases), dataset_folder=folders)
+
+
 @app.post("/datasets/deposit", tags=["datasets-deposit"], include_in_schema=False)
 def dataset_deposit_create(request: Request, body: Any = Body(None)):
-    """Declare one dataset deposit ``{data_project, basename, files: [{name, size, sha256, kind}],
-    update_of?}`` and get presigned upload instructions per file (201)."""
-    return _deposit_call(request, lambda service, identity: service.create(identity, body), status_code=201)
+    """Declare one deposit and get presigned upload instructions per file (201).
+
+    ``deposit_kind`` ``dataset`` (default): ``{data_project, basename, files: [{name, size, sha256, kind}],
+    update_of?}``. ``artefact`` (REST 2.47): ``{data_project, scope, artefact: {kind, artefact_id, title,
+    description, access?, made_from, declared, new_version_of?, change_note?}, files: [{name, size, sha256,
+    role?}]}``. ``collection``: ``{data_project, collection: {title, authors, description?, access?, doi?,
+    papers?}}`` (no files; answers ``uploaded`` with the group id)."""
+    kind = body.get('deposit_kind') if isinstance(body, dict) else None
+    if kind in ('artefact', 'collection'):
+        return _deposit_call(request, lambda service, identity: service.create(identity, body,
+                                                                               _artefact_context(request)),
+                             status_code=201, kinds=(kind,))
+    return _deposit_call(request, lambda service, identity: service.create(identity, body), status_code=201,
+                         kinds=('dataset',))
+
+
+@app.post("/artefacts/{group_id}/{scope}/{artefact_id}/{version}/purge", tags=["artefacts"],
+          include_in_schema=False)
+def purge_artefact_version(request: Request, group_id: str, scope: str, artefact_id: str, version: str,
+                           body: Any = Body(None)):
+    """Purge one version ``{reason, confirm: "<ref>@v<N>"}``: the uploader of that version, the artefact's
+    owner or an admin. 202 ``{ref, version, state: "purge_requested"}``; the watcher deletes the files and the
+    version becomes a tombstone. An artefact the caller cannot see is a 404."""
+    return _deposit_call(request, lambda service, identity: service.request_purge(
+        identity, _artefact_context(request), group_id, scope, artefact_id, version, body), status_code=202,
+        kinds=('artefact',))
 
 
 @app.get("/datasets/deposit/groups/{data_project}", tags=["datasets-deposit"], include_in_schema=False)
