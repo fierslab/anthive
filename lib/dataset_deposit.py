@@ -59,13 +59,17 @@ SINGLE_PUT_HARD_MAX = 5 * 1024 ** 3      # S3 PutObject limit
 MAX_PARTS_PER_CALL = 1000
 
 #: A new group (data_project) is named like a paper: capital letter first, a year last (mus' rule).
-NEW_GROUP_RE = re.compile(r'^[A-Z][A-Za-z0-9_]*\d{4}$')
+#: Every validator below is applied with ``fullmatch``: ``re.match(r'...$')`` also accepts a trailing newline.
+NEW_GROUP_RE = re.compile(r'^[A-Z][A-Za-z0-9_]*[0-9]{4}$')
 BASENAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$')
 #: Basenames the watch route reads as group seeds (``index.md``, ``<x>.index.md``): never a dataset name.
-RESERVED_BASENAME_RE = re.compile(r'^(index|.*\.index)$', re.IGNORECASE)
+RESERVED_BASENAME_RE = re.compile(r'^(index|.*\.index)$', re.IGNORECASE | re.DOTALL)
 SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
 DEPOSIT_ID_RE = re.compile(r'^dep_[0-9a-f]{20}$')
-DB_ID_RE = re.compile(r'^[A-Za-z0-9._-]{1,32}/[A-Za-z0-9._-]{1,64}$')
+#: A dataset id is ``<group_id>/<dataset id>``, both short alphanumeric codes (generated as 3 characters, e.g.
+#: ``AL1/CBL``); no dots, so ``..`` and other path forms never pass.
+DB_ID_RE = re.compile(r'^[A-Za-z0-9]{1,16}/[A-Za-z0-9]{1,16}$')
+USER_RE = re.compile(r'^[A-Za-z0-9._@-]{1,80}$')
 
 #: States of the deposit record itself. After ``uploaded`` the watcher's state is shown. ``completing``,
 #: ``withdrawing`` and ``expiring`` are short locks (compare-and-set) so complete, withdraw and expiry
@@ -274,7 +278,7 @@ def report_summary(report: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]
 
 def report_copy_path(state_dir: Path, deposit_id: str) -> Path:
     """Where the watcher writes the redacted report of a deposit (and the API reads it)."""
-    if not DEPOSIT_ID_RE.match(deposit_id):
+    if not DEPOSIT_ID_RE.fullmatch(deposit_id):
         raise ValueError(f'not a deposit id: {deposit_id!r}')
     return Path(state_dir) / REPORTS_DIR / f'{deposit_id}.json'
 
@@ -882,7 +886,7 @@ class DepositService:
 
     def _get_own(self, identity: Identity, deposit_id: str) -> Dict[str, Any]:
         """The deposit when the caller owns it (admins: any); 404 otherwise, also for other users' ids."""
-        record = self.store.get(deposit_id) if DEPOSIT_ID_RE.match(deposit_id or '') else None
+        record = self.store.get(deposit_id) if DEPOSIT_ID_RE.fullmatch(deposit_id or '') else None
         if record is None or (record['user'] != identity.user and not identity.is_admin):
             raise DepositError(404, 'not_found', f'no deposit {deposit_id!r} of yours')
         return record
@@ -1091,7 +1095,7 @@ class DepositService:
             if kind in TEXT_KINDS and size > TEXT_MAX_BYTES:
                 raise DepositError(413, 'too_large', f'{name!r}: text files ({", ".join(TEXT_KINDS)}) are at most '
                                                      f'{TEXT_MAX_BYTES // 1024} KB')
-            if not SHA256_RE.match(sha):
+            if not SHA256_RE.fullmatch(sha):
                 raise DepositError(422, 'invalid', f'{name!r}: sha256 must be 64 hex characters')
             counts[kind] = counts.get(kind, 0) + 1
             clean.append({'name': name, 'kind': kind, 'size': size, 'sha256': sha,
@@ -1141,7 +1145,7 @@ class DepositService:
             shown = f' ({clash[0]!r})' if identity.is_admin else ''
             raise DepositError(422, 'invalid_data_project', f'a group with this name in other letter case exists'
                                                             f'{shown}: spell it exactly as the catalogue does')
-        if not NEW_GROUP_RE.match(data_project):
+        if not NEW_GROUP_RE.fullmatch(data_project):
             raise DepositError(422, 'invalid_data_project', f'{data_project!r} is not an existing group, and a new '
                                                             f'group is named like Smith2024 ({NEW_GROUP_RE.pattern})')
         return False
@@ -1149,7 +1153,7 @@ class DepositService:
     # cleanup: expiry, staging, force expiry ---------------------------------
 
     def _staging_folder(self, deposit_id: str) -> str:
-        if not DEPOSIT_ID_RE.match(deposit_id):
+        if not DEPOSIT_ID_RE.fullmatch(deposit_id):
             raise ValueError(f'not a deposit id: {deposit_id!r}')
         return f'{self.settings.staging_prefix}{deposit_id}/'
 
@@ -1199,7 +1203,7 @@ class DepositService:
         newest: Dict[str, float] = {}
         for obj in self._list(prefix):
             deposit_id = obj['Key'][len(prefix):].split('/', 1)[0]
-            if not DEPOSIT_ID_RE.match(deposit_id):
+            if not DEPOSIT_ID_RE.fullmatch(deposit_id):
                 continue                                   # not a deposit folder: never touched
             modified = obj.get('LastModified')
             stamp = modified.timestamp() if hasattr(modified, 'timestamp') else float(modified or 0)
@@ -1273,7 +1277,7 @@ class DepositService:
                 answer['may_create'] = False
                 answer['reason'] = exc.body['message']
         if basename is not None:
-            if not isinstance(basename, str) or not BASENAME_RE.match(basename) or RESERVED_BASENAME_RE.match(basename):
+            if not isinstance(basename, str) or not BASENAME_RE.fullmatch(basename) or RESERVED_BASENAME_RE.fullmatch(basename):
                 raise DepositError(422, 'invalid_name', f'{basename!r} is not a usable dataset name')
             existing = dataset_db_id(self.store_root, data_project, basename) if exists else None
             answer['dataset_exists'] = existing is not None
@@ -1293,9 +1297,9 @@ class DepositService:
     def set_owner(self, identity: Identity, db_id: str, user: str, note: str = '') -> Dict[str, Any]:
         """Admin: who may deposit new versions of a dataset (for datasets published before deposits existed)."""
         self._require_admin(identity, 'assign dataset owners')
-        if not isinstance(db_id, str) or not DB_ID_RE.match(db_id):
+        if not isinstance(db_id, str) or not DB_ID_RE.fullmatch(db_id):
             raise DepositError(422, 'invalid', 'db_id is a dataset id like ABC/xyz')
-        if not isinstance(user, str) or not re.match(r'^[A-Za-z0-9._@-]{1,80}$', user):
+        if not isinstance(user, str) or not USER_RE.fullmatch(user):
             raise DepositError(422, 'invalid', 'user is a login name (letters, digits, ._@-)')
         if find_dataset_md(self.store_root, db_id) is None:
             raise DepositError(404, 'not_found', f'no dataset {db_id} in the store')
@@ -1316,7 +1320,7 @@ class DepositService:
         except Exception:  # noqa: BLE001
             meta = {}
         sha = str(meta.get('sha256') or '').lower()
-        if not SHA256_RE.match(sha):
+        if not SHA256_RE.fullmatch(sha):
             raise DepositError(409, 'h5ad_unavailable', 'the published dataset has no recorded sha256: a metadata '
                                                         'update needs the h5ad deposited again')
         wanted = [('h5ad', f'{basename}{H5AD_SUFFIX}')]
@@ -1395,14 +1399,14 @@ class DepositService:
         data_project = body.get('data_project')
         basename = body.get('basename')
         group_exists = self._check_group(data_project, identity)
-        if not isinstance(basename, str) or not BASENAME_RE.match(basename) or basename.endswith(H5AD_SUFFIX):
+        if not isinstance(basename, str) or not BASENAME_RE.fullmatch(basename) or basename.endswith(H5AD_SUFFIX):
             raise DepositError(422, 'invalid_name', 'basename: the h5ad name without .h5ad; letters, digits, ._-, '
                                                     'at most 50 characters')
-        if RESERVED_BASENAME_RE.match(basename):
+        if RESERVED_BASENAME_RE.fullmatch(basename):
             raise DepositError(422, 'invalid_name', f'{basename!r} cannot be a dataset name: index.md and '
                                                     f'<x>.index.md are group descriptions')
         update_of = body.get('update_of')
-        if update_of is not None and (not isinstance(update_of, str) or not DB_ID_RE.match(update_of)):
+        if update_of is not None and (not isinstance(update_of, str) or not DB_ID_RE.fullmatch(update_of)):
             raise DepositError(422, 'invalid', 'update_of is a dataset id like ABC/xyz')
         files_in = body.get('files')
         de_only = isinstance(files_in, list) and bool(files_in) and all(
@@ -1613,7 +1617,7 @@ class DepositService:
                                                    'deposit again for other files')
             size, sha = body.get('size'), str(body.get('sha256') or '').lower()
             if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= TEXT_MAX_BYTES \
-                    or not SHA256_RE.match(sha):
+                    or not SHA256_RE.fullmatch(sha):
                 raise DepositError(422, 'invalid', f'size (0..{TEXT_MAX_BYTES} bytes) and sha256 (64 hex) of the '
                                                    f'corrected sidecar')
         if int(record.get('refreshes') or 0) >= self.settings.max_refreshes:

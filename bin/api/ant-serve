@@ -11458,7 +11458,7 @@ async def plot_notebook_b64_named_endpoint(
     """
     # ``filename`` is cosmetic — the response body is driven entirely by
     # the b64 blob. Validate it just enough to refuse abuse / weird URLs.
-    if not _NOTEBOOK_FILENAME_RE.match(filename):
+    if not _NOTEBOOK_FILENAME_RE.fullmatch(filename):
         raise HTTPException(
             400,
             detail=(

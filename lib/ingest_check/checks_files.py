@@ -54,7 +54,7 @@ def files_filename(ctx) -> Outcome:
     if not valid:
         return fail(message or 'invalid file name', 'Rename the file: letters, digits, dot, dash, underscore; '
                     'at most 50 characters before .h5ad.', basename=ctx.basename)
-    if not _NAME_PART.match(group_name) or group_name.startswith('_') or group_name.startswith('.'):
+    if not _NAME_PART.fullmatch(group_name) or group_name.startswith('_') or group_name.startswith('.'):
         return fail(f'group folder name {group_name!r} is not allowed',
                     'Use letters, digits, dot, dash and underscore; do not start with _ or a dot.',
                     group=group_name)

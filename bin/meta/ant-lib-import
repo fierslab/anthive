@@ -84,7 +84,7 @@ def main() -> int:
             updated += 1
         else:
             key = entry.get('ID', '').lower()
-            if not L.CITEKEY_RE.match(key) or key in papers:
+            if not L.CITEKEY_RE.fullmatch(key) or key in papers:
                 key = L.make_citekey(L.first_author_last(fields), fields.get('date'), fields['title'], papers)
             new_fields = {'anthive_role': args.role, **fields, 'citekey': key}
             body = '## Notes\n\nImported from ' + args.bibfile.name + '.'

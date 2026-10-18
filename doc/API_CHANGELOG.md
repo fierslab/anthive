@@ -29,6 +29,35 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.46.2 (unreleased)
+
+Security patch. No endpoint, parameter or response field changes. Clients do not need to update.
+
+REST and tools:
+
+- Validators no longer accept a trailing newline. Python's `$` also matches just before a final `\n`, so
+  `re.match(r'^...$', 'abc\n')` passed. Every validation regex applied to untrusted input now uses
+  `fullmatch`: S3 key segments (`ingest_pipeline.valid_segment`), deposit group names, basenames, sha256,
+  deposit ids, db ids and owner logins (`lib/dataset_deposit.py`), personal MCP link tokens, citekeys,
+  depositor name and e-mail, licence ids, group folder names, h5ad file names, version strings, layer keys,
+  sidecar names, SQL identifiers in `anthive_db`, donor group slugs, the notebook filename of
+  `/notebook/{b64}/{filename}.ipynb`, and the login, e-mail and group names of `ant-adduser` and `ant_s3`. A
+  value with a trailing `\n`, `\r` or NUL is now refused with the same error as any other invalid value.
+- `db_id` / `update_of` of the deposit routes must have the real dataset id form `<group_id>/<id>`, letters and
+  digits only (at most 16 each). Before, dots and dashes were allowed, so `../x` passed the check (the lookup
+  afterwards found no dataset, so nothing was reached).
+- `ant-adduser` refuses control characters in an e-mail address.
+- `tests/test_validator_anchors.py` covers every validator and fails when one is applied with `.match` or
+  `.search` again.
+
+Deployment:
+
+- The Caddy access log drops the query of a redirect's `Location` header (`resp_headers>Location`), keeping
+  host and path. `/databases/{id}/download/h5ad` and `/papers/{citekey}/file` answer with a 307 to a presigned
+  S3 URL, and the access log wrote that URL with its credential and signature. Sites pick this up with the new
+  Caddyfile (image rebuild or `ant-stack up`). Tested against Caddy 2.10.2 and 2.11.4
+  (`tests/test_caddy_access_log.py`).
+
 ## 2.46.1 (2026-10-18)
 
 Patch release: operational fixes reported by the anthive-intern site and found on the 2.46.0 scratch site.

@@ -74,7 +74,7 @@ def access_licence(ctx) -> Outcome:
                        'Set license= to an SPDX id (CC-BY-4.0, CC0-1.0, ...) or in-house in the .h5ad.mus.')
         outcome.held.append(HELD_LICENCE)
         return outcome
-    if licence.lower() != 'in-house' and not _SPDX_LIKE.match(licence):
+    if licence.lower() != 'in-house' and not _SPDX_LIKE.fullmatch(licence):
         return fail(f'licence {licence!r} is not an SPDX style id', 'Use an SPDX id such as CC-BY-4.0, CC0-1.0, '
                     'CC-BY-NC-4.0, or in-house.', licence=licence)
     return ok(f'licence {licence}', licence=licence)

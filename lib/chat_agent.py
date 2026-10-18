@@ -156,7 +156,7 @@ async def _preflight_plot_url(
     # /browse/<group>/<file>/plot/<geom>?<params> →
     # <internal>/databases/<group>/<file>/plot/<geom>?<params>+tiny dims
     parts = urlsplit(nav_url)
-    m = re.match(r'^/browse/([^/]+/[^/]+)/plot/([a-z0-9_]+)$', parts.path)
+    m = re.fullmatch(r'/browse/([^/]+/[^/]+)/plot/([a-z0-9_]+)', parts.path)
     if not m:
         # Not a plot-page URL — skip preflight.
         return {'failed': False, 'status': None, 'reason': 'not a plot URL'}

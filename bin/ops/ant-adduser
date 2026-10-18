@@ -61,7 +61,7 @@ AUTHELIA_BIN = REPO_ROOT / "envs" / "authelia" / "authelia"
 DEFAULT_USERS_FILE = REPO_ROOT / "config" / "authelia" / "users_database.yml"
 DEFAULT_CONFIG_FILE = REPO_ROOT / "config" / "authelia" / "configuration.yml"
 
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+EMAIL_RE = re.compile(r"^[^@\s\x00-\x1f\x7f]+@[^@\s\x00-\x1f\x7f]+\.[^@\s\x00-\x1f\x7f]+$")
 LOGIN_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
@@ -105,7 +105,7 @@ def confirm_login(suggestion: str, existing: dict[str, str | None],
             die("collision not resolved (no input); re-run with "
                 f"-u <login> — suggestion: {suggestion}")
         choice = response or suggestion
-        if not LOGIN_RE.match(choice):
+        if not LOGIN_RE.fullmatch(choice):
             print("  invalid: lowercase, start with a letter, a-z 0-9 _ -",
                   file=sys.stderr)
             continue
@@ -229,7 +229,7 @@ def main() -> None:
     users_path = Path(args.file)
     if not users_path.is_file():
         die(f"users database not found at {users_path}")
-    if not EMAIL_RE.match(args.email):
+    if not EMAIL_RE.fullmatch(args.email):
         die(f"invalid email address: {args.email}")
 
     yaml = YAML()  # round-trip: preserves existing entries' formatting
@@ -249,7 +249,7 @@ def main() -> None:
     candidates, tokens = candidate_logins(args.email)
 
     if args.login:
-        if not LOGIN_RE.match(args.login):
+        if not LOGIN_RE.fullmatch(args.login):
             die(f"login {args.login!r} must be lowercase, start with a letter, "
                 f"and contain only a-z 0-9 _ -")
         desired = args.login

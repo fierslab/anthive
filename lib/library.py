@@ -347,7 +347,7 @@ def validate_paper(paper: Paper, vocab: Optional[Dict[str, set]] = None) -> Libr
     issues = LibraryIssues()
     f = paper.fields
     where = paper.path.name if paper.path else paper.citekey
-    if not CITEKEY_RE.match(paper.citekey):
+    if not CITEKEY_RE.fullmatch(paper.citekey):
         issues.errors.append(f"{where}: citekey {paper.citekey!r} must be lowercase ascii")
     if paper.path and paper.path.stem != paper.citekey:
         issues.errors.append(f"{where}: file name must be <citekey>.md ({paper.citekey}.md)")

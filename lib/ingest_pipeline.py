@@ -95,7 +95,7 @@ class Blocked(RuntimeError):
 def valid_segment(segment: str) -> bool:
     """True for a safe key segment: ASCII letters, digits, ``._-``, not starting with ``.`` or ``_``."""
     return (bool(segment) and segment not in ('.', '..') and unicodedata.normalize('NFC', segment) == segment
-            and bool(SEGMENT_RE.match(segment)))
+            and bool(SEGMENT_RE.fullmatch(segment)))
 
 
 def ensure_inside(target: Path, root: Path) -> Path:
@@ -249,7 +249,7 @@ def plan_items(objects: Sequence[Dict[str, Any]], prefix: str) -> Tuple[List[Ite
             malformed.append(f'{key}: expected {prefix}<data_project>/[<subfolder>/]<file>.h5ad')
             continue
         basename = filename[:-len(H5AD_SUFFIX)]
-        if re.match(r'^(index|.*\.index)$', basename, re.IGNORECASE):
+        if re.fullmatch(r'^(index|.*\.index)$', basename, re.IGNORECASE | re.DOTALL):
             malformed.append(f'{key}: {basename!r} cannot be a dataset name (index.md and <x>.index.md describe '
                              f'groups)')
             continue

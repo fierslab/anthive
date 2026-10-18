@@ -32,7 +32,7 @@ def created(service, identity=ALICE, **kwargs):
 def test_create_returns_presigned_puts_for_exact_keys(tmp_path, clock):
     service = make_service(tmp_path, clock)
     response, payloads = created(service)
-    assert response['state'] == 'uploading' and dd.DEPOSIT_ID_RE.match(response['deposit_id'])
+    assert response['state'] == 'uploading' and dd.DEPOSIT_ID_RE.fullmatch(response['deposit_id'])
     keys = {entry['name']: entry['key'] for entry in response['files']}
     assert keys == {'cells.h5ad': f'{PREFIX}New2026/cells.h5ad', 'cells.h5ad.mus': f'{PREFIX}New2026/cells.h5ad.mus',
                     'cells.md': f'{PREFIX}New2026/static/cells.md', 'index.md': f'{PREFIX}New2026/static/index.md'}

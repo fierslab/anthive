@@ -380,11 +380,11 @@ def depositor_of(sidecar: Dict[str, Any]) -> Optional[str]:
     """
     name = str(sidecar.get('depositor') or '').strip()
     email = str(sidecar.get('depositor_email') or '').strip()
-    if not email or not _EMAIL_RE.match(email):
+    if not email or not _EMAIL_RE.fullmatch(email):
         return None
     if not name:
         name = email.split('@')[0]
-    if not _NAME_RE.match(name):
+    if not _NAME_RE.fullmatch(name):
         return None
     return f'{name} <{email}>'
 

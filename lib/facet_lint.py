@@ -536,7 +536,7 @@ def lint_lineage(metadata: Mapping[str, Any], known_db_ids: Iterable[str]) -> Li
                                     f'reanalysis_of is set ({", ".join(map(str, targets))}) but is_secondary '
                                     f'is {metadata.get("is_secondary")!r}'))
     donor_group = metadata.get('donor_group')
-    if donor_group is not None and not _DONOR_GROUP_RE.match(str(donor_group)):
+    if donor_group is not None and not _DONOR_GROUP_RE.fullmatch(str(donor_group)):
         findings.append(Finding(WARNING, 'donor_group_format',
                                 f'donor_group {donor_group!r} is not a lower-case slug'))
     return findings

@@ -34,12 +34,12 @@ COPIED_SUFFIXES = ('.de.parquet',)
 #: Catalog files copied on S3 for a version.
 S3_ARCHIVED_SUFFIXES = ('.h5ad', '.h5ad.mus')
 
-_VERSION_RE = re.compile(r'^\d+\.\d+\.\d+$')
+_VERSION_RE = re.compile(r'^[0-9]+\.[0-9]+\.[0-9]+$')
 
 
 def version_key(version: str) -> Tuple[int, int, int]:
     """Sort key of an ``X.Y.Z`` version; malformed versions sort first."""
-    if not _VERSION_RE.match(version or ''):
+    if not _VERSION_RE.fullmatch(version or ''):
         return (-1, -1, -1)
     major, minor, patch = (int(part) for part in version.split('.'))
     return (major, minor, patch)

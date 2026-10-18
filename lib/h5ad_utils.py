@@ -43,7 +43,7 @@ def validate_filename(filename: str) -> Tuple[bool, Optional[str]]:
         return False, f"Filename contains spaces. Suggested: {suggested}"
 
     # Check for special characters
-    if not re.match(r'^[a-zA-Z0-9._-]+$', filename):
+    if not re.fullmatch(r'[a-zA-Z0-9._-]+', filename):
         return False, "Filename contains special characters. Only alphanumeric, dash, underscore, and dot allowed"
 
     # Check basename length

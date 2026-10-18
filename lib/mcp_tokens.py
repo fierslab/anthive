@@ -54,7 +54,7 @@ def _parse(value: Optional[str]) -> Optional[datetime]:
 
 
 def looks_like_token(value: str) -> bool:
-    return bool(_TOKEN_RE.match(value or ''))
+    return bool(_TOKEN_RE.fullmatch(value or ''))
 
 
 def clean_label(label: Optional[str]) -> str:
@@ -282,7 +282,7 @@ class McpLinkStore:
     # ── verification ───────────────────────────────────────────────────
     def verify(self, token: str, client_ip: Optional[str] = None) -> Optional[LinkRecord]:
         """Return the link's record for a valid, active token, else None."""
-        match = _TOKEN_RE.match(token or '')
+        match = _TOKEN_RE.fullmatch(token or '')
         if not match:
             return None
         public_id, presented_mac = match.groups()

@@ -399,7 +399,7 @@ def notify_depositor(settings: Dict[str, Any], deposit: Dict[str, Any], row: Dic
     notify_settings = settings.get('notify') or {}
     email = str(deposit.get('email') or '').strip()
     if row.get('state') not in dataset_deposit.NOTIFY_DEPOSITOR_ON or not notify_settings.get('smtp_host') \
-            or not _EMAIL_RE.match(email):
+            or not _EMAIL_RE.fullmatch(email):
         return False
     held = json.loads(row.get('held_reasons') or '[]')
     lines = [f'Your Anthive deposit {deposit.get("id")} ({deposit.get("data_project")}/{deposit.get("basename")}) '

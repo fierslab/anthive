@@ -260,12 +260,12 @@ def _fmt_size(n: int) -> str:
 
 # Must start with a letter, contain only letters/digits/underscores,
 # and end with exactly 4 digits (the year).
-GROUP_NAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*\d{4}$')
+GROUP_NAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]*[0-9]{4}$')
 
 
 def _validate_group_name(name: str) -> None:
     """Exit with a clear message if the group name is invalid."""
-    if not GROUP_NAME_RE.match(name):
+    if not GROUP_NAME_RE.fullmatch(name):
         print(
             f'ERROR: Invalid group name {name!r}.\n'
             f'  Rules: letters, digits and underscores only (no hyphens).\n'

@@ -405,7 +405,7 @@ def layer_sidecar_path(db_location: Any, layer: str,
     """
     if db_location is None or order not in LAYER_ORDERS:
         return None
-    if not isinstance(layer, str) or not _LAYER_KEY_RE.match(layer):
+    if not isinstance(layer, str) or not _LAYER_KEY_RE.fullmatch(layer):
         return None
     import os
     db_str = str(db_location)
@@ -431,7 +431,7 @@ def layer_sidecar_path(db_location: Any, layer: str,
 _VIEW_PARQUET_PATH_RE = re.compile(r"read_parquet\(\s*'((?:[^']|'')+)'")
 _VIEW_BODY_RE = re.compile(r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+.+?\s+AS\s+(.*)$",
                            re.IGNORECASE | re.DOTALL)
-_SIDECAR_BASENAME_RE = re.compile(r"^[^/\\']+\.parquet$")
+_SIDECAR_BASENAME_RE = re.compile(r"^[^/\\'\x00-\x1f]+\.parquet$")
 _SIDECAR_NAME_RE = re.compile(r"^.+\.layer\.(.+)\.(by_gene|by_cell)\.parquet$")
 
 
@@ -493,15 +493,15 @@ def portable_layer_views(conn: duckdb.DuckDBPyConnection, db_location: Any,
 
     def _local_sidecar(baked_path: str) -> Optional[str]:
         basename = baked_path.replace('\\', '/').rsplit('/', 1)[-1]
-        if not _SIDECAR_BASENAME_RE.match(basename):
+        if not _SIDECAR_BASENAME_RE.fullmatch(basename):
             return None
         # The canonical name follows the duckdb's CURRENT stem: datasets get
         # renamed after conversion (SerranoPozo2024_* -> Wachter2024_*), and
         # the sidecars are renamed with them while the view keeps the old
         # name. Fall back to the baked file name only if that is absent.
         names = []
-        sidecar_match = _SIDECAR_NAME_RE.match(basename)
-        if sidecar_match and _LAYER_KEY_RE.match(sidecar_match.group(1)):
+        sidecar_match = _SIDECAR_NAME_RE.fullmatch(basename)
+        if sidecar_match and _LAYER_KEY_RE.fullmatch(sidecar_match.group(1)):
             names.append(f"{db_stem}.layer.{sidecar_match.group(1)}.{sidecar_match.group(2)}.parquet")
         if basename not in names:
             names.append(basename)
@@ -517,7 +517,7 @@ def portable_layer_views(conn: duckdb.DuckDBPyConnection, db_location: Any,
     with_parquet: List[Tuple[str, str, List[str]]] = []
     without_parquet: List[Tuple[str, str, List[str]]] = []
     for view_name, view_sql in rows:
-        if not isinstance(view_name, str) or not _SAFE_IDENT_RE.match(view_name):
+        if not isinstance(view_name, str) or not _SAFE_IDENT_RE.fullmatch(view_name):
             continue
         body_match = _VIEW_BODY_RE.match(view_sql or '')
         if body_match is None:
@@ -2004,7 +2004,7 @@ class AnthiveDB:
             resolved = layer_sidecar_path(self.db_path, layer, order)
         elif (self.db_url and str(self.db_url).startswith('s3://')
               and order in LAYER_ORDERS and isinstance(layer, str)
-              and _LAYER_KEY_RE.match(layer)):
+              and _LAYER_KEY_RE.fullmatch(layer)):
             view_row = self._conn.execute(
                 "SELECT sql FROM duckdb_views() "
                 "WHERE database_name = current_database() AND view_name = ?",
