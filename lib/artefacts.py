@@ -280,12 +280,12 @@ def _plain(value: Any) -> Any:
     return value
 
 
-_FRONT_MATTER_RE = re.compile(r'\A---\n(.*?\n)?---[ \t]*(?:\n|\Z)', re.DOTALL)
+_FRONT_MATTER_PREFIX = re.compile(r'\A---\n(.*?\n)?---[ \t]*(?:\n|\Z)', re.DOTALL)
 
 
 def split_front_matter(text: str) -> Tuple[Dict[str, Any], str]:
     """(front matter as a plain dict, body) of a ``---``-delimited document; ValueError when absent."""
-    match = _FRONT_MATTER_RE.match(text)
+    match = _FRONT_MATTER_PREFIX.match(text)
     if not match:
         raise ValueError('no front matter (a document starting with a --- line and closed by another)')
     data = yaml.safe_load(match.group(1) or '')

@@ -317,7 +317,10 @@ class DepositStore:
                                     ('files', 'staging_key', 'TEXT'), ('files', 'staging_etag', 'TEXT'),
                                     ('deposits', 'deposit_kind', "TEXT DEFAULT 'dataset'"),
                                     ('deposits', 'progress', 'TEXT'), ('deposits', 'complete_error', 'TEXT'),
-                                    ('deposits', 'worker', 'TEXT')):
+                                    ('deposits', 'worker', 'TEXT'),
+                                    # artefact and collection deposits (lib/artefact_deposit.py, REST 2.47)
+                                    ('deposits', 'artefact_ref', 'TEXT'), ('deposits', 'artefact', 'TEXT'),
+                                    ('deposits', 'group_id', 'TEXT')):
             if column not in {row[1] for row in self.conn.execute(f'PRAGMA table_info({table})')}:
                 self.conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
 
@@ -376,11 +379,14 @@ class DepositStore:
             self.conn.execute('DELETE FROM open_keys WHERE deposit_id = ?', (deposit_id,))
 
     def reserve(self, record: Dict[str, Any], files: Sequence[Dict[str, Any]], now: float,
-                settings: 'DepositSettings') -> None:
+                settings: 'DepositSettings',
+                extra_check: Optional[Callable[[sqlite3.Connection], None]] = None) -> None:
         """Check the per-user limits and insert the deposit, its files and its key locks in one transaction.
 
         ``BEGIN IMMEDIATE`` serialises concurrent creates (also across processes), and the primary key of
-        ``open_keys`` makes a key part of at most one open deposit.
+        ``open_keys`` makes a key part of at most one open deposit. ``extra_check(conn)`` runs inside the same
+        transaction after the limits (artefact deposits: one pending deposit per artefact or collection) and
+        refuses by raising :class:`DepositError`.
         """
         user = record['user']
         with self._lock:
@@ -406,6 +412,8 @@ class DepositStore:
                                        f'{(pending + record["total_bytes"]) / 1024 ** 3:.1f} GB would be pending for '
                                        f'you (limit {settings.max_pending_gb_per_user:g} GB); wait until earlier '
                                        f'deposits are published or withdraw them')
+                if extra_check is not None:
+                    extra_check(self.conn)
                 # locks of deposits that expired but were not cleaned up yet do not count
                 self.conn.execute("DELETE FROM open_keys WHERE deposit_id IN (SELECT id FROM deposits WHERE "
                                   "state = 'uploading' AND expires <= ?)", (now,))
