@@ -153,6 +153,50 @@ datasets_deposit_update_policy: own
 # taken from s3 unless given here). Empty: the s3 block's keys.
 datasets_deposit_s3: {}
 
+# Artefact store (doc/DESIGN_artefacts.md): versioned, immutable analysis files
+# (DE tables, figures, tables, notebooks, reports, models) of a dataset or a
+# collection, under <Group>/static/artefacts/. S3 holds the files; the API
+# checks access and redirects to a short-lived signed GET. Every key has an env
+# override ANTHIVE_<KEY in upper case>.
+# Off by default. Gates artefact and collection deposits (phase A2); the read
+# routes under /api/artefacts always serve what the store holds.
+artefacts_enabled: false
+# Who may deposit artefacts (signed in; datasets_upload_groups may too, admins always).
+artefacts_upload_groups:
+  - admins
+  - analysts
+# Who may create collections without datasets (collection_kind: analysis).
+collections_create_groups:
+  - admins
+  - analysts
+# Largest artefact file, in GB.
+artefacts_max_file_gb: 100
+# Largest artefact deposit (all files together), in GB.
+artefacts_max_deposit_gb: 200
+# Files per artefact version.
+artefacts_max_files: 50
+# Lifetime of the signed S3 GET a download redirects to, in seconds (10 to 3600).
+artefacts_url_ttl_seconds: 300
+# Files up to this size (MB), and every figure, are kept locally as well (inline copies).
+artefacts_inline_max_mb: 2
+# Tables up to this size (GB) are read by the content checks.
+artefacts_content_check_max_gb: 2
+# Downloads per user (or per address for anonymous callers) and minute.
+artefacts_download_per_minute: 60
+# Artefact bytes one user may have stored, in GB.
+artefacts_max_stored_gb_per_user: 1000
+# Versions per artefact (purged ones included).
+artefacts_max_versions: 100
+# Artefacts of public datasets or collections wait for an admin.
+artefacts_hold_public: true
+# fallback: redirect to S3 when the site can read it, else stream a verified
+# local copy. prefer: a verified local copy first, S3 otherwise.
+artefacts_serve_local: fallback
+# Read-only key pair for HEAD and signing GETs of artefact files (endpoint,
+# region and bucket from s3 unless given here). Empty: the s3 block's keys.
+# Env: ANTHIVE_ARTEFACTS_S3_ACCESS_KEY_ID, ANTHIVE_ARTEFACTS_S3_SECRET_ACCESS_KEY.
+artefacts_s3: {}
+
 # Where ingestion keeps its state (submissions, reports, overlap indexes).
 # Empty: <state_dir>/ingest. Env: ANTHIVE_INGEST_STATE_DIR.
 ingest_state_dir: ''

@@ -120,7 +120,8 @@ _UNKNOWN_KEYS_LENIENT = {'on': False}
 #     unknown top-level key that looks like a critical one (``internal_require_auth``) are errors: there a
 #     silent fallback would change who sees what or what a sync deletes.
 # Keys whose mistakes change who sees what or what a sync deletes:
-CRITICAL_KEYS = ('sync_policy', 'auth', 'internal_requires_auth', 'datasets_upload_groups', 's3')
+CRITICAL_KEYS = ('sync_policy', 'auth', 'internal_requires_auth', 'datasets_upload_groups', 's3',
+                 'artefacts_upload_groups', 'collections_create_groups')
 _CRITICAL_BLOCKS = ('sync_policy', 'auth', 's3')
 
 
@@ -156,9 +157,10 @@ def _critical_problems(config: Dict[str, Any], defaults: Dict[str, Any], unknown
         problems.append(f"sync_policy.role must be primary or slave, not {role!r}")
     if 'internal_requires_auth' in config and not isinstance(config['internal_requires_auth'], bool):
         problems.append(f"internal_requires_auth must be true or false, not {config['internal_requires_auth']!r}")
-    groups = config.get('datasets_upload_groups')
-    if groups is not None and (not isinstance(groups, list) or not all(isinstance(g, str) for g in groups)):
-        problems.append("datasets_upload_groups must be a list of group names")
+    for key in ('datasets_upload_groups', 'artefacts_upload_groups', 'collections_create_groups'):
+        groups = config.get(key)
+        if groups is not None and (not isinstance(groups, list) or not all(isinstance(g, str) for g in groups)):
+            problems.append(f"{key} must be a list of group names")
     return problems
 
 
@@ -738,6 +740,116 @@ def get_dataset_deposit_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[s
         's3': s3,
         'credential_source': credential_source,
     }
+
+
+#: Defaults of the artefact store keys (doc/DESIGN_artefacts.md, section 14). Mirrors anthive.default.yaml.
+ARTEFACT_DEFAULTS: Dict[str, Any] = {
+    'artefacts_enabled': False,
+    'artefacts_upload_groups': ['admins', 'analysts'],
+    'collections_create_groups': ['admins', 'analysts'],
+    'artefacts_max_file_gb': 100.0,
+    'artefacts_max_deposit_gb': 200.0,
+    'artefacts_max_files': 50,
+    'artefacts_url_ttl_seconds': 300,
+    'artefacts_inline_max_mb': 2.0,
+    'artefacts_content_check_max_gb': 2.0,
+    'artefacts_download_per_minute': 60,
+    'artefacts_max_stored_gb_per_user': 1000.0,
+    'artefacts_max_versions': 100,
+    'artefacts_hold_public': True,
+    'artefacts_serve_local': 'fallback',
+}
+ARTEFACT_SERVE_LOCAL_MODES = ('fallback', 'prefer')
+ARTEFACT_URL_TTL_RANGE = (10, 3600)
+
+
+def get_artefact_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Settings of the artefact store (doc/DESIGN_artefacts.md, section 14).
+
+    Precedence per key: env ``ANTHIVE_<KEY>`` (``ANTHIVE_ARTEFACTS_ENABLED``, ...) > anthive.yaml >
+    :data:`ARTEFACT_DEFAULTS`. Group lists are lower-cased; a comma-separated env value is split.
+    ``s3`` is the configuration used to HEAD and sign artefact GETs: ``artefacts_s3`` when it holds a key
+    pair (env ``ANTHIVE_ARTEFACTS_S3_ACCESS_KEY_ID`` / ``_SECRET_ACCESS_KEY``), merged over the ``s3``
+    block's endpoint, region and bucket, else the ``s3`` block itself. ``s3_readable`` is true when a bucket
+    is configured. ``catalog_prefix`` is where the store's relative paths live in the bucket:
+    ``ingest_watch.catalog_prefix``, else ``s3.prefix``.
+
+    Raises:
+        ConfigError: a number that is not one, ``artefacts_serve_local`` not fallback or prefer,
+            ``artefacts_url_ttl_seconds`` outside 10..3600, a group list that is not a list of names.
+    """
+    cfg = cfg if cfg is not None else get_config()
+    settings: Dict[str, Any] = {}
+    for key, default in ARTEFACT_DEFAULTS.items():
+        env_value = os.environ.get(f'ANTHIVE_{key.upper()}', '').strip()
+        raw = env_value if env_value else cfg.get(key)
+        if raw is None or raw == '':
+            raw = default
+        if isinstance(default, bool):
+            settings[key] = _flag(raw, default)
+        elif isinstance(default, list):
+            if isinstance(raw, str):
+                raw = [item for item in raw.split(',')]
+            if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+                raise ConfigError(f'ERROR: [Config] {key} must be a list of group names, got {raw!r}')
+            settings[key] = [item.strip().lower() for item in raw if item.strip()]
+        elif isinstance(default, (int, float)):
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                raise ConfigError(f'ERROR: [Config] {key} must be a number, got {raw!r}')
+            if value < 0 or value != value:
+                raise ConfigError(f'ERROR: [Config] {key} must not be negative, got {raw!r}')
+            settings[key] = int(value) if isinstance(default, int) else value
+        else:
+            settings[key] = str(raw).strip().lower()
+    if settings['artefacts_serve_local'] not in ARTEFACT_SERVE_LOCAL_MODES:
+        raise ConfigError("ERROR: [Config] artefacts_serve_local must be 'fallback' or 'prefer', "
+                          f"not {settings['artefacts_serve_local']!r}")
+    low, high = ARTEFACT_URL_TTL_RANGE
+    if not low <= settings['artefacts_url_ttl_seconds'] <= high:
+        raise ConfigError(f'ERROR: [Config] artefacts_url_ttl_seconds must be between {low} and {high}')
+    base_s3 = dict(cfg.get('s3') or {})
+    own_s3 = dict(cfg.get('artefacts_s3') or {})
+    for name in ('access_key_id', 'secret_access_key'):
+        env_value = os.environ.get(f'ANTHIVE_ARTEFACTS_S3_{name.upper()}', '').strip()
+        if env_value:
+            own_s3[name] = env_value
+    if own_s3.get('access_key_id') and own_s3.get('secret_access_key'):
+        settings['s3'] = {**{k: base_s3.get(k) for k in ('endpoint', 'region', 'bucket', 'use_path_style')},
+                          **own_s3}
+        settings['credential_source'] = 'artefacts_s3'
+    else:
+        settings['s3'] = base_s3
+        settings['credential_source'] = 's3'
+    settings['bucket'] = str(settings['s3'].get('bucket') or '')
+    settings['s3_readable'] = bool(settings['bucket'])
+    catalog_prefix = _watch_catalog_prefix(cfg) or str(base_s3.get('prefix') or '')
+    catalog_prefix = catalog_prefix.strip().strip('/')
+    settings['catalog_prefix'] = (catalog_prefix + '/') if catalog_prefix else ''
+    return settings
+
+
+def may_upload_artefacts(groups: Any, is_admin: bool, cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether a signed-in caller may deposit artefacts: admins always, members of
+    ``artefacts_upload_groups`` and, as the design's default, of ``datasets_upload_groups`` (curators)."""
+    if is_admin:
+        return True
+    cfg = cfg if cfg is not None else get_config()
+    member = {str(group).strip().lower() for group in (groups or []) if str(group).strip()}
+    allowed = set(get_artefact_settings(cfg)['artefacts_upload_groups'])
+    allowed |= set(get_dataset_deposit_settings(cfg)['upload_groups'])
+    return bool(member & allowed)
+
+
+def may_create_collections(groups: Any, is_admin: bool, cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether a signed-in caller may create a collection without datasets: admins always, members of
+    ``collections_create_groups``. Dataset uploaders are not included."""
+    if is_admin:
+        return True
+    cfg = cfg if cfg is not None else get_config()
+    member = {str(group).strip().lower() for group in (groups or []) if str(group).strip()}
+    return bool(member & set(get_artefact_settings(cfg)['collections_create_groups']))
 
 
 def get_model_cache_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
