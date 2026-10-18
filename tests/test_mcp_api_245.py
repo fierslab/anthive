@@ -28,16 +28,17 @@ MCP_SOURCE = MCP_PATH.read_text()
 MCP_TREE = ast.parse(MCP_SOURCE)
 
 MODULE_NAMES = ('PLOT_COMMON_PARAMS', 'PLOT_GEOM_PARAMS', 'de_method_level', 'de_level_note', 'DE_TECHNICAL_TERM',
-                'DE_RULES', 'ANTHIVE_GUIDE')
+                'DE_RULES', 'ANTHIVE_GUIDE', 'WARMING_UP_MESSAGE', 'ServerWarmingUp')
 NESTED_NAMES = ('_fmt_number', 'plot', 'facet_overview', 'get_facet_tests', 'facet_donor_values', 'donor_variability',
                 '_dataset_donor_variability', '_rank_phrase', '_geneset_rank_lines', 'get_geneset', 'list_module_scores',
-                '_dataset_path', '_de_studies_by_dataset', '_de_study_line', 'list_de_studies', 'de_study', 'gene_de')
+                '_dataset_path', '_de_studies_by_dataset', '_de_study_line', 'list_de_studies', 'de_study', 'gene_de',
+                'facet_effects')
 
 
 def _module_level() -> List[ast.stmt]:
     nodes = []
     for node in MCP_TREE.body:
-        if isinstance(node, ast.FunctionDef) and node.name in MODULE_NAMES:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in MODULE_NAMES:
             nodes.append(node)
         elif isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in MODULE_NAMES for t in node.targets):
             nodes.append(node)
@@ -532,3 +533,40 @@ def test_mcp_turns_warming_up_into_a_plain_message():
     with pytest.raises(StatusError):                                      # other 503s stay HTTP errors
         _run(helpers['api_request'](client, 'GET', 'http://api/genesets'))
     assert 'await api_request(_http_client' in MCP_SOURCE and '_http_client.get(url' not in MCP_SOURCE
+
+
+def test_facet_effects_reports_a_warming_facet_and_keeps_the_others():
+    namespace, _ = _load({})
+    card = {'facet': {'contrast': 'm vs f', 'effect_unit': 'log2FC'}, 'scope': 'human_postmortem',
+            'scopes': ['human_postmortem'], 'units': []}
+
+    async def fake_get(path: str, **params):
+        if path == '/facets/sex/effects':
+            raise namespace['ServerWarmingUp'](namespace['WARMING_UP_MESSAGE'])
+        if path == '/facets/disease/effects':
+            raise StatusError(500, 'boom')
+        return card
+    namespace['_get'] = fake_get
+    text = _run(namespace['facet_effects']('TREM2'))
+    assert 'TREM2 / sex: the server is still warming up' in text and 'try this facet again in a minute' in text
+    assert 'disease: error 500' in text
+    for name in ('graft_sex', 'host_sex', 'apoe4_carrier', 'braak', 'age', 'app_nlgf'):
+        assert f'## TREM2 / {name} [human_postmortem]' in text, name
+
+
+def test_deposit_tool_docstrings_name_every_state():
+    import sys  # noqa: PLC0415
+    sys.path.insert(0, str(REPO_ROOT / 'lib'))
+    from dataset_deposit import RECORD_STATES  # noqa: PLC0415
+    docs = _tool_docs()
+    states = set(RECORD_STATES) | {'seen', 'stable', 'checking', 'importing', 'live', 'held', 'failed',
+                                   'needs_decision', 'rejected', 'superseded'}
+    for tool in ('my_deposits', 'deposit_status'):
+        for state in states:
+            assert re.search(rf'\b{state}\b', docs[tool]), (tool, state)
+
+
+def test_instructions_mention_warm_up_and_internal_datasets():
+    instructions = MCP_SOURCE[MCP_SOURCE.index("instructions=("):MCP_SOURCE.index("This MCP server is reachable at")]
+    assert 'warming up, try again in a' in instructions and 'minute' in instructions
+    assert 'access=internal' in instructions and 'signed-in' in instructions

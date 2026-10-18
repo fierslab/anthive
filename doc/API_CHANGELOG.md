@@ -122,6 +122,17 @@ REST:
   a terminal fails with the `--password` hint before getpass prints its echo warning; `up` recreates
   Authelia once instead of twice; the api log says "facet caches for all callers".
 
+MCP:
+
+- `facet_effects` asks each facet on its own: a facet that is still warming up is reported as such in its
+  own section and the other facets are still answered (one warming facet aborted the whole call).
+- The server instructions say that some facet tools answer "warming up, try again in a minute" right after a
+  restart, and that internal datasets need a signed-in (personal) MCP link. `my_deposits` and
+  `deposit_status` list every deposit state, including `completing`, `importing`, `withdrawing`,
+  `expiring` and `superseded`.
+
+Clients: vark 0.0.22 and pyvark 0.11.0 handle the 503 `warming_up` answer; skills 2.46.1.
+
 ---
 
 ## 2.46.0 (2026-10-16)
@@ -455,7 +466,8 @@ Renames and error codes (2026-10-13):
   test results written under the old name are still read under the new one.
 - `/version`: `released` is null until the release is cut (it said 2026-10-07, the 2.44.0 date); new
   `compatible_pyvark` (`>=0.9.0`), the oldest pyvark that works with this API. `compatible_antclient` carries the same
-  pin and is deprecated (antclient became pyvark); it is removed in 2.46.
+  pin and is deprecated (antclient became pyvark): it will be removed in a future minor release, use
+  `compatible_pyvark`. Per the versioning rules a field is only removed in a minor or major release.
 
 Server (2026-10-14, no contract change):
 
@@ -765,9 +777,8 @@ Fixes (2026-10-13):
   than 3 datasets or under half of the group's datasets contribute. `/genes/{gene}/detection` is unchanged.
 - ant-mcp with `transport: stdio` writes its startup banner to stderr. It went to stdout, the protocol stream: with
   unbuffered output (`PYTHONUNBUFFERED=1`) a client read five non-JSON lines before the `initialize` answer.
-- Clients: pyvark, vark and the skills reach none of the new routes yet; pass-through clients keep working with
-  the new optional fields. pyvark's `get_facet_recurring_genes` documents `n` up to 500 and has no `offset`,
-  `effect_gate`, `strict` or `forest`. The breaking changes above (internal datasets for anonymous callers, admin-only
+- Clients: at release, pyvark, vark and the skills reached none of the new routes; they cover them now (vark
+  0.0.22, pyvark 0.11.0 and the MCP tools). Pass-through clients keep working with the new optional fields. The breaking changes above (internal datasets for anonymous callers, admin-only
   rescans, the `apoe_carrier` alias) are the ones a client may notice.
 
 ## 2.44.0 (2026-10-07)

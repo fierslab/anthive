@@ -699,6 +699,14 @@ def main() -> None:
             '  Datasets are uploaded with the vark command line client (presigned uploads), never\n'
             '  through MCP. Users who may deposit see my_deposits and deposit_status (read-only).\n'
             '\n'
+            'AFTER A SERVER RESTART\n'
+            '  For a few minutes after a restart some facet tools answer "warming up, try again in a\n'
+            '  minute": wait and call them again; it is not an error in your request.\n'
+            '\n'
+            'INTERNAL DATASETS\n'
+            '  Datasets with access=internal are only visible through a signed-in (personal) MCP link;\n'
+            '  without one they do not exist for these tools.\n'
+            '\n'
             'DATA LEAVES THE SERVER\n'
             '  Everything these tools return, including passages and notes from library papers, is\n'
             '  sent to your AI client and its LLM provider. Everyone who can sign in to this site\n'
@@ -2033,6 +2041,12 @@ def main() -> None:
             try:
                 card = await _get(f'/facets/{name}/effects', gene=gene, cell_type=cell_type, scope=scope,
                                   exclude_secondary=str(bool(exclude_secondary)).lower())
+            except ServerWarmingUp:
+                # One facet still warming must not abort the others (the gate is per visitor kind, but the
+                # caches of a facet may finish at a different moment).
+                lines.append(f"\n## {gene} / {name}: the server is still warming up after a restart; "
+                             'try this facet again in a minute')
+                continue
             except httpx.HTTPStatusError as exc:
                 lines.append(f"{name}: error {exc.response.status_code}: {exc.response.text[:200]}")
                 continue
@@ -3273,8 +3287,11 @@ def main() -> None:
     @mcp.tool()
     async def my_deposits(all_users: bool = False) -> str:
         """Your dataset deposits on this Anthive server, newest first, with their state:
-        uploading, uploaded (waiting for the watcher), seen, stable, checking, live,
-        held (waits for an admin), failed, needs_decision, rejected, withdrawn, expired.
+        uploading (URLs handed out), completing (being completed, seconds; large
+        deposits longer), uploaded (waiting for the watcher), seen, stable (queued),
+        checking, importing (a DE-only deposit being imported), live, held (waits for
+        an admin), failed, needs_decision (an admin decides), rejected, withdrawing,
+        withdrawn, expiring, expired, superseded (a newer upload replaced it).
         Read-only. A dataset is uploaded with the vark command line client
         (`vark datasets ...`, presigned uploads), never through MCP; this tool and
         deposit_status only follow deposits.
@@ -3290,7 +3307,9 @@ def main() -> None:
 
     @mcp.tool()
     async def deposit_status(deposit_id: str) -> str:
-        """One of your dataset deposits: state, dataset id and version once published,
+        """One of your dataset deposits: state (uploading, completing, uploaded, seen,
+        stable, checking, importing, live, held, failed, needs_decision, rejected,
+        withdrawing, withdrawn, expiring, expired, superseded; see my_deposits), dataset id and version once published,
         held reasons, the checks that failed or warned with their fix (from the
         redacted check report), and its events. Read-only; explain held reasons and
         fixes to the user, who corrects the files and deposits again with vark.
