@@ -147,7 +147,6 @@ Deployment:
 
 ## 2.46.1 (2026-10-18)
 
-
 Patch release: operational fixes reported by the anthive-intern site and found on the 2.46.0 scratch site.
 No endpoint, parameter or field is removed or renamed. Two response changes a client may see: the facet
 routes can answer 503 `warming_up` (below), and `POST /me/mcp/links` accepts `name`.
