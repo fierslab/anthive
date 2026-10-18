@@ -60,6 +60,9 @@ _SERVE_WANTED = {
     'get_de_study_summary', 'get_de_by_gene', 'get_de_study',
     'gene_stats_index_stats', 'gene_stats_cache_clear', 'plot_cache_clear', 'rescan_genesets',
     'rescan_module_variability', 'rescan_catalogs', 'gene_variance_index_stats',
+    # get_group_info / get_database_info count artefacts (REST 2.47, tests/test_artefacts_api.py)
+    '_caller_is_admin', '_artefact_service_instance', '_artefact_service_lock', '_artefact_service',
+    '_artefact_s3_client', '_artefact_viewer', '_artefact_policy', '_artefact_count',
 }
 
 

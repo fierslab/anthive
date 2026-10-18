@@ -771,6 +771,13 @@ class DatabaseRegistry:
     - Metadata field statistics (Phase 2)
     """
 
+    # Artefact store (lib/artefacts.py, doc/DESIGN_artefacts.md): the collection registry built from every
+    # <Group>/index.md and the artefact index, both rebuilt by every scan (_scan_artefacts) and swapped in
+    # whole. Class defaults so a registry made without a scan (tests) has an empty store.
+    _collection_registry: Optional[Dict[str, Any]] = None
+    _collection_problems: Optional[List[str]] = None
+    _artefact_index: Any = None
+
     def __init__(self, data_folder: Path, connection_pool: ConnectionPool, s3_config: Optional[Dict] = None):
         self.data_folder = data_folder.resolve()
         self.connection_pool = connection_pool
@@ -1260,6 +1267,7 @@ class DatabaseRegistry:
         self._db_md_bases = md_bases
         self._db_extra = db_extra
         self._databases_all = databases
+        self._scan_artefacts()
 
         print(f"Found {len(self._databases_all)} databases")
         if len(self._databases_all) <= 10:
@@ -1269,6 +1277,38 @@ class DatabaseRegistry:
             for db_id in sorted(self._databases_all.keys())[:10]:
                 print(f"  - {db_id}")
             print(f"  ... and {len(self._databases_all) - 10} more")
+
+    def _scan_artefacts(self) -> Dict[str, Any]:
+        """Rebuild the collection registry and the artefact index (lib/artefacts.py) and swap them in.
+
+        A failure keeps the previous ones: a broken record never empties what is served."""
+        import artefacts as artefacts_lib  # noqa: PLC0415
+        try:
+            collections, problems = artefacts_lib.scan_collections(
+                self.data_folder, artefacts_lib.dataset_group_ids(self._db_extra))
+            index = artefacts_lib.ArtefactIndex.build(self.data_folder, collections)
+        except Exception as exc:  # noqa: BLE001 - the dataset catalog must survive a bad artefact tree
+            log.error("artefact scan failed, keeping the previous index: %s", exc)
+            return {'artefacts': len(self._artefact_index or ()), 'error': str(exc)}
+        for problem in problems:
+            log.warning("collection registry: %s", problem)
+        self._collection_registry = collections
+        self._collection_problems = problems
+        self._artefact_index = index
+        analysis = sum(1 for c in collections.values() if c.kind == 'analysis')
+        print(f"Found {len(collections)} collections ({analysis} analysis), {len(index)} artefacts"
+              + (f", {len(index.problems) + len(problems)} problem(s) logged" if index.problems or problems else ''))
+        return {'collections': len(collections), 'analysis_collections': analysis, 'artefacts': len(index),
+                'artefact_problems': len(index.problems) + len(problems)}
+
+    def collection_registry(self) -> Dict[str, Any]:
+        return self._collection_registry or {}
+
+    def artefact_index(self):
+        if self._artefact_index is None:
+            import artefacts as artefacts_lib  # noqa: PLC0415
+            return artefacts_lib.ArtefactIndex.empty()
+        return self._artefact_index
 
     def _cache_all_metadata(self, force_reload: bool = False) -> None:
         """Load metadata for all databases, using the persisted cache where possible.
@@ -3637,7 +3677,10 @@ def get_metrics():
                 "metadata_cached": len(registry.metadata_cache),
                 "gene_lists_cached": len(registry.gene_list_cache),
                 "metadata_stats_cached": len(registry.metadata_stats_cache)
-            }
+            },
+            # Download totals only: the number of indexed artefacts would count internal ones for anyone.
+            "artefacts": (_artefact_service_instance.download_stats() if _artefact_service_instance is not None
+                          else {'downloads': 0, 'callers': 0}),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -3818,7 +3861,7 @@ def list_donor_groups(
 
 
 @app.get("/groups/{group_id}", tags=["databases"])
-def get_group_info(group_id: str):
+def get_group_info(request: Request, group_id: str):
     """
     Return collection-level metadata + prose for a single group.
 
@@ -3837,7 +3880,13 @@ def get_group_info(group_id: str):
     - description: Prose body of index.md (markdown, unrendered)
     - datasets: List of {db_id, title, id} for every dataset in the group
 
-    404 if no dataset in the catalog belongs to this group_id.
+    - collection_kind: ``datasets`` or ``analysis`` (REST 2.47)
+    - artefacts_count: artefacts of the collection (all scopes) the caller sees (REST 2.47)
+
+    A collection without datasets (``collection_kind: analysis`` in its
+    index.md, REST 2.47) answers from the collection registry with
+    ``datasets: []`` and its ``title`` and ``access``. 404 when the caller
+    may not see the collection or it does not exist.
     """
     # Find datasets whose group_id matches. We use ONLY the
     # collection-root index.md (data/h5adstore/<data_project>/index.md)
@@ -3876,18 +3925,43 @@ def get_group_info(group_id: str):
             'id': file_meta.get('id'),
         })
 
+    collection = registry.collection_registry().get(group_id)
     if not matching:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No datasets found for group_id={group_id!r}",
-        )
+        # An analysis collection (collection_kind: analysis, no datasets of
+        # its own) answers from the collection registry when the caller may
+        # see it (its index.md access, lib/artefacts.py). A dataset
+        # collection without visible datasets stays a 404 as before: hidden
+        # from this caller, or every dataset inactive.
+        visible = False
+        if collection is not None and collection.kind == 'analysis':
+            try:
+                visible = _artefact_policy().collection_visible(group_id, _artefact_viewer(request))
+            except Exception as exc:  # noqa: BLE001 - fail closed
+                log.warning("collection access check failed for %s: %s", group_id, exc)
+        if not visible:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No datasets found for group_id={group_id!r}",
+            )
+        index_path = registry.data_folder / collection.folder / 'index.md'
+        if not index_path.is_file():
+            index_path = None
 
     collection_meta: Dict = {}
     collection_body: str = ''
     if index_path is not None:
         collection_meta, collection_body = parse_md_file(index_path)
 
+    collection_fields: Dict[str, Any] = {
+        'collection_kind': collection.kind if collection is not None else 'datasets',
+        'artefacts_count': _artefact_count(request, group_id=group_id),
+    }
+    if collection is not None and collection.kind == 'analysis':
+        collection_fields.update({'title': collection_meta.get('title'),
+                                  'access': collection.access or 'internal'})
+
     return {
+        **collection_fields,
         'group': collection_meta.get('group'),
         'group_id': group_id,
         'experiment': collection_meta.get('experiment'),
@@ -3904,7 +3978,7 @@ def get_group_info(group_id: str):
 
 
 @app.get("/databases/{db_id:path}/info", tags=["databases"])
-def get_database_info(db_id: str):
+def get_database_info(request: Request, db_id: str):
     """
     Get detailed information about a specific database
 
@@ -3935,10 +4009,11 @@ def get_database_info(db_id: str):
       - experiment: Experiment description
       - authors: List of authors
       - year: Publication year
+    - artefacts_count: artefacts of this dataset the caller sees (REST 2.47)
     """
     try:
         metadata = registry.get_database_metadata(db_id)
-        return metadata
+        return {**metadata, 'artefacts_count': _artefact_count(request, db_id=db_id)}
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -12821,9 +12896,13 @@ async def set_api_config(db_id: str, request: Request):
 
 
 @app.post("/admin/rescan", tags=["admin"], dependencies=[Depends(_require_admin_or_local)])
-def rescan_databases():
+def rescan_databases(what: Optional[str] = Query(None, description="'artefacts': reload only the collection "
+                                                                   "registry and the artefact index")):
     """
     Force rescan of data folder and reload all metadata
+
+    ``?what=artefacts`` reloads only the collection registry and the artefact
+    index (what the artefact pipeline calls after publishing a version).
 
     Triggers a complete rescan of the data folder, clearing all caches
     and re-discovering databases and metadata.
@@ -12841,6 +12920,10 @@ def rescan_databases():
     - removed: List of removed database IDs
     - databases: Complete list of current database IDs
     """
+    if what not in (None, '', 'all', 'artefacts'):
+        raise HTTPException(status_code=400, detail="what must be 'artefacts' or left out")
+    if what == 'artefacts':
+        return {'status': 'success', **registry._scan_artefacts()}
     try:
         result = registry.rescan()
         # rebuild module-score and by-gene reverse indices too
@@ -16582,6 +16665,197 @@ def download_database_static_file(db_id: str, filename: str):
                         media_type='application/octet-stream')
 
 
+# ── Artefact store, read routes (REST 2.47.0, doc/DESIGN_artefacts.md) ──────────
+#
+# Versioned, immutable analysis files of a dataset or a collection, indexed at
+# the catalog scan (registry._artefact_index, lib/artefacts.py). The access
+# middleware only knows dataset paths and query parameters, so EVERY route
+# here resolves the artefact through _artefact_resolve (which checks access
+# on the artefact the server found, never on request parameters) or filters
+# through _artefact_policy; tests/test_artefacts_api.py enumerates the routes.
+# An invisible artefact is the same 404 as one that does not exist. Downloads
+# redirect (307) to a presigned GET for exactly one key, or stream a verified
+# local copy; the signed URL is never logged (Caddy drops the query of
+# Location in its access log).
+
+_artefact_service_instance = None
+_artefact_service_lock = Lock()
+
+
+def _artefact_s3_client(s3_cfg: Dict[str, Any]):
+    """boto3 client for HEAD and presigned GETs of artefact files (SigV4; path style when configured)."""
+    import boto3  # noqa: PLC0415
+    from botocore.config import Config as BotoConfig  # noqa: PLC0415
+    endpoint = s3_cfg.get('endpoint') or None
+    if endpoint and '://' not in endpoint:
+        endpoint = 'https://' + endpoint
+    return boto3.client(
+        's3', endpoint_url=endpoint, region_name=s3_cfg.get('region') or 'us-east-1',
+        aws_access_key_id=s3_cfg.get('access_key_id') or None,
+        aws_secret_access_key=s3_cfg.get('secret_access_key') or None,
+        config=BotoConfig(signature_version='s3v4',
+                          s3={'addressing_style': 'path' if s3_cfg.get('use_path_style') else 'auto'},
+                          retries={'max_attempts': 3, 'mode': 'standard'}))
+
+
+def _artefact_service():
+    """The ArtefactService of this process (built on first use; a config change needs a restart)."""
+    global _artefact_service_instance
+    if _artefact_service_instance is None:
+        with _artefact_service_lock:
+            if _artefact_service_instance is None:
+                import artefacts as artefacts_lib  # noqa: PLC0415
+                from config import get_artefact_settings  # noqa: PLC0415
+                settings = get_artefact_settings(get_config())
+                _artefact_service_instance = artefacts_lib.ArtefactService(
+                    registry.data_folder, settings, s3_factory=lambda: _artefact_s3_client(settings['s3']))
+    return _artefact_service_instance
+
+
+def _artefact_viewer(request: Request):
+    """Who asks, for the artefact access rules: sees internal data, is an admin, the hidden datasets."""
+    import artefacts as artefacts_lib  # noqa: PLC0415
+    user = (request.headers.get('Remote-User') or '').strip() if _access_settings()['auth_mode'] != 'none' else ''
+    return artefacts_lib.Viewer(sees_internal=_caller_sees_internal(request), is_admin=_caller_is_admin(request),
+                                hidden=_hidden_db_ids(), user=user)
+
+
+def _artefact_policy():
+    """Access rules over the FULL maps of the registry (the caller's view is applied by the policy)."""
+    import artefacts as artefacts_lib  # noqa: PLC0415
+    return artefacts_lib.AccessPolicy(registry.collection_registry(), registry._metadata_all,
+                                      artefacts_lib.folder_db_ids(registry._db_extra))
+
+
+def _artefact_error(exc) -> JSONResponse:
+    return JSONResponse(exc.body, status_code=exc.status, headers=exc.headers or None)
+
+
+def _artefact_resolve(request: Request, group_id: str, scope: str, artefact_id: str):
+    """(service, viewer, entry) for a visible artefact; ArtefactError (404) otherwise."""
+    service = _artefact_service()
+    viewer = _artefact_viewer(request)
+    entry = service.resolve(registry.artefact_index(), _artefact_policy(), viewer, group_id, scope, artefact_id)
+    return service, viewer, entry
+
+
+def _artefact_count(request: Request, group_id: Optional[str] = None, db_id: Optional[str] = None) -> int:
+    """Artefacts with a live version the caller sees (one collection, or one dataset)."""
+    try:
+        return _artefact_service().count(registry.artefact_index(), _artefact_policy(), _artefact_viewer(request),
+                                         group_id=group_id, db_id=db_id)
+    except Exception as exc:  # noqa: BLE001 - a count never breaks the dataset or group answer
+        log.warning("artefact count failed: %s", exc)
+        return 0
+
+
+@app.get("/artefacts", tags=["artefacts"])
+def list_artefacts(request: Request,
+                   group_id: Optional[str] = Query(None, description="collection (3-character group id)"),
+                   db_id: Optional[str] = Query(None, description="dataset, e.g. S26/SLM"),
+                   kind: Optional[str] = Query(None, description="de_table, figure, table, notebook, report, "
+                                                                 "model, other"),
+                   q: Optional[str] = Query(None, max_length=200, description="text in the id, title, description"),
+                   owner: Optional[str] = Query(None, max_length=200),
+                   include_purged: bool = Query(False, description="also artefacts whose every version is purged"),
+                   limit: int = Query(50, ge=1, le=200),
+                   cursor: Optional[str] = Query(None, max_length=1000),
+                   all: bool = Query(False, description="admins: also artefacts of inactive or removed datasets")):
+    """Artefacts the caller may see, ordered by reference: ``{artefacts: [summary], next_cursor}``.
+
+    Summary: ``{ref, artefact_id, kind, group_id, scope, db_id, title, latest, versions_live, owner,
+    updated, size_bytes, main_file, preview, access, path}`` (``preview`` and ``path`` are relative to
+    the API root)."""
+    import artefacts as artefacts_lib  # noqa: PLC0415
+    service = _artefact_service()
+    viewer = _artefact_viewer(request)
+    try:
+        return service.listing(registry.artefact_index(), _artefact_policy(), viewer, group_id=group_id,
+                               db_id=db_id, kind=kind, query=q, owner=owner, include_purged=include_purged,
+                               limit=limit, cursor=cursor, include_orphans=all and viewer.is_admin)
+    except artefacts_lib.ArtefactError as exc:
+        return _artefact_error(exc)
+
+
+@app.get("/artefacts/{group_id}/{scope}/{artefact_id}", tags=["artefacts"])
+def get_artefact(request: Request, group_id: str, scope: str, artefact_id: str):
+    """One artefact: the summary, ``created``, ``versions: [{version, state, published, purged?}]``, the
+    latest live ``manifest`` and its ``files`` with API paths for download and preview."""
+    import artefacts as artefacts_lib  # noqa: PLC0415
+    try:
+        service, viewer, entry = _artefact_resolve(request, group_id, scope, artefact_id)
+        return service.detail(entry, viewer)
+    except artefacts_lib.ArtefactError as exc:
+        return _artefact_error(exc)
+
+
+@app.get("/artefacts/{group_id}/{scope}/{artefact_id}/versions", tags=["artefacts"])
+def get_artefact_versions(request: Request, group_id: str, scope: str, artefact_id: str):
+    """Every version; purged ones as tombstones ``{version, state: "purged", published, purged, purged_by,
+    purge_reason}`` (``purged_by`` is "an admin" for non-admins when an admin purged)."""
+    import artefacts as artefacts_lib  # noqa: PLC0415
+    try:
+        service, viewer, entry = _artefact_resolve(request, group_id, scope, artefact_id)
+        return service.versions_payload(entry, viewer)
+    except artefacts_lib.ArtefactError as exc:
+        return _artefact_error(exc)
+
+
+@app.get("/artefacts/{group_id}/{scope}/{artefact_id}/{version}", tags=["artefacts"])
+def get_artefact_version(request: Request, group_id: str, scope: str, artefact_id: str, version: str):
+    """One version (``v<N>`` or ``latest``): ``{ref, version, state, latest, manifest, files}``.
+    410 ``purged`` with the tombstone for a purged version."""
+    import artefacts as artefacts_lib  # noqa: PLC0415
+    try:
+        service, viewer, entry = _artefact_resolve(request, group_id, scope, artefact_id)
+        return service.version_payload(entry, service.version_of(entry, version, viewer))
+    except artefacts_lib.ArtefactError as exc:
+        return _artefact_error(exc)
+
+
+@app.get("/artefacts/{group_id}/{scope}/{artefact_id}/{version}/files/{name:path}", tags=["artefacts"])
+def download_artefact_file(request: Request, group_id: str, scope: str, artefact_id: str, version: str,
+                           name: str):
+    """Download one file of a version (``v<N>`` or ``latest``).
+
+    307 to a presigned S3 GET for that one key (valid ``artefacts_url_ttl_seconds``, attachment, content
+    type from the manifest), or the verified local copy as an attachment, or 404 ``not_on_this_site``.
+    Counted and rate limited per caller (``artefacts_download_per_minute``)."""
+    import artefacts as artefacts_lib  # noqa: PLC0415
+    try:
+        service, viewer, entry = _artefact_resolve(request, group_id, scope, artefact_id)
+        version_entry = service.version_of(entry, version, viewer)
+        peer = request.client.host if request.client else ''
+        key = artefacts_lib.caller_key(viewer.user, request.headers, peer)
+        delivery = service.deliver(entry, version_entry, name, key)
+    except artefacts_lib.ArtefactError as exc:
+        return _artefact_error(exc)
+    log.info("artefact download %s@v%s/%s by %s via %s", entry.ref, version_entry.number, name,
+             viewer.user or 'anonymous', 's3' if delivery.how == 'redirect' else 'local')
+    if delivery.how == 'redirect':
+        return RedirectResponse(url=delivery.url, status_code=307,
+                                headers={'Cache-Control': 'no-store, private', 'Referrer-Policy': 'no-referrer'})
+    return FileResponse(str(delivery.path), media_type=delivery.content_type, filename=delivery.filename,
+                        content_disposition_type='attachment',
+                        headers={'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': 'sandbox',
+                                 'Cache-Control': 'private, no-cache', 'Referrer-Policy': 'no-referrer'})
+
+
+@app.get("/artefacts/{group_id}/{scope}/{artefact_id}/{version}/preview/{name:path}", tags=["artefacts"])
+def get_artefact_preview(request: Request, group_id: str, scope: str, artefact_id: str, version: str, name: str):
+    """The server-generated preview of one file (``<file>.webp`` or ``<file>.txt``), inline, from the local
+    store only; the content type is fixed by the server."""
+    import artefacts as artefacts_lib  # noqa: PLC0415
+    try:
+        service, viewer, entry = _artefact_resolve(request, group_id, scope, artefact_id)
+        path, content_type = service.preview(entry, service.version_of(entry, version, viewer), name)
+    except artefacts_lib.ArtefactError as exc:
+        return _artefact_error(exc)
+    return FileResponse(str(path), media_type=content_type,
+                        headers={'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': 'sandbox',
+                                 'Content-Disposition': 'inline', 'Cache-Control': 'private, max-age=300'})
+
+
 # ── Paper library + literature search (REST 2.39) ─────────────────────────────
 #
 # The library repository (lib/library.py, doc/LIBRARY.md) holds one
@@ -17339,6 +17613,15 @@ def main():
               f"  this server exposes. Admin features (editors, viz, rescans) are OFF.\n"
               f"  Only use this for a public read-only mirror or a loopback-only box.\n"
               f"{banner}", file=sys.stderr, flush=True)
+
+    # The artefact store settings are read when the first artefact route runs; a wrong value (serve mode,
+    # URL lifetime, a group list) must stop the start instead of turning every download into a 500.
+    try:
+        from config import get_artefact_settings  # noqa: PLC0415
+        get_artefact_settings(config)
+    except Exception as exc:  # noqa: BLE001 - ConfigError carries the message
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     # Initialize global connection pool and registry (Phase 2)
     global registry, connection_pool, geneset_registry
