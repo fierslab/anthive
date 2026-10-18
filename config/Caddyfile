@@ -295,6 +295,9 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 			request>headers>Remote-Name delete
 			request>headers>Remote-Email delete
 			request>headers>X-Forwarded-User delete
+			# A download redirect's Location is a signed S3 URL (artefacts, h5ad,
+			# paper PDFs): keep the host and path, drop the query with the signature.
+			resp_headers>Location regexp \?.*$ ?REDACTED
 		}
 	}
 }

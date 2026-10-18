@@ -705,7 +705,8 @@ must let these requests through **without** the Authelia gate. User docs:
   stripped on `/mcp*` (on gated routes `forward_auth copy_headers` already
   replaces client values);
 - the access log (`ANTHIVE_CADDY_LOG_OUTPUT`, default `file ./tmp/caddy.log`) redacts
-  `amcp_` tokens, `Authorization` and `Cookie`.
+  `amcp_` tokens, `Authorization` and `Cookie`, and drops the query (the
+  presigned signature) of a redirect's `Location`, keeping host and path.
 
 **Prod with nginx in front** (6b): nginx runs `auth_request` itself, so it
 needs one extra location that proxies `/mcp` to Caddy without the gate
