@@ -1,0 +1,1172 @@
+"""Watcher side of artefact and collection deposits (doc/DESIGN_artefacts.md sections 5 and 6, phase A2).
+
+``ant-ingest-watch`` calls :meth:`ArtefactPublisher.poll` once per poll with the listing of the incoming
+prefix. Items are driven by the deposit store (``deposits.sqlite``, ``deposit_kind`` ``artefact`` or
+``collection``, state ``uploaded``), like the DE-only deposits: an item is linked only when every object
+the deposit completed is listed with exactly its key and ETag and carries the deposit's mark; anything
+else under ``<prefix><data_project>/artefacts/`` is never processed (``needs_decision``).
+
+Per artefact deposit (design 5.2): settle (two identical listings, ``settle_seconds``), scope (the
+collection is live, the dataset is served and not inactive, each ``made_from`` version exists; its h5ad
+sha256 is filled from the dataset's changelog), hash (a streaming GET pinned to the listed ETag, sha256 and,
+for single-part objects, MD5 against the ETag), QC (section 6.1: names, sizes, extension and magic bytes,
+title, description, provenance, secrets and donor identifiers held, public scopes held, ZIP central
+directory), then under the scope's writer lock: the version (``max(every version, purged ones too) + 1``),
+a resume marker, the server-side copies to ``<catalog prefix><Group>/static/artefacts/.../v<N>/files/<name>``
+(``CopySourceIfMatch``, ``x-amz-meta-sha256``, HEAD-checked; a key that already exists with other bytes stops
+the item), previews and inline copies, the manifest (written last on S3: its existence makes the version
+real), the head record; then the rescan of the artefact index, the served check, the git commit of the head
+record and manifest, and the guarded delete of the incoming objects.
+
+Collection deposits place the rendered ``index.md`` in a new ``<Group>/`` folder. Purges (design 5.3) are
+requests of the API in ``artefact_purges``: only keys listed in the version's manifest are deleted, each
+HEAD-compared with the manifest sha256, one at a time, logged; then the tombstone.
+
+Input: the listing, ``deposits.sqlite``, the store tree, S3. Output: the store tree, S3 objects, rows of the
+watcher's ``ingest_watch.sqlite`` (key ``artefact:<deposit_id>``) mirrored into the deposit record.
+"""
+from __future__ import annotations
+
+import datetime as _dt
+import hashlib
+import io
+import json
+import os
+import shutil
+import subprocess
+import time
+import zipfile
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+
+import artefact_deposit as rules
+import artefacts
+import dataset_deposit
+from ingest_pipeline import ObjInfo, TransientError, delete_consumed, ensure_inside, writer_lock
+
+FINAL = ('live', 'held', 'failed', 'needs_decision', 'rejected')
+MAX_ATTEMPTS = 8
+MARKER_DIR = 'artefact_resume'
+REPORT_DIR = 'artefact_reports'
+CHUNK = 8 * 1024 * 1024
+HEAD_BYTES = 64 * 1024
+PREVIEW_PIXELS = 512
+ZIP_MAX_RATIO = 20
+ZIP_MAX_TOTAL = 1024 ** 4
+
+
+@dataclass
+class Outcome:
+    state: str = 'failed'
+    detail: str = ''
+    version: Optional[int] = None
+    warnings: List[str] = field(default_factory=list)
+    held_reasons: List[str] = field(default_factory=list)
+    report: Optional[Dict[str, Any]] = None
+    consumed: Dict[str, str] = field(default_factory=dict)
+    served: bool = False
+    git_commit: Optional[str] = None
+
+
+class Stop(Exception):
+    """The item stops in ``state`` (failed, held or needs_decision) with ``message``."""
+
+    def __init__(self, state: str, message: str, report: Optional[Dict[str, Any]] = None,
+                 held: Optional[List[str]] = None):
+        super().__init__(message)
+        self.state = state
+        self.report = report
+        self.held = held or []
+
+
+def _today() -> str:
+    return _dt.date.today().isoformat()
+
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _meta_of(head: Dict[str, Any]) -> Dict[str, str]:
+    return {str(k).lower(): str(v) for k, v in (head.get('Metadata') or {}).items()}
+
+
+def _code(exc: BaseException) -> str:
+    response = getattr(exc, 'response', None) or {}
+    return str((response.get('Error') or {}).get('Code') or type(exc).__name__)
+
+
+def _absent(exc: BaseException) -> bool:
+    return _code(exc) in ('404', 'NoSuchKey', 'NotFound')
+
+
+@dataclass
+class FileCheck:
+    """What the hash step learnt about one file."""
+    name: str
+    size: int
+    sha256: str
+    etag: str
+    head: bytes
+    tail: bytes
+    local: Optional[Path]          # the bytes in the work dir (inline copies and content checks)
+
+
+class ArtefactPublisher:
+    """One poll of the artefact route (see the module docstring)."""
+
+    def __init__(self, *, store_root: Path, state_dir: Path, work_root: Path, s3: Any, bucket: str,
+                 incoming_prefix: str, catalog_prefix: str, artefact_settings: Dict[str, Any], db: Any,
+                 api: Any = None, settle_seconds: float = 120, log: Callable[[str], None] = print,
+                 clock: Callable[[], float] = time.time, git_commit: bool = True,
+                 git_identity: str = 'anthive ingest-watch <noreply@anthive.local>',
+                 delete_incoming: bool = True, notify_settings: Optional[Dict[str, Any]] = None,
+                 stop_requested: Callable[[], bool] = lambda: False, server_version: str = '',
+                 site_id: str = '', run: Optional[Callable[..., Any]] = None):
+        self.store_root = Path(store_root)
+        self.state_dir = Path(state_dir)
+        self.work_root = Path(work_root)
+        self.s3 = s3
+        self.bucket = bucket
+        self.prefix = incoming_prefix
+        self.catalog_prefix = catalog_prefix
+        self.settings = dict(artefact_settings)
+        self.db = db
+        self.api = api
+        self.settle_seconds = float(settle_seconds)
+        self.log = log
+        self.clock = clock
+        self.git_commit = git_commit
+        self.git_identity = git_identity
+        self.delete_incoming = delete_incoming
+        self.notify_settings = notify_settings or {}
+        self.stop_requested = stop_requested
+        self.server_version = server_version
+        self.site_id = site_id
+        self.run = run or (lambda cmd: subprocess.run([str(part) for part in cmd], capture_output=True, text=True))
+        self._marks: Dict[Tuple[str, str], str] = {}
+
+    # ── the poll ────────────────────────────────────────────────────────────
+    def poll(self, objects: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        listing = {obj['Key']: ObjInfo.from_listing(obj) for obj in objects}
+        try:
+            store = dataset_deposit.DepositStore.open_if_exists(self.state_dir)
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            raise TransientError(f'the deposit store cannot be opened ({exc}); artefacts not polled') from exc
+        if store is None:
+            self.refuse_unlinked(None, listing)
+            return counts
+        try:
+            store.conn.executescript(rules.PURGE_SCHEMA)
+            for state, number in self.process_purges(store).items():
+                counts[f'purge_{state}'] = counts.get(f'purge_{state}', 0) + number
+            records = store._rows("SELECT * FROM deposits WHERE deposit_kind IN ('artefact', 'collection') AND "
+                                  "state = 'uploaded' ORDER BY completed")
+            for record in records:
+                if self.stop_requested():
+                    break
+                state = self.handle(store, record, listing)
+                if state:
+                    counts[state] = counts.get(state, 0) + 1
+            self.refuse_unlinked(store, listing)
+        finally:
+            store.close()
+        return counts
+
+    def refuse_unlinked(self, store: Any, listing: Dict[str, ObjInfo]) -> None:
+        """Objects under ``<prefix><data_project>/artefacts/`` that no completed deposit accounts for (a
+        replayed URL, a leftover, a hand upload): recorded once as needs_decision, never processed."""
+        accounted: Dict[str, str] = {}
+        if store is not None:
+            for row in store._rows("SELECT f.key, f.etag FROM files f JOIN deposits d ON d.id = f.deposit_id WHERE "
+                                   "d.deposit_kind IN ('artefact', 'collection') AND d.state IN ('uploaded', "
+                                   "'completing', 'uploading', 'withdrawing') AND f.etag IS NOT NULL"):
+                accounted[row['key']] = row['etag']
+            open_keys = store.held_keys()
+        else:
+            open_keys = {}
+        for key, obj in listing.items():
+            parsed = rules.deposit_of_incoming_key(self.prefix, key)
+            if parsed is None or key in open_keys or accounted.get(key) == obj.etag:
+                continue
+            row_key = f'artefact-unlinked:{key}'
+            row = self.db.get(row_key)
+            if row and row.get('processed_signature') == obj.etag:
+                continue
+            message = (f'{key} is under the artefact folder of incoming but no completed deposit accounts for it '
+                       f'(a replayed URL or a leftover); never processed. Delete it after a look.')
+            self.db.transition(row_key, 'needs_decision', message, error=message, processed_signature=obj.etag,
+                               data_project=parsed[0], basename=parsed[2], kind='artefact')
+            self.log(f'artefacts: {message}')
+
+    # ── one deposit ─────────────────────────────────────────────────────────
+    def handle(self, store: Any, record: Dict[str, Any], listing: Dict[str, ObjInfo]) -> Optional[str]:
+        key = record['watch_key']
+        row = self.db.get(key)
+        files = store.files(record['id'])
+        if row and row['state'] == 'live':
+            if not row.get('deleted'):
+                self._delete_incoming(key, json.loads(row.get('consumed') or '{}'))
+            return None
+        if row and row['state'] in FINAL:
+            return None
+        objs = [listing.get(entry['key']) for entry in files]
+        signature = json.dumps(sorted([entry['key'], entry['etag'], entry['size']] for entry in files)
+                               + [['deposit', record['id'], 0]])
+        base = {'data_project': record['data_project'], 'basename': record['basename'], 'last_seen': self.clock(),
+                'kind': record['deposit_kind'], 'db_id': record.get('artefact_ref')}
+        if not files or any(obj is None or obj.etag != entry['etag'] or obj.size != entry['size']
+                            for obj, entry in zip(objs, files)):
+            message = 'files of this deposit are missing or changed in incoming; withdraw it and deposit again'
+            self._finish(store, record, key, Outcome(state='needs_decision', detail=message),
+                         signature, first=row is None, base=base)
+            return 'needs_decision'
+        if row is None:
+            self.db.transition(key, 'seen', 'first listed', content_signature=signature, settle_signature=signature,
+                               first_seen=self.clock(), polls_unchanged=0, attempts=0, next_attempt=0, **base)
+            return None
+        if row['settle_signature'] != signature:
+            self.db.upsert(key, settle_signature=signature, content_signature=signature, polls_unchanged=0,
+                           state='seen', approval=None, **base)
+            return None
+        newest = max(obj.last_modified for obj in objs)
+        if self.clock() - newest < self.settle_seconds:
+            return None
+        if row['state'] == 'seen':
+            self.db.transition(key, 'stable', 'upload complete (two identical listings)', error=None)
+        if float(row.get('next_attempt') or 0) > self.clock():
+            return None
+        try:
+            for obj in objs:
+                mark = self._deposit_mark(obj)
+                if mark != record['id']:
+                    message = f'{obj.key} does not carry the mark of {record["id"]}; refused'
+                    self._finish(store, record, key, Outcome(state='needs_decision', detail=message), signature)
+                    return 'needs_decision'
+        except TransientError as exc:
+            self.log(f'artefacts: {record["id"]} waits: {exc}')
+            return None
+        approval = json.loads(row['approval']) if row.get('approval') else None
+        if approval and approval.get('signature') != signature:
+            approval = None
+        self.db.transition(key, 'pulled', 'processing started' + (' (approved)' if approval else ''))
+        try:
+            if record['deposit_kind'] == 'collection':
+                outcome = self.publish_collection(record, files, objs, approval)
+            else:
+                outcome = self.publish_artefact(record, files, objs, approval)
+        except TransientError as exc:
+            attempts = int(row.get('attempts') or 0) + 1
+            if attempts >= MAX_ATTEMPTS:
+                self._finish(store, record, key, Outcome(state='failed', detail=f'gave up after {attempts} attempts: '
+                                                                                 f'{exc}'), signature)
+                return 'failed'
+            delay = min(3600, 60 * 2 ** attempts)
+            self.db.transition(key, 'stable', f'retry in {delay} s: {exc}', attempts=attempts,
+                               next_attempt=self.clock() + delay, error=str(exc))
+            return 'retry'
+        except Exception as exc:  # noqa: BLE001 - a bug: recorded, never crash the poll
+            outcome = Outcome(state='failed', detail=f'{type(exc).__name__}: {exc}')
+        self._finish(store, record, key, outcome, signature, approval=approval)
+        if outcome.state == 'live':
+            self._delete_incoming(key, outcome.consumed)
+        return outcome.state
+
+    def _finish(self, store: Any, record: Dict[str, Any], key: str, outcome: Outcome, signature: str,
+                first: bool = False, base: Optional[Dict[str, Any]] = None, approval: Any = None) -> None:
+        report_path = None
+        if outcome.report is not None:
+            folder = self.state_dir / REPORT_DIR
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f'{record["id"]}.json'
+            partial = path.with_suffix('.json.partial')
+            partial.write_text(json.dumps(outcome.report, indent=1, default=str))
+            os.replace(partial, path)
+            report_path = str(path)
+        fields = dict(base or {})
+        fields.update(processed_signature=signature, content_signature=signature,
+                      error=None if outcome.state == 'live' else outcome.detail,
+                      warnings=json.dumps(outcome.warnings), held_reasons=json.dumps(outcome.held_reasons),
+                      version=f'v{outcome.version}' if outcome.version and outcome.state == 'live' else None,
+                      report_path=report_path, consumed=json.dumps(outcome.consumed), served=int(outcome.served),
+                      catalog_verified=int(outcome.state == 'live'), git_commit=outcome.git_commit, attempts=0,
+                      next_attempt=0, approval=json.dumps(approval) if approval else None)
+        if first:
+            fields.setdefault('first_seen', self.clock())
+            fields.setdefault('settle_signature', signature)
+        self.db.transition(key, outcome.state, outcome.detail or outcome.state, **fields)
+        row = self.db.get(key) or {}
+        roots = {'store': self.store_root, 'state': self.state_dir, 'work': self.work_root, 'bucket': self.bucket}
+        try:
+            copy = dataset_deposit.write_report_copy(self.state_dir, record['id'], report_path, roots)
+            store.record_watch(record['id'], row, roots, report_file=str(copy) if copy else None)
+            store.event(record['id'], 'watcher', outcome.state,
+                        str(dataset_deposit.sanitize_text(outcome.detail or row.get('version') or '', roots)))
+            marker = f'{outcome.state}:{signature}'
+            if record.get('notified_state') != marker and outcome.state in dataset_deposit.NOTIFY_DEPOSITOR_ON:
+                import ingest_watch  # noqa: PLC0415
+                summary = dataset_deposit.report_summary(outcome.report) if outcome.report else None
+                if ingest_watch.notify_depositor({'notify': self.notify_settings}, record, row, summary, self.log):
+                    store.update(record['id'], notified_state=marker)
+        except Exception as exc:  # noqa: BLE001 - the record is a mirror; the watch row is the truth
+            self.log(f'artefacts: could not mirror the outcome of {record["id"]}: {exc}')
+        self.log(f'artefacts: {record["id"]} ({record.get("artefact_ref")}): {outcome.state}'
+                 + (f' v{outcome.version}' if outcome.version and outcome.state == 'live' else '')
+                 + (f': {outcome.detail}' if outcome.detail and outcome.state != 'live' else ''))
+
+    def _deposit_mark(self, obj: ObjInfo) -> str:
+        cache = (obj.key, obj.etag)
+        if cache not in self._marks:
+            try:
+                head = self.s3.head_object(Bucket=self.bucket, Key=obj.key)
+            except Exception as exc:  # noqa: BLE001
+                raise TransientError(f'HEAD {obj.key} failed ({_code(exc)})') from exc
+            if str(head.get('ETag', '')).strip('"') != obj.etag:
+                raise TransientError(f'{obj.key} changed since it was listed')
+            self._marks[cache] = _meta_of(head).get('deposit', '')
+        return self._marks[cache]
+
+    def _delete_incoming(self, key: str, consumed: Dict[str, str]) -> None:
+        if not self.delete_incoming or not consumed:
+            return
+        results: Dict[str, str] = {}
+
+        def record(s3_key: str, etag: str, result: str) -> None:
+            results[s3_key] = result
+            self.db.record_deletion(key, s3_key, etag, result)
+        delete_consumed(self.s3, self.bucket, self.prefix, consumed, record)
+        gone = all(results.get(s3_key) in ('deleted', 'skipped:absent') for s3_key in consumed)
+        self.db.upsert(key, deleted=int(gone))
+
+    # ── the store's view ────────────────────────────────────────────────────
+    def _catalog(self) -> Tuple[Dict[str, artefacts.Collection], Dict[str, Path], Dict[str, str]]:
+        """(collections by group id, served dataset .md by db_id, dataset folder by db_id) from the store."""
+        from h5adstore import catalog_dataset_mds  # noqa: PLC0415
+        mds: Dict[str, Path] = {}
+        folders: Dict[str, str] = {}
+        group_ids: Dict[str, set] = {}
+        for _item, resolved, rel in catalog_dataset_mds(self.store_root):
+            db_id = dataset_deposit.dataset_db_id(self.store_root, rel.parts[0], resolved.stem) \
+                if len(rel.parts) == 2 else self._nested_db_id(resolved, rel)
+            if not db_id:
+                continue
+            mds[db_id] = resolved
+            folders[db_id] = rel.parts[0]
+            group_ids.setdefault(rel.parts[0], set()).add(db_id.split('/')[0])
+        collections, _problems = artefacts.scan_collections(self.store_root, group_ids)
+        return collections, mds, folders
+
+    @staticmethod
+    def _nested_db_id(md: Path, rel: PurePosixPath) -> Optional[str]:
+        meta = rules.read_md_meta(md)
+        index = rules.read_md_meta(md.parent / 'index.md')
+        group_id, file_id = index.get('group_id'), meta.get('id')
+        return f'{group_id}/{file_id}' if group_id and file_id else None
+
+    def _scope_lock_path(self, path: artefacts.ArtefactPath, scope_md: Optional[Path]) -> Path:
+        """The scope's writer lock: the dataset's ``<stem>.duckdb.lock``, or ``static/artefacts/_group.lock``."""
+        if scope_md is not None:
+            return scope_md.with_suffix('.duckdb')
+        base = self.store_root / path.group / artefacts.ARTEFACTS_PARTS[0] / artefacts.ARTEFACTS_PARTS[1]
+        base.mkdir(parents=True, exist_ok=True)
+        return base / artefacts.GROUP_SCOPE
+
+    def _artefacts_root(self, group: str) -> Path:
+        root = self.store_root / group / artefacts.ARTEFACTS_PARTS[0] / artefacts.ARTEFACTS_PARTS[1]
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    def _write_local(self, rel: PurePosixPath, data: bytes, group: str) -> Path:
+        """Write a store file under ``<Group>/static/artefacts/`` atomically (temp file renamed over it)."""
+        target = self.store_root / str(rel)
+        ensure_inside(target, self._artefacts_root(group))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        ensure_inside(target, self._artefacts_root(group))       # again, now that the folders exist
+        partial = target.with_name(f'.{target.name}.partial')
+        partial.write_bytes(data)
+        os.replace(partial, target)
+        return target
+
+    # ── markers ─────────────────────────────────────────────────────────────
+    def _marker_path(self, deposit_id: str) -> Path:
+        if not dataset_deposit.DEPOSIT_ID_RE.fullmatch(deposit_id):
+            raise ValueError(deposit_id)
+        return self.state_dir / MARKER_DIR / f'{deposit_id}.json'
+
+    def load_marker(self, deposit_id: str) -> Optional[Dict[str, Any]]:
+        path = self._marker_path(deposit_id)
+        try:
+            return json.loads(path.read_text()) if path.exists() else None
+        except ValueError:
+            return None
+
+    def save_marker(self, deposit_id: str, marker: Dict[str, Any]) -> None:
+        path = self._marker_path(deposit_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_suffix('.json.partial')
+        partial.write_text(json.dumps(marker, indent=1))
+        os.replace(partial, path)
+
+    def drop_marker(self, deposit_id: str) -> None:
+        self._marker_path(deposit_id).unlink(missing_ok=True)
+
+    # ── hashing and QC ──────────────────────────────────────────────────────
+    def _hash(self, obj: ObjInfo, entry: Dict[str, Any], keep: Optional[Path]) -> FileCheck:
+        """Stream the object pinned to its listed ETag; sha256 (and MD5 for single-part ETags) on the stream."""
+        try:
+            response = self.s3.get_object(Bucket=self.bucket, Key=obj.key, IfMatch=f'"{obj.etag}"')
+        except Exception as exc:  # noqa: BLE001
+            if _code(exc) in ('PreconditionFailed', '412'):
+                raise Stop('needs_decision', f'{entry["name"]} changed in incoming while it was read')
+            raise TransientError(f'GET {entry["name"]} failed ({_code(exc)})') from exc
+        sha, md5 = hashlib.sha256(), hashlib.md5()
+        head = b''
+        tail = b''
+        size = 0
+        handle = None
+        if keep is not None:
+            keep.parent.mkdir(parents=True, exist_ok=True)
+            handle = keep.open('wb')
+        try:
+            body = response['Body']
+            while True:
+                chunk = body.read(CHUNK)
+                if not chunk:
+                    break
+                sha.update(chunk)
+                md5.update(chunk)
+                size += len(chunk)
+                if len(head) < HEAD_BYTES:
+                    head += chunk[:HEAD_BYTES - len(head)]
+                tail = (tail + chunk)[-8:]
+                if handle is not None:
+                    handle.write(chunk)
+        except Exception as exc:  # noqa: BLE001
+            raise TransientError(f'reading {entry["name"]} failed ({exc})') from exc
+        finally:
+            if handle is not None:
+                handle.close()
+        if '-' not in obj.etag and md5.hexdigest() != obj.etag:
+            raise Stop('needs_decision', f'{entry["name"]}: the bytes read are not the listed object (MD5)')
+        return FileCheck(entry['name'], size, sha.hexdigest(), obj.etag, head, tail, keep)
+
+    def _keep_bytes(self, kind: str, name: str, size: int) -> bool:
+        """Read into the work dir: inline files and files whose content the checks read."""
+        ending = rules.file_extension(name)
+        inline = kind == 'figure' or size <= float(self.settings.get('artefacts_inline_max_mb', 2)) * 1024 ** 2
+        content = ending in rules.TEXT_EXTENSIONS or ending in rules.TABLE_EXTENSIONS or ending == '.zip' \
+            or kind in ('notebook', 'figure')
+        return inline or (content and size <= float(self.settings.get('artefacts_content_check_max_gb', 2)) * 1024 ** 3)
+
+    def _qc(self, record: Dict[str, Any], block: Dict[str, Any], checks: List[FileCheck], declared_rows: List[Dict[str, Any]],
+            public: bool, approval: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Section 6.1 generic checks. Returns the report; raises Stop for errors and held reasons."""
+        kind = block['kind']
+        results: List[Dict[str, Any]] = []
+
+        def add(check_id: str, status: str, summary: str, fix: str = '') -> None:
+            results.append({'id': check_id, 'status': status, 'summary': summary, 'fix': fix})
+        names = [entry['name'] for entry in declared_rows]
+        name_problems = [problem for problem in (artefacts.file_name_problem(name) for name in names) if problem]
+        name_problems += [f'{clash}: differs from another file only in case' for clash in artefacts.casefold_clashes(names)]
+        add('files.names', 'fail' if name_problems else 'pass', '; '.join(name_problems) or 'names are safe')
+        max_files = int(self.settings.get('artefacts_max_files', 50))
+        max_file = float(self.settings.get('artefacts_max_file_gb', 100)) * 1024 ** 3
+        max_total = float(self.settings.get('artefacts_max_deposit_gb', 200)) * 1024 ** 3
+        size_problems = []
+        if len(checks) > max_files:
+            size_problems.append(f'{len(checks)} files (at most {max_files})')
+        size_problems += [f'{check.name}: {check.size} bytes is over the file limit' for check in checks
+                          if check.size > max_file]
+        if sum(check.size for check in checks) > max_total:
+            size_problems.append('the deposit is over its size limit')
+        add('files.limits', 'fail' if size_problems else 'pass', '; '.join(size_problems) or 'within the limits')
+        mismatched = [f'{check.name}: declared {row["size"]} bytes / {row["sha256"][:12]}, read {check.size} bytes / '
+                      f'{check.sha256[:12]}' for check, row in zip(checks, declared_rows)
+                      if check.size != int(row['size']) or check.sha256 != row['sha256']]
+        add('files.sha256', 'fail' if mismatched else 'pass', '; '.join(mismatched) or 'sizes and sha256 match',
+            'compute the sha256 of the files you upload' if mismatched else '')
+        type_problems = []
+        for check in checks:
+            problem = rules.extension_problem(kind, check.name) or rules.magic_problem(check.name, check.head,
+                                                                                       check.tail, check.size)
+            if problem:
+                type_problems.append(problem)
+            elif rules.file_extension(check.name) == '.zip' or rules.file_extension(check.name) in ('.xlsx', '.docx'):
+                problem = self._zip_problem(check)
+                if problem:
+                    type_problems.append(problem)
+        add('files.type', 'fail' if type_problems else 'pass', '; '.join(type_problems) or 'types agree with endings')
+        text_problems = []
+        if not rules.TITLE_MIN_CHARS <= len(block.get('title') or '') <= artefacts.TITLE_MAX_CHARS:
+            text_problems.append('title length')
+        if len((block.get('description') or '').strip()) < rules.DESCRIPTION_MIN_CHARS:
+            text_problems.append('description shorter than 50 characters')
+        add('meta.text', 'fail' if text_problems else 'pass', '; '.join(text_problems) or 'title and description')
+        missing = rules.provenance_missing(block.get('declared'))
+        if missing:
+            add('meta.provenance', 'fail' if kind in rules.PROVENANCE_STRICT_KINDS else 'warn',
+                'provenance incomplete: ' + ', '.join(missing), 'vark artefacts add --code auto --software auto')
+        else:
+            add('meta.provenance', 'pass', 'author, date, software and code declared')
+        held: List[str] = []
+        secrets_found = []
+        donors_found = []
+        crosswalk_values = self._crosswalk_values()
+        for check in checks:
+            ending = rules.file_extension(check.name)
+            data = check.local.read_bytes() if check.local is not None and check.local.exists() else None
+            if data is None:
+                if ending in rules.TEXT_EXTENSIONS or ending in rules.TABLE_EXTENSIONS:
+                    add('content.read', 'warn', f'{check.name} is larger than the content check limit; not scanned')
+                continue
+            if ending in rules.TEXT_EXTENSIONS or ending == '.mus':
+                found = rules.secret_findings(data)
+                if found:
+                    secrets_found.append(f'{check.name}: {", ".join(found)}')
+            if ending in rules.TABLE_EXTENSIONS and crosswalk_values:
+                hits = self._donor_hits(check.name, data, crosswalk_values)
+                if hits:
+                    donors_found.append(f'{check.name}: {hits} value(s)')
+        if secrets_found:
+            held.append('possible_secret')
+            add('content.secrets', 'held', '; '.join(secrets_found), 'remove the secret and deposit a new version')
+        else:
+            add('content.secrets', 'pass', 'no key, token or password found')
+        if donors_found:
+            held.append('donor_identifiers')
+            add('content.donors', 'held', '; '.join(donors_found), 'replace internal donor ids by public ones')
+        else:
+            add('content.donors', 'pass', 'no donor crosswalk values' if crosswalk_values else
+                'no donor crosswalk on this site')
+        if public and self.settings.get('artefacts_hold_public', True):
+            held.append('public_access')
+            add('access.public', 'held', 'the artefact will be public: an admin publishes it')
+        approved = set((approval or {}).get('reasons') or [])
+        remaining = [reason for reason in held if reason not in approved]
+        failed = [entry for entry in results if entry['status'] == 'fail']
+        report = {'schema': 'anthive.artefact_qc/1', 'deposit_id': record['id'], 'ref': record.get('artefact_ref'),
+                  'result': 'fail' if failed else ('held' if remaining else 'pass'),
+                  'publish': not failed and not remaining, 'held_reasons': remaining,
+                  'counts': {status: sum(entry['status'] == status for entry in results)
+                             for status in ('pass', 'warn', 'fail', 'held')},
+                  'checks': results}
+        if failed:
+            raise Stop('failed', 'checks failed: ' + '; '.join(entry['summary'] for entry in failed)[:2000], report)
+        if remaining:
+            raise Stop('held', 'held for an admin: ' + ', '.join(remaining), report, held=remaining)
+        return report
+
+    def _zip_problem(self, check: FileCheck) -> Optional[str]:
+        """Central directory only, never extracted: names without ``..`` or absolute paths, sane totals."""
+        if check.local is None:
+            return None
+        try:
+            with zipfile.ZipFile(check.local) as archive:
+                total = 0
+                for info in archive.infolist():
+                    name = info.filename
+                    if name.startswith(('/', '\\')) or '..' in name.replace('\\', '/').split('/') or ':' in name[:3]:
+                        return f'{check.name}: entry {name[:80]!r} escapes the archive'
+                    total += info.file_size
+        except (zipfile.BadZipFile, OSError) as exc:
+            return f'{check.name}: not a readable ZIP ({exc})'
+        if total > ZIP_MAX_TOTAL or total > ZIP_MAX_RATIO * max(1, check.size) and total > 100 * 1024 ** 2:
+            return f'{check.name}: uncompresses to {total} bytes (more than {ZIP_MAX_RATIO} times its size)'
+        return None
+
+    def _crosswalk_values(self) -> set:
+        path = self.store_root / 'donor_crosswalk.tsv'
+        if not path.is_file():
+            return set()
+        from obs_derive_forms import load_crosswalk  # noqa: PLC0415
+        try:
+            crosswalk = load_crosswalk(path)
+        except Exception:  # noqa: BLE001 - an unreadable crosswalk: no scan (recorded as such)
+            return set()
+        values = set()
+        for table in crosswalk.by_cohort.values():
+            for alias, uid in table.items():
+                for value in (alias, uid):
+                    if value and len(str(value)) >= 4:
+                        values.add(str(value).strip().lower())
+        return values
+
+    @staticmethod
+    def _donor_hits(name: str, data: bytes, values: set) -> int:
+        import csv  # noqa: PLC0415
+        import gzip  # noqa: PLC0415
+        try:
+            if name.lower().endswith('.gz'):
+                data = gzip.GzipFile(fileobj=io.BytesIO(data)).read(256 * 1024 ** 2)
+            text = data.decode('utf-8', errors='replace')
+        except (OSError, EOFError):
+            return 0
+        delimiter = '\t' if '.tsv' in name.lower() else ','
+        hits = set()
+        for row in csv.reader(io.StringIO(text), delimiter=delimiter):
+            for cell in row:
+                value = cell.strip().lower()
+                if value in values:
+                    hits.add(value)
+        return len(hits)
+
+    # ── publish an artefact ─────────────────────────────────────────────────
+    def publish_artefact(self, record: Dict[str, Any], files: List[Dict[str, Any]], objs: List[ObjInfo],
+                         approval: Optional[Dict[str, Any]]) -> Outcome:
+        try:
+            return self._publish_artefact(record, files, objs, approval)
+        except Stop as stop:
+            return Outcome(state=stop.state, detail=str(stop), report=stop.report, held_reasons=stop.held)
+
+    def _publish_artefact(self, record: Dict[str, Any], files: List[Dict[str, Any]], objs: List[ObjInfo],
+                          approval: Optional[Dict[str, Any]]) -> Outcome:
+        block = json.loads(record.get('artefact') or '{}')
+        group, group_id, scope = record['data_project'], block.get('group_id'), block.get('scope')
+        kind, artefact_id = block.get('kind'), block.get('artefact_id')
+        try:
+            path = artefacts.ArtefactPath(group, scope, kind, artefact_id)
+        except (TypeError, ValueError) as exc:
+            raise Stop('failed', f'the deposit names no valid artefact ({exc})')
+        if kind in rules.DEFERRED_KINDS:
+            raise Stop('failed', 'de_table artefacts are not accepted yet')
+        ref = artefacts.format_ref(group_id, scope, artefact_id)
+        outcome = Outcome()
+        # scope ---------------------------------------------------------------
+        collections, mds, folders = self._catalog()
+        collection = collections.get(group_id)
+        if collection is None or collection.folder != group:
+            raise Stop('failed', f'the collection {group} ({group_id}) is not live on this site')
+        scope_db_id = None if scope == artefacts.GROUP_SCOPE else f'{group_id}/{scope}'
+        scope_md = None
+        if scope_db_id is not None:
+            scope_md = mds.get(scope_db_id)
+            if scope_md is None or folders.get(scope_db_id) != group:
+                raise Stop('failed', f'the dataset {scope_db_id} is not served (removed or inactive)')
+        made_from = []
+        for entry in block.get('made_from') or []:
+            md = mds.get(entry.get('db_id'))
+            meta = rules.read_md_meta(md) if md else {}
+            sha = rules.h5ad_sha256_at(meta, str(entry.get('dataset_version'))) if md else None
+            if md is None or str(entry.get('dataset_version')) not in rules.changelog_versions(meta):
+                raise Stop('failed', f'made_from {entry.get("db_id")} {entry.get("dataset_version")}: no such '
+                                     f'dataset version (any more)')
+            if str(meta.get('version')) != str(entry.get('dataset_version')):
+                outcome.warnings.append(f'made from {entry["db_id"]} {entry["dataset_version"]}; the dataset is now '
+                                        f'{meta.get("version")}')
+            made_from.append({'db_id': entry['db_id'], 'dataset_version': str(entry['dataset_version']),
+                              'h5ad_sha256': sha})
+        if scope_db_id is not None and scope_db_id not in {entry['db_id'] for entry in made_from}:
+            raise Stop('failed', f'made_from does not include the scope dataset {scope_db_id}')
+        policy = artefacts.AccessPolicy(collections, self._mus_access(mds), self._folder_db_ids(folders))
+        public = block.get('access') != 'internal' and (
+            policy.dataset_public(scope_db_id) if scope_db_id else policy.collection_public(group_id))
+        # hash and QC (skipped when a marker shows they passed before the placement started) --------------
+        marker = self.load_marker(record['id'])
+        work = self.work_root / f'artefact_{record["id"]}'
+        checks: List[FileCheck] = []
+        report = None
+        if marker is None:
+            shutil.rmtree(work, ignore_errors=True)
+            work.mkdir(parents=True, exist_ok=True)
+            for obj, entry in zip(objs, files):
+                keep = work / entry['name'] if self._keep_bytes(kind, entry['name'], int(entry['size'])) else None
+                if keep is not None:
+                    ensure_inside(keep, work)
+                checks.append(self._hash(obj, entry, keep))
+            report = self._qc(record, block, checks, files, public, approval)
+        # version, placement, manifest, head record: under the scope's writer lock ---------------------------
+        lock = self._scope_lock_path(path, scope_md)
+        with writer_lock(lock, timeout=600):
+            head = self._read_head(path)
+            if head is not None:
+                live = [v['version'] for v in head['versions'] if v['state'] == 'live']
+                latest = max(live) if live else None
+                if marker is None:
+                    if block.get('new_version_of') is None:
+                        raise Stop('failed', f'artefact_exists: {ref} exists (latest {latest})')
+                    if head.get('owner') != record['user'] and not record['is_admin']:
+                        raise Stop('failed', f'not_owner: new versions of {ref} are deposited by its owner or an '
+                                             f'admin')
+                    if block.get('new_version_of') != latest:
+                        raise Stop('failed', f'version_conflict: the latest version of {ref} is {latest}, the '
+                                             f'deposit was for {block.get("new_version_of")}')
+                if head.get('kind') != kind:
+                    raise Stop('failed', f'{ref} is a {head.get("kind")}; the kind cannot change')
+            elif block.get('new_version_of') is not None and marker is None:
+                raise Stop('failed', f'version_conflict: {ref} does not exist')
+            if marker is None:
+                existing_numbers = [v['version'] for v in (head or {}).get('versions') or []]
+                if len(existing_numbers) >= int(self.settings.get('artefacts_max_versions', 100)):
+                    raise Stop('failed', f'{ref} has the maximum number of versions')
+                number = max(existing_numbers, default=0) + 1
+                marker = {'deposit_id': record['id'], 'ref': ref, 'version': number, 'steps': [],
+                          'started': _now_iso(),
+                          'files': {check.name: {'sha256': check.sha256, 'size': check.size, 'etag': check.etag}
+                                    for check in checks},
+                          'made_from': made_from, 'warnings': outcome.warnings, 'report': report,
+                          'approval': ({'by': approval.get('by'), 'reasons': approval.get('reasons') or [],
+                                        'date': approval.get('date')} if approval else None)}
+                self.save_marker(record['id'], marker)
+            number = int(marker['version'])
+            outcome.version = number
+            outcome.warnings = list(marker.get('warnings') or outcome.warnings)
+            report = marker.get('report') or report
+            # the files: server-side copies, never overwriting a key of the version
+            for obj, entry in zip(objs, files):
+                info = marker['files'][entry['name']]
+                self._place(path, number, entry['name'], obj, info, record, ref)
+            if 'local' not in marker['steps']:
+                self._local_copies(path, number, kind, files, work, marker, outcome)
+                marker['steps'].append('local')
+                self.save_marker(record['id'], marker)
+            if marker.get('manifest'):            # resumed: exactly the manifest decided before the interruption
+                raw = marker['manifest'].encode('utf-8')
+                manifest = json.loads(raw.decode('utf-8'))
+            else:
+                manifest = self._manifest(record, block, path, group_id, number, marker, files)
+                raw = (json.dumps(manifest, indent=2, sort_keys=False) + '\n').encode('utf-8')
+                marker['manifest'] = raw.decode('utf-8')
+                self.save_marker(record['id'], marker)
+            manifest_sha = hashlib.sha256(raw).hexdigest()
+            # written last on S3: its existence makes the version real
+            self._put_once(path.manifest_rel(number), raw, manifest_sha, record, ref, marker)
+            self._write_local_once(path.manifest_rel(number), raw, group)
+            if 'head' not in marker['steps']:
+                self._update_head(path, head, record, manifest, number, manifest_sha)
+                marker['steps'].append('head')
+                self.save_marker(record['id'], marker)
+        # serve, commit, done ------------------------------------------------------------------------------
+        outcome.served = self._rescan_and_check(f'/artefacts/{group_id}/{scope}/{artefact_id}/v{number}',
+                                                outcome.warnings)
+        outcome.git_commit = self._commit([path.head_rel, path.manifest_rel(number)],
+                                          f'artefact {ref}@v{number} ({kind})\n\nDeposit {record["id"]} by '
+                                          f'{record["user"]}.\n', record, outcome.warnings)
+        outcome.consumed = {obj.key: obj.etag for obj in objs}
+        outcome.state = 'live'
+        outcome.detail = f'published {ref}@v{number}'
+        outcome.report = report
+        self.drop_marker(record['id'])
+        shutil.rmtree(work, ignore_errors=True)
+        return outcome
+
+    def _mus_access(self, mds: Dict[str, Path]) -> Dict[str, Dict[str, Any]]:
+        """The resolved ``access`` of each dataset (sidecar and .env cascade), as the server sees it."""
+        out: Dict[str, Dict[str, Any]] = {}
+        try:
+            import mus  # noqa: PLC0415
+        except Exception:  # noqa: BLE001
+            return out
+        for db_id, md in mds.items():
+            try:
+                annotation = mus.resolve_annotation(md.with_suffix('.h5ad'))
+            except Exception:  # noqa: BLE001 - unresolvable: internal (fail closed)
+                annotation = {}
+            out[db_id] = {**rules.read_md_meta(md), 'access': (annotation or {}).get('access')}
+        return out
+
+    @staticmethod
+    def _folder_db_ids(folders: Dict[str, str]) -> Dict[str, List[str]]:
+        out: Dict[str, List[str]] = {}
+        for db_id, folder in folders.items():
+            out.setdefault(folder, []).append(db_id)
+        return out
+
+    def _read_head(self, path: artefacts.ArtefactPath) -> Optional[Dict[str, Any]]:
+        head_path = self.store_root / str(path.head_rel)
+        if not head_path.exists():
+            return None
+        try:
+            head = artefacts.parse_head_record(head_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            raise Stop('needs_decision', f'the head record of {path.rel} cannot be read ({exc})')
+        problems = artefacts.validate_head_record(head, path)
+        if problems:
+            raise Stop('needs_decision', f'the head record of {path.rel} is inconsistent: ' + '; '.join(problems))
+        return head
+
+    def _place(self, path: artefacts.ArtefactPath, number: int, name: str, obj: ObjInfo, info: Dict[str, Any],
+               record: Dict[str, Any], ref: str) -> None:
+        """Copy one incoming object to its version key (HEAD first: an existing key is reused only when it is
+        exactly this file; any other bytes stop the item, a version is never overwritten)."""
+        key = artefacts.s3_key(self.catalog_prefix, path.file_rel(number, name))
+        existing = self._head_or_none(key)
+        if existing is not None:
+            if _meta_of(existing).get('sha256') == info['sha256'] and int(existing.get('ContentLength', -1)) == info['size']:
+                return
+            raise Stop('needs_decision', f'{key} already exists with other content; a version is never overwritten')
+        metadata = {'sha256': info['sha256'], 'deposit': record['id'], 'artefact': f'{ref}@v{number}'}
+        source = {'Bucket': self.bucket, 'Key': obj.key}
+        condition = f'"{obj.etag}"'
+        content_type = rules.content_type_for(name)
+        try:
+            if obj.size <= dataset_deposit.SINGLE_PUT_HARD_MAX:
+                self.s3.copy_object(Bucket=self.bucket, Key=key, CopySource=source, Metadata=metadata,
+                                    MetadataDirective='REPLACE', CopySourceIfMatch=condition, ContentType=content_type)
+            else:
+                self.s3.copy(source, self.bucket, key, ExtraArgs={'Metadata': metadata, 'MetadataDirective': 'REPLACE',
+                                                                  'CopySourceIfMatch': condition,
+                                                                  'ContentType': content_type})
+        except Exception as exc:  # noqa: BLE001
+            if _code(exc) in ('PreconditionFailed', '412'):
+                raise Stop('needs_decision', f'{name} changed in incoming during the copy')
+            raise TransientError(f'copying {name} failed ({_code(exc)})') from exc
+        placed = self._head_or_none(key)
+        if placed is None or int(placed.get('ContentLength', -1)) != info['size'] \
+                or _meta_of(placed).get('sha256') != info['sha256']:
+            raise TransientError(f'the copy of {name} could not be verified')
+        if '-' not in obj.etag and str(placed.get('ETag', '')).strip('"') != obj.etag:
+            raise Stop('needs_decision', f'the copy of {name} is not the checked object (ETag differs)')
+
+    def _head_or_none(self, key: str) -> Optional[Dict[str, Any]]:
+        try:
+            return self.s3.head_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001
+            if _absent(exc):
+                return None
+            raise TransientError(f'HEAD {key} failed ({_code(exc)})') from exc
+
+    def _put_once(self, rel: PurePosixPath, raw: bytes, sha: str, record: Dict[str, Any], ref: str,
+                  marker: Dict[str, Any]) -> None:
+        """Write a version object (manifest, preview) unless it exists with exactly these bytes."""
+        key = artefacts.s3_key(self.catalog_prefix, rel)
+        existing = self._head_or_none(key)
+        if existing is not None:
+            if _meta_of(existing).get('sha256') == sha:
+                return
+            raise Stop('needs_decision', f'{key} already exists with other content; a version is never overwritten')
+        try:
+            self.s3.put_object(Bucket=self.bucket, Key=key, Body=raw, ContentType='application/json',
+                               Metadata={'sha256': sha, 'deposit': record['id'], 'artefact': ref})
+        except Exception as exc:  # noqa: BLE001
+            raise TransientError(f'writing {rel.name} failed ({_code(exc)})') from exc
+        placed = self._head_or_none(key)
+        if placed is None or _meta_of(placed).get('sha256') != sha:
+            raise TransientError(f'{rel.name} could not be verified on S3')
+
+    def _write_local_once(self, rel: PurePosixPath, raw: bytes, group: str) -> None:
+        target = self.store_root / str(rel)
+        if target.exists():
+            if target.read_bytes() == raw:
+                return
+            raise Stop('needs_decision', f'{rel} exists locally with other content')
+        self._write_local(rel, raw, group)
+
+    def _local_copies(self, path: artefacts.ArtefactPath, number: int, kind: str, files: List[Dict[str, Any]],
+                      work: Path, marker: Dict[str, Any], outcome: Outcome) -> None:
+        """Inline copies (figures, small files) and previews, locally and (previews) on S3. Warnings only."""
+        for entry in files:
+            name = entry['name']
+            source = work / name
+            if not source.is_file():
+                continue
+            if hashlib.sha256(source.read_bytes()).hexdigest() != marker['files'][name]['sha256']:
+                outcome.warnings.append(f'{name}: the work copy changed; no inline copy')
+                continue
+            inline = kind == 'figure' or entry['size'] <= float(self.settings.get('artefacts_inline_max_mb', 2)) * 1024 ** 2
+            try:
+                if inline:
+                    self._write_local_once(path.file_rel(number, name), source.read_bytes(), path.group)
+                preview = self._make_preview(name, source)
+                if preview is not None:
+                    suffix, data = preview
+                    rel = path.preview_rel(number, f'{name}{suffix}')
+                    self._write_local_once(rel, data, path.group)
+                    key = artefacts.s3_key(self.catalog_prefix, rel)
+                    if self._head_or_none(key) is None:
+                        self.s3.put_object(Bucket=self.bucket, Key=key, Body=data,
+                                           ContentType=artefacts.PREVIEW_TYPES[suffix],
+                                           Metadata={'sha256': hashlib.sha256(data).hexdigest()})
+            except Stop:
+                raise
+            except Exception as exc:  # noqa: BLE001 - previews are a convenience
+                outcome.warnings.append(f'{name}: no preview or inline copy ({type(exc).__name__}: {exc})')
+
+    @staticmethod
+    def _make_preview(name: str, source: Path) -> Optional[Tuple[str, bytes]]:
+        ending = rules.file_extension(name)
+        if ending in ('.png', '.jpg', '.jpeg', '.webp', '.tif', '.tiff'):
+            try:
+                from PIL import Image  # noqa: PLC0415
+            except ImportError:
+                return None
+            Image.MAX_IMAGE_PIXELS = 100_000_000          # a decompression bomb raises instead of filling memory
+            with Image.open(source) as image:
+                image.thumbnail((PREVIEW_PIXELS, PREVIEW_PIXELS))
+                buffer = io.BytesIO()
+                image.convert('RGB').save(buffer, format='WEBP', quality=80)
+                return '.webp', buffer.getvalue()
+        if ending in ('.tsv', '.csv'):
+            with source.open('rb') as handle:
+                lines = [handle.readline() for _ in range(21)]
+            return '.txt', b''.join(lines)[:65536]
+        return None
+
+    def _manifest(self, record: Dict[str, Any], block: Dict[str, Any], path: artefacts.ArtefactPath, group_id: str,
+                  number: int, marker: Dict[str, Any], files: List[Dict[str, Any]]) -> Dict[str, Any]:
+        roles = {entry['name']: entry.get('role') for entry in block.get('files') or []}
+        manifest = {
+            'schema': artefacts.SCHEMA, 'ref': artefacts.format_ref(group_id, path.scope, path.artefact_id, number),
+            'artefact_id': path.artefact_id, 'version': number, 'kind': path.kind, 'group': path.group,
+            'group_id': group_id, 'scope': path.scope,
+            'db_id': None if path.scope == artefacts.GROUP_SCOPE else f'{group_id}/{path.scope}',
+            'title': block['title'], 'description': block.get('description'), 'change_note': block.get('change_note'),
+            'supersedes': block.get('new_version_of'), 'access': block.get('access') or 'inherit',
+            'files': [{'name': entry['name'], 'size': marker['files'][entry['name']]['size'],
+                       'sha256': marker['files'][entry['name']]['sha256'],
+                       'content_type': rules.content_type_for(entry['name']),
+                       'role': roles.get(entry['name']) or 'supporting'} for entry in files],
+            'made_from': marker.get('made_from') or [],
+            'declared': block.get('declared') or {},
+            'recorded': {'uploaded_by': record['user'], 'uploaded_by_name': record.get('name') or '',
+                         'deposit_id': record['id'], 'published': marker.get('started') or _now_iso(),
+                         'site_id': self.site_id, 'server_version': self.server_version,
+                         'checks': {entry['id']: entry['status'] for entry in (marker.get('report') or {}).get('checks') or []},
+                         **({'approval': marker['approval']} if marker.get('approval') else {})},
+            'de': None,
+        }
+        problems = artefacts.validate_manifest(manifest, path, group_id, number)
+        if problems:
+            raise Stop('failed', 'the manifest would not be valid: ' + '; '.join(problems))
+        return manifest
+
+    def _update_head(self, path: artefacts.ArtefactPath, head: Optional[Dict[str, Any]], record: Dict[str, Any],
+                     manifest: Dict[str, Any], number: int, manifest_sha: str) -> None:
+        today = _today()
+        if head is None:
+            head = {'artefact_id': path.artefact_id, 'kind': path.kind, 'scope': path.scope, 'owner': record['user'],
+                    'created': today, 'title': manifest['title'], 'latest': None, 'versions': []}
+        versions = [entry for entry in head['versions'] if entry['version'] != number]
+        versions.append({'version': number, 'state': 'live', 'manifest_sha256': manifest_sha, 'published': today})
+        versions.sort(key=lambda entry: entry['version'])
+        live = [entry['version'] for entry in versions if entry['state'] == 'live']
+        head = {**head, 'title': manifest['title'], 'latest': max(live) if live else None, 'versions': versions}
+        self._write_head(path, head)
+
+    def _write_head(self, path: artefacts.ArtefactPath, head: Dict[str, Any]) -> None:
+        problems = artefacts.validate_head_record(head, path)
+        if problems:
+            raise Stop('needs_decision', 'the new head record would be inconsistent: ' + '; '.join(problems))
+        text = artefacts.render_head_record(head).encode('utf-8')
+        self._write_local(path.head_rel, text, path.group)
+        key = artefacts.s3_key(self.catalog_prefix, path.head_rel)
+        try:
+            self.s3.put_object(Bucket=self.bucket, Key=key, Body=text, ContentType='text/markdown',
+                               Metadata={'sha256': hashlib.sha256(text).hexdigest()})
+        except Exception as exc:  # noqa: BLE001
+            raise TransientError(f'pushing the head record failed ({_code(exc)})') from exc
+
+    def _rescan_and_check(self, path: str, warnings: List[str]) -> bool:
+        if self.api is None:
+            warnings.append('no API configured: not rescanned')
+            return False
+        try:
+            self.api.post_with_retry('/admin/rescan?what=artefacts')
+            answer = self.api._request(path, method='GET', timeout=60)
+            return bool(answer)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f'rescan or served check failed ({exc}); the next rescan serves it')
+            return False
+
+    def _commit(self, rels: Sequence[PurePosixPath], message: str, record: Optional[Dict[str, Any]],
+                warnings: List[str]) -> Optional[str]:
+        """Commit only these store paths (written, or deleted, by the route); never others' staged changes."""
+        if not self.git_commit:
+            return None
+        if not (self.store_root / '.git').exists():
+            warnings.append('the store is not a git repository: not committed')
+            return None
+        rel = [str(item) for item in rels]
+        staged = self.run(['git', '-C', self.store_root, 'diff', '--cached', '--name-only', '--', *rel])
+        if staged.returncode != 0 or staged.stdout.strip():
+            warnings.append('not committed: staged changes of someone else on these paths')
+            return None
+        name, _, email = self.git_identity.partition('<')
+        author = []
+        if record and record.get('user'):
+            mail = record.get('email') or f'{record["user"]}@anthive'
+            author = ['--author', f'{record.get("name") or record["user"]} <{mail}>']
+        add = self.run(['git', '-C', self.store_root, 'add', '-A', '--', *rel])
+        if add.returncode == 0:
+            result = self.run(['git', '-C', self.store_root, '-c', f'user.name={name.strip()}', '-c',
+                               f'user.email={email.rstrip(">").strip()}', 'commit', '--only', '-m', message,
+                               *author, '--', *rel])
+        else:
+            result = add
+        if result.returncode != 0:
+            warnings.append(f'git commit failed: {(result.stdout or "") + (result.stderr or "")}'.strip()[:300])
+            self.run(['git', '-C', self.store_root, 'reset', '-q', '--', *rel])
+            return None
+        head = self.run(['git', '-C', self.store_root, 'rev-parse', 'HEAD'])
+        return head.stdout.strip() if head.returncode == 0 else None
+
+    # ── publish a collection ────────────────────────────────────────────────
+    def publish_collection(self, record: Dict[str, Any], files: List[Dict[str, Any]], objs: List[ObjInfo],
+                           approval: Optional[Dict[str, Any]]) -> Outcome:
+        try:
+            return self._publish_collection(record, files, objs, approval)
+        except Stop as stop:
+            return Outcome(state=stop.state, detail=str(stop), report=stop.report, held_reasons=stop.held)
+
+    def _publish_collection(self, record: Dict[str, Any], files: List[Dict[str, Any]], objs: List[ObjInfo],
+                            approval: Optional[Dict[str, Any]]) -> Outcome:
+        data_project = record['data_project']
+        if len(files) != 1 or files[0]['name'] != 'index.md':
+            raise Stop('failed', 'a collection deposit holds exactly its index.md')
+        check = self._hash(objs[0], files[0], None)
+        if check.sha256 != files[0]['sha256']:
+            raise Stop('needs_decision', 'the index.md in incoming is not the one the server wrote')
+        response = self.s3.get_object(Bucket=self.bucket, Key=objs[0].key, IfMatch=f'"{objs[0].etag}"')
+        raw = response['Body'].read(1024 * 1024 + 1)
+        if hashlib.sha256(raw).hexdigest() != files[0]['sha256']:
+            raise Stop('needs_decision', 'the index.md read back is not the one the server wrote')
+        text = raw.decode('utf-8')
+        meta = artefacts.parse_front_matter(text)
+        problems = artefacts.analysis_collection_problems(data_project, meta)
+        if problems or meta.get('collection_kind') != 'analysis':
+            raise Stop('failed', 'the index.md is not a valid analysis collection: ' + '; '.join(problems))
+        if not artefacts.DATA_PROJECT_RE.fullmatch(data_project):
+            raise Stop('failed', 'the collection name does not follow the naming rule')
+        clash = [entry.name for entry in self.store_root.iterdir() if entry.name.lower() == data_project.lower()]
+        if clash:
+            raise Stop('needs_decision', f'{clash[0]} already exists in the store')
+        collections, mds, _folders = self._catalog()
+        taken = set(collections) | {db_id.split('/')[0] for db_id in mds}
+        if str(meta['group_id']).upper() in {value.upper() for value in taken}:
+            raise Stop('failed', f'the group id {meta["group_id"]} is taken meanwhile; create the collection again')
+        held = []
+        if meta.get('access') == 'public' and self.settings.get('artefacts_hold_public', True):
+            held.append('public_access')
+        remaining = [reason for reason in held if reason not in set((approval or {}).get('reasons') or [])]
+        report = {'schema': 'anthive.artefact_qc/1', 'deposit_id': record['id'], 'result': 'held' if remaining else 'pass',
+                  'publish': not remaining, 'held_reasons': remaining, 'counts': {},
+                  'checks': [{'id': 'collection.index_md', 'status': 'pass', 'summary': 'valid analysis index.md',
+                              'fix': ''}]
+                  + ([{'id': 'access.public', 'status': 'held', 'summary': 'public collection: an admin decides',
+                       'fix': ''}] if remaining else [])}
+        if remaining:
+            raise Stop('held', 'held for an admin: ' + ', '.join(remaining), report, held=remaining)
+        folder = self.store_root / data_project
+        ensure_inside(folder, self.store_root)
+        folder.mkdir()
+        target = folder / 'index.md'
+        partial = folder / '.index.md.partial'
+        partial.write_bytes(raw)
+        os.replace(partial, target)
+        outcome = Outcome(state='live', detail=f'collection {data_project} ({meta["group_id"]}) created',
+                          report=report)
+        outcome.served = self._rescan_and_check(f'/groups/{meta["group_id"]}', outcome.warnings)
+        outcome.git_commit = self._commit([PurePosixPath(data_project, 'index.md')],
+                                          f'collection {data_project} ({meta["group_id"]})\n\nDeposit {record["id"]} '
+                                          f'by {record["user"]}.\n', record, outcome.warnings)
+        outcome.consumed = {objs[0].key: objs[0].etag}
+        return outcome
+
+    # ── purge ───────────────────────────────────────────────────────────────
+    def process_purges(self, store: Any) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for row in store._rows("SELECT * FROM artefact_purges WHERE state IN ('requested', 'purging') ORDER BY id"):
+            if self.stop_requested():
+                break
+            try:
+                state, detail = self.purge(row)
+            except TransientError as exc:
+                self.log(f'artefacts: purge of {row["ref"]}@v{row["version"]} waits: {exc}')
+                continue
+            except Exception as exc:  # noqa: BLE001
+                state, detail = 'needs_decision', f'{type(exc).__name__}: {exc}'
+            with store._lock:
+                store.conn.execute('UPDATE artefact_purges SET state = ?, detail = ?, updated = ? WHERE id = ?',
+                                   (state, detail[:2000], self.clock(), row['id']))
+            self.db.event(f'purge:{row["ref"]}@v{row["version"]}', state, detail)
+            self.log(f'artefacts: purge of {row["ref"]}@v{row["version"]}: {state} {detail}')
+            counts[state] = counts.get(state, 0) + 1
+        return counts
+
+    def _guarded_delete(self, key: str, version_prefix: str, expected_sha: Optional[str], log_key: str) -> str:
+        """Delete one catalog key of the version being purged, only when its sha256 metadata equals
+        ``expected_sha`` (the manifest's; for a preview without a local copy: any sha256 the pipeline wrote)."""
+        if not key.startswith(version_prefix) or '..' in key.split('/'):
+            raise ValueError(f'refusing to delete {key!r}: outside {version_prefix!r}')
+        head = self._head_or_none(key)
+        if head is None:
+            self.db.record_deletion(log_key, key, '', 'skipped:absent')
+            return 'absent'
+        stored = _meta_of(head).get('sha256')
+        if not stored or (expected_sha is not None and stored != expected_sha):
+            self.db.record_deletion(log_key, key, str(head.get('ETag', '')).strip('"'), 'skipped:sha256_differs')
+            return 'differs'
+        try:
+            self.s3.delete_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001
+            if not _absent(exc):
+                raise TransientError(f'deleting {key} failed ({_code(exc)})') from exc
+        self.db.record_deletion(log_key, key, str(head.get('ETag', '')).strip('"'), 'deleted')
+        return 'deleted'
+
+    def purge(self, row: Dict[str, Any]) -> Tuple[str, str]:
+        """Design 5.3: mark purging, delete exactly the listed keys (manifest last), local copies, tombstone."""
+        path = artefacts.ArtefactPath(row['group_folder'], row['scope'], row['kind'], row['artefact_id'])
+        number = int(row['version'])
+        scope_md = None
+        if path.scope != artefacts.GROUP_SCOPE:
+            _collections, mds, folders = self._catalog()
+            scope_md = next((md for db_id, md in mds.items() if db_id.split('/')[1] == path.scope
+                             and folders.get(db_id) == path.group), None)
+        log_key = f'purge:{row["ref"]}@v{number}'
+        with writer_lock(self._scope_lock_path(path, scope_md), timeout=600):
+            head = self._read_head(path)
+            entry = next((item for item in (head or {}).get('versions') or [] if item['version'] == number), None)
+            if head is None or entry is None:
+                return 'failed', 'no such version in the head record'
+            if entry['state'] == 'purged':
+                return 'done', 'already purged'
+            manifest_path = self.store_root / str(path.manifest_rel(number))
+            if not manifest_path.is_file():
+                return 'needs_decision', 'the manifest of the version is missing locally; nothing deleted'
+            raw = manifest_path.read_bytes()
+            if hashlib.sha256(raw).hexdigest() != entry['manifest_sha256']:
+                return 'needs_decision', 'the local manifest differs from the head record; nothing deleted'
+            manifest = json.loads(raw.decode('utf-8'))
+            if entry['state'] != 'purging':
+                entry['state'] = 'purging'
+                self._write_head(path, {**head, 'versions': head['versions'],
+                                        'latest': max([v['version'] for v in head['versions']
+                                                       if v['state'] == 'live'], default=None)})
+            version_prefix = artefacts.s3_key(self.catalog_prefix, path.version_rel(number)) + '/'
+            kept = []
+            for item in manifest.get('files') or []:
+                for rel, sha in ((path.file_rel(number, item['name']), item['sha256']),):
+                    if self._guarded_delete(artefacts.s3_key(self.catalog_prefix, rel), version_prefix, sha,
+                                            log_key) == 'differs':
+                        kept.append(str(rel))
+                for suffix in artefacts.PREVIEW_TYPES:
+                    rel = path.preview_rel(number, f'{item["name"]}{suffix}')
+                    local = self.store_root / str(rel)
+                    sha = hashlib.sha256(local.read_bytes()).hexdigest() if local.is_file() else None
+                    if self._head_or_none(artefacts.s3_key(self.catalog_prefix, rel)) is not None:
+                        if self._guarded_delete(artefacts.s3_key(self.catalog_prefix, rel), version_prefix, sha,
+                                                log_key) == 'differs':
+                            kept.append(str(rel))
+            if kept:
+                return 'needs_decision', 'kept (sha256 differs from the manifest): ' + ', '.join(kept)
+            self._guarded_delete(artefacts.s3_key(self.catalog_prefix, path.manifest_rel(number)), version_prefix,
+                                 entry['manifest_sha256'], log_key)
+            version_dir = self.store_root / str(path.version_rel(number))
+            if version_dir.exists():
+                ensure_inside(version_dir, self._artefacts_root(path.group))
+                shutil.rmtree(version_dir)
+            entry.update({'state': 'purged', 'purged': _today(), 'purged_by': row['requested_by'],
+                          'purge_reason': row.get('reason') or ''})
+            if row.get('by_admin'):
+                entry['purged_by_admin'] = True
+            live = [v['version'] for v in head['versions'] if v['state'] == 'live']
+            self._write_head(path, {**head, 'latest': max(live) if live else None})
+        warnings: List[str] = []
+        self._rescan_and_check(f'/artefacts/{row["ref"]}/versions', warnings)
+        self._commit([path.head_rel, path.manifest_rel(number)], f'purge {row["ref"]}@v{number}\n\nRequested by '
+                     f'{row["requested_by"]}: {row.get("reason") or ""}\n', None, warnings)
+        return 'done', 'purged' + (f' ({"; ".join(warnings)})' if warnings else '')

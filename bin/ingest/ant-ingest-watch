@@ -146,8 +146,33 @@ def build(args: argparse.Namespace):
     db = ingest_watch.StateDB(state_dir / ingest_watch.DB_FILE)
     watcher = ingest_watch.Watcher(settings, db, client, s3_cfg['bucket'], pipeline, state_dir, log=log,
                                    max_items=args.max_items, stop_requested=lambda: _stop,
-                                   deposit_settings=deposit_settings(cfg, settings))
+                                   deposit_settings=deposit_settings(cfg, settings),
+                                   artefact_publisher=artefact_publisher(cfg, settings, client, s3_cfg, db, store_root,
+                                                                         state_dir, work_root, pipeline.api))
     return settings, state_dir, db, watcher, store_root
+
+
+def artefact_publisher(cfg: dict, settings: dict, client, s3_cfg: dict, db, store_root: Path, state_dir: Path,
+                       work_root: Path, api):
+    """The artefact route of this run (lib/artefact_pipeline.py): artefact and collection deposits, purges."""
+    import artefact_pipeline  # noqa: PLC0415
+
+    artefact_settings = config.get_artefact_settings(cfg)
+    return artefact_pipeline.ArtefactPublisher(
+        store_root=store_root, state_dir=state_dir, work_root=work_root / 'artefacts', s3=client,
+        bucket=s3_cfg['bucket'], incoming_prefix=settings['prefix'],
+        catalog_prefix=artefact_settings['catalog_prefix'], artefact_settings=artefact_settings, db=db, api=api,
+        settle_seconds=float(settings['settle_seconds']), log=log, git_commit=settings['store_git_commit'],
+        git_identity=settings['git_identity'], delete_incoming=settings['delete_incoming_after_ingest'],
+        notify_settings=settings.get('notify') or {}, stop_requested=lambda: _stop,
+        site_id=config.deposit_site_id(cfg), server_version=_server_version())
+
+
+def _server_version() -> str:
+    import re  # noqa: PLC0415
+
+    match = re.search(r'^__version__ = "([^"]+)"', (SCRIPT_DIR.parent.parent / 'lib' / '__init__.py').read_text(), re.M)
+    return match.group(1) if match else ''
 
 
 def deposit_settings(cfg: dict, settings: dict):

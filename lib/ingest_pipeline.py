@@ -222,6 +222,8 @@ def plan_items(objects: Sequence[Dict[str, Any]], prefix: str) -> Tuple[List[Ite
         parts = key[len(prefix):].split('/')
         if parts[0] == SELFTEST_DIR:
             continue                                   # the IfMatch self-test's scratch object
+        if len(parts) >= 2 and parts[1] == ARTEFACTS_INCOMING_DIR:
+            continue                                   # artefact and collection deposits: lib/artefact_pipeline.py
         if not all(valid_segment(part) for part in parts):
             malformed.append(f'{key}: unsafe key segment (allowed: letters, digits, ._-, not starting with . or _)')
             continue
@@ -471,6 +473,8 @@ def _delete_if_unchanged(s3: Any, bucket: str, key: str, etag: str, if_match: bo
 
 
 SELFTEST_DIR = '_selftest'
+#: ``<prefix><data_project>/artefacts/``: artefact and collection deposits, never dataset items (REST 2.47)
+ARTEFACTS_INCOMING_DIR = 'artefacts'
 
 
 def _delete_selftest_object(s3: Any, bucket: str, prefix: str, key: str, **kwargs: Any) -> None:

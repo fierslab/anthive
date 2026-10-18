@@ -478,7 +478,7 @@ class Watcher:
     def __init__(self, settings: Dict[str, Any], db: StateDB, s3: Any, bucket: str, pipeline: Pipeline,
                  state_dir: Path, log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
                  max_items: Optional[int] = None, stop_requested: Callable[[], bool] = lambda: False,
-                 deposit_settings: Any = None):
+                 deposit_settings: Any = None, artefact_publisher: Any = None):
         self.settings = settings
         self.db = db
         self.s3 = s3
@@ -493,6 +493,8 @@ class Watcher:
         #: ``dataset_deposit.DepositSettings`` for expiry and the staging sweep (None: no deposit housekeeping)
         self.deposit_settings = deposit_settings
         self._deposit_marks: Dict[Tuple[str, str], str] = {}
+        #: ``artefact_pipeline.ArtefactPublisher``: artefact and collection deposits, purges (REST 2.47)
+        self.artefact_publisher = artefact_publisher
 
     def check_if_match(self) -> bool:
         """Whether the backend enforces ``IfMatch`` on DeleteObject (self-test, cached a week per bucket and prefix)."""
@@ -556,6 +558,12 @@ class Watcher:
                     counts[state] = counts.get(state, 0) + number
             except Exception as exc:  # noqa: BLE001 - never stop the poll for the DE route
                 self.log(f'deposits: DE deposits not processed: {exc}')
+        if self.artefact_publisher is not None and not self.stop_requested():
+            try:
+                for state, number in self.artefact_publisher.poll(objects).items():
+                    counts[f'artefact_{state}'] = counts.get(f'artefact_{state}', 0) + number
+            except Exception as exc:  # noqa: BLE001 - never stop the poll for the artefact route
+                self.log(f'artefacts: not processed this poll: {exc}')
         self.prune_work_dirs()
         return counts
 
