@@ -158,7 +158,8 @@ def meta_index_md(ctx) -> Outcome:
         soft.append('year')
     if not (index.get('authors') or index.get('first_author')):
         soft.append('authors')
-    if not index.get('default_dataset'):
+    # An analysis collection (doc/DESIGN_artefacts.md 2.6) has no dataset to show first.
+    if not index.get('default_dataset') and str(index.get('collection_kind') or '').strip().lower() != 'analysis':
         soft.append('default_dataset')
     if strict and soft:
         problems.append('missing ' + ', '.join(soft))

@@ -2,7 +2,11 @@
 Anthive .md file sanity checks.
 
 Checks all metadata .md files in a folder tree for:
-  - index.md:  presence and validity of group_id (3 chars), no cross-group duplicates
+  - index.md:  presence and validity of group_id (3 chars), no cross-group duplicates;
+    ``collection_kind`` is ``datasets`` (the default) or ``analysis``. An analysis
+    collection (no datasets, doc/DESIGN_artefacts.md 2.6) needs the naming rule,
+    ``group`` equal to the folder, a group_id, a title and authors, and never
+    ``default_dataset``; its index.md is only reported on, never fixed
   - data .md:  presence and validity of id (3 chars), no within-group duplicates
   - data .md:  the ``api:`` facet mapping and the lineage keys
     (``lib/facet_lint.py``: closed ``ant_*`` namespace, mapping rules,
@@ -244,6 +248,26 @@ def check_md_folder(
         group_id = metadata.get('group_id')
         changed = False
 
+        # Analysis collections (collection_kind: analysis) hold artefacts, not
+        # datasets: checked with the artefact store's rules and never fixed
+        # (their index.md is written by the collection deposit only).
+        rel_parts = md_path.relative_to(folder).parts
+        collection_folder = rel_parts[0] if len(rel_parts) > 1 else folder.name
+        raw_kind = metadata.get('collection_kind')
+        kind = str(raw_kind).strip().lower() if raw_kind is not None else 'datasets'
+        if kind not in ('datasets', 'analysis'):
+            report.errors.append(f"{md_path.relative_to(folder)}: collection_kind {raw_kind!r} "
+                                 f"is not datasets or analysis")
+        is_analysis = kind == 'analysis'
+        if is_analysis and len(rel_parts) <= 2:      # the collection-root index.md
+            from artefacts import analysis_collection_problems  # noqa: PLC0415
+            for problem in analysis_collection_problems(collection_folder, metadata):
+                report.errors.append(f"{md_path.relative_to(folder)}: analysis collection: {problem}")
+
+        if not group_id and is_analysis:
+            if verbose:
+                print(f"  ! {md_path.relative_to(folder)}  (analysis collection without group_id, not fixed)")
+            continue
         if not group_id:
             group_id = generate_group_id(top_level)
             metadata['group_id'] = group_id
@@ -276,7 +300,7 @@ def check_md_folder(
         else:
             group_ids[gid_upper] = top_level
 
-        if changed and fix:
+        if changed and fix and not is_analysis:
             try:
                 write_md_file(md_path, metadata, body)
             except Exception as e:

@@ -407,3 +407,17 @@ def test_scores_sidecar_explains_missing_score_columns(tmp_path):
     assert not checks_files._covered_by_scores(lines + ['\u2717 Missing table __genes'], database)
     assert not checks_files._covered_by_scores(['\u2717 Missing required tables:'], database)
     assert not checks_files._covered_by_scores(lines, tmp_path / 'elsewhere' / 'ds.duckdb')
+
+
+def test_index_md_of_an_analysis_collection_needs_no_default_dataset(submission):
+    """doc/DESIGN_artefacts.md 2.6: an analysis collection has no dataset to show first."""
+    submission.build(with_index_md=False)
+    front = {'group': submission.group_dir.name, 'group_id': 'ZZ1', 'doi': '10.1000/test', 'year': 2026,
+             'first_author': 'Test Author'}
+    write_md(submission.group_dir / 'index.md', **front)
+    with submission.context() as ctx:
+        outcome = checks_meta.meta_index_md(ctx)
+    assert outcome.status == FAIL and 'default_dataset' in outcome.summary
+    write_md(submission.group_dir / 'index.md', collection_kind='analysis', **front)
+    with submission.context() as ctx:
+        assert checks_meta.meta_index_md(ctx).status == PASS
