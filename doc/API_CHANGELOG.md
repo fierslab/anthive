@@ -29,7 +29,7 @@ the spec drifting away from the running code.
 
 ---
 
-## 2.46.1 (unreleased)
+## 2.46.1 (2026-10-18)
 
 Patch release: operational fixes reported by the anthive-intern site and found on the 2.46.0 scratch site.
 No endpoint, parameter or field is removed or renamed. Two response changes a client may see: the facet
