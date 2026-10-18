@@ -216,6 +216,18 @@ and `lib/config.py` (anthive.yaml loader).
   warming up, no geneset store) is logged at info once per reason, not as ERROR.
   `facets_visible` (config) only adds `hidden_by_config` to the facet
   listings; nothing is dropped from the API.
+- **Artefact store** (REST 2.47.0, `doc/DESIGN_artefacts.md`, `lib/artefacts.py`): `_scan_databases` ends
+  with `registry._scan_artefacts()`, which builds the collection registry (every `<Group>/index.md`, so
+  analysis collections without datasets exist) and the artefact index and swaps both in (a failure keeps the
+  old ones; `POST /admin/rescan?what=artefacts` reloads only these). Routes `/artefacts...` (tag `artefacts`):
+  the access middleware knows only dataset paths and query parameters, so every route resolves through
+  `_artefact_resolve` (access on the resolved artefact; invisible = the same 404 as missing) or filters with
+  `_artefact_policy()` over the FULL registry maps plus `_artefact_viewer(request)`;
+  `tests/test_artefacts_api.py` enumerates the routes, add new ones there. Downloads: 307 to a presigned GET
+  for one key (`artefacts_s3` read keys, else `s3`), `no-store` and `no-referrer`, or a sha256-verified local
+  copy with `nosniff` and `CSP: sandbox`; never put a signed URL in a log line or an MCP answer (Caddy drops
+  the query of `Location` in its access log). `/groups/{id}` answers analysis collections from the registry;
+  `/groups/{id}` and `/databases/{id}/info` carry `artefacts_count`.
 - **Catalog scan** walks the store with `lib/h5adstore.catalog_dataset_mds` (2.46.1), the same helper
   `ant-stack check` counts with: store-root documents, `static/` documents, `index.md`/`README.md`,
   `_` folders and inactive datasets are never datasets.

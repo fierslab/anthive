@@ -1,6 +1,8 @@
 # Design: the artefact store
 
-Status: design only, 2026-10-16, not built. Section 23 of `doc/DESIGN_dataset_ingestion.md` points here.
+Status: design 2026-10-16, approved by Mark with the section 16 defaults on 2026-10-18. Phase A1 (read
+side) built 2026-10-18 for REST 2.47.0, see section 17. Section 23 of `doc/DESIGN_dataset_ingestion.md`
+points here.
 It builds on the S3 watch route (that document's section 21) and the deposit API (section 22, REST 2.46.0
 and 2.46.1, `lib/dataset_deposit.py`, `vark datasets ...`). Nothing in this document changes those routes
 until the phases of section 15 are built.
@@ -653,3 +655,62 @@ sources and supplements; A2 and A5 together are the first point where analysts c
 14. Previews for SVG and PDF need cairosvg and poppler in the images; worth the image size, or raster previews
     only?
 15. Is `analysts` a separate group from `curators`, and should curators automatically be analysts?
+
+---
+
+## 17. Phase A1 as built (2026-10-18)
+
+`lib/artefacts.py`, the read routes in `bin/api/ant-serve`, the config keys of section 14 in
+`lib/config.py` (`get_artefact_settings`, `may_upload_artefacts`, `may_create_collections`), the Caddy log
+filter, `md_check` and `ingest-check` for analysis collections. Tests: `tests/test_artefacts_lib.py`,
+`tests/test_artefacts_api.py`. Choices made where this document was silent or had to be read one way:
+
+- **Index trust.** The index serves a version only when its `manifest.json` has the sha256 the head record
+  lists and every identifying field (ref, group, group_id, scope, kind, artefact_id, version, db_id) agrees
+  with the folder it was read from. A head record that disagrees with its folder, or whose `latest` is not
+  the highest live version, leaves the artefact out. An artefact id found under two kinds of one scope is
+  left out entirely. Head records and manifests above 1 MB are not read. Files reached through a symlink
+  that leaves `static/artefacts/` are refused; a whole group folder symlinked from another store works.
+- **Artefact-level access.** An artefact is internal when any of its versions says `access: internal` (the
+  most restrictive version wins, so narrowing one version cannot be undone by a later one). "Never
+  anonymous" is read as "needs a caller who sees internal data", the dataset rule: on a site with
+  `internal_requires_auth: false` internal artefacts are as open as internal datasets.
+- **Collection access.** A dataset collection's `_group` is public only when it has served datasets, all of
+  them public, and its `index.md` does not set `access` to anything but `public` (an optional narrowing key;
+  no collection has it today). Without served datasets it counts as internal. An analysis collection is
+  public only when its `index.md` says `access: public` and any dataset placed in it is public too.
+  Orphans (dataset inactive or gone, collection unknown) are visible to admins only: on the get routes, and
+  in the listing with `all=true`.
+- **Collection registry.** Built from every top-level folder with an `index.md` or with served datasets
+  (`_` and `.` folders never). A dataset collection whose `index.md` has no `group_id` takes the group id of
+  its datasets when they agree. Two folders with one group id are both left out of the registry (their
+  datasets are served as before, but they get no collection artefacts). An analysis collection with an
+  incomplete `index.md` (name rule, group = folder, 3-character group_id, title, authors, access value) is
+  left out. `/groups/{id}` answers from the registry only for an analysis collection the caller may see; a
+  dataset collection without visible datasets (hidden from the caller, or all inactive) stays a 404.
+- **Downloads.** Before signing, a HEAD of the object must show the manifest's size and, when the object
+  carries `x-amz-meta-sha256`, the manifest's sha256 (502 `integrity_error` otherwise; the URL is never
+  signed). Objects without the metadata are accepted on size alone (A2 sets it on every copy; the A3
+  migration must too). A transient S3 failure without a local copy is 503 `storage_unavailable`, not 404.
+  `latest` works in file and preview paths too. Local copies are hashed once per inode, size and mtime
+  (in-memory, bounded); a large explicitly pulled file is hashed on its first download request.
+- **Rate limits.** Downloads per caller: the signed-in user, else the last `X-Forwarded-For` entry (the
+  address Caddy saw), else the peer. List and get are not rate limited in A1 (the deposit lookup limiter the
+  design names exists only when deposits are configured).
+- **Tombstones.** The head record entry of a purged version may carry `purged_by_admin: true`; with it,
+  non-admins see `purged_by: "an admin"`. A2 writes the flag.
+- **artefacts_enabled** gates the deposits (A2). The read routes always serve what the store holds: a site
+  without artefacts answers empty lists.
+- **Catalog prefix.** Artefact keys are `<catalog prefix><Group>/static/artefacts/...` with the catalog
+  prefix `ingest_watch.catalog_prefix`, else `s3.prefix` (`get_artefact_settings()['catalog_prefix']`). The
+  watcher of A2 must place files with the same helper; today the dataset pipeline uses
+  `ingest_watch.catalog_prefix` alone, which differs only on a site whose `s3.prefix` is not empty.
+- **Caddy.** Verified with Caddy 2.10.2: the access log wrote the full `Location` of a 307 (signature and
+  key id included) under `resp_headers`. The filter `resp_headers>Location regexp \?.*$ ?REDACTED` keeps
+  host and path; the h5ad download and paper PDF redirects were leaking the same way and are covered too.
+  The default logger does not log response headers.
+- **Not in A1:** `index_md.required_spec` of the deposit vocabulary still lists `default_dataset` (dataset
+  deposits always target dataset collections; A2 adds the collection deposit and its own spec). The
+  `site.yaml` `artefacts:` block, the read-key secrets and `ant-stack check` stay in A4 as planned: every new
+  key is optional and a site that sets none behaves as before. help.html and the web UI are A6.
+

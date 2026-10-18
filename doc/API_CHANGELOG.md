@@ -29,6 +29,93 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.47.0 (unreleased)
+
+Minor release: the read side of the artefact store (doc/DESIGN_artefacts.md, phase A1). Nothing is removed or
+renamed. Uploads of artefacts and collections come in a later phase (A2); until then the routes below serve
+what the store holds, which on most sites is nothing yet.
+
+An artefact is a versioned, immutable set of analysis files of one dataset or one collection: kind
+`de_table`, `figure`, `table`, `notebook`, `report`, `model` or `other`. A reference is
+`<group_id>/<scope>/<artefact_id>[@v<N>]`, where the scope is the dataset's file id (`SLM` of `S26/SLM`) or
+`_group` for the collection; without `@v<N>` it means the latest live version. Versions are `v1`, `v2`, ...;
+a published version never changes, and a purged one stays as a tombstone.
+
+New routes (tag `artefacts`, in the public schema). Errors use the deposit API's shape
+`{"status": "<word>", "message": "...", ...}`:
+
+- `GET /artefacts?group_id=&db_id=&kind=&q=&owner=&include_purged=false&limit=50&cursor=&all=false`:
+  `{artefacts: [summary], next_cursor}`, ordered by reference, `limit` 1 to 200, `cursor` from the previous
+  page. Summary: `{ref, artefact_id, kind, group_id, scope, db_id, title, latest, versions_live, owner,
+  updated, size_bytes, main_file, preview, access, path}`; `db_id` is null for a collection artefact,
+  `access` is `inherit` or `internal`, `preview` and `path` are paths relative to the API root. `all=true`
+  (admins only, ignored for others) adds artefacts whose dataset is inactive or gone. 422 `invalid_kind`,
+  `invalid_db_id`, `invalid_limit`, `invalid_cursor`.
+- `GET /artefacts/{group_id}/{scope}/{artefact_id}`: the summary plus `created`,
+  `versions: [{version, state, published, purged?}]` (`state` is `live`, `purging`, `purged`, or
+  `unavailable` for a live version whose manifest failed its checks), `manifest` (the latest live manifest,
+  schema `anthive.artefact/1`, or null) and `files: [{name, size, sha256, content_type, role, download,
+  preview}]` (`download` and `preview` are API paths, never signed URLs).
+- `GET /artefacts/{group_id}/{scope}/{artefact_id}/versions`: `{ref, latest, versions}`; a purged version is
+  a tombstone `{version, state: "purged", published, purged, purged_by, purge_reason}`. `purged_by` reads
+  "an admin" for non-admins when an admin purged it.
+- `GET /artefacts/{group_id}/{scope}/{artefact_id}/{version}` (`v<N>` or `latest`):
+  `{ref, version, state, latest, manifest, files}`. 410 `purged` with `tombstone` for a purged version, 409
+  `purging` while a purge runs, 404 `not_found` for a version that does not exist.
+- `GET /artefacts/{group_id}/{scope}/{artefact_id}/{version}/files/{name}`: 307 to a presigned S3 GET for
+  that one object, valid `artefacts_url_ttl_seconds` (300), with `Content-Disposition: attachment` and the
+  manifest's content type signed into it; the redirect carries `Cache-Control: no-store, private` and
+  `Referrer-Policy: no-referrer`. Before signing, the server checks that the object's size (and its sha256
+  metadata when present) match the manifest. On a site without S3 read access, or when the object is missing,
+  a local copy whose sha256 matches the manifest is streamed as an attachment with
+  `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`. Otherwise 404 `not_on_this_site`
+  `{ref, file}` (fetch it from another site), 502 `integrity_error` when the stored object differs from the
+  manifest, 503 `storage_unavailable` with `Retry-After` when S3 did not answer. `name` may hold one
+  subfolder (`panels/a.png`); it is looked up in the manifest, never joined into a path. Rate limited per
+  caller (`artefacts_download_per_minute`, 60): 429 `rate_limited` with `Retry-After`. A signed URL cannot be
+  revoked: after a purge or an access change it keeps working for at most its lifetime.
+- `GET /artefacts/{group_id}/{scope}/{artefact_id}/{version}/preview/{name}`: the server-generated preview of
+  a file, `name` = `<file name>.webp` or `<file name>.txt`, inline, from the local store only.
+
+Access: an artefact is visible exactly when its scope is. A dataset artefact follows the dataset (served, not
+inactive, `internal_requires_auth`). A collection artefact (`_group`) of a dataset collection is public only
+when every served dataset of the collection is public (the most restrictive dataset wins) and its `index.md`
+does not say `access: internal`; a dataset collection without served datasets counts as internal. An
+analysis collection follows the `access` of its `index.md` (internal unless `public`). An artefact any of
+whose versions says `access: internal` needs a caller who sees internal data. An artefact the caller may not
+see answers the same 404 `not_found` as one that does not exist, on every route.
+
+Changed responses (additive):
+
+- `GET /groups/{group_id}` gains `collection_kind` (`datasets` or `analysis`) and `artefacts_count` (artefacts
+  of the collection, all scopes, the caller sees). A collection without datasets (`collection_kind: analysis`
+  in its `index.md`) now answers 200 with `datasets: []`, its `title` and `access`, instead of 404, when the
+  caller may see it. A dataset collection without visible datasets (all hidden from the caller, or all
+  inactive) is still a 404.
+- `GET /databases/{db_id}/info` gains `artefacts_count`.
+- `GET /metrics` gains `artefacts: {downloads, callers}` (download totals since the start).
+- `POST /admin/rescan?what=artefacts` reloads only the collection registry and the artefact index (the full
+  rescan reloads them too); any other `what` is a 400.
+
+Configuration (all optional, env `ANTHIVE_<KEY>`): `artefacts_enabled` (false; gates the deposits of phase
+A2), `artefacts_upload_groups` ([admins, analysts]; dataset uploaders may deposit artefacts too),
+`collections_create_groups` ([admins, analysts]), `artefacts_max_file_gb` (100), `artefacts_max_deposit_gb`
+(200), `artefacts_max_files` (50), `artefacts_url_ttl_seconds` (300, 10 to 3600), `artefacts_inline_max_mb`
+(2), `artefacts_content_check_max_gb` (2), `artefacts_download_per_minute` (60),
+`artefacts_max_stored_gb_per_user` (1000), `artefacts_max_versions` (100), `artefacts_hold_public` (true),
+`artefacts_serve_local` (`fallback` or `prefer`), `artefacts_s3` (a read key pair; env
+`ANTHIVE_ARTEFACTS_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY`; else the `s3` keys). A wrong type of
+`artefacts_upload_groups` or `collections_create_groups`, or a bad serve mode or URL lifetime, stops the
+start. The bucket path of an artefact file is the catalog prefix (`ingest_watch.catalog_prefix`, else
+`s3.prefix`) plus `<Group>/static/artefacts/<scope>/<kind>/<artefact_id>/v<N>/files/<name>`.
+
+Proxy: artefact download redirects rely on the Caddy `Location` log filter of 2.46.2.
+
+Store tools: `ant md-check` accepts `collection_kind: analysis` collections without `default_dataset`,
+checks their `index.md` (naming rule, `group` equal to the folder, `group_id`, `title`, `authors`, `access`)
+and never rewrites it, even without `--no-fix`. `ant ingest-check` no longer asks an analysis collection for
+`default_dataset`.
+
 ## 2.46.2 (unreleased)
 
 Security patch. No endpoint, parameter or response field changes. Clients do not need to update.
@@ -59,6 +146,7 @@ Deployment:
   (`tests/test_caddy_access_log.py`).
 
 ## 2.46.1 (2026-10-18)
+
 
 Patch release: operational fixes reported by the anthive-intern site and found on the 2.46.0 scratch site.
 No endpoint, parameter or field is removed or renamed. Two response changes a client may see: the facet
