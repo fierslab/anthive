@@ -1,7 +1,8 @@
 # Design: the artefact store
 
 Status: design 2026-10-16, approved by Mark with the section 16 defaults on 2026-10-18. Phase A1 (read
-side) built 2026-10-18 for REST 2.47.0, see section 17. Section 23 of `doc/DESIGN_dataset_ingestion.md`
+side) and A2 (deposits, publication, versions, purge) built 2026-10-18 for REST 2.47.0, see sections 17
+and 18. Section 23 of `doc/DESIGN_dataset_ingestion.md`
 points here.
 It builds on the S3 watch route (that document's section 21) and the deposit API (section 22, REST 2.46.0
 and 2.46.1, `lib/dataset_deposit.py`, `vark datasets ...`). Nothing in this document changes those routes
@@ -714,3 +715,75 @@ filter, `md_check` and `ingest-check` for analysis collections. Tests: `tests/te
   `site.yaml` `artefacts:` block, the read-key secrets and `ant-stack check` stay in A4 as planned: every new
   key is optional and a site that sets none behaves as before. help.html and the web UI are A6.
 
+
+---
+
+## 18. Phase A2 as built (2026-10-18)
+
+`lib/artefact_deposit.py` (server: `ArtefactDepositService`, a subclass of the 2.46 `DepositService` that
+leaves dataset deposits as they were; the shared rules: kind allowlists, magic bytes, secret scan, provenance,
+group id assignment, `index.md` rendering), `lib/artefact_pipeline.py` (watcher: `ArtefactPublisher`, called
+by `ingest_watch.Watcher.poll` after the DE deposits), the deposit route dispatch and the purge route in
+`bin/api/ant-serve`, the `deposits` columns `artefact_ref`, `artefact`, `group_id` and the table
+`artefact_purges` in `deposits.sqlite`. Tests: `tests/test_artefact_deposit.py`, `test_artefact_pipeline.py`,
+`test_artefact_deposit_api.py`, and `test_artefact_e2e_s3.py` (opt-in, `ANTHIVE_E2E_S3=1`, real bucket, test
+prefixes only, every object it created deleted). Where this document was silent or was changed:
+
+- **Items come from the deposit store**, as the DE-only deposits do: the watcher reads the completed artefact
+  and collection deposits from `deposits.sqlite` and links them to the listing (exact key, ETag, size and
+  `x-amz-meta-deposit` of every file). No `request.json` is written to incoming: the artefact block lives in
+  the deposit record, which the watcher reads anyway, so there is one object less to verify and delete. An
+  object under `<prefix><data_project>/artefacts/` that no completed deposit accounts for is recorded as
+  `needs_decision` (`artefact-unlinked:<key>`) and never processed or deleted.
+- **The collection's `index.md` goes to `<prefix><data_project>/artefacts/<deposit_id>/index.md`**, not to
+  `<prefix><data_project>/static/index.md`: the dataset route reads `static/index.md` as a group seed, and a
+  dataset deposit of the same name would have consumed it. `ingest_pipeline.plan_items` skips every key below
+  `<prefix><data_project>/artefacts/`, so the name `artefacts` is reserved there (a `mus s3 upload` with a
+  subfolder of that name is no longer a dataset item).
+- **`de_table` is refused** with 422 `invalid_kind` until A3; DE tables keep the 2.46 DE route.
+- **Rights.** The artefact and collection groups count only where `artefacts_enabled` is on; elsewhere the
+  2.46 rules apply unchanged (a site that limited `datasets_upload_groups` keeps its limits). Where it is on,
+  admins may always deposit artefacts and create collections, as section 4.1 says. The generic deposit routes
+  (status, urls, complete, withdraw, list, vocab) accept any of the three kinds of depositor; the service only
+  shows a caller their own deposits (another user's deposit is a 404, as in 2.46). A dataset collection's
+  artefact needs a visible collection; a dataset artefact needs a visible dataset (a public dataset of a mixed
+  collection is a valid scope).
+- **One deposit per artefact.** `reserve` gained an `extra_check` that runs inside its `BEGIN IMMEDIATE`
+  transaction: no other deposit of the same artefact (or collection name or group id) may be open or waiting for
+  the watcher (409 `busy`, 409 `collection_exists`). The version check runs again at publication under the
+  scope's writer lock (the dataset's `<stem>.duckdb.lock`, or `static/artefacts/_group.lock`).
+- **Publication without a served gate.** The placement is verified on S3 (HEAD of every copy: size, sha256
+  metadata, and the source ETag for single-part objects, since the lab bucket ignores `CopySourceIfMatch`),
+  then the artefact index is rescanned and the version route fetched. A failed rescan or served check is a
+  warning (the next rescan serves the version); the incoming objects are deleted once the placement is
+  verified, because the S3 copies are the truth. The dataset route waits for its served check instead.
+- **Resume.** A marker in `<ingest_state_dir>/artefact_resume/<deposit_id>.json` is written before the first
+  copy and holds the version, the hashes, the made_from versions, the QC report and (once decided) the exact
+  manifest text, so a restarted watcher writes the same manifest. Files already at their key with the right
+  sha256 are not copied again; a key with other bytes stops the item. Tested by killing the watcher after the
+  marker, after the first copy, after the manifest and after the head record.
+- **Previews.** Table previews (first 20 lines as `.txt`) are written; raster previews need Pillow, which the
+  watcher's dependencies and the images do not carry yet (A4 adds it with the image rebuild). Inline copies of
+  figures and files up to `artefacts_inline_max_mb` are written locally.
+- **Donor identifiers.** Every alias and canonical uid of `donor_crosswalk.tsv` of at least 4 characters,
+  matched exactly (case-insensitive) against the cells of `.tsv` / `.csv` tables (gzip too) up to
+  `artefacts_content_check_max_gb`; a hit holds the deposit (`donor_identifiers`). The secret scan names what it
+  found (private key, AWS key id, GitLab or GitHub token, password assignment), never the value.
+- **Approvals** of held reasons are recorded in the manifest (`recorded.approval: {by, reasons, date}`).
+- **Quotas.** `artefacts_max_stored_gb_per_user` counts the live versions the user uploaded (from the index)
+  plus the new deposit, at create; `artefacts_max_versions` is checked at create and at publication.
+- **Purge** runs in the watcher (`artefact_purges`), under the scope's writer lock: the head record entry
+  becomes `purging`, every file of the manifest is deleted after a HEAD that shows the manifest's sha256 (a
+  preview needs the sha256 the pipeline wrote), the manifest last, then the local version folder, then the
+  tombstone (`purged`, who, when, why, `purged_by_admin`), the rescan and a git commit of the head record and
+  the removed manifest. A key whose sha256 differs is kept and the purge stops at `needs_decision` with the
+  version `purging`. A killed purge is finished by the next poll.
+- **Not built in A2:** the owner transfer of section 4.4 (`POST .../owner`); the DE import of `de_table`
+  artefacts and their purge (A3); MCP, vark and pyvark (A5, A7).
+- **Before artefacts are switched on at a site** (A4): `ant-sync` still mirrors `<Group>/static/` in both
+  directions whatever the size, so another site's `ant sync pull` would download every artefact file the
+  watcher placed locally (inline files only, so at most a few MB each, but every version), and it skips
+  `_group` folders. The h5adstore repository needs `static/artefacts/**/files/` and
+  `static/artefacts/**/preview/` in its `.gitignore` (the watcher commits only head records, manifests and
+  `index.md`, by path, but a hand `git add -A` would pick the files up). The `site.yaml` `artefacts:` block,
+  the read-key secrets and `ant-stack check` are A4 as planned.

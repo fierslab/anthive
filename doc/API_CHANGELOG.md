@@ -31,9 +31,10 @@ the spec drifting away from the running code.
 
 ## 2.47.0 (unreleased)
 
-Minor release: the read side of the artefact store (doc/DESIGN_artefacts.md, phase A1). Nothing is removed or
-renamed. Uploads of artefacts and collections come in a later phase (A2); until then the routes below serve
-what the store holds, which on most sites is nothing yet.
+Minor release: the artefact store (doc/DESIGN_artefacts.md), phases A1 (read side) and A2 (deposits,
+publication, versions, purge). Nothing is removed or renamed. Artefact and collection deposits need
+`artefacts_enabled: true` (off by default); the read routes serve what the store holds, which on most sites
+is nothing yet.
 
 An artefact is a versioned, immutable set of analysis files of one dataset or one collection: kind
 `de_table`, `figure`, `table`, `notebook`, `report`, `model` or `other`. A reference is
@@ -115,6 +116,64 @@ Store tools: `ant md-check` accepts `collection_kind: analysis` collections with
 checks their `index.md` (naming rule, `group` equal to the folder, `group_id`, `title`, `authors`, `access`)
 and never rewrites it, even without `--no-fix`. `ant ingest-check` no longer asks an analysis collection for
 `default_dataset`.
+
+### Deposits of artefacts and collections (phase A2)
+
+Through the deposit routes of 2.46 (`/datasets/deposit`, hidden from the schema), with the same staging
+prefix, presigned uploads, verified complete, key locks, limits, states and redaction:
+
+- `POST /datasets/deposit` with `deposit_kind: "artefact"`:
+  `{data_project, scope, artefact: {kind, artefact_id, title, description, access?, made_from: [{db_id,
+  dataset_version}], declared: {author: {name, orcid?}, created, software: [{name, version}], code:
+  {repository, commit} | {none: reason}, parameters?}, new_version_of?, change_note?}, files: [{name, size,
+  sha256, role?: main | supporting | sidecar}]}`. Who: signed-in members of `artefacts_upload_groups`
+  (default admins, analysts) and of `datasets_upload_groups` (curators), admins always; only where
+  `artefacts_enabled` is on (elsewhere the 2.46 rights apply unchanged). Answer 201: the 2.46 create answer with
+  `deposit_kind: "artefact"`, `scope` and `artefact: {ref_without_version, kind, new_version_of}`. Upload keys
+  are in the deposit's staging folder; complete copies the files to
+  `<incoming prefix><data_project>/artefacts/<deposit_id>/<name>`, a folder the dataset route never reads.
+  Refusals: 422 `invalid_data_project`, `invalid_scope`, `invalid_kind` (also `de_table`, which comes with a
+  later phase, and a kind change), `invalid_artefact_id`, `invalid_name` (file names, endings outside the kind's
+  allowlist, case clashes), `made_from_unknown` (also for a dataset the caller cannot see, same message),
+  `provenance_incomplete` (`missing`), `invalid`; 409 `artefact_exists` (with `latest`), `version_conflict`
+  (with `latest`), `collection_pending`, `busy` (another deposit of the same artefact is open or being
+  published); 403 `not_owner`; 404 `not_found` (an artefact the caller cannot see); 413 `too_large`,
+  `quota_exceeded` (`artefacts_max_stored_gb_per_user`, `artefacts_max_versions`); 429 `rate_limited`; 503
+  `disabled`. `recorded` keys in the request are dropped.
+- `POST /datasets/deposit` with `deposit_kind: "collection"`: `{data_project, collection: {title, authors,
+  description?, access?: internal | public, doi?, paper_title?, license?, papers?}}`. Who:
+  `collections_create_groups` (default admins, analysts; curators are not included), admins always. The
+  server checks the name (`^[A-Z][A-Za-z0-9_]*\d{4}$`, no folder of that name in any letter case, no pending
+  creation), assigns the group id (first letter and the year's last two digits, `F26`, else the next free
+  combination), renders the minimal `index.md` and writes it to incoming itself. Answer 201
+  `{deposit_id, state: "uploaded", deposit_kind: "collection", data_project, group_id, index_md, held}`.
+  Refusals: 422 `invalid_data_project`, `invalid_collection`; 409 `collection_exists` (the clashing name is
+  shown to admins only).
+- Status, list, urls, complete, withdraw, approve, reject, retry and report work on artefact and collection
+  deposits. The status adds `artefact: {ref, kind, new_version_of, version, ref_version}` (version once live)
+  or `collection: {data_project, group_id}`. `POST .../urls` refuses to declare an artefact file again (422).
+- `GET /datasets/deposit/vocab` adds `artefacts` (kinds and their endings, limits, provenance rules, held
+  reasons, the incoming key) and `analysis_index_md` (`required_spec` of an analysis collection's `index.md`:
+  group, group_id assigned by the server, `collection_kind: analysis`, title, authors, year; `default_dataset`,
+  doi and paper_title not required). `index_md` of dataset deposits is unchanged.
+- `POST /artefacts/{group_id}/{scope}/{artefact_id}/v{N}/purge` `{reason, confirm: "<ref>@v<N>"}` (hidden from
+  the schema): the uploader of that version, the artefact's owner or an admin. 202 `{ref, version, state:
+  "purge_requested"}`. Refusals: 403 `forbidden`, 404 `not_found` (also for an artefact the caller cannot
+  see), 409 `purged` or `busy`, 422 `confirm_mismatch` or `invalid`. The watcher deletes the version's files
+  and manifest (each key listed in the manifest, HEAD-compared with its sha256, one at a time; a key whose
+  sha256 differs is kept and the purge stops for an admin) and marks the version purged; non-admins see "an
+  admin" as `purged_by` when an admin purged.
+
+Publication (the S3 watcher, `ant-ingest-watch`): two identical listings, then hash (a streaming GET pinned to
+the listed ETag, MD5 checked for single-part objects), checks (names, sizes, endings and magic bytes, title,
+description, provenance; possible secrets, donor crosswalk values and public scopes are held for an admin;
+ZIPs are read from their central directory, never extracted), the version (one more than every version the
+artefact ever had), server-side copies to `<catalog prefix><Group>/static/artefacts/<scope>/<kind>/<id>/v<N>/files/`
+with `x-amz-meta-sha256` (an existing key with other bytes stops the item: a version is never overwritten),
+inline copies of figures and small files, the manifest (written last), the head record, the artefact
+rescan, a git commit of the head record and manifest, and the guarded delete of the incoming objects. An
+interrupted publication is finished by the next poll from its resume marker with the same version.
+Collection deposits create `<Group>/index.md`; a public one is held.
 
 ## 2.46.2 (unreleased)
 

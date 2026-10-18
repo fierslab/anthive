@@ -228,6 +228,13 @@ and `lib/config.py` (anthive.yaml loader).
   copy with `nosniff` and `CSP: sandbox`; never put a signed URL in a log line or an MCP answer (Caddy drops
   the query of `Location` in its access log). `/groups/{id}` answers analysis collections from the registry;
   `/groups/{id}` and `/databases/{id}/info` carry `artefacts_count`.
+- **Artefact and collection deposits** (REST 2.47.0, phase A2, `lib/artefact_deposit.py`): `_deposit_service()` builds
+  `ArtefactDepositService`; `POST /datasets/deposit` dispatches on `deposit_kind` with `_deposit_call(..., kinds=(kind,))`
+  and passes `_artefact_context(request)` (registry, index, policy, viewer); `_require_dataset_uploader(kinds=...)`
+  counts `artefacts_upload_groups` (plus dataset uploaders) and `collections_create_groups` only where
+  `artefacts_enabled` is on, admins always there; the generic routes accept all three kinds (the service shows a
+  caller only their own deposits). `POST /artefacts/{gid}/{scope}/{id}/{version}/purge` records a purge request
+  (202); the watcher carries it out. Tests: `tests/test_artefact_deposit_api.py` (rights matrix).
 - **Catalog scan** walks the store with `lib/h5adstore.catalog_dataset_mds` (2.46.1), the same helper
   `ant-stack check` counts with: store-root documents, `static/` documents, `index.md`/`README.md`,
   `_` folders and inactive datasets are never datasets.
