@@ -256,7 +256,36 @@ Collection deposits create `<Group>/index.md`; a public one is held.
   versions; `--no-artefacts` skips it. Head records and manifests come with the h5adstore checkout. `ant sync
   push` never uploads `static/artefacts/`.
 
-## 2.46.2 (unreleased)
+## 2.46.3 (2026-10-19)
+
+Patch release. No endpoint, parameter or response field changes. Clients do not need to update.
+
+JupyterLite (`/jupyter/`):
+
+- The bundled Python client is pyvark 0.11.0 (API 2.46: deposit read methods, retry on 503 `warming_up`). It was
+  0.9.0 in the 2.46.x images. The copy is now made with `make vendor-pyvark`, which records version, commit and
+  file hashes in `frontend/jupyter/vendored_pyvark.json`; `make test` fails when the files and the record differ.
+- `Getting_Started.ipynb` failed at its first cell with `ModuleNotFoundError: No module named 'requests'`: vark
+  needs `requests`, and Pyodide does not preinstall it. The notebook now installs it, uses JupyterLite's `python`
+  kernel name and has cell ids (valid nbformat 4.5).
+- The notebooks behind the "notebook" buttons (`/notebook/{b64}/{filename}.ipynb`, `/plot/{geom}/notebook`)
+  install `requests` and `seaborn` in Pyodide instead of `pyvark` and `seaborn` from PyPI. PyPI has pyvark 0.7.0,
+  far behind this API; the bundled client was imported anyway (it comes first on `sys.path`), so the PyPI
+  download only cost time and made the first cell depend on PyPI being reachable.
+
+Tests:
+
+- `make test` checks the vendored client against its record and the server's `API_COMPATIBLE_PYVARK`, validates
+  the shipped notebooks with nbformat, and compares the JupyterLite build pins of the Makefile and
+  `docker/Dockerfile` (`tests/test_jupyterlite_static.py`).
+- `make test-jupyter` builds JupyterLite and runs it in headless Chromium against a running ant-serve
+  (`tests/test_jupyterlite_e2e.py`): kernel start, vendored vark, same-origin client calls, the shipped
+  notebooks, the dataset and plot notebooks opened through `?fromURL=`, and the `warming_up` retry inside
+  Pyodide.
+- `make test-live-site URL=...` runs the same checks against a deployed site through its real login, and compares
+  the served JupyterLite files with the checkout (`tests/live/test_site_jupyterlite.py`).
+
+## 2.46.2 (2026-10-19)
 
 Security patch. No endpoint, parameter or response field changes. Clients do not need to update.
 
@@ -284,6 +313,35 @@ Deployment:
   S3 URL, and the access log wrote that URL with its credential and signature. Sites pick this up with the new
   Caddyfile (image rebuild or `ant-stack up`). Tested against Caddy 2.10.2 and 2.11.4
   (`tests/test_caddy_access_log.py`).
+- `ant-stack check` (and `up`, which runs it) compares `site.yaml` with `site.example.yaml`: an unknown key
+  under `auth`, `tls`, `ports`, `s3`, `services`, `datasets` or `data` is a PROBLEM, anywhere else (top level
+  included) a WARNING, each with the closest known key ("did you mean 'internal_requires_auth'?"). Before, a
+  misspelt `auth: internal_requires_auht: false` or `auth: mdoe` was merged over the defaults and ignored.
+  `site.docs_base_url`, `auth.smtp` and `anthive:` stay free-form where they were.
+- A rendered config that `lib/config.py` refuses is one `PROBLEM  rendered <file> is invalid: <message>` line
+  in `check` instead of a Python traceback.
+- `check` on an empty store prints one "no datasets yet: <store> has no dataset .md files ..." warning
+  instead of that warning plus a second "no datasets yet" line.
+- `ant-stack watch` prints the command it runs on stderr before it starts the watcher.
+- Container sites render `mcp.mcp_url: <public_url>/mcp`. ant-mcp's instructions said "This MCP server is
+  reachable at: http://0.0.0.0:8090/mcp" (the container listener); without `mcp.mcp_url` the address is now
+  `<mcp.public_base_url>/mcp`, and without either the line is left out.
+- `ant sync` with an unreachable S3 endpoint exits 3 with one line ("cannot reach the S3 endpoint ...")
+  instead of a botocore traceback.
+- Deposit watcher (`ant-ingest-watch`): listing the incoming prefix uses its own client with 3 retries and
+  10 s / 60 s connect / read timeouts, so an unreachable endpoint ends the poll within about a minute (the
+  loop backs off and retries) instead of hanging silently for 20 adaptive attempts of 30 s. Every failed S3
+  attempt is logged ("S3 ListObjectsV2 attempt 2 failed (EndpointConnectionError: ...)"); transfers keep
+  their patient retries. The first SIGTERM/SIGINT says it stops after the current step; a second one exits
+  at once (an interrupted swap is rolled back by the next run).
+
+REST wording:
+
+- `/me/mcp` and the chat routes without an identity answer 401 "sign-in required: this request carries no
+  user identity (no Remote-User header from the login proxy)" instead of "chat endpoint requires
+  authentication".
+
+Tests: `tests/test_scratch_site_2462.py`.
 
 ## 2.46.1 (2026-10-18)
 

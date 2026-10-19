@@ -28,6 +28,8 @@ from .client import AnthiveClient
 from ._credentials import VarkConfigError
 from .exceptions import (
     AnthiveAPIError,
+    AnthiveWarmingUpError,
+    DatasetDepositError,
     PaperDuplicateError,
     PaperInvalidError,
     PaperNotPDFError,
@@ -35,15 +37,18 @@ from .exceptions import (
     PaperUploadDisabledError,
     PaperUploadError,
     PaperUploadForbiddenError,
+    ServerWarmingUpWarning,
 )
 
 # Backward-compatibility alias (matches antclient 1.x).
 AntClient = AnthiveClient
 
-__version__ = "0.9.0"
+__version__ = "0.11.0"
 __all__ = [
     "AnthiveClient", "AntClient", "VarkConfigError", "__version__",
-    "AnthiveAPIError", "PaperUploadError", "PaperUploadForbiddenError",
+    "AnthiveAPIError", "AnthiveWarmingUpError", "ServerWarmingUpWarning",
+    "DatasetDepositError",
+    "PaperUploadError", "PaperUploadForbiddenError",
     "PaperUploadDisabledError", "PaperDuplicateError", "PaperInvalidError",
     "PaperTooLargeError", "PaperNotPDFError",
 ]

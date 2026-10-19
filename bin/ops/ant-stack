@@ -65,6 +65,7 @@ import os
 import pwd
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import stat
@@ -149,11 +150,56 @@ def load_site(path: Path) -> dict:
         raise SiteError(f"{path} not found; run `ant-stack init` first")
     defaults = yaml.safe_load(EXAMPLE.read_text()) or {}
     user = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(user, dict):
+        raise SiteError(f"{path} must be a YAML mapping (site:, data:, auth:, ...)")
     site = _deep_merge(defaults, user)
     # `users` lists replace rather than merge.
     if 'auth' in user and 'users' in (user.get('auth') or {}):
         site['auth']['users'] = user['auth']['users'] or []
-    return validate_site(site, path)
+    site = validate_site(site, path)
+    site['_key_problems'], site['_key_warnings'] = site_key_findings(user, defaults)
+    return site
+
+
+#: Sections whose unknown keys block `check` / `up` (a typo there silently changes security or
+#: what is served); unknown keys elsewhere are warnings.
+STRICT_SECTIONS = ('auth', 'tls', 'ports', 's3', 'services', 'datasets', 'data')
+#: Valid keys that site.example.yaml only shows in a comment.
+EXTRA_SITE_KEYS = {'site': {'docs_base_url'}}
+#: Mappings whose own keys are free-form (copied through or described elsewhere).
+FREE_FORM = {('anthive',), ('auth', 'smtp'), ('auth', 'users')}
+
+
+def site_key_findings(user: dict, schema: dict) -> tuple[list[str], list[str]]:
+    """(problems, warnings) for keys of site.yaml that site.example.yaml does not know.
+
+    A misspelt key (``auth: {mdoe: basic}``) is otherwise merged over the defaults and ignored.
+    Unknown keys in STRICT_SECTIONS are problems; at the top level and in other sections they
+    are warnings. Each finding names the closest known key."""
+    import difflib  # noqa: PLC0415
+
+    problems: list[str] = []
+    warnings: list[str] = []
+
+    def hint(key: str, known) -> str:
+        close = difflib.get_close_matches(str(key), sorted(map(str, known)), n=1, cutoff=0.6)
+        return f" (did you mean {close[0]!r}?)" if close else ''
+
+    def walk(given: dict, known: dict, trail: tuple) -> None:
+        if trail in FREE_FORM:
+            return
+        allowed = set(known) | EXTRA_SITE_KEYS.get('.'.join(trail), set())
+        for key, value in given.items():
+            where = '.'.join((*trail, str(key)))
+            if key not in allowed:
+                message = f"site.yaml: unknown key {where}{hint(key, allowed)}"
+                (problems if trail and trail[0] in STRICT_SECTIONS else warnings).append(message)
+                continue
+            if isinstance(value, dict) and isinstance(known.get(key), dict):
+                walk(value, known[key], (*trail, str(key)))
+
+    walk(user, schema, ())
+    return problems, warnings
 
 
 def _abs(value: Any, field: str, required: bool = True) -> Path | None:
@@ -562,6 +608,8 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
             'public_base_url': site['site']['public_url'].rstrip('/'),
             'plots_dir': f"{C_WEBAPP}/plots",
             'public_url': site['site']['public_url'].rstrip('/'),
+            # what the MCP instructions name as its address (not the container's 0.0.0.0:8090)
+            'mcp_url': site['site']['public_url'].rstrip('/') + '/mcp',
             'token_ttl_days': int((site.get('mcp') or {}).get('token_ttl_days') or 0),
             'max_links_per_user': int((site.get('mcp') or {}).get('max_links_per_user') or 5),
         },
@@ -1198,15 +1246,22 @@ def _render_locked(site: dict, quiet: bool, apply: bool) -> Path:
 
 def _validate_rendered_config(path: Path) -> None:
     """Load the rendered config through lib/config so unknown keys fail now."""
-    code = ("import sys; sys.path.insert(0, sys.argv[1]); import config; "
-            "cfg = config.load_config(); config.get_auth_settings(cfg); "
-            "config.get_coordinate_mode(cfg); config.get_catalog_scan_mode(cfg); "
-            "config.get_facets_visible(cfg); config.get_log_stderr_level(cfg)")
+    # A ConfigError is printed as its message only (no traceback); anything else as its last line.
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); import config\n"
+            "try:\n"
+            "    cfg = config.load_config(); config.get_auth_settings(cfg)\n"
+            "    config.get_coordinate_mode(cfg); config.get_catalog_scan_mode(cfg)\n"
+            "    config.get_facets_visible(cfg); config.get_log_stderr_level(cfg)\n"
+            "except Exception as error:\n"
+            "    print(error if isinstance(error, config.ConfigError) else f'{type(error).__name__}: {error}',"
+            " file=sys.stderr); sys.exit(3)\n")
     env = {**os.environ, 'ANTHIVE_CONFIG': str(path), 'ANTHIVE_CONFIG_STRICT': '1'}
     result = subprocess.run([sys.executable, '-c', code, str(REPO / 'lib')],
                             env=env, capture_output=True, text=True)
     if result.returncode != 0:
-        raise SiteError(f"rendered anthive.yaml is invalid:\n{result.stderr.strip()}")
+        lines = [line for line in result.stderr.strip().splitlines() if line.strip()]
+        message = ' '.join(lines) if result.returncode == 3 else (lines[-1] if lines else 'unknown error')
+        raise SiteError(f"rendered {path.name} is invalid: {message}")
 
 
 # ── docker compose plumbing ─────────────────────────────────────────────
@@ -1690,7 +1745,9 @@ def _check_publish_library(site: dict) -> None:
 
 
 def check(site: dict, running: bool = False) -> list[str]:
-    problems: list[str] = []
+    problems: list[str] = list(site.get('_key_problems') or [])
+    for warning in site.get('_key_warnings') or []:
+        _warn(warning)
     if not shutil.which('docker'):
         problems.append("docker is not installed or not on PATH")
     else:
@@ -1738,8 +1795,9 @@ def check(site: dict, running: bool = False) -> list[str]:
     if store and store.is_dir():
         mds = [resolved for _item, resolved, _rel in _catalog_dataset_mds(store)]
         if not mds:
-            _warn(f"{store} has no dataset .md files: the catalog will be empty "
-                  f"(clone the h5adstore repo there first, see doc/DEPLOY_CONTAINERS.md)")
+            # One line for an empty store (the internal-access count stays silent then).
+            _warn(f"no datasets yet: {store} has no dataset .md files, so the catalog is empty "
+                  f"(clone the h5adstore repo there, see doc/DEPLOY_CONTAINERS.md)")
         else:
             missing = [p for p in mds if not p.with_suffix('.duckdb').exists()]
             if missing:
@@ -1836,7 +1894,7 @@ def internal_access_summary(site: dict, internal: int, total: int) -> tuple[str,
     requires_auth = bool(site['auth'].get('internal_requires_auth', True))
     head = f"{internal} of {total} datasets are internal"
     if not total:
-        return "no datasets yet (the store has no dataset .md files)", None
+        return "", None          # check already warned "no datasets yet"
     if not internal:
         return f"{head}: every dataset is access: public", None
     if not requires_auth:
@@ -1866,7 +1924,8 @@ def _check_internal_access(site: dict) -> None:
         return
     internal, total = _internal_dataset_count(store)
     line, warning = internal_access_summary(site, internal, total)
-    _say(line)
+    if line:
+        _say(line)
     if warning:
         _warn(warning)
 
@@ -1933,7 +1992,11 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     site = load_site(site_path(args))
-    render(site, quiet=True, apply=False)
+    try:
+        render(site, quiet=True, apply=False)
+    except SiteError as error:
+        print(f"  PROBLEM  {error}")
+        return 1
     print_plan(site)
     problems = check(site, running=args.running)
     for problem in problems:
@@ -2338,6 +2401,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
         extra = extra[1:]
     tool = REPO / 'bin' / 'ingest' / 'ant-ingest-watch'
     env = {**os.environ, **watcher_env(site)}
+    print(f"[ant-stack] exec {watcher_command(site)}{(' ' + shlex.join(extra)) if extra else ''}",
+          file=sys.stderr, flush=True)
     os.execvpe(str(tool), [str(tool), *extra], env)
     return 0  # not reached
 

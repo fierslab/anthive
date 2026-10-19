@@ -135,7 +135,7 @@ images:
   # The release you run: the same number as the git tag you checked out
   # (`git describe --tags`). Change it at every upgrade. Never `latest`, it
   # changes under you.
-  tag: 2.46.1
+  tag: 2.46.3
   # Leave the defaults unless you mirror these images.
   caddy: caddy:2.11-alpine
   authelia: authelia/authelia:4.39

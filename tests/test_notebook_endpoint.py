@@ -192,7 +192,9 @@ def test_notebook_auth_cell_is_generic():
 
 def test_notebook_jupyterlite_detection_via_sys_modules():
     """The auth cell uses ``"pyodide" in sys.modules`` (not try/except)
-    to detect JupyterLite before calling micropip.install(["pyvark", "seaborn"]).
+    to detect JupyterLite before calling micropip.install(["requests", "seaborn"]).
+    vark itself is bundled with the site's JupyterLite (API 2.46.3+): the
+    PyPI pyvark lagged the API by several releases.
     """
     r = _get(
         f"/databases/{V6A}/plot/volcano/notebook",
@@ -204,7 +206,8 @@ def test_notebook_jupyterlite_detection_via_sys_modules():
     code = r.json()['cells'][_AUTH_CODE]['source']
 
     assert '"pyodide" in sys.modules' in code, code
-    assert "await micropip.install([\"pyvark\", \"seaborn\"])" in code, code
+    assert "await micropip.install([\"requests\", \"seaborn\"])" in code, code
+    assert '"pyvark"' not in code, code
     # No misleading try/except → micropip pattern.
     assert 'except ImportError' not in code, code
 

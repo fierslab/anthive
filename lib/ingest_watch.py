@@ -478,10 +478,13 @@ class Watcher:
     def __init__(self, settings: Dict[str, Any], db: StateDB, s3: Any, bucket: str, pipeline: Pipeline,
                  state_dir: Path, log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
                  max_items: Optional[int] = None, stop_requested: Callable[[], bool] = lambda: False,
-                 deposit_settings: Any = None, artefact_publisher: Any = None):
+                 deposit_settings: Any = None, artefact_publisher: Any = None,
+                 list_s3: Any = None):
         self.settings = settings
         self.db = db
         self.s3 = s3
+        #: client for listing the prefix (fewer, shorter retries than the transfer client ``s3``); None: ``s3``
+        self._list_s3 = list_s3
         self.bucket = bucket
         self.pipeline = pipeline
         self.state_dir = Path(state_dir)
@@ -525,7 +528,7 @@ class Watcher:
         """Every object under the prefix (raises TransientError on an S3 error)."""
         objects: List[Dict[str, Any]] = []
         try:
-            paginator = self.s3.get_paginator('list_objects_v2')
+            paginator = (self._list_s3 if self._list_s3 is not None else self.s3).get_paginator('list_objects_v2')
             for page in paginator.paginate(Bucket=self.bucket, Prefix=self.settings['prefix']):
                 objects.extend(page.get('Contents', []) or [])
         except Exception as exc:  # noqa: BLE001

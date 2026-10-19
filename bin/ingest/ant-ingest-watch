@@ -53,6 +53,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR.parent.parent / 'lib'))
@@ -64,22 +65,90 @@ from ingest_pipeline import ApiClient, Pipeline, PipelineConfig, SubprocessRunne
 _stop = False
 
 
+def _child_pids(parent: int) -> list:
+    """Direct and indirect child pids of `parent` (Linux /proc; empty elsewhere)."""
+    children: dict = {}
+    proc = Path('/proc')
+    if not proc.is_dir():
+        return []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        children.setdefault(int(fields[1]), []).append(int(entry.name))
+    found, todo = [], [parent]
+    while todo:
+        for pid in children.get(todo.pop(), []):
+            found.append(pid)
+            todo.append(pid)
+    return found
+
+
+def _terminate_children() -> None:
+    """SIGTERM every child (ant-convert, ant-ingest-check, ...) before an immediate exit, so none keeps
+    writing the work directory while the next watcher starts. os._exit does not do this by itself."""
+    for pid in reversed(_child_pids(os.getpid())):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+
 def _handle_stop(signum, frame) -> None:  # noqa: ANN001
+    """First SIGTERM/SIGINT: stop after the current step. Second: exit at once.
+
+    An S3 call against an unreachable endpoint can block for minutes inside botocore; a second
+    signal must not wait for it. An interrupted swap is rolled back by the next run (recover_swaps)."""
     global _stop
+    if _stop:
+        log(f'second {signal.Signals(signum).name}: exiting now')
+        _terminate_children()
+        os._exit(128 + signum)
     _stop = True
+    log(f'{signal.Signals(signum).name}: stopping after the current step (send it again to exit now)')
 
 
-def s3_client(s3_cfg: dict):
-    """boto3 client from the ``s3:`` block of anthive.yaml."""
+#: Listing the watched prefix: few, short attempts, so an unreachable endpoint shows up within about a minute
+#: (the poll backs off and tries again) instead of 20 adaptive attempts with 30 s connect timeouts.
+LIST_RETRIES = {'max_attempts': 3, 'mode': 'standard'}
+LIST_TIMEOUTS = {'connect_timeout': 10, 'read_timeout': 60}
+#: Pulls, copies and deletes of an item that is being processed: patient, a restart costs a whole ingest.
+TRANSFER_RETRIES = {'max_attempts': 20, 'mode': 'adaptive'}
+TRANSFER_TIMEOUTS = {'connect_timeout': 30, 'read_timeout': 300}
+
+
+def _log_s3_retry(attempts=None, caught_exception=None, response=None, operation=None, **kwargs) -> None:  # noqa: ANN001
+    """botocore ``needs-retry`` hook: log every failed attempt (connection error, throttling, 5xx).
+
+    Returns None, so botocore's own retry handler still decides whether and when to retry."""
+    reason = None
+    if caught_exception is not None:
+        reason = f'{type(caught_exception).__name__}: {caught_exception}'
+    elif response is not None and response[0] is not None:
+        status = getattr(response[0], 'status_code', None)
+        if status is not None and (status >= 500 or status == 429):
+            reason = f'HTTP {status}'
+    if reason:
+        log(f'S3 {getattr(operation, "name", operation)} attempt {attempts} failed ({reason})')
+    return None
+
+
+def s3_client(s3_cfg: dict, retries: Optional[dict] = None, timeouts: Optional[dict] = None):
+    """boto3 client from the ``s3:`` block of anthive.yaml (transfer settings unless given)."""
     import boto3  # noqa: PLC0415
     from botocore.config import Config as BotoConfig  # noqa: PLC0415
 
     endpoint = s3_cfg.get('endpoint')
-    return boto3.client(
+    client = boto3.client(
         's3', endpoint_url=f'https://{endpoint}' if endpoint and '://' not in endpoint else endpoint,
         region_name=s3_cfg.get('region', 'us-east-1'), aws_access_key_id=s3_cfg.get('access_key_id'),
         aws_secret_access_key=s3_cfg.get('secret_access_key'),
-        config=BotoConfig(retries={'max_attempts': 20, 'mode': 'adaptive'}, connect_timeout=30, read_timeout=300))
+        config=BotoConfig(retries=dict(retries or TRANSFER_RETRIES), **(timeouts or TRANSFER_TIMEOUTS)))
+    client.meta.events.register('needs-retry.s3', _log_s3_retry)
+    return client
 
 
 def lower_priority() -> None:
@@ -148,7 +217,8 @@ def build(args: argparse.Namespace):
                                    max_items=args.max_items, stop_requested=lambda: _stop,
                                    deposit_settings=deposit_settings(cfg, settings),
                                    artefact_publisher=artefact_publisher(cfg, settings, client, s3_cfg, db, store_root,
-                                                                         state_dir, work_root, pipeline.api))
+                                                                         state_dir, work_root, pipeline.api),
+                                   list_s3=s3_client(s3_cfg, LIST_RETRIES, LIST_TIMEOUTS))
     return settings, state_dir, db, watcher, store_root
 
 

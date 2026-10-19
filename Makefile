@@ -1,4 +1,4 @@
-.PHONY: help test build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop dev-jupyter refresh-viewer symlink sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry ingest-watch ingest-watch-once ingest-watch-status manifest cache-warm docker-build docker-run docker-smoketest docker-clean lock images sif push-images ship stack-check
+.PHONY: help test test-jupyter test-live-site vendor-pyvark build-reports build-webapp build-jupyter clean-webapp serve serve-nginx serve-api serve-browse serve-mcp serve-all serve-debug serve-prod serve-stop dev-jupyter refresh-viewer symlink sync-push sync-pull sync-plan sync-pull-evict sync-evict sync-pull-duckdb sync-pull-de sync-pull-all sync-status build-stale sync-update serve-status serve-restart h5adstore-push push-all ingest ingest-dry ingest-watch ingest-watch-once ingest-watch-status manifest cache-warm docker-build docker-run docker-smoketest docker-clean lock images sif push-images ship stack-check
 
 help:
 	@echo "Anthive4 Development Commands"
@@ -7,6 +7,9 @@ help:
 	@echo "Webapp:"
 	@echo "  make build-webapp   - Build complete webapp (JupyterLite + index)"
 	@echo "  make build-jupyter  - Build only JupyterLite to webapp/jupyter"
+	@echo "  make vendor-pyvark  - Re-vendor the pyvark client into JupyterLite (PYVARK=../pyvark)"
+	@echo "  make test-jupyter   - JupyterLite end to end in headless Chromium (slow)"
+	@echo "  make test-live-site URL=... - JupyterLite + client checks on a deployed site"
 	@echo "  make clean-webapp   - Clean webapp build directory"
 	@echo "  make serve          - Serve webapp with Caddy (port 8501, API proxied)"
 	@echo "  make serve-nginx    - Serve webapp with Nginx (port 8501, API proxied)"
@@ -71,10 +74,43 @@ TEST_DEPS = --with pytest --with duckdb --with pyyaml --with numpy \
             --with fastapi --with httpx --with jinja2 \
             --with markdown --with requests --with anndata --with bcrypt \
             --with uvicorn --with matplotlib --with seaborn \
-            --with 'bibtexparser>=1.4,<2' --with python-multipart --with tqdm --with boto3
+            --with 'bibtexparser>=1.4,<2' --with python-multipart --with tqdm --with boto3 \
+            --with nbformat
 
 test:
 	uv run $(TEST_DEPS) env PYTHONPATH=lib python -m pytest tests/ -v
+
+## test-jupyter - JupyterLite end to end in headless Chromium (slow)
+# in:  frontend/jupyter/ sources; a running ant-serve (JUPYTER_API, default
+#      http://localhost:8080); network to the Pyodide CDN; Chromium for
+#      playwright (`uv run --with playwright playwright install chromium`)
+# out: nothing kept; builds JupyterLite into a temporary directory, serves
+#      it with an /api proxy on one origin and runs tests/test_jupyterlite_e2e.py.
+#      Skips (with the reason) when the browser or the network is missing.
+JUPYTER_API ?= http://localhost:8080
+test-jupyter:
+	@tmp_build=$$(mktemp -d) && trap 'rm -rf "$$tmp_build"' EXIT && \
+	$(MAKE) --no-print-directory build-jupyter JUPYTER_OUT=$$tmp_build/jupyter >/dev/null && \
+	ANTHIVE_TEST_JUPYTER=1 ANTHIVE_JUPYTER_BUILD=$$tmp_build ANTHIVE_JUPYTER_API=$(JUPYTER_API) \
+	uv run --with pytest --with playwright --with nbformat env PYTHONPATH=lib:tests \
+		python -m pytest -rs -v tests/test_jupyterlite_e2e.py tests/test_jupyterlite_static.py
+
+## test-live-site - JupyterLite + client checks against a deployed site
+# in:  URL=<site public_url> (required); credentials in ANTHIVE_LIVE_USER /
+#      ANTHIVE_LIVE_PASSWORD or a ~/.netrc entry for the host; Chromium for
+#      playwright and network to the Pyodide CDN for the browser part
+# out: nothing kept; runs tests/live/ (doc/RELEASING.md, scratch-site check)
+test-live-site:
+	@test -n "$(URL)" || { echo "usage: make test-live-site URL=https://host[:port]"; exit 2; }
+	ANTHIVE_LIVE_URL=$(URL) uv run --with pytest --with playwright --with requests \
+		--with nbformat env PYTHONPATH=lib:tests python -m pytest -rs -v tests/live/
+
+## vendor-pyvark - Copy pyvark's vark/*.py into the JupyterLite contents
+# in:  PYVARK=<pyvark checkout> (default ../pyvark), committed
+# out: frontend/jupyter/jupyter/vark/*.py, frontend/jupyter/vendored_pyvark.json
+PYVARK ?= ../pyvark
+vendor-pyvark:
+	python3 frontend/jupyter/vendor_pyvark.py $(PYVARK)
 
 # Pull static report sites from git repos (defined in anthive.yaml)
 build-reports:
@@ -86,19 +122,23 @@ clean-webapp:
 	@echo "✓ Clean complete!"
 
 # build-jupyter packages the JupyterLite notebooks.
+# Output: $(JUPYTER_OUT) (default webapp/jupyter, which the dev Caddy serves;
+# `make test-jupyter` builds into a temporary directory instead).
+JUPYTER_OUT ?= webapp/jupyter
 # The `vark/` package is vendored under frontend/jupyter/jupyter/ — that's
 # the source of truth for what the notebooks see (Pyodide treats it as a
 # top-level package, no PyPI install needed). The canonical pyvark repo
-# lives at codeberg.org/mfiers/pyvark — re-vendor by copying the new
-# vark/*.py over the vendored copy when bumping the client version.
+# lives at codeberg.org/mfiers/pyvark — re-vendor with `make vendor-pyvark`
+# (records version + commit + sha256 in frontend/jupyter/vendored_pyvark.json,
+# which tests/test_jupyterlite_static.py checks).
 build-jupyter:
-	@echo "Building JupyterLite to webapp/jupyter..."
+	@echo "Building JupyterLite to $(JUPYTER_OUT)..."
 	@echo ""
 	@# Ensure source dir is writable (may be read-only from a previous run)
 	@chmod -R u+rw frontend/jupyter/jupyter
 	@# Clear output directory so no stale files survive the build
-	@rm -rf webapp/jupyter
-	@mkdir -p webapp
+	@rm -rf $(JUPYTER_OUT)
+	@mkdir -p $(dir $(JUPYTER_OUT))
 	@# Make source files read-only so JupyterLite cannot modify them
 	@chmod -R a-w frontend/jupyter/jupyter
 	@chmod -R a+rX frontend/jupyter/jupyter
@@ -133,13 +173,13 @@ build-jupyter:
 		--with jupyterlab-open-url-parameter \
 		jupyter-lite build --force \
 			--contents frontend/jupyter/jupyter \
-			--output-dir webapp/jupyter
+			--output-dir $(JUPYTER_OUT)
 	@# Restore read+write so files can be edited again
 	@chmod -R u+rw frontend/jupyter/jupyter
 	@echo "✓ JupyterLite build complete!"
 	@echo ""
-	@echo "Location: webapp/jupyter/"
-	@echo "Client:   webapp/jupyter/files/vark/  (vendored from codeberg.org/mfiers/pyvark)"
+	@echo "Location: $(JUPYTER_OUT)/"
+	@echo "Client:   $(JUPYTER_OUT)/files/vark/  (vendored from codeberg.org/mfiers/pyvark)"
 
 build-webapp: build-jupyter frontend/jupyter/index.html
 	@echo ""
