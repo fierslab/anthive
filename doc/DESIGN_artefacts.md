@@ -801,8 +801,8 @@ Choices:
 
 - **Order of the steps.** The import runs after the file copies and before the manifest, under the dataset's
   writer lock: a version whose import fails never becomes real. Its copies are deleted (only keys of that
-  version carrying the sha256 this deposit placed) and its marker dropped, so the next deposit gets the same
-  number cleanly. A kill after the import is recognised by the changelog line naming `artefact <ref>@v<N>
+  version carrying the sha256 this deposit placed), its head entry is marked `failed` and its marker dropped;
+  the next deposit gets the next number (section 20). A kill after the import is recognised by the changelog line naming `artefact <ref>@v<N>
   (deposit <id>)`; the study is never imported twice.
 - **Study ownership.** A study id belongs to the artefact whose live versions list it in `de.imported`. A
   new version of that artefact replaces it (archived, as an admin replacement in 2.46); any other clash needs
@@ -827,3 +827,48 @@ Choices:
   need a decision before `--apply`: deposit the Sierksma tables again as `de_table` artefacts (which imports
   them), and correct the Sun2026 sidecars to the dataset they belong to.
 
+## 20. Security review of A1 + A2 (2026-10-19)
+
+An independent review probed the A1 + A2 code (probes kept as `tests/test_artefact_review.py`). What changed:
+
+- **made_from (S1).** The read side redacts `made_from` per viewer (`artefacts.redact_manifest`), so an
+  internal dataset id never reaches a caller who cannot see the dataset. At publication a public artefact with
+  an internal source is held (`made_from_internal`); an admin approves it or the depositor redeposits it as
+  internal. The manifest on S3 and on disk keeps the full list; only the API redacts.
+- **ant-sync (S2).** `*/static/artefacts/**` is never pushed or pulled: an `ant sync push` would re-upload
+  version files without their `sha256` / `deposit` metadata, and a later purge would then refuse them (or,
+  worse, a pull would bring back purged files).
+- **Failed placements (S3).** The version number is reserved in the head record (`state: reserved`) right
+  after the resume marker and before any copy. A stop during placement marks it `failed` and deletes the
+  copies that carry this deposit's mark. Numbers are never reused, so a half-placed version can never be
+  mistaken for a later deposit's. `_place` reuses an existing key only when its `sha256`, `deposit` and size
+  all match. Admins clean up a failed version by purging it (`cleanup_failed_version`, listed keys with the
+  deposit mark only). An index entry with only failed or reserved versions counts as not existing, so the
+  depositor can try again without `new_version_of`; the owner is set at the first published version.
+- **Memory (S4).** The QC never reads a whole file: the secret scan streams 1 MiB chunks with a 16 KiB
+  overlap that starts at a line boundary (the patterns anchor on `^`), sha256 and MD5 come from the one pull,
+  local copies stream through a temp file, the donor scan stops at 2,000,000 rows (a warning), and figures are
+  kept in the work dir only up to the content check limit. DE tables stream through `artefact_de.open_table`.
+- **Sticky internal (C5).** Each head entry records the access it was published with; `access_internal`
+  is true when any entry, purged ones included, was internal.
+- **Multipart copies (C6).** Some stores ignore `CopySourceIfMatch` on a managed (multipart) copy, and the
+  copy gets its own ETag. After such a copy the source must still have the checked ETag, else the item stops.
+- **Unscanned files and more types (C7).** A text or table file too large to scan is held (`not_scanned`).
+  The donor scan reads parquet (DuckDB, streamed), xlsx (shared strings and sheets, iterparse inside the zip,
+  nothing extracted), json, txt, yaml and md (token scan). A zip that is not kept locally has its central
+  directory read with ranged GETs pinned to the ETag (`RangedObject`), never downloaded whole.
+- **Active content (C8).** html, svg, js, xml and notebooks are stored as `application/octet-stream`; every
+  object gets `Content-Disposition: attachment`. The presigned GET adds nothing the object does not carry.
+- **Locks (C9).** Placement and purge take `<stem>.artefacts.lock` (or `static/artefacts/_group.lock`); the
+  duckdb's writer lock is taken only around a DE import or study removal, so annotation writers are not
+  blocked by a long copy.
+- **Collections against new groups (C10).** A dataset deposit whose group is a pending collection waits
+  (409); a collection whose name a pending dataset deposit is creating is refused; a dataset deposit into an
+  analysis collection needs its creator or an admin.
+- **Resume (C11).** `resume_interrupted` runs at startup also where only artefacts are on.
+- **Logins (nits).** Callers without a sign-in see "a member" / "an admin" instead of logins and no purge
+  reason. The quota counts pending deposits.
+
+Left for A6: the head record's description and the change notes are markdown written by depositors. They are
+served as text today; when the web UI renders them, it must sanitise (no raw HTML, no `javascript:` links, no
+images from other hosts).

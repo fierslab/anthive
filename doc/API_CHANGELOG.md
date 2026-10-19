@@ -205,6 +205,29 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - `ant artefacts-migrate-de` (`--dry-run`, the default; `--apply --yes`) turns `<Group>/de_sources/` tables
   into `de_table` artefacts v1 without importing again; the copied sidecar keeps only the DE keys.
 
+### Fixes from the security review of A1 + A2
+
+- `made_from` entries naming a dataset the caller cannot see come back as `{db_id: null, dataset_version:
+  null, h5ad_sha256: null, hidden: "made from a dataset you cannot see"}` in the detail and version payloads.
+  A public artefact made from an internal dataset is held with the new reason `made_from_internal` (create
+  warns); deposit it with `access: internal` to avoid the hold.
+- Callers without a sign-in see `owner`, `uploaded_by`, `purged_by` and an approval's `by` as "a member" /
+  "an admin"; `purge_reason` is null for them. Filtering the listing by `owner` needs a sign-in (422).
+- Head records carry `access` per version, tombstones included: an artefact that was ever internal stays
+  internal after that version is purged.
+- Version states `reserved` (a publication in progress) and `failed` (it stopped; its copies were removed).
+  A failed number is never reused; the next deposit gets the next number. Only an admin purges a failed
+  version (cleanup of what is left); purging a reserved version is 409 `busy`.
+- New held reason `not_scanned`: a text or table file larger than `artefacts_content_check_max_gb` is held,
+  not passed with a warning. The donor identifier scan now also reads `.parquet`, `.xlsx`, `.json`, `.txt`,
+  `.yaml` and `.md` files (the first 2,000,000 rows or lines; a cut scan is a warning).
+- Active types (`.html`, `.svg`, `.js`, `.xml`, notebooks) are stored as `application/octet-stream` with
+  `Content-Disposition: attachment`; other files keep their type and are also attachments.
+- Dataset deposits: into an analysis collection only from its creator or an admin (403); with the name of a
+  collection being created 409 `collection_pending`. A collection with the name of a pending new-group dataset
+  deposit is refused (409).
+- The per-user stored-bytes quota counts the user's pending artefact deposits.
+
 ## 2.46.2 (unreleased)
 
 Security patch. No endpoint, parameter or response field changes. Clients do not need to update.
