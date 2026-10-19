@@ -187,6 +187,23 @@ datasets:
   catalog_prefix: null      # where published files live on S3; default s3.prefix (the ant-sync layout)
   watcher_config: null      # host path of the watcher's anthive.yaml, if it has its own: `check` compares the prefixes
 
+# Artefact store (since 2.47.0; doc/DESIGN_artefacts.md): versioned analysis files of datasets and
+# collections. The read routes always serve what the store holds; `enabled` switches deposits on. They
+# use the dataset deposit machinery: the presigning key pair and the watcher (`bin/ops/ant-stack watch`)
+# of the datasets: block, also when services.dataset_deposit stays off. Downloads are signed links made
+# with <state_dir>/secrets/s3_artefacts_read_access_key_id + s3_artefacts_read_secret_access_key
+# (read-only), else the api's s3 keys (s3.api_access), else only files with a local copy.
+artefacts:
+  enabled: false
+  upload_groups: [admins, analysts]          # who may deposit artefacts (Authelia groups; basic mode: auth.admins)
+  collections_create_groups: [admins, analysts]   # who may create analysis collections
+  max_file_gb: 100          # largest artefact file
+  max_deposit_gb: 200       # largest deposit (all files)
+  max_stored_gb_per_user: 1000   # artefact storage per user, pending deposits included
+  hold_public: true         # every public artefact waits for an admin
+  # also: max_files (50), max_versions (100), inline_max_mb (2), serve_local (fallback | prefer),
+  # url_ttl_seconds (300)
+
 mcp:
   token_ttl_days: 90 # lifetime of a per-user MCP link (0 = never expires)
   max_links_per_user: 5 # each user can have this many named links

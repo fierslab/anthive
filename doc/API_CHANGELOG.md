@@ -244,6 +244,18 @@ Collection deposits create `<Group>/index.md`; a public one is held.
   the dataset); one that fails after transient errors or an internal error leaves its version `failed`, not
   `reserved`.
 
+### Deployment and sync (phase A4)
+
+- `site.yaml` gains an `artefacts:` block (`enabled`, `upload_groups`, `collections_create_groups`, size and
+  version limits, `hold_public`, `serve_local`, `url_ttl_seconds`), rendered as the `artefacts_*` keys.
+  `artefacts.enabled` renders the watcher config, the tools listener and the presigning pair also when
+  `services.dataset_deposit` is off. The read-only pair `secrets/s3_artefacts_read_*` becomes the api's
+  `artefacts_s3`. `ant-stack check` reports how artefact files are served and fails for a half pair.
+- `ant sync pull` brings the inline files and previews of live artefact versions (verified against their
+  sha256), the large files of the artefacts `--artefacts PATTERN` names, and deletes local copies of purged
+  versions; `--no-artefacts` skips it. Head records and manifests come with the h5adstore checkout. `ant sync
+  push` never uploads `static/artefacts/`.
+
 ## 2.46.2 (unreleased)
 
 Security patch. No endpoint, parameter or response field changes. Clients do not need to update.

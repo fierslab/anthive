@@ -753,6 +753,56 @@ s3:
 Depositors need the curators group (`auth.users[].groups`) and, once it exists, the vark client. Their MCP
 link shows `my_deposits` and `deposit_status`; uploads never go through MCP.
 
+### Let analysts deposit artefacts (since 2.47.0)
+
+Artefacts are versioned analysis files (DE tables, figures, tables, notebooks, reports, models) that belong to a
+dataset or to a collection. S3 holds them; the api checks who may see an artefact and answers a download with
+a short-lived signed link (`doc/DESIGN_artefacts.md`). The read routes always serve what the store holds, so a
+mirror sees the artefacts its h5adstore checkout brings. Deposits are off by default:
+
+```yaml
+artefacts:
+  enabled: true                       # artefact and collection deposits (needs s3.enabled)
+  upload_groups: [admins, analysts]   # who may deposit artefacts (Authelia groups; basic mode: auth.admins)
+  collections_create_groups: [admins, analysts]   # who may create analysis collections
+  max_file_gb: 100                    # largest file
+  max_deposit_gb: 200                 # largest deposit
+  max_stored_gb_per_user: 1000        # artefact storage per user, pending deposits included
+  hold_public: true                   # an admin publishes every public artefact
+s3:
+  enabled: true
+```
+
+1. Artefact deposits use the dataset deposit machinery, so step 1 (the presigning key pair) and step 2 (the
+   watcher on the host, `bin/ops/ant-stack watch`) of "Let depositors add datasets" apply as they are, also
+   when `services.dataset_deposit` stays off: with `artefacts.enabled` the watcher config, the tools listener
+   on `127.0.0.1:<ports.tools>` and the presigning pair are rendered too, and one watcher publishes datasets
+   and artefacts. The lifecycle rule of step 5 covers artefact uploads (same prefixes).
+2. Give the api a read-only key pair for artefact downloads: `<state_dir>/secrets/s3_artefacts_read_access_key_id`
+   and `s3_artefacts_read_secret_access_key` (chmod 600; `HeadObject` and `GetObject` on the catalogue
+   prefix are enough). The api HEADs each file against its manifest and signs a GET for that one key. Without
+   the pair the api uses its own S3 keys (`s3.api_access: read`), and with neither only files with a local copy
+   (figures and files up to 2 MB, which the watcher keeps in the store) can be downloaded; `check` says which.
+3. Put the depositors in the `analysts` group (`auth.users[].groups` before `init`, or
+   `authelia/users_database.yml`). Basic mode has no groups: only `auth.admins` can deposit.
+4. In the h5adstore checkout, add these lines to `.gitignore` and commit them (the watcher commits head records
+   and manifests by path; a hand `git add -A` would otherwise pick up artefact files):
+
+   ```
+   static/artefacts/**/files/
+   static/artefacts/**/preview/
+   ```
+5. `bin/ops/ant-stack check`, then `bin/ops/ant-stack up`. `check` prints `artefact deposits: on for admins,
+   analysts`, how artefact files are served, and fails for a half read key pair or `s3.enabled: false`.
+6. Other sites: `ant sync pull` (`bin/ops/ant-stack ingest -- ant sync pull`) brings the inline files and
+   previews of every live artefact version their checkout lists and deletes local copies of purged versions;
+   `ant sync pull --artefacts 'S20/SIE/*'` also brings the large files of the artefacts the pattern names
+   (`<group_id>/<scope>/<artefact_id>`, or `...@v<N>`). `ant sync push` never uploads artefacts. Head
+   records and manifests come with `git pull` of the h5adstore.
+
+Signed links never reach the access log: the Caddy log filter drops the query string of a redirect's
+`Location` header (checked by `ant-stack check`).
+
 ### A mirror with a hand-picked subset (symlinked stores and library)
 
 A public mirror can serve a few curated datasets and papers that physically
@@ -892,6 +942,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.45.0** | (1) **Internal datasets need a login**: datasets that are not `access: public` (also those without an `access` value) are hidden from callers without an identity: absent from every listing, 404 on their routes (new `auth.internal_requires_auth`, default true; see "Internal datasets"). Sites with a login see no change; on `auth.mode: none` internal datasets disappear, and a `trusted-proxy` site behind a vhost without a login must drop the `Remote-*` headers there. (2) `X-Remote-User` / `X-Remote-Groups` are ignored everywhere and dropped by the Caddy snippets. (3) Cache, index and rescan routes (`/admin/*-cache/*`, `/admin/*-index/*`, `/admin/api-config/*`, `POST /genesets/rescan`, `/module-variability/rescan`, `/catalogs/rescan`) need an admin, a host-local tool or the internal secret; other signed-in users get 403. (4) The web, mcp and api containers must run the same release (the web now forwards the visitor's identity to the api). (5) **Cache warm-up**: after a start the api fills the facet caches for signed-in and anonymous visitors, per-donor values and the gene set rank tables in the background (new `warmup` block of anthive.yaml, default on; see "Cache warm-up after a start"). The first start builds the rank tables (up to a minute per dataset with scores, one at a time). | `ant-stack check` (it prints how many datasets are internal and who sees them, and warns only for `internal_requires_auth: false` or `trusted-proxy`), set `images: tag: 2.45.0`, `ant-stack pull`, `ant-stack up`; then `ant-stack restart api web mcp` (2.45.0's `up` does not recreate them when only the config changed; fixed in 2.45.1). If your upstream proxy sends identity as `X-Remote-*` only, switch it to `Remote-User` / `Remote-Groups`. If you copied an nginx vhost from `config/examples/`, add the new `proxy_set_header ... ""` lines (the public vhost must drop `Remote-*`). Scripts that call the rescan routes need an admin account. |
 | **2.45.1** | Fixes in `ant-stack`: `up` recreates api, web and mcp when their rendered config or secrets changed (before, a changed `auth.internal_requires_auth` or `auth.mode` did not take effect until a restart); `restart` takes several services; `passwd` without a terminal points to `--password`; `check` labels Caddy's in-container listener, prints the published host address and always prints the internal dataset count; `ant-stack logs api` shows the warm-up progress. | set `images: tag: 2.45.1`, `ant-stack pull`, `ant-stack up` |
 | **2.46.0** | Dataset deposits through the API: signed-in members of `datasets.upload_groups` get presigned uploads into the S3 watcher's incoming prefix and follow their deposit in the API (and two read-only MCP tools). Off by default; nothing changes for a site that leaves it off. `ant sync push` now sets `x-amz-meta-sha256` on uploaded `.h5ad` objects. | optional: `services: dataset_deposit: true`, the `datasets:` block, a presigning key pair and the watcher on the host (see "Let depositors add datasets"); `ant-stack check`. The primary site, once, for metadata-only updates of datasets pushed before: `bin/ops/ant-stack ingest -- ant sync stamp-sha256 --dry-run`, then without `--dry-run` |
+| **2.47.0** | Artefact store: versioned analysis files of datasets and collections, read routes under `/api/artefacts`, artefact and collection deposits (off by default), DE tables as `de_table` artefacts (the 2.46 DE-only deposit becomes an alias until 2.48.0). `ant sync push` never uploads `static/artefacts/`; `ant sync pull` brings inline artefact files and previews and deletes purged copies. | none required. Optional: the `artefacts:` block, the read-only pair `secrets/s3_artefacts_read_*`, the `analysts` group and the h5adstore `.gitignore` lines (see "Let analysts deposit artefacts"); `ant-stack check` |
 | **2.46.1** | Fixes. (1) `ant sync pull --dry-run` changes nothing on every path (before, with `--include-duckdb` or `--only` it downloaded and overwrote files); `ant sync push --dry-run` exists. (2) `sync_policy.mode: priority` pulls each kept dataset with its layer, DE and score parquets plus the shared indexes, caches, `_facet_tests/` and `static/`, never `.h5ad`; `--include-duckdb` no longer bypasses it. (3) `pull` and `check` stage the rendered config, `up` applies it; the api warns about unknown config keys instead of stopping. (4) `check` counts datasets like the api (store-root documents and `static/*.md` are not datasets) and says "no datasets yet" for an empty store. (5) Facet routes answer 503 `warming_up` with `Retry-After` while the start-up warm-up builds their caches, instead of blocking for a minute; the web says "warming up, try again in a minute". (6) `publish-library --s3-host-config <path>`; it says "records: up to date" when there was nothing to push. (7) Deposit watcher: `ant-stack watch`, a watcher config with host paths (`config-path --role watcher`), the api reachable through Caddy's tools listener on `127.0.0.1:<ports.tools>`, and the full command in `check`. (8) `POST /api/me/mcp/links` also accepts `{"name": ...}`. | `git checkout v2.46.1`, set `images: tag: 2.46.1`, `ant-stack check`, `ant-stack pull`, then `ant-stack up` at once. A priority site: replace any `ant sync pull --include-duckdb` in cron with `ant sync pull` (add `--evict` if wanted), try it with `--dry-run`. A deposit site: replace the watcher's `ANTHIVE_CONFIG=... --role ingest` setup with `ant-stack watch` (`config/examples/anthive-ingest-watch-stack.service.example`); `up` publishes `127.0.0.1:8079` (`ports.tools`). A site with S3 keys only on the host: replace the two-step library publishing with `publish-library --s3-host-config <path>`. |
 
 The in-app chat assistant is off and being phased out; leave
@@ -1154,7 +1205,8 @@ resolve inside the containers.
 | `services.paper_upload` | let `library.upload_groups` add papers through the API and MCP (mounts the library read-write) |
 | `services.dataset_deposit` | since 2.46.0: let `datasets.upload_groups` deposit datasets through presigned S3 uploads (needs `s3.enabled`; see "Let depositors add datasets") |
 | `datasets.*` | since 2.46.0: who may deposit (`upload_groups`, default admins and curators), `max_gb`, `url_ttl_hours`, `max_open_days` (an open deposit not completed within this many days expires, default 7), `max_open_per_user`, `max_pending_gb_per_user`, `update_policy`, `site_id` (default `site.name`) |
-| `ports.tools` | since 2.46.1: the `127.0.0.1` port of Caddy's listener for the host-side deposit watcher (default 8079; published only with `services.dataset_deposit`; requires the internal secret) |
+| `ports.tools` | since 2.46.1: the `127.0.0.1` port of Caddy's listener for the host-side deposit watcher (default 8079; published only with `services.dataset_deposit` or `artefacts.enabled`; requires the internal secret) |
+| `artefacts.*` | since 2.47.0: artefact and collection deposits (`enabled`, needs `s3.enabled`), `upload_groups` and `collections_create_groups` (default admins and analysts), `max_file_gb`, `max_deposit_gb`, `max_files`, `max_versions`, `max_stored_gb_per_user`, `inline_max_mb`, `hold_public`, `serve_local` (`fallback` or `prefer`), `url_ttl_seconds` (see "Let analysts deposit artefacts") |
 | `library.*` | upload groups, PDF size limit, git committer and push, S3 autopush, index publisher, `index_pull` (false: this site never downloads the shared literature index) |
 | `library.deploy_key` | SSH key `ant-stack publish-library` pushes the library with (host path) |
 | `s3.api_access` | what the api may do on S3: `none` (default), `read` (own read-only key pair) or `write` |
@@ -1175,7 +1227,7 @@ Who sees which secret:
 
 | Container | Config | From `state_dir` |
 | --- | --- | --- |
-| api | `stack/anthive-api.yaml` (S3 keys only as `s3.api_access` allows, the presigning pair with `services.dataset_deposit`, chat key) | read-write, but `secrets/`, `authelia/` and `stack/` are hidden; only `internal_secret` and `mcp_token_secret` come back, read-only |
+| api | `stack/anthive-api.yaml` (S3 keys only as `s3.api_access` allows, the presigning pair with `services.dataset_deposit` or `artefacts.enabled`, the artefact read pair, chat key) | read-write, but `secrets/`, `authelia/` and `stack/` are hidden; only `internal_secret` and `mcp_token_secret` come back, read-only |
 | mcp | `stack/anthive.yaml` (no keys) | only `secrets/internal_secret`, read-only |
 | web | `stack/anthive.yaml` (no keys) | nothing |
 | authelia | its own `authelia/` folder | nothing else |
