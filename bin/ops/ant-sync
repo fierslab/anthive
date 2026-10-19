@@ -173,6 +173,17 @@ def _is_static_path(rel: str) -> bool:
     return 'static' in parts[:-1]
 
 
+def _is_artefact_path(rel: str) -> bool:
+    """True for anything under ``<Group>/static/artefacts/`` (the artefact store, REST 2.47).
+
+    The watcher writes those objects itself (with ``x-amz-meta-sha256``, which purge and the download check
+    rely on), so ant-sync neither pushes nor pulls them: a push would re-upload them without that metadata
+    and could bring back a purged version from a stale checkout. Phase A4 adds the proper pull rules.
+    """
+    parts = Path(rel).parts[:-1]
+    return any(parts[index] == 'static' and parts[index + 1] == 'artefacts' for index in range(len(parts) - 1))
+
+
 def _is_syncable(
     rel: str,
     allowed_exts: set[str] | None = None,
@@ -180,6 +191,8 @@ def _is_syncable(
 ) -> bool:
     path = Path(rel)
     if path.name.startswith('.'):
+        return False
+    if _is_artefact_path(rel):
         return False
     # Prefixed-path allowlist (checked BEFORE the `_` skip because these
     # prefixes deliberately start with `_`, e.g. the module-variability
@@ -816,7 +829,7 @@ def _is_priority_global(rel: str) -> bool:
     """Files a priority site always mirrors, whatever its dataset budget: the root
     fleet indexes, the shared caches and facet results (SYNC_PATH_PREFIXES) and
     per-group static/ files. Never an .h5ad or a .duckdb."""
-    if rel.endswith('.h5ad') or rel.endswith('.duckdb'):
+    if rel.endswith('.h5ad') or rel.endswith('.duckdb') or _is_artefact_path(rel):
         return False
     if rel.startswith(SYNC_PATH_PREFIXES):
         return True
