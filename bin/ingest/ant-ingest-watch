@@ -165,7 +165,8 @@ def artefact_publisher(cfg: dict, settings: dict, client, s3_cfg: dict, db, stor
         settle_seconds=float(settings['settle_seconds']), log=log, git_commit=settings['store_git_commit'],
         git_identity=settings['git_identity'], delete_incoming=settings['delete_incoming_after_ingest'],
         notify_settings=settings.get('notify') or {}, stop_requested=lambda: _stop,
-        site_id=config.deposit_site_id(cfg), server_version=_server_version())
+        site_id=config.deposit_site_id(cfg), server_version=_server_version(),
+        update_policy=str(config.get_dataset_deposit_settings(cfg).get('update_policy') or 'own'))
 
 
 def _server_version() -> str:

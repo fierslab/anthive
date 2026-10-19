@@ -110,7 +110,10 @@ SERVED = {'PU1/pub': {'access': 'public'}, 'PU1/int': {'access': 'internal'}}
 
 
 def make_service(tmp_path: Path, clock: List[float], s3: Optional[ArtefactFakeS3] = None,
-                 artefact_settings: Optional[Dict[str, Any]] = None, **overrides: Any):
+                 artefact_settings: Optional[Dict[str, Any]] = None, dataset_owner: Optional[str] = 'ana',
+                 **overrides: Any):
+    """The deposit service on a test store; ``dataset_owner`` is recorded as the owner of PU1/int and PU1/pub
+    (the de_table tests deposit as ana; review N1 needs the right to update the dataset)."""
     s3 = s3 or ArtefactFakeS3(lambda: clock[0])
     store_root = tmp_path / 'store'
     if not store_root.exists():
@@ -127,6 +130,9 @@ def make_service(tmp_path: Path, clock: List[float], s3: Optional[ArtefactFakeS3
     service = artefact_deposit.ArtefactDepositService(settings, store, s3, store_root, state_dir,
                                                       clock=lambda: clock[0], artefact_settings=merged,
                                                       background=lambda work: work())
+    if dataset_owner:
+        for db_id in SERVED:
+            store.set_owner(db_id, dataset_owner, 'root', 'test fixture')
     return service, s3
 
 

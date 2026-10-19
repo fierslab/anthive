@@ -578,6 +578,8 @@ class ArtefactDepositService(DepositService):
         if kind == 'de_table' and scope_db_id is None:
             raise DepositError(422, 'invalid_scope', 'a de_table belongs to a dataset (its DE tables are imported '
                                                      'into it); scope is the dataset file id, not _group')
+        if kind == 'de_table':
+            self.require_dataset_update(identity, scope_db_id)
         artefact_id = block.get('artefact_id')
         if not artefacts.valid_artefact_id(artefact_id):
             raise DepositError(422, 'invalid_artefact_id', 'artefact_id: 2 to 64 lower-case letters, digits and '
@@ -588,6 +590,8 @@ class ArtefactDepositService(DepositService):
                                   public_scope=public_scope)
         if kind == 'de_table':
             clean['dataset_basename'] = Path(context.dataset_md[scope_db_id]).stem
+        if relaxed_provenance:
+            clean['alias_of'] = 'de_only'      # set by the server only: the watcher relaxes provenance for it
         ref = artefacts.format_ref(group_id, scope, artefact_id)
         new_version_of = block.get('new_version_of')
         existing = context.index.get(group_id, scope, artefact_id)
@@ -603,17 +607,18 @@ class ArtefactDepositService(DepositService):
                 raise DepositError(409, 'version_conflict', f'{ref} does not exist; leave new_version_of out',
                                    latest=None)
         else:
+            follows = version_followed(existing)
             if new_version_of is None:
                 raise DepositError(409, 'artefact_exists', f'{ref} exists; a new version gives "new_version_of": '
-                                                           f'{existing.latest}', latest=existing.latest)
+                                                           f'{follows}', latest=existing.latest)
             if existing.owner != identity.user and not identity.is_admin:
                 raise DepositError(403, 'not_owner', f'new versions of {ref} are deposited by its owner or an admin')
             if existing.path.kind != kind:
                 raise DepositError(422, 'invalid_kind', f'{ref} is a {existing.path.kind}; the kind cannot change')
             if isinstance(new_version_of, bool) or not isinstance(new_version_of, int) \
-                    or new_version_of != existing.latest:
-                raise DepositError(409, 'version_conflict', f'the latest version of {ref} is {existing.latest}',
-                                   latest=existing.latest)
+                    or new_version_of != follows:
+                raise DepositError(409, 'version_conflict', f'the latest version of {ref} is {follows}'
+                                   + (' (purged)' if existing.latest is None else ''), latest=existing.latest)
             if len(existing.versions) >= int(self._limit('artefacts_max_versions', 100)):
                 raise DepositError(413, 'quota_exceeded', f'{ref} has the maximum number of versions; purge old '
                                                           f'ones first')
@@ -794,6 +799,20 @@ class ArtefactDepositService(DepositService):
                 if version.state == 'live' and (manifest.get('recorded') or {}).get('uploaded_by') == user:
                     total += sum(int(item.get('size') or 0) for item in manifest.get('files') or [])
         return total
+
+    def may_update_dataset(self, identity: Identity, db_id: str) -> bool:
+        """The 2.46 update rule of a published dataset (``_existing_dataset``): an admin, ``update_policy:
+        any``, or the dataset's owner (assigned by an admin, else the depositor of its newest live version)."""
+        return identity.is_admin or self.settings.update_policy == 'any' \
+            or self.store.owner_of_dataset(db_id) == identity.user
+
+    def require_dataset_update(self, identity: Identity, db_id: str) -> None:
+        """Review N1: DE tables change the dataset (a patch version and new DE studies), so a de_table (and
+        the de_only alias) needs the right to update the dataset, as the 2.46 DE-only route did."""
+        if not self.may_update_dataset(identity, db_id):
+            raise DepositError(403, 'forbidden', f'DE tables are added to {db_id} by its owner or an admin '
+                                                 f'(datasets_deposit_update_policy: own); ask an admin to record '
+                                                 f'you as its owner, or deposit the table as kind table')
 
     def _pending_new_group(self, data_project: str) -> bool:
         """A dataset deposit that is creating a group of this name (open or waiting for the watcher)."""
@@ -1039,6 +1058,7 @@ class ArtefactDepositService(DepositService):
         if db_id not in context.dataset_md or context.dataset_folder.get(db_id) != data_project \
                 or not context.policy.dataset_visible(db_id, context.viewer):
             raise DepositError(422, 'update_of_unknown', f'{data_project}/{db_id} is not a published dataset')
+        self.require_dataset_update(identity, db_id)
         files = body.get('files')
         if not isinstance(files, list) or not files or not all(isinstance(entry, dict) for entry in files):
             raise DepositError(422, 'invalid', 'files must be a non-empty list')
@@ -1057,12 +1077,13 @@ class ArtefactDepositService(DepositService):
         meta = read_md_meta(context.dataset_md[db_id])
         new_version_of = None
         existing = context.index.get(group_id, scope, artefact_id)
-        if existing is not None and existing.latest is not None:
+        follows = version_followed(existing) if existing is not None else None
+        if follows is not None:
             if existing.owner != identity.user and not identity.is_admin:
                 raise DepositError(409, 'artefact_exists', f'the DE table {stem} is already an artefact of {db_id}, '
                                                            f'deposited by someone else; give your table another name '
                                                            f'or ask an admin')
-            new_version_of = existing.latest
+            new_version_of = follows
         names = ', '.join(tables)
         artefact = {
             'kind': 'de_table', 'artefact_id': artefact_id, 'title': f'DE table {stem}'[:artefacts.TITLE_MAX_CHARS],
@@ -1125,6 +1146,17 @@ def is_de_only_body(body: Any) -> bool:
     files = body.get('files') if isinstance(body, dict) else None
     return bool(isinstance(body, dict) and body.get('update_of') and isinstance(files, list) and files
                 and all(isinstance(entry, dict) and entry.get('kind') == 'de' for entry in files))
+
+
+def version_followed(entry: Any) -> Optional[int]:
+    """The version a new version of ``entry`` must name in ``new_version_of``: its latest live version, else
+    (every version purged) the highest purged one; None when nothing was ever published."""
+    if entry is None:
+        return None
+    if entry.latest is not None:
+        return entry.latest
+    published = [number for number, version in entry.versions.items() if version.state in ('live', 'purging', 'purged')]
+    return max(published) if published else None
 
 
 def alias_artefact_id(stem: str) -> str:

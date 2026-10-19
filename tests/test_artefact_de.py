@@ -36,10 +36,10 @@ def clock():
     return [time.time()]
 
 
-def _setup(tmp_path, clock, **kwargs):
-    service, s3 = make_service(tmp_path, clock)
+def _setup(tmp_path, clock, update_policy='own', **kwargs):
+    service, s3 = make_service(tmp_path, clock, update_policy=update_policy)
     make_dataset_duckdb(tmp_path / 'store')
-    publisher, db, git, api = make_publisher(tmp_path, s3, clock, **kwargs)
+    publisher, db, git, api = make_publisher(tmp_path, s3, clock, update_policy=update_policy, **kwargs)
     return service, s3, publisher, db, git, api
 
 
@@ -226,7 +226,7 @@ def test_a_2_46_de_only_body_becomes_a_de_table_artefact(tmp_path, clock):
 
 def test_the_alias_follows_ownership(tmp_path, clock):
     from tests.artefact_helpers import write_artefact
-    service, _s3 = make_service(tmp_path, clock)
+    service, _s3 = make_service(tmp_path, clock, update_policy='any')     # both may update the dataset
     write_artefact(tmp_path / 'store', 'Public2021', 'PU1', 'int', 'de_table', 'treated-vs-control',
                    [{'files': {'a/treated_vs_control.tsv': b'x', 'a/treated_vs_control.tsv.mus': b'y'},
                      'manifest': {'made_from': [{'db_id': 'PU1/int', 'dataset_version': '1.0.0'}]}}], owner='otto')
@@ -284,7 +284,7 @@ def test_a_new_version_replaces_its_own_study(tmp_path, clock):
 
 
 def test_a_foreign_study_is_refused_for_a_depositor_and_replaced_by_an_admin(tmp_path, clock):
-    service, s3, publisher, db, git, api = _setup(tmp_path, clock)
+    service, s3, publisher, db, git, api = _setup(tmp_path, clock, update_policy='any')
     deposit(service, s3, ANALYST, de_files(), artefact_id='first', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
     duckdb_before = (tmp_path / 'store' / 'Public2021' / 'int.duckdb').read_bytes()

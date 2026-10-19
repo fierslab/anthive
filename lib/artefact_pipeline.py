@@ -285,7 +285,7 @@ class ArtefactPublisher:
                  delete_incoming: bool = True, notify_settings: Optional[Dict[str, Any]] = None,
                  stop_requested: Callable[[], bool] = lambda: False, server_version: str = '',
                  site_id: str = '', run: Optional[Callable[..., Any]] = None, de_runner: Any = None,
-                 dataset_catalog_prefix: Optional[str] = None):
+                 dataset_catalog_prefix: Optional[str] = None, update_policy: str = 'own'):
         self.store_root = Path(store_root)
         self.state_dir = Path(state_dir)
         self.work_root = Path(work_root)
@@ -315,6 +315,9 @@ class ArtefactPublisher:
         #: where a dataset's ``.de.parquet`` lives in the bucket (the dataset route's catalog prefix)
         self.dataset_catalog_prefix = catalog_prefix if dataset_catalog_prefix is None else dataset_catalog_prefix
         self._marks: Dict[Tuple[str, str], str] = {}
+        #: ``datasets_deposit_update_policy``: who may change a dataset through a de_table (review N1)
+        self.update_policy = update_policy
+        self._store: Any = None
 
     # ── the poll ────────────────────────────────────────────────────────────
     def poll(self, objects: Sequence[Dict[str, Any]]) -> Dict[str, int]:
@@ -327,6 +330,7 @@ class ArtefactPublisher:
         if store is None:
             self.refuse_unlinked(None, listing)
             return counts
+        self._store = store
         try:
             store.conn.executescript(rules.PURGE_SCHEMA)
             for state, number in self.process_purges(store).items():
@@ -341,6 +345,7 @@ class ArtefactPublisher:
                     counts[state] = counts.get(state, 0) + 1
             self.refuse_unlinked(store, listing)
         finally:
+            self._store = None
             store.close()
         return counts
 
@@ -687,7 +692,8 @@ class ArtefactPublisher:
         add('meta.text', 'fail' if text_problems else 'pass', '; '.join(text_problems) or 'title and description')
         missing = rules.provenance_missing(block.get('declared'))
         if missing:
-            add('meta.provenance', 'fail' if kind in rules.PROVENANCE_STRICT_KINDS else 'warn',
+            strict = kind in rules.PROVENANCE_STRICT_KINDS and block.get('alias_of') != 'de_only'
+            add('meta.provenance', 'fail' if strict else 'warn',
                 'provenance incomplete: ' + ', '.join(missing), 'vark artefacts add --code auto --software auto')
         else:
             add('meta.provenance', 'pass', 'author, date, software and code declared')
@@ -838,6 +844,8 @@ class ArtefactPublisher:
                               'h5ad_sha256': sha})
         if scope_db_id is not None and scope_db_id not in {entry['db_id'] for entry in made_from}:
             raise Stop('failed', f'made_from does not include the scope dataset {scope_db_id}')
+        if kind == 'de_table':
+            self._require_dataset_update(record, scope_db_id)
         policy = artefacts.AccessPolicy(collections, self._mus_access(mds), self._folder_db_ids(folders))
         public = block.get('access') != 'internal' and (
             policy.dataset_public(scope_db_id) if scope_db_id else policy.collection_public(group_id))
@@ -874,7 +882,7 @@ class ArtefactPublisher:
             published = [v for v in (head or {}).get('versions') or [] if v['state'] in ('live', 'purging', 'purged')]
             if head is not None and published:
                 live = [v['version'] for v in head['versions'] if v['state'] == 'live']
-                latest = max(live) if live else None
+                latest = max(live) if live else max(v['version'] for v in published)
                 if marker is None:
                     if block.get('new_version_of') is None:
                         raise Stop('failed', f'artefact_exists: {ref} exists (latest {latest})')
@@ -1496,6 +1504,16 @@ class ArtefactPublisher:
             checks.extend(result.checks)
             tables.append(result.manifest_entry())
         return checks, tables
+
+    def _require_dataset_update(self, record: Dict[str, Any], db_id: str) -> None:
+        """Review N1, again at publication: the depositor may still update the dataset (an owner change or a
+        policy change since the create is honoured)."""
+        if record.get('is_admin') or self.update_policy == 'any':
+            return
+        owner = self._store.owner_of_dataset(db_id) if self._store is not None else None
+        if owner != record.get('user'):
+            raise Stop('failed', f'not_owner: DE tables are added to {db_id} by its owner or an admin '
+                                 f'(datasets_deposit_update_policy: own)')
 
     def _own_studies(self, path: artefacts.ArtefactPath, head: Optional[Dict[str, Any]], exclude: int) -> set:
         """Study ids that live versions of this artefact (other than ``exclude``) imported."""
