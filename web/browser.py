@@ -32,6 +32,7 @@ if str(_lib_dir) not in sys.path:
     sys.path.insert(0, str(_lib_dir))
 from facet_aliases import canonical_facet  # noqa: E402
 import help_content  # noqa: E402
+import safe_markdown  # noqa: E402
 import celltype_groups  # noqa: E402
 
 from canonical_columns import is_canonical_column, strip_ant_prefix  # noqa: E402
@@ -102,6 +103,7 @@ VIEW_REGISTRY: Dict[str, str] = {
     'gene-other-de': 'Gene page, Other DE (author and custom) on the Facet DE tab',
     'older-views': 'The Older views menu of the gene, gene set and facet pages (earlier designs)',
     'dataset-facet-gs': 'Dataset page, Facet GS tab (gene set scores by annotation column, per cell)',
+    'artefacts': 'Artefacts: the Artefacts tab of a dataset, the artefact list of a collection, the artefact page',
 }
 APPROVED_VIEWS = frozenset({
     'datasets', 'genes', 'genesets', 'gene-expression', 'geneset-expression',
@@ -2509,6 +2511,145 @@ def _group_static_files(group_id: str) -> List[Dict]:
     return out
 
 
+# ── Artefacts (REST 2.47, doc/DESIGN_artefacts.md) ─────────────────────────────
+#
+# Versioned analysis files of a dataset or a collection. The API decides who sees what; every fetch goes out
+# as the visitor (identity headers kept, so owners and admins get the purge controls the API would accept).
+# Titles, descriptions and change notes are written by depositors: plain text or safe_markdown, never raw.
+
+ARTEFACT_KIND_LABELS = {'de_table': 'DE table', 'figure': 'Figure', 'table': 'Table', 'notebook': 'Notebook',
+                        'report': 'Report', 'model': 'Model', 'other': 'Other'}
+_ARTEFACT_SEGMENT_RE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}')
+
+
+def _artefact_row(item: Dict[str, Any]) -> Dict[str, Any]:
+    """One row of an artefact list (the API summary, display-ready)."""
+    group_id, scope, artefact_id = item.get('group_id'), item.get('scope'), item.get('artefact_id')
+    return {
+        'title': safe_markdown.plain(item.get('title')) or artefact_id,
+        'artefact_id': artefact_id, 'ref': item.get('ref'), 'kind': item.get('kind'),
+        'kind_label': ARTEFACT_KIND_LABELS.get(item.get('kind') or '', item.get('kind') or ''),
+        'scope': scope, 'db_id': item.get('db_id'), 'latest': item.get('latest'),
+        'versions_live': item.get('versions_live') or 0, 'updated': item.get('updated'),
+        'size_bytes': item.get('size_bytes'), 'internal': item.get('access') == 'internal',
+        'url': f"/artefacts/{url_quote(str(group_id))}/{url_quote(str(scope))}/{url_quote(str(artefact_id))}",
+    }
+
+
+def _artefact_rows(request: Request, **params: str) -> List[Dict[str, Any]]:
+    """The artefacts the visitor sees (``db_id`` or ``group_id``), [] when the API has none or errors."""
+    query = urlencode({**{key: value for key, value in params.items() if value}, 'limit': 200})
+    try:
+        payload = _api_get_as_user(request, _api_url(request), f'/artefacts?{query}') or {}
+    except Exception:
+        return []
+    return [_artefact_row(item) for item in payload.get('artefacts') or [] if isinstance(item, dict)]
+
+
+def _may_purge(request: Request, owner: Optional[str], uploader: Optional[str]) -> bool:
+    """Show the purge form to the artefact's owner, the version's uploader and admins (the API decides)."""
+    user = (request.headers.get('Remote-User') or '').strip()
+    return bool(user) and (_is_admin(request) or user in {owner, uploader})
+
+
+def _artefact_view(request: Request, detail: Dict[str, Any], version_payload: Optional[Dict[str, Any]],
+                   versions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The context of artefact.html: the shown version's manifest made safe for display."""
+    shown = version_payload or {'version': detail.get('latest'), 'manifest': detail.get('manifest'),
+                                'files': detail.get('files') or []}
+    manifest = shown.get('manifest') or {}
+    declared = manifest.get('declared') or {}
+    recorded = manifest.get('recorded') or {}
+    made_from = []
+    for entry in manifest.get('made_from') or []:
+        db_id = entry.get('db_id') if isinstance(entry, dict) else None
+        if db_id and '/' in str(db_id):
+            group, file_id = str(db_id).split('/', 1)
+            made_from.append({'db_id': db_id, 'version': entry.get('dataset_version'),
+                              'url': f"/browse/{url_quote(group)}/{url_quote(file_id)}"})
+        else:
+            made_from.append({'db_id': None, 'version': None,
+                              'hidden': (entry or {}).get('hidden') or 'made from a dataset you cannot see'})
+    code = declared.get('code') or {}
+    files = []
+    for item in shown.get('files') or []:
+        preview = item.get('preview') or ''
+        files.append({'name': item.get('name'), 'size': item.get('size'), 'role': item.get('role'),
+                      'download': '/api' + str(item.get('download') or ''),
+                      'preview_image': '/api' + preview if preview.endswith('.webp') else None,
+                      'preview_text': '/api' + preview if preview.endswith('.txt') else None})
+    owner = detail.get('owner')
+    rows = []
+    for entry in versions:
+        rows.append({**entry, 'is_shown': entry.get('version') == shown.get('version'),
+                     'purge_reason': safe_markdown.plain(entry.get('purge_reason'))})
+    group_id, scope, artefact_id = detail.get('group_id'), detail.get('scope'), detail.get('artefact_id')
+    return {
+        'title': safe_markdown.plain(manifest.get('title') or detail.get('title')) or artefact_id,
+        'description_html': safe_markdown.render(manifest.get('description')),
+        'change_note_html': safe_markdown.render(manifest.get('change_note')),
+        'kind_label': ARTEFACT_KIND_LABELS.get(detail.get('kind') or '', detail.get('kind') or ''),
+        'ref': detail.get('ref'), 'group_id': group_id, 'scope': scope, 'artefact_id': artefact_id,
+        'db_id': detail.get('db_id'), 'latest': detail.get('latest'), 'shown': shown.get('version'),
+        'internal': detail.get('access') == 'internal', 'owner': owner, 'created': detail.get('created'),
+        'made_from': made_from, 'files': files, 'versions': rows,
+        'author': safe_markdown.plain(((declared.get('author') or {}).get('name'))),
+        'declared_created': declared.get('created'),
+        'code_repository': safe_markdown.safe_href(code.get('repository')),
+        'code_commit': safe_markdown.plain(code.get('commit'), 64),
+        'code_none': safe_markdown.plain(code.get('none')),
+        'software': [f"{safe_markdown.plain(s.get('name'), 60)} {safe_markdown.plain(s.get('version'), 40)}".strip()
+                     for s in declared.get('software') or [] if isinstance(s, dict)],
+        'uploaded_by': recorded.get('uploaded_by'), 'published': recorded.get('published'),
+        'approved_by': (recorded.get('approval') or {}).get('by') if isinstance(recorded.get('approval'), dict) else None,
+        'de_tables': [{'study_id': t.get('study_id'), 'file': t.get('file'), 'contrast': t.get('de_contrast'),
+                       'method': t.get('de_method')} for t in (manifest.get('de') or {}).get('tables') or []],
+        'may_purge': _may_purge(request, owner, recorded.get('uploaded_by')),
+        'api_base': f"/api/artefacts/{url_quote(str(group_id))}/{url_quote(str(scope))}/{url_quote(str(artefact_id))}",
+    }
+
+
+@router.get("/artefacts/{group_id}/{scope}/{artefact_id}", response_class=HTMLResponse)
+async def artefact_page(request: Request, group_id: str, scope: str, artefact_id: str,
+                        version: Optional[int] = None):
+    """One artefact: what it is, what it was made from, its versions and files (preview view)."""
+    for part in (group_id, scope, artefact_id):
+        if not _ARTEFACT_SEGMENT_RE.fullmatch(part):
+            return _error_page(request, "Artefact not found", 404)
+    api_url = _api_url(request)
+    base = f"/artefacts/{url_quote(group_id)}/{url_quote(scope)}/{url_quote(artefact_id)}"
+    try:
+        detail = _api_get_as_user(request, api_url, base) or {}
+        versions = (_api_get_as_user(request, api_url, f"{base}/versions") or {}).get('versions') or []
+    except Exception:
+        return _error_page(request, "Artefact not found", 404,
+                           hint="It does not exist, or you need to sign in to see it.")
+    version_payload = None
+    if version is not None and version != detail.get('latest'):
+        if not 1 <= version <= 10000:
+            return _error_page(request, "Artefact version not found", 404)
+        try:
+            version_payload = _api_get_as_user(request, api_url, f"{base}/v{version}")
+        except Exception:
+            version_payload = None
+        if not version_payload:
+            tomb = next((v for v in versions if v.get('version') == version), None)
+            if tomb is None:
+                return _error_page(request, "Artefact version not found", 404)
+            version_payload = {'version': version, 'manifest': {}, 'files': [], 'purged': tomb}
+    view = _artefact_view(request, detail, version_payload, versions)
+    collection = group_id
+    try:
+        group = _api_get_as_user(request, api_url, f"/groups/{url_quote(group_id)}") or {}
+        collection = safe_markdown.plain(group.get('title')) or group.get('group') or group_id
+    except Exception:
+        pass
+    return templates.TemplateResponse(request, "artefact.html", {
+        "a": view, "collection_name": collection, "purged_version": (version_payload or {}).get('purged'),
+        "is_admin": _is_admin(request),
+    })
+
+
 @router.get("/browse/{browse_id}", response_class=HTMLResponse)
 async def folder_view(request: Request, browse_id: str):
     group_id = unquote(browse_id)
@@ -2520,7 +2661,7 @@ async def folder_view(request: Request, browse_id: str):
         datasets, description_html, collection_meta = [], None, {'pills': [], 'var_fields': []}
 
     if not datasets:
-        return _error_page(request, f"Collection '{group_id}' not found", 404)
+        return _analysis_collection_view(request, group_id)
 
     # Friendly group name. Falls through index.md `title` (curator override)
     # → `group` (folder name) → the short group_id when neither is set.
@@ -2555,6 +2696,42 @@ async def folder_view(request: Request, browse_id: str):
         "static_files": static_files,
         "papers": _collection_papers(_api_url(request), group_id,
                                      [d['file_id'] for d in datasets if d.get('file_id')]),
+        "artefacts": _artefact_rows(request, group_id=group_id),
+        "analysis": False,
+    })
+
+
+def _analysis_collection_view(request: Request, group_id: str):
+    """A collection without datasets (``collection_kind: analysis``, REST 2.47): its description and
+    artefacts. Its index.md is written from a depositor's collection deposit, so the description goes through
+    safe_markdown. Anything else without datasets stays a 404."""
+    try:
+        group = _api_get_as_user(request, _api_url(request), f"/groups/{url_quote(group_id)}") or {}
+    except Exception:
+        group = {}
+    if group.get('collection_kind') != 'analysis':
+        return _error_page(request, f"Collection '{group_id}' not found", 404)
+    body = (group.get('description') or '').strip()
+    lines = body.split('\n')
+    if lines and lines[0].lstrip().startswith('# '):
+        body = '\n'.join(lines[1:]).strip()
+    authors = group.get('authors') or []
+    return templates.TemplateResponse(request, "folder.html", {
+        "folder_name": safe_markdown.plain(group.get('title')) or group.get('group') or group_id,
+        "folder_browse_id": group_id,
+        "group_id": group_id,
+        "description_html": safe_markdown.render(body) or None,
+        "datasets": [],
+        "collection_pills": [],
+        "var_fields": [],
+        "is_admin": _is_admin(request),
+        "static_files": [],
+        "papers": [],
+        "artefacts": _artefact_rows(request, group_id=group_id),
+        "analysis": True,
+        "analysis_authors": [safe_markdown.plain(str(a), 80) for a in (authors if isinstance(authors, list) else [authors])],
+        "analysis_year": group.get('year'),
+        "analysis_internal": group.get('access') != 'public',
     })
 
 
@@ -3194,6 +3371,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "is_bulk": _view_category(db) == 'bulk',
         "de_total_contrasts": de_total_contrasts,
         "papers": _dataset_papers(api_url, db_id),
+        "artefacts": _artefact_rows(request, db_id=db_id),
         "facet_tests": facet_tests,
         "replicate": _replicate_view(info, (facet_tests or {}).get('replicate_source')),
         "caveats": caveats,

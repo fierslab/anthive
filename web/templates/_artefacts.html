@@ -1,0 +1,35 @@
+{#- Artefact lists shared by dataset.html (Artefacts tab) and folder.html (the collection's artefacts).
+    `rows` come from browser._artefact_row: title (plain text), kind_label, url, latest, versions_live,
+    updated, size_bytes, scope, db_id, internal. Titles are depositor text: autoescaped, never |safe. -#}
+{% macro artefact_styles() -%}
+<style>
+  .art-table td.kind { white-space: nowrap; color: var(--text-muted); }
+  .art-table td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .art-tag { display: inline-block; font-size: 10px; padding: 0 5px; border-radius: 3px; margin-left: 5px;
+             border: 1px solid var(--border); color: var(--text-muted); vertical-align: 1px; }
+  @media (max-width: 560px) { .art-table .col-updated { display: none; } }
+</style>
+{%- endmacro %}
+
+{% macro artefact_table(rows, show_scope=False) -%}
+<div class="table-wrap">
+<table class="card-table art-table">
+  <thead><tr>
+    <th>Name</th><th>Kind</th>{% if show_scope %}<th>Belongs to</th>{% endif %}
+    <th class="num">Version</th><th class="num col-updated">Updated</th><th class="num">Size</th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr data-kind="{{ r.kind }}">
+      <td data-label="Name"><a href="{{ r.url }}">{{ r.title }}</a>{% if r.internal %}<span class="art-tag" title="Only signed-in members see this artefact.">internal</span>{% endif %}</td>
+      <td class="kind" data-label="Kind">{{ r.kind_label }}</td>
+      {% if show_scope %}<td data-label="Belongs to">{% if r.db_id %}<a href="/browse/{{ r.db_id.split('/')[0]|urlencode }}/{{ r.db_id.split('/')[1]|urlencode }}" class="mono">{{ r.db_id }}</a>{% else %}the collection{% endif %}</td>{% endif %}
+      <td class="num" data-label="Version">{% if r.latest %}v{{ r.latest }}{% endif %}{% if r.versions_live > 1 %} <span class="muted">({{ r.versions_live }} versions)</span>{% endif %}</td>
+      <td class="num col-updated" data-label="Updated">{{ r.updated or '' }}</td>
+      <td class="num" data-label="Size">{% if r.size_bytes is not none %}{{ r.size_bytes|filesize }}{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{%- endmacro %}

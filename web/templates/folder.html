@@ -132,12 +132,19 @@
   {% endif %}
 </div>
 
+{% if analysis %}
+{% from "_macros.html" import review_banner as _ac_banner %}
+{{ _ac_banner('artefacts') }}
+<p class="muted" style="margin:4px 0 10px">Analysis collection{% if analysis_authors %} by {{ analysis_authors|join(', ') }}{% endif %}{% if analysis_year %}, {{ analysis_year }}{% endif %}. It holds analyses, no single-cell data of its own{% if analysis_internal %}; only signed-in members see it{% endif %}.</p>
+{% endif %}
+
 {% if collection_pills %}
 <div class="coll-meta" title="metadata shared by every dataset in this collection">
     {% for p in collection_pills %}<span class="grp-pill {{ p.cls }}" title="{{ p.title }}">{{ p.text }}</span>{% endfor %}
 </div>
 {% endif %}
 
+{% if datasets %}
 <!-- Toolbar: filter (top-left), stats (top-right). -->
 {% set _total_cells = namespace(n=0) %}
 {% for d in datasets %}{% if d.n_obs %}{% set _total_cells.n = _total_cells.n + d.n_obs %}{% endif %}{% endfor %}
@@ -215,6 +222,7 @@
     </tbody>
 </table>
 </div>
+{% endif %}
 
 {% if description_html %}
 <h2 class="section-head">About this collection</h2>
@@ -229,6 +237,23 @@
   <h2 class="section-head first">Papers
     <span class="info" title="Papers in the anthive library linked to this collection's datasets, source papers first. The label says why each one is linked.">ⓘ</span></h2>
   {{ paper_list(papers) }}
+</section>
+{% endif %}
+
+{% if artefacts or analysis %}
+{% from "_artefacts.html" import artefact_table, artefact_styles %}
+{% from "_macros.html" import review_banner as _art_banner, doc_toggle as _art_toggle, doc_block as _art_block %}
+<section id="coll-artefacts" style="margin:22px 0 16px">
+  {% if not analysis %}{{ _art_banner('artefacts') }}{% endif %}
+  {{ artefact_styles() }}
+  <h2 class="section-head first">Artefacts{% if artefacts %} <span class="muted">{{ artefacts|length }}</span>{% endif %}
+    {{ _art_toggle('art-coll-help', 'About artefacts') }}</h2>
+  {% call _art_block('About artefacts', id='art-coll-help') %}
+    <p>Analysis files of this collection and of its datasets: DE tables, figures, tables, notebooks, reports and
+    models, each with its versions. A published version never changes. Open one to see what it was made from and
+    to download its files.</p>
+  {% endcall %}
+  {% if artefacts %}{{ artefact_table(artefacts, show_scope=True) }}{% else %}<p class="muted">No artefacts in this collection yet.</p>{% endif %}
 </section>
 {% endif %}
 

@@ -109,10 +109,11 @@ def render(text: Optional[str]) -> str:
 
 
 def plain(text: Optional[str], max_chars: int = 300) -> str:
-    """A single line of plain text (titles): markdown markers and whitespace runs removed, escaped by the
-    caller's template autoescape."""
+    """A single line of plain text (titles): HTML tags, markdown markers and whitespace runs removed; the
+    caller's template autoescape escapes what is left."""
     if not text:
         return ''
-    value = re.sub(r'[`*_#>\[\]]', '', str(text))
+    value = re.sub(r'<[^>]*>', '', str(text))           # tags go, their text stays
+    value = re.sub(r'[`*_#>\[\]]', '', value)
     value = re.sub(r'\s+', ' ', value).strip()
     return value[:max_chars]

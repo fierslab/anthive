@@ -6770,7 +6770,9 @@ def test_dataset_papers_tab_sits_right_before_downloads(library_client):
     html = library_client.get("/browse/GroupA/ds1").text
     buttons = re.findall(r'data-tab="([a-z]+)"', html)
     assert 'papers' in buttons and 'downloads' in buttons
-    assert buttons.index('downloads') == buttons.index('papers') + 1
+    # 2.47: the Artefacts tab sits between Papers and Downloads
+    assert buttons.index('artefacts') == buttons.index('papers') + 1
+    assert buttons.index('downloads') == buttons.index('artefacts') + 1
     assert buttons[0] != 'papers'
 
 
@@ -7897,7 +7899,7 @@ def test_dataset_tab_order_follows_the_agreed_sequence(client, monkeypatch):
         return result
     monkeypatch.setattr(browser, "_api_get", everything)
     tabs, bar = _tab_order(client.get("/browse/GroupA/ds1").text)
-    expected = ["overview", "data", "num", "cat", "genes", "modules", "facets", "facet-gene", "facet-gs", "de", "papers", "downloads", "caveats"]
+    expected = ["overview", "data", "num", "cat", "genes", "modules", "facets", "facet-gene", "facet-gs", "de", "papers", "artefacts", "downloads", "caveats"]
     present = [name for name in expected if name in tabs]
     assert tabs == present, tabs
     for name in ("data", "num", "cat", "modules", "facet-gs", "downloads", "caveats"):

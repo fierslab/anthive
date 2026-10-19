@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{#- One artefact (REST 2.47). Every text field comes from the depositor: titles are plain text
+    (autoescaped), descriptions and change notes are browser._artefact_view's safe_markdown output. -#}
+
+{% block title %}{{ a.title }} · anthive{% endblock %}
+
+{% block content %}
+{% from "_macros.html" import breadcrumb, review_banner, doc_toggle, doc_block %}
+<style>
+  .art-page { max-width: 960px; }
+  .art-page h1 { font-size: 20px; line-height: 1.3; margin: 6px 0 4px; font-weight: 600; }
+  .art-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 10px; }
+  .art-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 12.5px; margin: 6px 0 12px; }
+  .art-facts dt { color: var(--text-muted); }
+  .art-facts dd { margin: 0; overflow-wrap: anywhere; }
+  .art-files td.num, .art-versions td.num { text-align: right; white-space: nowrap; }
+  .art-preview { max-width: 100%; max-height: 360px; border: 1px solid var(--border); border-radius: 4px; margin: 6px 0; }
+  .art-purge { margin-top: 6px; font-size: 12.5px; }
+  .art-purge input[type=text] { width: min(420px, 100%); }
+  .art-purge .msg { margin-left: 8px; }
+  .art-tag { display: inline-block; font-size: 10px; padding: 0 5px; border-radius: 3px; margin-left: 6px;
+             border: 1px solid var(--border); color: var(--text-muted); vertical-align: 2px; }
+  @media (max-width: 600px) { .art-facts { grid-template-columns: 1fr; } .art-facts dt { margin-top: 4px; } }
+</style>
+<div class="art-page">
+  {% set _trail = [(collection_name, '/browse/' ~ (a.group_id|urlencode))] %}
+  {% if a.db_id %}{% set _trail = _trail + [(a.db_id.split('/')[1], '/browse/' ~ (a.db_id.split('/')[0]|urlencode) ~ '/' ~ (a.db_id.split('/')[1]|urlencode) ~ '#artefacts')] %}{% endif %}
+  {{ breadcrumb(_trail + [(a.title, None)], ids=[("artefact", a.ref)]) }}
+  <h1>{{ a.title }}{% if a.internal %}<span class="art-tag" title="Only signed-in members see this artefact.">internal</span>{% endif %}</h1>
+  {{ review_banner('artefacts') }}
+  <div class="art-sub">{{ a.kind_label }}{% if a.latest %} · latest version v{{ a.latest }}{% endif %}{% if a.shown and a.shown != a.latest %} · showing v{{ a.shown }}{% endif %}
+    {{ doc_toggle('art-help', 'About artefacts') }}</div>
+  {% call doc_block('About artefacts', id='art-help') %}
+    <p>An artefact is an analysis file deposited with a dataset or a collection: a differential expression table,
+    a figure, a table, a notebook, a report or a model. A published version never changes; a correction is a new
+    version, and old versions stay until their owner or an admin purges them. Downloads come straight from the
+    object store through a link that is valid for a few minutes. Files are always downloaded, never opened in the
+    page. More in the <a href="/help#artefacts">help</a>.</p>
+  {% endcall %}
+
+  {% if purged_version %}
+  <p class="muted">Version v{{ purged_version.version }} was purged on {{ purged_version.purged }}{% if purged_version.purged_by %} by {{ purged_version.purged_by }}{% endif %}{% if purged_version.purge_reason %}: {{ purged_version.purge_reason }}{% endif %}.</p>
+  {% endif %}
+
+  {% if a.description_html %}<div class="md-body">{{ a.description_html|safe }}</div>{% endif %}
+  {% if a.change_note_html %}<h3 class="subsection-head">What changed in this version</h3><div class="md-body">{{ a.change_note_html|safe }}</div>{% endif %}
+
+  <h2 class="section-head">Made from</h2>
+  {% if a.made_from %}
+  <ul>
+    {% for m in a.made_from %}
+    <li>{% if m.db_id %}<a href="{{ m.url }}" class="mono">{{ m.db_id }}</a>{% if m.version %} version {{ m.version }}{% endif %}{% else %}<span class="muted">{{ m.hidden }}</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% else %}<p class="muted">No dataset named (a collection-level artefact).</p>{% endif %}
+
+  {% if a.files %}
+  <h2 class="section-head">Files <span class="muted">{{ a.files|length }}</span></h2>
+  <div class="table-wrap">
+  <table class="card-table art-files">
+    <thead><tr><th>File</th><th>Role</th><th class="num">Size</th></tr></thead>
+    <tbody>
+    {% for f in a.files %}
+      <tr>
+        <td data-label="File"><a href="{{ f.download }}" download rel="noopener">{{ f.name }}</a>
+          {% if f.preview_text %} <a class="muted" href="{{ f.preview_text }}" download>(first lines)</a>{% endif %}</td>
+        <td data-label="Role">{{ f.role or '' }}</td>
+        <td class="num" data-label="Size">{% if f.size is not none %}{{ f.size|filesize }}{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% for f in a.files if f.preview_image %}
+    <img class="art-preview" src="{{ f.preview_image }}" alt="Preview of {{ f.name }}" loading="lazy">
+  {% endfor %}
+  {% endif %}
+
+  {% if a.de_tables %}
+  <h2 class="section-head">Imported DE studies</h2>
+  <ul>{% for t in a.de_tables %}<li class="mono">{{ t.study_id }}{% if t.contrast %} <span class="muted">({{ t.contrast }}{% if t.method %}, {{ t.method }}{% endif %})</span>{% endif %}</li>{% endfor %}</ul>
+  {% endif %}
+
+  <h2 class="section-head">Provenance</h2>
+  <dl class="art-facts">
+    {% if a.author %}<dt>Made by</dt><dd>{{ a.author }}{% if a.declared_created %}, {{ a.declared_created }}{% endif %}</dd>{% endif %}
+    {% if a.code_repository %}<dt>Code</dt><dd><a href="{{ a.code_repository }}" rel="nofollow noopener noreferrer" target="_blank">{{ a.code_repository }}</a>{% if a.code_commit %} at <span class="mono">{{ a.code_commit }}</span>{% endif %}</dd>
+    {% elif a.code_none %}<dt>Code</dt><dd>{{ a.code_none }}</dd>{% endif %}
+    {% if a.software %}<dt>Software</dt><dd>{{ a.software|join(', ') }}</dd>{% endif %}
+    {% if a.uploaded_by %}<dt>Deposited by</dt><dd>{{ a.uploaded_by }}{% if a.published %} on {{ a.published[:10] }}{% endif %}</dd>{% endif %}
+    {% if a.approved_by %}<dt>Published by</dt><dd>{{ a.approved_by }}</dd>{% endif %}
+    <dt>Reference</dt><dd class="mono">{{ a.ref }}</dd>
+  </dl>
+
+  <h2 class="section-head">Versions</h2>
+  <div class="table-wrap">
+  <table class="card-table art-versions">
+    <thead><tr><th>Version</th><th>State</th><th>Published</th><th></th></tr></thead>
+    <tbody>
+    {% for v in a.versions %}
+      <tr{% if v.is_shown %} class="row-current"{% endif %}>
+        <td data-label="Version">{% if v.state == 'live' and not v.is_shown %}<a href="?version={{ v.version }}">v{{ v.version }}</a>{% else %}v{{ v.version }}{% endif %}{% if v.version == a.latest %} <span class="muted">(latest)</span>{% endif %}</td>
+        <td data-label="State">{{ v.state }}{% if v.state == 'purged' %} on {{ v.purged }}{% if v.purged_by %} by {{ v.purged_by }}{% endif %}{% if v.purge_reason %}: {{ v.purge_reason }}{% endif %}{% endif %}</td>
+        <td data-label="Published">{{ v.published or '' }}</td>
+        <td>{% if a.may_purge and v.state == 'live' %}<button type="button" class="btn-link art-purge-open" data-version="{{ v.version }}">purge</button>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+  {% if a.may_purge %}
+  <form class="art-purge" id="art-purge-form" hidden>
+    <p>Purging deletes the files of version <strong id="art-purge-v"></strong> for good; the version stays listed as
+    purged with your reason. Type <span class="mono" id="art-purge-ref"></span> to confirm.</p>
+    <label>Reason <input type="text" name="reason" minlength="5" maxlength="500" required></label><br>
+    <label>Confirm <input type="text" name="confirm" required autocomplete="off"></label>
+    <button type="submit">Request the purge</button><span class="msg muted" role="status"></span>
+  </form>
+  <script>
+  (function () {
+    var form = document.getElementById('art-purge-form');
+    if (!form) return;
+    var base = {{ a.api_base|tojson }}, ref = {{ a.ref|tojson }}, version = null;
+    document.querySelectorAll('.art-purge-open').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        version = btn.getAttribute('data-version');
+        document.getElementById('art-purge-v').textContent = 'v' + version;
+        document.getElementById('art-purge-ref').textContent = ref + '@v' + version;
+        form.hidden = false;
+        form.querySelector('input[name=reason]').focus();
+      });
+    });
+    form.addEventListener('submit', function (event) {
+      event.preventDefault();
+      var msg = form.querySelector('.msg');
+      msg.textContent = 'sending';
+      fetch(base + '/v' + encodeURIComponent(version) + '/purge', {
+        method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({reason: form.reason.value, confirm: form.confirm.value})
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          msg.textContent = response.ok ? 'Requested. The version shows as purged after the next publication run.'
+                                        : (body.message || body.detail || ('refused (' + response.status + ')'));
+        });
+      }).catch(function () { msg.textContent = 'the request failed; try again'; });
+    });
+  })();
+  </script>
+  {% endif %}
+</div>
+{% endblock %}

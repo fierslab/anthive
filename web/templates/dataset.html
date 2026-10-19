@@ -540,6 +540,7 @@
   <button type="button" class="tab-btn"        data-tab="de"       role="tab">Differential expression<span class="tab-count">{{ de_studies|length }}</span></button>
   {% endif %}
   {% if papers %}<button type="button" class="tab-btn" data-tab="papers" role="tab" id="tab-btn-papers">Papers<span class="tab-count">{{ papers|length }}</span></button>{% endif %}
+  <button type="button" class="tab-btn {{ view_class('artefacts') }}{% if not artefacts %} tab-empty{% endif %}" data-tab="artefacts" role="tab" id="tab-btn-artefacts" title="{{ view_tip('artefacts', 'Analysis files deposited with this dataset: DE tables, figures, tables, notebooks, reports, models.') }}">Artefacts{% if artefacts %}<span class="tab-count">{{ artefacts|length }}</span>{% endif %}</button>
   {# Downloads is always shown. The JS (loadFiles) adds .tab-empty when /files lists nothing and there are
      no paper PDFs: greyed, still clickable, the panel says there is nothing to download. #}
   <button type="button" class="tab-btn"        data-tab="downloads" role="tab" id="tab-btn-downloads">Downloads</button>
@@ -1198,6 +1199,27 @@
   {{ paper_list(papers) }}
 </section>
 {% endif %}
+
+{# ── Artefacts tab (REST 2.47; preview view `artefacts`) ───────────────────── #}
+{% from "_artefacts.html" import artefact_table, artefact_styles %}
+{% from "_macros.html" import review_banner as _art_banner, doc_toggle as _art_toggle, doc_block as _art_block %}
+<section class="tab-panel" id="tab-artefacts" role="tabpanel">
+  {{ _art_banner('artefacts') }}
+  {{ artefact_styles() }}
+  <h2 class="section-head">Artefacts{% if artefacts %} <span class="muted">{{ artefacts|length }}</span>{% endif %}
+    {{ _art_toggle('art-ds-help', 'About artefacts') }}</h2>
+  {% call _art_block('About artefacts', id='art-ds-help') %}
+    <p>Analysis files deposited with this dataset by members of the lab: DE tables (their studies are also
+    imported into the dataset's DE results), figures, tables, notebooks, reports and models. Each has
+    versions; a published version never changes. Open one to see what it was made from and to download its
+    files. The raw data of the dataset stays under Downloads.</p>
+  {% endcall %}
+  {% if artefacts %}
+  {{ artefact_table(artefacts) }}
+  {% else %}
+  <p class="muted">No artefacts for this dataset.</p>
+  {% endif %}
+</section>
 
 {# ── Downloads tab ────────────────────────────────────────────────────── #}
 <section class="tab-panel" id="tab-downloads" role="tabpanel">

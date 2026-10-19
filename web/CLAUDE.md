@@ -584,7 +584,8 @@ with `nh3`/`bleach` + a CSP if editing ever widens.)
   the **Facet group** (when the dataset has facets or module scores; see
   "Facet tab group" below) ·
   `Differential expression` (only when DE data) · `Papers` (only when linked
-  library papers) · `Downloads` (always; `loadFiles` adds `.tab-empty` and the
+  library papers) · `Artefacts` (always, 2.47; preview view `artefacts`, `.tab-empty` and "No artefacts for this
+  dataset." without any) · `Downloads` (always; `loadFiles` adds `.tab-empty` and the
   panel says "Nothing to download for this dataset" when `/files` lists nothing
   and there are no paper PDFs) · `Caveats` (always, pinned far right, **never
   default-active**; level colour with caveats, `.tab-empty` plus "No caveats
@@ -1005,3 +1006,28 @@ These rules come from the site audit (Fable, 2026-10-13) with Mark's overrides. 
 - Per donor plot page sized to the frame with a cleaned caption; plot pages "<kind> in <dataset>" without emoji.
 - `/datasets` redirects to `/`; the collection breadcrumb ends in the collection name; the library shows 50 papers at a time; the
   gene set Module score tab has a progress line.
+
+## Artefacts (2026-10-19, REST 2.47)
+
+- Registry key `artefacts` (not approved): the dataset page's **Artefacts** tab (between Papers and Downloads,
+  `#artefacts`, count badge, `.tab-empty` when none), the collection page's `#coll-artefacts` section (artefacts of
+  the collection and of its datasets, "Belongs to" column), and the artefact page `/artefacts/{group_id}/{scope}/{id}`
+  (`artefact.html`, `?version=N` for an older version, the tombstone for a purged one). Shared table macro in
+  `_artefacts.html`. Downloads stays raw h5ad + static only; artefacts never appear there.
+- Every fetch is `_api_get_as_user` (identity headers kept): the API decides visibility, redacts `made_from`
+  ("made from a dataset you cannot see") and logins. The purge form (`#art-purge-form`, POST
+  `/api/artefacts/.../v{N}/purge` with reason + typed ref) shows only to the artefact owner, the version's uploader
+  and admins (`_may_purge`); the API is the authority.
+- **Depositor text is never rendered raw** (unlike curated `.md` bodies): titles through `safe_markdown.plain`,
+  descriptions and change notes through `safe_markdown.render` (`lib/safe_markdown.py`: source escaped before
+  markdown, allowlist re-serialisation, http(s)/mailto/relative links only with `rel=nofollow noopener noreferrer`,
+  images dropped). The description of an analysis collection (written from a collection deposit) goes through it too.
+- File links point at the API download route with `download`; the API answers a 307 to a signed attachment link or
+  an attachment with `CSP: sandbox`, so active types (html, svg, notebooks) are never opened in the page. Only
+  `.webp` previews are shown inline (`/api/.../preview/...`).
+- Analysis collections (no datasets, `collection_kind: analysis` from `GET /groups/{id}`) render `folder.html` with
+  `analysis=True`: no dataset table or filter, a one-line "Analysis collection by ..." note, the artefact list. Any
+  other collection without visible datasets stays a 404.
+- Help: topic `artefacts` (`lib/help_content/topics/artefacts.yaml`, section `#artefacts` of help.html); the (i)
+  boxes `art-ds-help`, `art-coll-help`, `art-help`. Tests: `tests/test_web_artefacts.py`, `tests/test_safe_markdown.py`.
+
