@@ -177,8 +177,10 @@ def _is_artefact_path(rel: str) -> bool:
     """True for anything under ``<Group>/static/artefacts/`` (the artefact store, REST 2.47).
 
     The watcher writes those objects itself (with ``x-amz-meta-sha256``, which purge and the download check
-    rely on), so ant-sync neither pushes nor pulls them: a push would re-upload them without that metadata
-    and could bring back a purged version from a stale checkout. Phase A4 adds the proper pull rules.
+    rely on), so the generic push and pull never touch them: a push would re-upload them without that
+    metadata and could bring back a purged version from a stale checkout. ``ant-sync pull`` handles them
+    separately afterwards (``lib/artefact_sync.py``: inline files and previews, ``--artefacts PATTERN`` for
+    the others, purged versions deleted locally).
     """
     parts = Path(rel).parts[:-1]
     return any(parts[index] == 'static' and parts[index + 1] == 'artefacts' for index in range(len(parts) - 1))
@@ -1344,6 +1346,7 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
                   "the priority fill already pulls duckdbs with their sidecars)")
         _run_priority(args, policy, s3_cfg, data_folder,
                       do_evict=args.evict, do_pull=True, dry_run=dry_run)
+        _pull_artefacts(args, cfg, s3_cfg, data_folder, dry_run, policy['min_free_bytes'])
         return
 
     # Policy mode determines the candidate extension set BEFORE
@@ -1477,6 +1480,33 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
     if skipped_no_fit:
         print(f"  skipped (no room)={skipped_no_fit}", end='')
     print()
+    _pull_artefacts(args, cfg, s3_cfg, data_folder, dry_run, policy['min_free_bytes'])
+
+
+def _pull_artefacts(args, cfg: dict, s3_cfg: dict, data_folder: Path, dry_run: bool,
+                    min_free_bytes: Optional[int]) -> None:
+    """The artefact store's pull rules (doc/DESIGN_artefacts.md section 11): inline files and previews of
+    live versions, the files of artefacts ``--artefacts PATTERN`` selects, local copies of purged versions
+    deleted. Head records and manifests come with the h5adstore checkout, never from here."""
+    if getattr(args, 'no_artefacts', False) or (args.filter and not getattr(args, 'artefacts', None)):
+        return
+    import artefact_sync  # noqa: PLC0415
+    from config import get_artefact_settings  # noqa: PLC0415
+
+    settings = get_artefact_settings(cfg)
+    client = _s3_client(s3_cfg)
+    inline_max = int(float(settings['artefacts_inline_max_mb']) * 1024 ** 2)
+    actions = artefact_sync.plan(data_folder, client, s3_cfg['bucket'], settings['catalog_prefix'], inline_max,
+                                 getattr(args, 'artefacts', None))
+    if not actions:
+        print('artefacts: up to date')
+        return
+    counts = artefact_sync.apply(actions, data_folder, client, s3_cfg['bucket'], dry_run=dry_run,
+                                 min_free_bytes=min_free_bytes)
+    print(f"artefacts: {'would download' if dry_run else 'downloaded'}={counts['downloaded']}  "
+          f"{'would delete' if dry_run else 'deleted'}={counts['deleted']}  failed={counts['failed']}  "
+          f"notes={counts['notes']}" + (f"  skipped (no room)={counts['skipped_no_room']}"
+                                        if counts['skipped_no_room'] else ''))
 
 
 def cmd_evict(args, s3_cfg: dict, data_folder: Path) -> None:
@@ -1757,6 +1787,14 @@ def main() -> None:
               "or h5adstore git pull."),
     )
 
+    pull_sub.add_argument(
+        '--artefacts', default=None, metavar='PATTERN',
+        help=('Also pull the large files of these artefacts (comma-separated fnmatch patterns on '
+              '<group_id>/<scope>/<artefact_id> or ...@v<N>, e.g. "S20/SIE/*"). Inline files and previews '
+              'of live versions are always pulled; purged versions are deleted locally.'),
+    )
+    pull_sub.add_argument('--no-artefacts', action='store_true',
+                          help='skip the artefact store (static/artefacts/) in this pull')
     pull_sub.add_argument('--no-library', action='store_true',
                           help='skip the library PDFs and the literature index')
     pull_sub.add_argument('--library-only', action='store_true',
