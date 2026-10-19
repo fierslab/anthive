@@ -767,7 +767,7 @@ def test_check_counts_datasets_like_the_catalog_scan(tmp_path, ant_stack):
 def test_internal_access_line_for_an_empty_store(tmp_path, ant_stack):
     site = _site(ant_stack, tmp_path)
     line, warning = ant_stack.internal_access_summary(site, 0, 0)
-    assert line.startswith('no datasets yet') and warning is None
+    assert line == '' and warning is None          # check already warned "no datasets yet" (2.46.2)
 
 
 def test_publish_library_says_up_to_date_when_nothing_was_pushed(tmp_path, ant_stack, library_repo, capsys):

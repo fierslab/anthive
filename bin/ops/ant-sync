@@ -1830,5 +1830,17 @@ def main() -> None:
         cmd_stamp(args, s3_cfg, data_folder)
 
 
+def _run() -> int:
+    """main() with an unreachable S3 endpoint reported in one line instead of a traceback."""
+    from botocore.exceptions import ConnectionError as BotoConnectionError, ReadTimeoutError  # noqa: PLC0415
+    try:
+        main()
+    except (BotoConnectionError, ReadTimeoutError) as error:
+        endpoint = (get_config().get('s3') or {}).get('endpoint') or 'the default AWS endpoint'
+        print(f'Error: cannot reach the S3 endpoint {endpoint}: {error}', file=sys.stderr)
+        return 3
+    return 0
+
+
 if __name__ == '__main__':
-    main()
+    sys.exit(_run())

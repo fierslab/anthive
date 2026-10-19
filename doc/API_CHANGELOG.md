@@ -57,6 +57,35 @@ Deployment:
   S3 URL, and the access log wrote that URL with its credential and signature. Sites pick this up with the new
   Caddyfile (image rebuild or `ant-stack up`). Tested against Caddy 2.10.2 and 2.11.4
   (`tests/test_caddy_access_log.py`).
+- `ant-stack check` (and `up`, which runs it) compares `site.yaml` with `site.example.yaml`: an unknown key
+  under `auth`, `tls`, `ports`, `s3`, `services`, `datasets` or `data` is a PROBLEM, anywhere else (top level
+  included) a WARNING, each with the closest known key ("did you mean 'internal_requires_auth'?"). Before, a
+  misspelt `auth: internal_requires_auht: false` or `auth: mdoe` was merged over the defaults and ignored.
+  `site.docs_base_url`, `auth.smtp` and `anthive:` stay free-form where they were.
+- A rendered config that `lib/config.py` refuses is one `PROBLEM  rendered <file> is invalid: <message>` line
+  in `check` instead of a Python traceback.
+- `check` on an empty store prints one "no datasets yet: <store> has no dataset .md files ..." warning
+  instead of that warning plus a second "no datasets yet" line.
+- `ant-stack watch` prints the command it runs on stderr before it starts the watcher.
+- Container sites render `mcp.mcp_url: <public_url>/mcp`. ant-mcp's instructions said "This MCP server is
+  reachable at: http://0.0.0.0:8090/mcp" (the container listener); without `mcp.mcp_url` the address is now
+  `<mcp.public_base_url>/mcp`, and without either the line is left out.
+- `ant sync` with an unreachable S3 endpoint exits 3 with one line ("cannot reach the S3 endpoint ...")
+  instead of a botocore traceback.
+- Deposit watcher (`ant-ingest-watch`): listing the incoming prefix uses its own client with 3 retries and
+  10 s / 60 s connect / read timeouts, so an unreachable endpoint ends the poll within about a minute (the
+  loop backs off and retries) instead of hanging silently for 20 adaptive attempts of 30 s. Every failed S3
+  attempt is logged ("S3 ListObjectsV2 attempt 2 failed (EndpointConnectionError: ...)"); transfers keep
+  their patient retries. The first SIGTERM/SIGINT says it stops after the current step; a second one exits
+  at once (an interrupted swap is rolled back by the next run).
+
+REST wording:
+
+- `/me/mcp` and the chat routes without an identity answer 401 "sign-in required: this request carries no
+  user identity (no Remote-User header from the login proxy)" instead of "chat endpoint requires
+  authentication".
+
+Tests: `tests/test_scratch_site_2462.py`.
 
 ## 2.46.1 (2026-10-18)
 

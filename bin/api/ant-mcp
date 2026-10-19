@@ -643,6 +643,16 @@ def _parse_args() -> argparse.Namespace:
 
 # ── main ───────────────────────────────────────────────────────────────────────
 
+def _mcp_public_url(mcp_url: Optional[str], public_base_url: Optional[str]) -> Optional[str]:
+    """The address the instructions give clients: ``mcp.mcp_url``, else ``<public_base_url>/mcp``, else None.
+
+    Never the bind address: ``http://0.0.0.0:8090/mcp`` (the container listener) is useless to a client."""
+    for candidate, suffix in ((mcp_url, ''), (public_base_url, '/mcp')):
+        if candidate and str(candidate).strip():
+            return str(candidate).strip().rstrip('/') + suffix
+    return None
+
+
 def main() -> None:
     args = _parse_args()
     api_base_url = args.api_url.rstrip('/')
@@ -651,7 +661,8 @@ def main() -> None:
     # ant-serve as the users' browsers reach it: Caddy serves it under /api
     # (config/Caddyfile, handle_path /api/*). Links printed by tools use this.
     public_api_url = f'{public_url}/api'
-    mcp_public_url = (args.mcp_url or f'http://{args.host}:{args.port}/mcp').rstrip('/')
+    mcp_public_url = _mcp_public_url(args.mcp_url, _anthive_cfg.get('public_base_url'))
+    mcp_local_url = f'http://{args.host}:{args.port}/mcp'
 
     require_token = bool(_anthive_cfg.get('require_token', True))
     AnthiveMCP.require_identity = require_token
@@ -823,7 +834,7 @@ def main() -> None:
             '  When this header is present, plot and analytics_viz embed the image as a base64\n'
             '  content block so it renders inline; the URL is always included as well.\n'
             '\n'
-            f'This MCP server is reachable at: {mcp_public_url}'
+            + (f'This MCP server is reachable at: {mcp_public_url}' if mcp_public_url else '')
         ),
     )
 
@@ -831,7 +842,8 @@ def main() -> None:
     # written there corrupts the protocol, so the banner goes to stderr.
     banner_stream = sys.stderr if args.transport == 'stdio' else sys.stdout
     print('Anthive MCP server', file=banner_stream)
-    print(f'  MCP URL:    {mcp_public_url}', file=banner_stream)
+    print(f'  MCP URL:    {mcp_public_url or mcp_local_url + " (local; set mcp.mcp_url for the public one)"}',
+          file=banner_stream)
     print(f'  API URL:    {api_base_url}', file=banner_stream)
     print(f'  Plots dir:  {plots_dir or "(none — using data: URIs)"}', file=banner_stream)
     print(f'  Public URL: {public_url}', file=banner_stream)

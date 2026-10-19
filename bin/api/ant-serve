@@ -2345,7 +2345,7 @@ def _get_chat_history(cfg) -> ChatHistory:
 
 
 def _chat_user_from_request(request: Request) -> str:
-    """Pull the Authelia/nginx Remote-User header off an incoming request.
+    """Pull the Authelia/nginx Remote-User header off an incoming request (chat and /me/mcp routes).
 
     Locked per pika #217 §9: chat history is keyed on Authelia Remote-User
     × session_id. If Remote-User is missing the request is unauthenticated
@@ -2358,8 +2358,8 @@ def _chat_user_from_request(request: Request) -> str:
     if not user:
         raise HTTPException(
             status_code=401,
-            detail="chat endpoint requires authentication "
-                   "(Remote-User header not set)",
+            detail="sign-in required: this request carries no user identity "
+                   "(no Remote-User header from the login proxy)",
         )
     return user
 
