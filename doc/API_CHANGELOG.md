@@ -175,6 +175,36 @@ rescan, a git commit of the head record and manifest, and the guarded delete of 
 interrupted publication is finished by the next poll from its resume marker with the same version.
 Collection deposits create `<Group>/index.md`; a public one is held.
 
+### DE tables as artefacts (phase A3)
+
+- `kind: "de_table"` is accepted (it was refused with 422 in A2). Scope: a dataset (not `_group`). Files: DE
+  tables (`.tsv`, `.csv`, gzip of those), each with its `<table>.mus` (role `sidecar`, set by the server);
+  a table without its sidecar or a sidecar without its table is 422 `invalid`. At complete the sidecars are
+  read back from staging: the keys their `de_format` needs (term, contrast, method; `auto` is missing), the
+  scope dataset named (`de_dataset_id` or `de_dataset_h5ad`) and one study id per table, else 422
+  `de_mismatch`.
+- Publication checks every table against the server's DE presets (required columns after the `de_map_`
+  keys, at least one row, p-values and adjusted p-values in [0, 1], finite log fold changes, at least 50% of
+  the genes in the dataset; warnings for adjusted p below raw p in more than 1% of rows, fewer than 90% genes
+  matched, duplicated genes within a contrast, a contrast that does not say its direction (`A_vs_B`), and
+  sidecar keys that point at the uploader's systems), then imports the tables into the dataset's DE tables,
+  all or nothing (the 2.46 DE-only import, shared: a copy of the duckdb, release / restore, a patch version
+  of the dataset whose changelog names `artefact <ref>@v<N>`). A new version of the same artefact replaces
+  its own study (the previous one is archived under `_versions/<basename>/de/<study>/`); a study id that
+  another artefact or route imported is refused unless an admin deposited it. The manifest's `de` block holds
+  per table `{file, sidecar, study_id, rows, genes_matched, sign_convention, de_format, de_term, de_contrast,
+  de_method, ...}` and `imported: {study_ids, rows, imported_at, dataset_version_after, replaced, archived}`.
+- Purging a `de_table` version removes its studies from the dataset (all or nothing, a patch version with a
+  changelog line and a caveat `DE study <id> removed: purged artefact <ref>@v<N>`) unless a newer live version
+  of the artefact imported the same study id.
+- `deposit_kind: "de_only"` (and a 2.46 DE-only body: `update_of` with files of kind `de`) is taken as a
+  `de_table` artefact where artefacts are on, until 2.48.0: the answer adds `alias_of: "de_only"` and a
+  warning; the artefact id comes from the first table's name; a table that is already an artefact of the
+  dataset becomes its next version when the caller owns it (or is an admin), else 409 `artefact_exists`.
+  Provenance gaps are warnings for the alias. Where artefacts are off the 2.46 route is unchanged.
+- `ant artefacts-migrate-de` (`--dry-run`, the default; `--apply --yes`) turns `<Group>/de_sources/` tables
+  into `de_table` artefacts v1 without importing again; the copied sidecar keeps only the DE keys.
+
 ## 2.46.2 (unreleased)
 
 Security patch. No endpoint, parameter or response field changes. Clients do not need to update.

@@ -1,8 +1,8 @@
 # Design: the artefact store
 
 Status: design 2026-10-16, approved by Mark with the section 16 defaults on 2026-10-18. Phase A1 (read
-side) and A2 (deposits, publication, versions, purge) built 2026-10-18 for REST 2.47.0, see sections 17
-and 18. Section 23 of `doc/DESIGN_dataset_ingestion.md`
+side), A2 (deposits, publication, versions, purge) and A3 (de_table, 2026-10-19) built for REST 2.47.0,
+see sections 17 to 19. Section 23 of `doc/DESIGN_dataset_ingestion.md`
 points here.
 It builds on the S3 watch route (that document's section 21) and the deposit API (section 22, REST 2.46.0
 and 2.46.1, `lib/dataset_deposit.py`, `vark datasets ...`). Nothing in this document changes those routes
@@ -787,3 +787,43 @@ prefixes only, every object it created deleted). Where this document was silent 
   `static/artefacts/**/preview/` in its `.gitignore` (the watcher commits only head records, manifests and
   `index.md`, by path, but a hand `git add -A` would pick the files up). The `site.yaml` `artefacts:` block,
   the read-key secrets and `ant-stack check` are A4 as planned.
+
+---
+
+## 19. Phase A3 as built (2026-10-19)
+
+`lib/artefact_de.py` (the section 6.2 checks), `ingest_pipeline.import_de_all_or_nothing` (the DE-only
+route's import, extracted unchanged and shared; it can also remove studies and append a caveat), the
+`de_table` steps of `lib/artefact_pipeline.py`, the server rules and the `de_only` alias in
+`lib/artefact_deposit.py`, `lib/artefact_migrate.py` with `bin/ingest/ant-artefacts-migrate-de`. Tests:
+`tests/test_artefact_de.py` (with the real `ant-de-ingest`), the de_table part of `test_artefact_e2e_s3.py`.
+Choices:
+
+- **Order of the steps.** The import runs after the file copies and before the manifest, under the dataset's
+  writer lock: a version whose import fails never becomes real. Its copies are deleted (only keys of that
+  version carrying the sha256 this deposit placed) and its marker dropped, so the next deposit gets the same
+  number cleanly. A kill after the import is recognised by the changelog line naming `artefact <ref>@v<N>
+  (deposit <id>)`; the study is never imported twice.
+- **Study ownership.** A study id belongs to the artefact whose live versions list it in `de.imported`. A
+  new version of that artefact replaces it (archived, as an admin replacement in 2.46); any other clash needs
+  an admin, as in 2.46. Purge removes a study only when no other live version of the artefact lists it.
+- **Sign convention.** The table cannot prove the direction of a comparison. The check reads the contrast:
+  `A_vs_B` (or `A vs B`) is recorded as "positive log2 fold change = higher in A than in B"; any other contrast
+  is a warning. Nothing compares the sign with the data.
+- **Versions known for `made_from`.** A dataset published before it had a changelog loses its first version
+  from the `.md` at the first patch bump; `changelog_versions` now also knows the version a first patch entry
+  implies (`1.0.0` before `1.0.1`), and `h5ad_sha256_at` treats it as preceding every entry.
+- **Sidecars.** API deposits keep the `.mus` as uploaded (a warning names keys such as `abspath`,
+  `eln_*`, `s3_*`, which are served with the table); the migration copies only the DE keys.
+- **`de_only` alias.** Only where artefacts are on, for one minor release; the rights of the 2.46 route
+  (dataset uploaders) still apply to it. The artefact id comes from the first table's name, not from the
+  sidecar's `de_study_id`, because the sidecar is not uploaded yet when the deposit is created.
+- **Migration dry run on the dev store (2026-10-19, `/data/1/project/h5adstore`, read-only: no file in the
+  store changed).** Four tables found. `Sierksma2020/de_sources/de/DE_ARM_vs_HM1.tsv.gz` and
+  `DE_HM1_vs_HM2.tsv.gz` would become `S20/SIE/de-arm-vs-hm1` and `S20/SIE/de-hm1-vs-hm2`, but the served duckdb
+  holds no DE study at all (no `__de_study`, no `.de.parquet`): the imports were lost or never made, so these
+  would be artefacts without an import record. The two `Sun2026/de_sources/*/res_TvsC_sh*.tsv` tables are
+  skipped: their sidecars name `de_dataset_id=AQB`, and no Sun2026 dataset has that id (DUN, AQR, AQM). Both
+  need a decision before `--apply`: deposit the Sierksma tables again as `de_table` artefacts (which imports
+  them), and correct the Sun2026 sidecars to the dataset they belong to.
+
