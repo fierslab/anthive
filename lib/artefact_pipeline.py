@@ -102,6 +102,166 @@ def _absent(exc: BaseException) -> bool:
     return _code(exc) in ('404', 'NoSuchKey', 'NotFound')
 
 
+#: endings a browser runs or renders as active content: stored as octet-stream, attachment (review C8)
+ACTIVE_ENDINGS = ('.html', '.htm', '.xhtml', '.svg', '.js', '.mjs', '.xml', '.qmd', '.rmd', '.ipynb')
+
+
+def stored_type(name: str) -> Tuple[str, str]:
+    """(Content-Type, Content-Disposition) the object is stored with. Active types never keep their own type."""
+    filename = PurePosixPath(name).name
+    disposition = f'attachment; filename="{filename}"'
+    if rules.file_extension(name) in ACTIVE_ENDINGS:
+        return 'application/octet-stream', disposition
+    return rules.content_type_for(name), disposition
+
+
+SCAN_CHUNK = 1024 * 1024
+SCAN_OVERLAP = 16 * 1024
+DONOR_ROW_CAP = 2_000_000
+#: endings the donor identifier scan reads (review C7: also parquet, xlsx, json, text)
+DONOR_SCAN_ENDINGS = ('.tsv', '.csv', '.tsv.gz', '.csv.gz', '.txt', '.json', '.parquet', '.xlsx', '.yaml', '.yml',
+                      '.md')
+TOKEN_RE = __import__('re').compile(r'[A-Za-z0-9][A-Za-z0-9:_.\-]{2,}')
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(SCAN_CHUNK), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def scan_secrets(path: Path) -> List[str]:
+    """The secret scan over a file in chunks with an overlap, never the whole file in memory (review S4)."""
+    found: set = set()
+    tail = b''
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(SCAN_CHUNK), b''):
+            window = tail + chunk
+            found.update(rules.secret_findings(window))
+            tail = window[-SCAN_OVERLAP:]
+            newline = tail.find(b'\n')
+            if newline >= 0:              # the next window starts at a line start (the patterns anchor on ^)
+                tail = tail[newline + 1:]
+    return sorted(found)
+
+
+def _token_hits(values: set, tokens) -> set:
+    return {token for token in tokens if token in values}
+
+
+def donor_hits(path: Path, name: str, values: set, row_cap: int = DONOR_ROW_CAP) -> Tuple[int, bool]:
+    """Distinct crosswalk values (aliases and canonical uids, lower case) found in a table or text file, and
+    whether the row cap cut the scan. Streamed; tables cell by cell, text files token by token, parquet through
+    DuckDB, xlsx from its shared strings and sheets (never extracted to disk)."""
+    import csv  # noqa: PLC0415
+    import gzip  # noqa: PLC0415
+    lower = name.lower()
+    hits: set = set()
+    rows = 0
+    try:
+        if lower.endswith(('.tsv', '.csv', '.tsv.gz', '.csv.gz')):
+            handle = gzip.open(path, 'rt', encoding='utf-8', errors='replace', newline='') if lower.endswith('.gz') \
+                else open(path, 'r', encoding='utf-8', errors='replace', newline='')
+            with handle:
+                for row in csv.reader(handle, delimiter='\t' if '.tsv' in lower else ','):
+                    rows += 1
+                    if rows > row_cap:
+                        return len(hits), True
+                    hits.update(cell.strip().lower() for cell in row if cell.strip().lower() in values)
+        elif lower.endswith('.parquet'):
+            import duckdb  # noqa: PLC0415
+            connection = duckdb.connect()
+            try:
+                cursor = connection.execute('SELECT * FROM read_parquet(?) LIMIT ?', [str(path), row_cap + 1])
+                while True:
+                    batch = cursor.fetchmany(10000)
+                    if not batch:
+                        break
+                    for row in batch:
+                        rows += 1
+                        if rows > row_cap:
+                            return len(hits), True
+                        hits.update(str(cell).strip().lower() for cell in row
+                                    if cell is not None and str(cell).strip().lower() in values)
+            finally:
+                connection.close()
+        elif lower.endswith('.xlsx'):
+            import xml.etree.ElementTree as ElementTree  # noqa: PLC0415
+            with zipfile.ZipFile(path) as archive:
+                for member in archive.namelist():
+                    if not (member == 'xl/sharedStrings.xml' or member.startswith('xl/worksheets/')):
+                        continue
+                    with archive.open(member) as handle:
+                        for _event, element in ElementTree.iterparse(handle):
+                            if element.tag.endswith('}t') or element.tag.endswith('}v'):
+                                rows += 1
+                                if rows > row_cap:
+                                    return len(hits), True
+                                text = (element.text or '').strip().lower()
+                                if text in values:
+                                    hits.add(text)
+                            element.clear()
+        else:
+            with open(path, 'r', encoding='utf-8', errors='replace') as handle:
+                for line in handle:
+                    rows += 1
+                    if rows > row_cap:
+                        return len(hits), True
+                    hits.update(_token_hits(values, (token.lower() for token in TOKEN_RE.findall(line))))
+    except (OSError, EOFError, zipfile.BadZipFile, ValueError) as exc:
+        raise Stop('failed', f'{name} could not be read for the donor identifier scan ({exc})')
+    except Exception as exc:  # noqa: BLE001 - e.g. a parquet DuckDB cannot read: never a silent pass
+        raise Stop('failed', f'{name} could not be read for the donor identifier scan ({type(exc).__name__})')
+    return len(hits), False
+
+
+class RangedObject(io.RawIOBase):
+    """A seekable read-only view of one S3 object through ranged GETs pinned to its ETag (zip central directory
+    of an archive that is not kept on the watcher's disk)."""
+
+    def __init__(self, s3: Any, bucket: str, key: str, etag: str, size: int):
+        super().__init__()
+        self.s3, self.bucket, self.key, self.etag, self.size = s3, bucket, key, etag, size
+        self.position = 0
+        self.ranges = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self.position
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        base = {0: 0, 1: self.position, 2: self.size}[whence]
+        self.position = max(0, min(self.size, base + offset))
+        return self.position
+
+    def read(self, size: int = -1) -> bytes:
+        if self.position >= self.size:
+            return b''
+        end = self.size if size is None or size < 0 else min(self.size, self.position + size)
+        if end <= self.position:
+            return b''
+        self.ranges += 1
+        if self.ranges > 1000:
+            raise OSError('too many ranged reads for one archive')
+        response = self.s3.get_object(Bucket=self.bucket, Key=self.key, IfMatch=f'"{self.etag}"',
+                                      Range=f'bytes={self.position}-{end - 1}')
+        data = response['Body'].read()
+        self.position += len(data)
+        return data
+
+    def readinto(self, buffer) -> int:
+        data = self.read(len(buffer))
+        buffer[:len(data)] = data
+        return len(data)
+
+
 @dataclass
 class FileCheck:
     """What the hash step learnt about one file."""
@@ -375,9 +535,11 @@ class ArtefactPublisher:
         return f'{group_id}/{file_id}' if group_id and file_id else None
 
     def _scope_lock_path(self, path: artefacts.ArtefactPath, scope_md: Optional[Path]) -> Path:
-        """The scope's writer lock: the dataset's ``<stem>.duckdb.lock``, or ``static/artefacts/_group.lock``."""
+        """The artefact lock of a scope: ``<stem>.artefacts.lock`` next to the dataset, or
+        ``static/artefacts/_group.lock``. The duckdb's own writer lock is taken only around a DE import or study
+        removal (review C9: placement and purge never block annotation writers)."""
         if scope_md is not None:
-            return scope_md.with_suffix('.duckdb')
+            return scope_md.with_suffix('.artefacts')
         base = self.store_root / path.group / artefacts.ARTEFACTS_PARTS[0] / artefacts.ARTEFACTS_PARTS[1]
         base.mkdir(parents=True, exist_ok=True)
         return base / artefacts.GROUP_SCOPE
@@ -464,19 +626,24 @@ class ArtefactPublisher:
     def _keep_bytes(self, kind: str, name: str, size: int) -> bool:
         """Read into the work dir: inline files and files whose content the checks read."""
         ending = rules.file_extension(name)
+        limit = float(self.settings.get('artefacts_content_check_max_gb', 2)) * 1024 ** 3
         if kind == 'de_table':
-            return True                       # read in full by the DE checks and the import
-        inline = kind == 'figure' or size <= float(self.settings.get('artefacts_inline_max_mb', 2)) * 1024 ** 2
+            return size <= limit              # read by the DE checks and the import (larger: the check fails)
+        inline = (kind == 'figure' and size <= limit) \
+            or size <= float(self.settings.get('artefacts_inline_max_mb', 2)) * 1024 ** 2
         content = ending in rules.TEXT_EXTENSIONS or ending in rules.TABLE_EXTENSIONS or ending == '.zip' \
-            or kind in ('notebook', 'figure')
+            or ending in DONOR_SCAN_ENDINGS or kind in ('notebook', 'figure')
         return inline or (content and size <= float(self.settings.get('artefacts_content_check_max_gb', 2)) * 1024 ** 3)
 
     def _qc(self, record: Dict[str, Any], block: Dict[str, Any], checks: List[FileCheck], declared_rows: List[Dict[str, Any]],
             public: bool, approval: Optional[Dict[str, Any]],
-            extra: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+            extra: Optional[List[Dict[str, Any]]] = None,
+            extra_held: Sequence[Tuple[str, str]] = (),
+            objs_by_name: Optional[Dict[str, ObjInfo]] = None) -> Dict[str, Any]:
         """Section 6.1 generic checks plus ``extra`` (the DE checks of section 6.2). Returns the report; raises
         Stop for errors and held reasons."""
         kind = block['kind']
+        objs_by_name = objs_by_name or {}
         results: List[Dict[str, Any]] = []
 
         def add(check_id: str, status: str, summary: str, fix: str = '') -> None:
@@ -508,7 +675,7 @@ class ArtefactPublisher:
             if problem:
                 type_problems.append(problem)
             elif rules.file_extension(check.name) == '.zip' or rules.file_extension(check.name) in ('.xlsx', '.docx'):
-                problem = self._zip_problem(check)
+                problem = self._zip_problem(check, objs_by_name.get(check.name))
                 if problem:
                     type_problems.append(problem)
         add('files.type', 'fail' if type_problems else 'pass', '; '.join(type_problems) or 'types agree with endings')
@@ -528,21 +695,30 @@ class ArtefactPublisher:
         secrets_found = []
         donors_found = []
         crosswalk_values = self._crosswalk_values()
+        not_scanned = []
         for check in checks:
             ending = rules.file_extension(check.name)
-            data = check.local.read_bytes() if check.local is not None and check.local.exists() else None
-            if data is None:
-                if ending in rules.TEXT_EXTENSIONS or ending in rules.TABLE_EXTENSIONS:
-                    add('content.read', 'warn', f'{check.name} is larger than the content check limit; not scanned')
+            local = check.local if check.local is not None and check.local.exists() else None
+            scannable = ending in rules.TEXT_EXTENSIONS or ending in DONOR_SCAN_ENDINGS or ending == '.mus'
+            if local is None:
+                if scannable:
+                    not_scanned.append(check.name)   # review C7: held, never a silent pass
                 continue
             if ending in rules.TEXT_EXTENSIONS or ending == '.mus':
-                found = rules.secret_findings(data)
+                found = scan_secrets(local)
                 if found:
                     secrets_found.append(f'{check.name}: {", ".join(found)}')
-            if ending in rules.TABLE_EXTENSIONS and crosswalk_values:
-                hits = self._donor_hits(check.name, data, crosswalk_values)
+            if ending in DONOR_SCAN_ENDINGS and crosswalk_values:
+                hits, truncated = donor_hits(local, check.name, crosswalk_values)
                 if hits:
                     donors_found.append(f'{check.name}: {hits} value(s)')
+                if truncated:
+                    add('content.donors_cap', 'warn', f'{check.name}: only the first {DONOR_ROW_CAP} rows were '
+                                                      f'scanned for donor identifiers')
+        if not_scanned:
+            held.append('not_scanned')
+            add('content.not_scanned', 'held', 'larger than the content check limit, not scanned: '
+                + ', '.join(not_scanned), 'an admin looks at the files, or raise artefacts_content_check_max_gb')
         if secrets_found:
             held.append('possible_secret')
             add('content.secrets', 'held', '; '.join(secrets_found), 'remove the secret and deposit a new version')
@@ -558,6 +734,9 @@ class ArtefactPublisher:
             held.append('public_access')
             add('access.public', 'held', 'the artefact will be public: an admin publishes it')
         results.extend(extra or [])
+        for reason, summary in extra_held:
+            held.append(reason)
+            add(reason.replace('_', '.', 1), 'held', summary)
         approved = set((approval or {}).get('reasons') or [])
         remaining = [reason for reason in held if reason not in approved]
         failed = [entry for entry in results if entry['status'] == 'fail']
@@ -573,12 +752,16 @@ class ArtefactPublisher:
             raise Stop('held', 'held for an admin: ' + ', '.join(remaining), report, held=remaining)
         return report
 
-    def _zip_problem(self, check: FileCheck) -> Optional[str]:
-        """Central directory only, never extracted: names without ``..`` or absolute paths, sane totals."""
-        if check.local is None:
-            return None
+    def _zip_problem(self, check: FileCheck, obj: Optional[ObjInfo] = None) -> Optional[str]:
+        """Central directory only, never extracted: names without ``..`` or absolute paths, sane totals. An
+        archive not kept in the work dir is read with ranged GETs pinned to its ETag (review C7)."""
+        source: Any = check.local
+        if source is None:
+            if obj is None:
+                return f'{check.name}: the archive could not be read for its central directory'
+            source = RangedObject(self.s3, self.bucket, obj.key, obj.etag, check.size)
         try:
-            with zipfile.ZipFile(check.local) as archive:
+            with zipfile.ZipFile(source) as archive:
                 total = 0
                 for info in archive.infolist():
                     name = info.filename
@@ -607,25 +790,6 @@ class ArtefactPublisher:
                     if value and len(str(value)) >= 4:
                         values.add(str(value).strip().lower())
         return values
-
-    @staticmethod
-    def _donor_hits(name: str, data: bytes, values: set) -> int:
-        import csv  # noqa: PLC0415
-        import gzip  # noqa: PLC0415
-        try:
-            if name.lower().endswith('.gz'):
-                data = gzip.GzipFile(fileobj=io.BytesIO(data)).read(256 * 1024 ** 2)
-            text = data.decode('utf-8', errors='replace')
-        except (OSError, EOFError):
-            return 0
-        delimiter = '\t' if '.tsv' in name.lower() else ','
-        hits = set()
-        for row in csv.reader(io.StringIO(text), delimiter=delimiter):
-            for cell in row:
-                value = cell.strip().lower()
-                if value in values:
-                    hits.add(value)
-        return len(hits)
 
     # ── publish an artefact ─────────────────────────────────────────────────
     def publish_artefact(self, record: Dict[str, Any], files: List[Dict[str, Any]], objs: List[ObjInfo],
@@ -677,6 +841,12 @@ class ArtefactPublisher:
         policy = artefacts.AccessPolicy(collections, self._mus_access(mds), self._folder_db_ids(folders))
         public = block.get('access') != 'internal' and (
             policy.dataset_public(scope_db_id) if scope_db_id else policy.collection_public(group_id))
+        # review S1: a public artefact must not name internal datasets it was made from (held for an admin)
+        hidden_sources = [entry['db_id'] for entry in made_from if not policy.dataset_public(entry['db_id'])] \
+            if public else []
+        extra_held = [('made_from_internal', f'the artefact will be public but was made from internal '
+                                             f'dataset(s) {", ".join(hidden_sources)}: an admin decides (or deposit '
+                                             f'it with access internal)')] if hidden_sources else []
         # hash and QC (skipped when a marker shows they passed before the placement started) --------------
         marker = self.load_marker(record['id'])
         work = self.work_root / f'artefact_{record["id"]}'
@@ -694,12 +864,15 @@ class ArtefactPublisher:
             de_tables: List[Dict[str, Any]] = []
             if kind == 'de_table':
                 de_checks, de_tables = self._de_checks(scope_db_id, scope_md, files, work)
-            report = self._qc(record, block, checks, files, public, approval, extra=de_checks)
+            report = self._qc(record, block, checks, files, public, approval, extra=de_checks,
+                              extra_held=extra_held,
+                              objs_by_name={entry['name']: obj for entry, obj in zip(files, objs)})
         # version, placement, manifest, head record: under the scope's writer lock ---------------------------
         lock = self._scope_lock_path(path, scope_md)
         with writer_lock(lock, timeout=600):
             head = self._read_head(path)
-            if head is not None:
+            published = [v for v in (head or {}).get('versions') or [] if v['state'] in ('live', 'purging', 'purged')]
+            if head is not None and published:
                 live = [v['version'] for v in head['versions'] if v['state'] == 'live']
                 latest = max(live) if live else None
                 if marker is None:
@@ -715,6 +888,8 @@ class ArtefactPublisher:
                     raise Stop('failed', f'{ref} is a {head.get("kind")}; the kind cannot change')
             elif block.get('new_version_of') is not None and marker is None:
                 raise Stop('failed', f'version_conflict: {ref} does not exist')
+            if head is not None and head.get('kind') != kind:
+                raise Stop('failed', f'{ref} is a {head.get("kind")}; the kind cannot change')
             if marker is None:
                 existing_numbers = [v['version'] for v in (head or {}).get('versions') or []]
                 if len(existing_numbers) >= int(self.settings.get('artefacts_max_versions', 100)):
@@ -729,39 +904,59 @@ class ArtefactPublisher:
                           'approval': ({'by': approval.get('by'), 'reasons': approval.get('reasons') or [],
                                         'date': approval.get('date')} if approval else None)}
                 self.save_marker(record['id'], marker)
+                # the number is reserved in the head record before any copy (review S3): a failed placement
+                # marks it failed and a later deposit takes the next number, never this one again
+                head = self._reserve_version(path, head, record, number, block.get('access') or 'inherit')
             number = int(marker['version'])
             outcome.version = number
             outcome.warnings = list(marker.get('warnings') or outcome.warnings)
             report = marker.get('report') or report
-            # the files: server-side copies, never overwriting a key of the version
-            for obj, entry in zip(objs, files):
-                info = marker['files'][entry['name']]
-                self._place(path, number, entry['name'], obj, info, record, ref)
-            if kind == 'de_table' and 'imported' not in marker['steps']:
-                self._de_import(record, path, ref, number, scope_db_id, scope_md, objs, files, work, marker, outcome)
-                marker['steps'].append('imported')
-                self.save_marker(record['id'], marker)
-            if 'local' not in marker['steps']:
-                self._local_copies(path, number, kind, files, work, marker, outcome)
-                marker['steps'].append('local')
-                self.save_marker(record['id'], marker)
-            if marker.get('manifest'):            # resumed: exactly the manifest decided before the interruption
-                raw = marker['manifest'].encode('utf-8')
-                manifest = json.loads(raw.decode('utf-8'))
-            else:
-                manifest = self._manifest(record, block, path, group_id, number, marker, files)
-                raw = (json.dumps(manifest, indent=2, sort_keys=False) + '\n').encode('utf-8')
-                marker['manifest'] = raw.decode('utf-8')
-                self.save_marker(record['id'], marker)
-            manifest_sha = hashlib.sha256(raw).hexdigest()
-            # written last on S3: its existence makes the version real
-            self._put_once(path.manifest_rel(number), raw, manifest_sha, record, ref, marker)
-            self._write_local_once(path.manifest_rel(number), raw, group)
-            if 'head' not in marker['steps']:
-                self._update_head(path, head, record, manifest, number, manifest_sha)
-                marker['steps'].append('head')
-                self.save_marker(record['id'], marker)
-        # serve, commit, done ------------------------------------------------------------------------------
+            try:
+                head = self._place_version(record, block, path, ref, group, group_id, number, kind, scope_db_id,
+                                           scope_md, objs, files, work, marker, outcome, head)
+            except Stop as stop:
+                if stop.state != 'held':
+                    self._abandon_version(path, number, marker, record, str(stop))
+                raise
+        return self._finish_publication(record, path, ref, group_id, scope, artefact_id, number, kind, scope_md,
+                                        objs, work, report, outcome)
+
+    def _place_version(self, record, block, path, ref, group, group_id, number, kind, scope_db_id, scope_md, objs,
+                       files, work, marker, outcome, head):
+        """Copies, DE import, local copies, manifest and head record of one version (under the scope lock)."""
+        # the files: server-side copies, never overwriting a key of the version
+        for obj, entry in zip(objs, files):
+            info = marker['files'][entry['name']]
+            self._place(path, number, entry['name'], obj, info, record, ref)
+        if kind == 'de_table' and 'imported' not in marker['steps']:
+            self._de_import(record, path, ref, number, scope_db_id, scope_md, objs, files, work, marker, outcome)
+            marker['steps'].append('imported')
+            self.save_marker(record['id'], marker)
+        if 'local' not in marker['steps']:
+            self._local_copies(path, number, kind, files, work, marker, outcome)
+            marker['steps'].append('local')
+            self.save_marker(record['id'], marker)
+        if marker.get('manifest'):            # resumed: exactly the manifest decided before the interruption
+            raw = marker['manifest'].encode('utf-8')
+            manifest = json.loads(raw.decode('utf-8'))
+        else:
+            manifest = self._manifest(record, block, path, group_id, number, marker, files)
+            raw = (json.dumps(manifest, indent=2, sort_keys=False) + '\n').encode('utf-8')
+            marker['manifest'] = raw.decode('utf-8')
+            self.save_marker(record['id'], marker)
+        manifest_sha = hashlib.sha256(raw).hexdigest()
+        # written last on S3: its existence makes the version real
+        self._put_once(path.manifest_rel(number), raw, manifest_sha, record, ref, marker)
+        self._write_local_once(path.manifest_rel(number), raw, group)
+        if 'head' not in marker['steps']:
+            self._update_head(path, self._read_head(path), record, manifest, number, manifest_sha)
+            marker['steps'].append('head')
+            self.save_marker(record['id'], marker)
+        return head
+
+    def _finish_publication(self, record, path, ref, group_id, scope, artefact_id, number, kind, scope_md, objs,
+                            work, report, outcome):
+        """After the scope lock: the DE sidecar push, rescans, served check, git commit, cleanup."""
         commit_paths = [path.head_rel, path.manifest_rel(number)]
         if kind == 'de_table':
             self._push_de_sidecar(scope_md, outcome.warnings)
@@ -822,21 +1017,26 @@ class ArtefactPublisher:
         key = artefacts.s3_key(self.catalog_prefix, path.file_rel(number, name))
         existing = self._head_or_none(key)
         if existing is not None:
-            if _meta_of(existing).get('sha256') == info['sha256'] and int(existing.get('ContentLength', -1)) == info['size']:
+            existing_meta = _meta_of(existing)
+            # reused only when it is exactly this file AND this deposit placed it (review S3)
+            if existing_meta.get('sha256') == info['sha256'] and existing_meta.get('deposit') == record['id'] \
+                    and int(existing.get('ContentLength', -1)) == info['size']:
                 return
             raise Stop('needs_decision', f'{key} already exists with other content; a version is never overwritten')
         metadata = {'sha256': info['sha256'], 'deposit': record['id'], 'artefact': f'{ref}@v{number}'}
         source = {'Bucket': self.bucket, 'Key': obj.key}
         condition = f'"{obj.etag}"'
-        content_type = rules.content_type_for(name)
+        content_type, disposition = stored_type(name)
         try:
             if obj.size <= dataset_deposit.SINGLE_PUT_HARD_MAX:
                 self.s3.copy_object(Bucket=self.bucket, Key=key, CopySource=source, Metadata=metadata,
-                                    MetadataDirective='REPLACE', CopySourceIfMatch=condition, ContentType=content_type)
+                                    MetadataDirective='REPLACE', CopySourceIfMatch=condition, ContentType=content_type,
+                                    ContentDisposition=disposition)
             else:
                 self.s3.copy(source, self.bucket, key, ExtraArgs={'Metadata': metadata, 'MetadataDirective': 'REPLACE',
                                                                   'CopySourceIfMatch': condition,
-                                                                  'ContentType': content_type})
+                                                                  'ContentType': content_type,
+                                                                  'ContentDisposition': disposition})
         except Exception as exc:  # noqa: BLE001
             if _code(exc) in ('PreconditionFailed', '412'):
                 raise Stop('needs_decision', f'{name} changed in incoming during the copy')
@@ -847,6 +1047,13 @@ class ArtefactPublisher:
             raise TransientError(f'the copy of {name} could not be verified')
         if '-' not in obj.etag and str(placed.get('ETag', '')).strip('"') != obj.etag:
             raise Stop('needs_decision', f'the copy of {name} is not the checked object (ETag differs)')
+        if '-' in obj.etag:
+            # a multipart source: the copy has its own composite ETag, and the store may ignore
+            # CopySourceIfMatch. The source still carrying the checked ETag after the copy means the bytes copied
+            # were the checked ones (review C6).
+            source_now = self._head_or_none(obj.key)
+            if source_now is None or str(source_now.get('ETag', '')).strip('"') != obj.etag:
+                raise Stop('needs_decision', f'{name} changed in incoming during the copy')
 
     def _head_or_none(self, key: str) -> Optional[Dict[str, Any]]:
         try:
@@ -874,6 +1081,20 @@ class ArtefactPublisher:
         if placed is None or _meta_of(placed).get('sha256') != sha:
             raise TransientError(f'{rel.name} could not be verified on S3')
 
+    def _copy_local_once(self, rel: PurePosixPath, source: Path, sha256: str, group: str) -> None:
+        """A local inline copy, streamed (a temp file renamed over the target); an existing other file stops."""
+        target = self.store_root / str(rel)
+        ensure_inside(target, self._artefacts_root(group))
+        if target.exists():
+            if sha256_file(target) == sha256:
+                return
+            raise Stop('needs_decision', f'{rel} exists locally with other content')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        ensure_inside(target, self._artefacts_root(group))
+        partial = target.with_name(f'.{target.name}.partial')
+        shutil.copyfile(source, partial)
+        os.replace(partial, target)
+
     def _write_local_once(self, rel: PurePosixPath, raw: bytes, group: str) -> None:
         target = self.store_root / str(rel)
         if target.exists():
@@ -890,13 +1111,14 @@ class ArtefactPublisher:
             source = work / name
             if not source.is_file():
                 continue
-            if hashlib.sha256(source.read_bytes()).hexdigest() != marker['files'][name]['sha256']:
+            if sha256_file(source) != marker['files'][name]['sha256']:
                 outcome.warnings.append(f'{name}: the work copy changed; no inline copy')
                 continue
             inline = kind == 'figure' or entry['size'] <= float(self.settings.get('artefacts_inline_max_mb', 2)) * 1024 ** 2
             try:
                 if inline:
-                    self._write_local_once(path.file_rel(number, name), source.read_bytes(), path.group)
+                    self._copy_local_once(path.file_rel(number, name), source, marker['files'][name]['sha256'],
+                                          path.group)
                 preview = self._make_preview(name, source)
                 if preview is not None:
                     suffix, data = preview
@@ -966,8 +1188,11 @@ class ArtefactPublisher:
         if head is None:
             head = {'artefact_id': path.artefact_id, 'kind': path.kind, 'scope': path.scope, 'owner': record['user'],
                     'created': today, 'title': manifest['title'], 'latest': None, 'versions': []}
+        if not any(entry['state'] in ('live', 'purging', 'purged') for entry in head['versions']):
+            head = {**head, 'owner': record['user'], 'created': today}   # the first published version: its owner
         versions = [entry for entry in head['versions'] if entry['version'] != number]
-        versions.append({'version': number, 'state': 'live', 'manifest_sha256': manifest_sha, 'published': today})
+        versions.append({'version': number, 'state': 'live', 'manifest_sha256': manifest_sha, 'published': today,
+                         'access': manifest.get('access') or 'inherit'})
         versions.sort(key=lambda entry: entry['version'])
         live = [entry['version'] for entry in versions if entry['state'] == 'live']
         head = {**head, 'title': manifest['title'], 'latest': max(live) if live else None, 'versions': versions}
@@ -1151,6 +1376,16 @@ class ArtefactPublisher:
                 return 'failed', 'no such version in the head record'
             if entry['state'] == 'purged':
                 return 'done', 'already purged'
+            if entry['state'] == 'failed':
+                deleted = self.cleanup_failed_version(path, number, log_key)
+                entry.update({'state': 'purged', 'purged': _today(), 'purged_by': row['requested_by'],
+                              'purge_reason': row.get('reason') or ''})
+                if row.get('by_admin'):
+                    entry['purged_by_admin'] = True
+                self._write_head(path, head)
+                return 'done', f'failed version cleaned up ({len(deleted)} object(s) deleted)'
+            if entry['state'] == 'reserved':
+                return 'needs_decision', 'the version is still reserved by a publication in progress'
             manifest_path = self.store_root / str(path.manifest_rel(number))
             if not manifest_path.is_file():
                 return 'needs_decision', 'the manifest of the version is missing locally; nothing deleted'
@@ -1177,7 +1412,7 @@ class ArtefactPublisher:
                 for suffix in artefacts.PREVIEW_TYPES:
                     rel = path.preview_rel(number, f'{item["name"]}{suffix}')
                     local = self.store_root / str(rel)
-                    sha = hashlib.sha256(local.read_bytes()).hexdigest() if local.is_file() else None
+                    sha = sha256_file(local) if local.is_file() else None
                     if self._head_or_none(artefacts.s3_key(self.catalog_prefix, rel)) is not None:
                         if self._guarded_delete(artefacts.s3_key(self.catalog_prefix, rel), version_prefix, sha,
                                                 log_key) == 'differs':
@@ -1191,7 +1426,8 @@ class ArtefactPublisher:
                 ensure_inside(version_dir, self._artefacts_root(path.group))
                 shutil.rmtree(version_dir)
             entry.update({'state': 'purged', 'purged': _today(), 'purged_by': row['requested_by'],
-                          'purge_reason': row.get('reason') or ''})
+                          'purge_reason': row.get('reason') or '',
+                          'access': entry.get('access') or manifest.get('access') or 'inherit'})
             if row.get('by_admin'):
                 entry['purged_by_admin'] = True
             live = [v['version'] for v in head['versions'] if v['state'] == 'live']
@@ -1279,7 +1515,7 @@ class ArtefactPublisher:
         """The work-dir copy of a file, read again (pinned to its ETag) when a restart lost it."""
         target = work / entry['name']
         ensure_inside(target, work)
-        if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == sha256:
+        if target.is_file() and sha256_file(target) == sha256:
             return target
         check = self._hash(obj, entry, target)
         if check.sha256 != sha256:
@@ -1353,10 +1589,11 @@ class ArtefactPublisher:
         import_work = self.work_root / f'artefact_{record["id"]}_import'
         shutil.rmtree(import_work, ignore_errors=True)
         try:
-            version, archived, warnings = import_de_all_or_nothing(
-                store_root=self.store_root, md=scope_md, db_id=scope_db_id, work=import_work, tables=tables,
-                replace=clashes, runner=self.de_runner, api=_Api(self.api), today=today_iso(), change=change,
-                archive=self._archive_study)
+            with writer_lock(duckdb_path, timeout=600):
+                version, archived, warnings = import_de_all_or_nothing(
+                    store_root=self.store_root, md=scope_md, db_id=scope_db_id, work=import_work, tables=tables,
+                    replace=clashes, runner=self.de_runner, api=_Api(self.api), today=today_iso(), change=change,
+                    archive=self._archive_study)
         except DeImportFailed as exc:
             self._remove_version_copies(path, number, marker)
             raise Stop('failed', f'the DE table {exc.table} could not be imported: {friendly_de_error(exc.output)} '
@@ -1497,12 +1734,75 @@ class ArtefactPublisher:
         work = self.work_root / f'purge_{hashlib.sha1(ref.encode()).hexdigest()[:12]}'
         shutil.rmtree(work, ignore_errors=True)
         try:
-            import_de_all_or_nothing(store_root=self.store_root, md=scope_md, db_id=db_id, work=work, tables=[],
-                                     replace=[], remove=remove, runner=self.de_runner, api=_Api(self.api),
-                                     today=today_iso(), change=lambda _archived: message + '.', caveat=caveat)
+            with writer_lock(duckdb_path, timeout=600):
+                import_de_all_or_nothing(store_root=self.store_root, md=scope_md, db_id=db_id, work=work, tables=[],
+                                         replace=[], remove=remove, runner=self.de_runner, api=_Api(self.api),
+                                         today=today_iso(), change=lambda _archived: message + '.', caveat=caveat)
         except DeImportFailed as exc:
             return f'the DE study could not be removed ({exc.output}); nothing deleted'
         finally:
             shutil.rmtree(work, ignore_errors=True)
         return None
+
+    # ── version reservation (review S3) ──────────────────────────────────────
+    def _reserve_version(self, path: artefacts.ArtefactPath, head: Optional[Dict[str, Any]], record: Dict[str, Any],
+                         number: int, access: str) -> Dict[str, Any]:
+        """Add ``{version: N, state: reserved, deposit_id, access}`` to the head record (local and S3)."""
+        today = _today()
+        if head is None:
+            head = {'artefact_id': path.artefact_id, 'kind': path.kind, 'scope': path.scope, 'owner': record['user'],
+                    'created': today, 'title': json.loads(record.get('artefact') or '{}').get('title') or '',
+                    'latest': None, 'versions': []}
+        if any(entry['version'] == number for entry in head['versions']):
+            return head
+        versions = list(head['versions']) + [{'version': number, 'state': 'reserved', 'published': today,
+                                              'deposit_id': record['id'], 'access': access}]
+        head = {**head, 'versions': versions}
+        self._write_head(path, head)
+        return head
+
+    def _abandon_version(self, path: artefacts.ArtefactPath, number: int, marker: Dict[str, Any],
+                         record: Dict[str, Any], reason: str) -> None:
+        """A version that will not be published: delete its copies (keys of this version that this deposit
+        placed, by sha256 and deposit mark), mark the head record entry failed, drop the marker."""
+        self._remove_version_copies(path, number, marker)
+        head = self._read_head_quiet(path)
+        if head is None:
+            return
+        changed = False
+        for entry in head['versions']:
+            if entry['version'] == number and entry['state'] == 'reserved':
+                entry.update({'state': 'failed', 'failed': _today(),
+                              'failure': dataset_deposit.clean_note(reason, 300)})
+                changed = True
+        if changed:
+            try:
+                self._write_head(path, head)
+            except (Stop, TransientError) as exc:
+                self.log(f'artefacts: the failed version v{number} of {path.rel} could not be recorded ({exc})')
+
+    def _read_head_quiet(self, path: artefacts.ArtefactPath) -> Optional[Dict[str, Any]]:
+        try:
+            return self._read_head(path)
+        except Stop:
+            return None
+
+    def cleanup_failed_version(self, path: artefacts.ArtefactPath, number: int, log_key: str) -> List[str]:
+        """Admin cleanup of a failed version: delete every object under ``.../v<N>/`` that carries the failed
+        deposit's mark (a listing of that one version prefix, filtered by the deposit id the head record names),
+        then the version becomes a tombstone. Returns the keys deleted."""
+        head = self._read_head(path)
+        entry = next((item for item in (head or {}).get('versions') or [] if item['version'] == number), None)
+        if entry is None or entry['state'] != 'failed' or not entry.get('deposit_id'):
+            raise Stop('failed', f'v{number} is not a failed version')
+        prefix = artefacts.s3_key(self.catalog_prefix, path.version_rel(number)) + '/'
+        deleted = []
+        for page in self.s3.get_paginator('list_objects_v2').paginate(Bucket=self.bucket, Prefix=prefix):
+            for obj in page.get('Contents', []) or []:
+                head_object = self._head_or_none(obj['Key'])
+                if head_object is None or _meta_of(head_object).get('deposit') != entry['deposit_id']:
+                    continue
+                if self._guarded_delete(obj['Key'], prefix, _meta_of(head_object).get('sha256'), log_key) == 'deleted':
+                    deleted.append(obj['Key'])
+        return deleted
 

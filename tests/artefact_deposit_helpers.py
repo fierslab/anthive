@@ -40,6 +40,7 @@ class ArtefactFakeS3(DepositFakeS3):
         super().__init__(clock)
         self.presign_log: List[tuple] = []
         self.content_types: Dict[str, str] = {}
+        self.dispositions: Dict[str, str] = {}
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f'the artefact route must not call S3 {name}')
@@ -63,11 +64,13 @@ class ArtefactFakeS3(DepositFakeS3):
 
     def copy_object(self, Bucket: str, Key: str, CopySource: dict, Metadata: Optional[dict] = None,  # noqa: N803
                     MetadataDirective: str = 'COPY', CopySourceIfMatch: Optional[str] = None,  # noqa: N803
-                    ContentType: Optional[str] = None) -> None:  # noqa: N803
+                    ContentType: Optional[str] = None, ContentDisposition: Optional[str] = None) -> None:  # noqa: N803
         super().copy_object(Bucket=Bucket, Key=Key, CopySource=CopySource, Metadata=Metadata,
                             MetadataDirective=MetadataDirective, CopySourceIfMatch=CopySourceIfMatch)
         if ContentType:
             self.content_types[Key] = ContentType
+        if ContentDisposition:
+            self.dispositions[Key] = ContentDisposition
 
     def generate_presigned_url(self, operation: str, Params: dict, ExpiresIn: int):  # noqa: N803
         self.presign_log.append((operation, Params['Key']))

@@ -318,7 +318,7 @@ def test_failed_checks_change_nothing(tmp_path, clock):
     assert s3.keys(CATALOG) == []
 
 
-def test_an_import_failure_changes_nothing_and_frees_the_version(tmp_path, clock):
+def test_an_import_failure_changes_nothing_and_records_the_failed_version(tmp_path, clock):
     class FailingRunner:
         def run(self, label, cmd, cwd=None, timeout=None):
             return 1, 'ant-de-ingest: --term is required'
@@ -331,12 +331,15 @@ def test_an_import_failure_changes_nothing_and_frees_the_version(tmp_path, clock
     assert row['state'] == 'failed' and 'de_term=' in row['error'] and 'Nothing was changed' in row['error']
     assert (tmp_path / 'store' / 'Public2021' / 'int.duckdb').read_bytes() == duckdb_before
     assert (tmp_path / 'store' / MD).read_text() == md_before
-    assert s3.keys(CATALOG) == [] and publisher.load_marker(answer['deposit_id']) is None
-    # a corrected deposit gets v1 cleanly, with the real tool
+    head_key = f'{CATALOG}Public2021/static/artefacts/int/de_table/tvc/artefact.md'
+    assert s3.keys(CATALOG) == [head_key] and publisher.load_marker(answer['deposit_id']) is None
+    head = artefacts.parse_head_record(s3.objects[head_key]['body'].decode())
+    assert [(v['version'], v['state']) for v in head['versions']] == [(1, 'failed')] and head['latest'] is None
+    # a corrected deposit is published with the real tool as v2 (a failed number is never reused)
     fresh, db2, _git, _api = make_publisher(tmp_path, s3, clock)
     retry = deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
     poll_until_final(fresh, s3, clock)
-    assert watch_row(db2, retry['deposit_id'])['version'] == 'v1'
+    assert watch_row(db2, retry['deposit_id'])['version'] == 'v2'
 
 
 @pytest.mark.parametrize('step', ['before_import', 'after_import'])

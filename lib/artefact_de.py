@@ -28,9 +28,10 @@ import gzip
 import io
 import math
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 DE_TABLE_EXTS = ('.tsv', '.csv', '.tsv.gz', '.csv.gz')
 MIN_ROWS = 1
@@ -72,20 +73,27 @@ def is_table(name: str) -> bool:
     return name.lower().endswith(DE_TABLE_EXTS)
 
 
-def read_table(path: Path) -> Tuple[List[str], List[List[str]]]:
-    """Header and rows of a DE table (tab for ``.tsv``, comma for ``.csv``; gzip by ending). An empty header
-    cell is named ``column<i>``, as DuckDB's ``read_csv_auto`` (and so ``ant-de-ingest``) names it."""
+@contextmanager
+def open_table(path: Path) -> Iterator[Tuple[List[str], Iterator[List[str]]]]:
+    """Header and a row iterator of a DE table, streamed (tab for ``.tsv``, comma for ``.csv``; gzip by ending;
+    never the whole file in memory, review S4). An empty header cell is named ``column<i>``, as DuckDB's
+    ``read_csv_auto`` (and so ``ant-de-ingest``) names it."""
     name = path.name.lower()
-    raw = path.read_bytes()
-    if name.endswith('.gz'):
-        raw = gzip.decompress(raw)
-    text = raw.decode('utf-8-sig')
-    delimiter = '\t' if '.tsv' in name else ','
-    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-    header = next(reader, None) or []
-    columns = [column.strip() or f'column{index}' for index, column in enumerate(header)]
-    rows = [row for row in reader if any(cell.strip() for cell in row)]
-    return columns, rows
+    handle = gzip.open(path, 'rt', encoding='utf-8-sig', newline='') if name.endswith('.gz') \
+        else open(path, 'r', encoding='utf-8-sig', newline='')
+    try:
+        reader = csv.reader(handle, delimiter='\t' if '.tsv' in name else ',')
+        header = next(reader, None) or []
+        columns = [column.strip() or f'column{index}' for index, column in enumerate(header)]
+        yield columns, (row for row in reader if any(cell.strip() for cell in row))
+    finally:
+        handle.close()
+
+
+def read_table(path: Path) -> Tuple[List[str], List[List[str]]]:
+    """Header and every row (small tables and tests; the checks stream with :func:`open_table`)."""
+    with open_table(path) as (columns, rows):
+        return columns, list(rows)
 
 
 def resolve_columns(preset: Any, meta: Dict[str, str], columns: Sequence[str]) -> Dict[str, str]:
@@ -135,7 +143,8 @@ def sign_convention(contrast: Optional[str]) -> Optional[str]:
 
 def check_table(path: Path, file_name: str, sidecar_name: str, meta: Dict[str, str], *, file_id: str,
                 dataset_basename: str, db_id: str, genes: Optional[Set[str]], study_id: str) -> TableResult:
-    """Every section 6.2 check of one table. Errors are ``fail`` entries; nothing raises for bad content."""
+    """Every section 6.2 check of one table, streamed. Errors are ``fail`` entries; nothing raises for bad
+    content."""
     from de_presets import PRESETS  # noqa: PLC0415
     from ingest_pipeline import de_sidecar_names, de_sidecar_problems  # noqa: PLC0415
 
@@ -157,71 +166,53 @@ def check_table(path: Path, file_name: str, sidecar_name: str, meta: Dict[str, s
     if local:
         add('de.sidecar_local_keys', 'warn', f'the sidecar holds {", ".join(local)} (paths or ids of your systems); '
                                              f'it is served with the table', 'remove these keys before depositing')
+    preset = PRESETS.get(str(meta.get('de_format') or ''))
     try:
-        columns, rows = read_table(path)
+        with open_table(path) as (columns, rows):
+            if preset is None:
+                result.rows = sum(1 for _row in rows)
+                return result
+            mapped = resolve_columns(preset, meta, columns)
+            missing = [anthive for anthive in preset.required_in_file if anthive not in mapped]
+            if missing:
+                fits = fitting_presets(PRESETS, columns)
+                add('de.columns', 'fail', f'columns for {", ".join(missing)} are missing for de_format '
+                                          f'{preset.name} (the file has {", ".join(columns[:12])})',
+                    (f'the columns fit de_format {", ".join(fits)}' if fits else
+                     f'map them with de_map_<column>=<your column>, e.g. de_map_{missing[0]}=<column>'))
+                result.rows = sum(1 for _row in rows)
+                return result
+            add('de.columns', 'pass', f'required columns of {preset.name} present')
+            stats = _scan_rows(rows, columns, mapped, meta)
     except (OSError, UnicodeDecodeError, EOFError, csv.Error) as exc:
         add('de.read', 'fail', f'cannot be read as a table ({exc})')
         return result
-    result.rows = len(rows)
-    preset = PRESETS.get(str(meta.get('de_format') or ''))
-    if preset is None:
-        return result
-    mapped = resolve_columns(preset, meta, columns)
-    missing = [anthive for anthive in preset.required_in_file if anthive not in mapped]
-    if missing:
-        fits = fitting_presets(PRESETS, columns)
-        add('de.columns', 'fail', f'columns for {", ".join(missing)} are missing for de_format '
-                                  f'{preset.name} (the file has {", ".join(columns[:12])})',
-            (f'the columns fit de_format {", ".join(fits)}' if fits else
-             f'map them with de_map_<column>=<your column>, e.g. de_map_{missing[0]}=<column>'))
-        return result
-    add('de.columns', 'pass', f'required columns of {preset.name} present')
-    if len(rows) < MIN_ROWS:
+    result.rows = stats['rows']
+    if stats['rows'] < MIN_ROWS:
         add('de.rows', 'fail', 'the table has no rows')
         return result
-    add('de.rows', 'pass', f'{len(rows)} rows')
-    index = {column: position for position, column in enumerate(columns)}
-
-    def column(anthive: str) -> List[str]:
-        source = mapped.get(anthive)
-        if source is None:
-            return []
-        position = index[source]
-        return [row[position] if position < len(row) else '' for row in rows]
-    out_of_range: Dict[str, int] = {}
-    pvalues = [_number(value) for value in column('pvalue')]
-    padjs = [_number(value) for value in column('padj')]
-    for name, values in (('pvalue', pvalues), ('padj', padjs)):
-        bad = sum(1 for value in values if value is not None and (math.isnan(value) or not 0 <= value <= 1))
-        if bad:
-            out_of_range[name] = bad
-    if out_of_range:
+    add('de.rows', 'pass', f'{stats["rows"]} rows')
+    if stats['out_of_range']:
         add('de.pvalues', 'fail', 'values outside [0, 1] (or not numbers): ' + ', '.join(
-            f'{name} {count} row(s)' for name, count in out_of_range.items()), 'export raw p-values and FDR, not -log10')
-    elif pvalues or padjs:
+            f'{name} {count} row(s)' for name, count in stats['out_of_range'].items()),
+            'export raw p-values and FDR, not -log10')
+    elif stats['has_p']:
         add('de.pvalues', 'pass', 'p-values and adjusted p-values within [0, 1]')
-    pairs = [(p, q) for p, q in zip(pvalues, padjs) if p is not None and q is not None]
-    if pairs:
-        below = sum(1 for p, q in pairs if q < p - 1e-12)
-        if below / len(pairs) > PADJ_BELOW_P_WARN:
-            add('de.padj_order', 'warn', f'the adjusted p-value is smaller than the raw p-value in {below} of '
-                                         f'{len(pairs)} rows', 'check that padj and pvalue are not swapped')
-    effect_name = 'log2fc' if 'log2fc' in mapped else ('estimate' if 'estimate' in mapped else None)
-    if effect_name:
-        effects = [_number(value) for value in column(effect_name)]
-        bad = sum(1 for value in effects if value is not None and not math.isfinite(value))
-        if bad:
-            add('de.effects', 'fail', f'{effect_name} is not a finite number in {bad} row(s)')
+    if stats['pairs'] and stats['below'] / stats['pairs'] > PADJ_BELOW_P_WARN:
+        add('de.padj_order', 'warn', f'the adjusted p-value is smaller than the raw p-value in {stats["below"]} of '
+                                     f'{stats["pairs"]} rows', 'check that padj and pvalue are not swapped')
+    if stats['effect_name']:
+        if stats['bad_effects']:
+            add('de.effects', 'fail', f'{stats["effect_name"]} is not a finite number in {stats["bad_effects"]} row(s)')
         else:
-            add('de.effects', 'pass', f'{effect_name} finite')
-    gene_values = [value.strip() for value in column('gene')]
-    if genes is not None and gene_values:
-        distinct = {value for value in gene_values if value}
+            add('de.effects', 'pass', f'{stats["effect_name"]} finite')
+    distinct = stats['genes']
+    if genes is not None and distinct:
         matched = len(distinct & genes)
-        fraction = matched / len(distinct) if distinct else 0.0
+        fraction = matched / len(distinct)
         if fraction < GENE_MATCH_ERROR:
             folded = {gene.lower() for gene in genes}
-            fraction_folded = sum(1 for value in distinct if value.lower() in folded) / len(distinct) if distinct else 0
+            fraction_folded = sum(1 for value in distinct if value.lower() in folded) / len(distinct)
             add('de.genes', 'fail', f'{fraction:.0%} of {len(distinct)} gene identifiers are genes of {db_id}'
                 + (f' ({fraction_folded:.0%} ignoring case)' if fraction_folded > fraction else ''),
                 'use the gene names of the dataset (symbols, not Ensembl ids, or the other way round)')
@@ -232,18 +223,9 @@ def check_table(path: Path, file_name: str, sidecar_name: str, meta: Dict[str, s
         result.genes_matched = round(fraction, 4)
     elif genes is None:
         add('de.genes', 'warn', f'the genes of {db_id} could not be read; not compared')
-    contrasts = column('contrast') or [str(meta.get('de_contrast') or '')] * len(gene_values)
-    terms = column('term') or [''] * len(gene_values)
-    seen: Set[Tuple[str, str, str]] = set()
-    duplicates = 0
-    for term, contrast, gene in zip(terms, contrasts, gene_values):
-        key = (term, contrast, gene)
-        if key in seen:
-            duplicates += 1
-        seen.add(key)
-    if duplicates:
-        add('de.duplicates', 'warn', f'{duplicates} duplicated gene(s) within one contrast')
-    stated = [value for value in {contrast.strip() for contrast in contrasts} if value]
+    if stats['duplicates']:
+        add('de.duplicates', 'warn', f'{stats["duplicates"]} duplicated gene(s) within one contrast')
+    stated = sorted(stats['contrasts'])
     conventions = {value: sign_convention(value) for value in stated}
     unclear = sorted(value for value, convention in conventions.items() if convention is None)
     if unclear:
@@ -254,3 +236,49 @@ def check_table(path: Path, file_name: str, sidecar_name: str, meta: Dict[str, s
     elif stated and not unclear:
         result.sign_convention = 'positive log2 fold change = higher in the first group of each contrast (A_vs_B)'
     return result
+
+def _scan_rows(rows: Iterator[List[str]], columns: Sequence[str], mapped: Dict[str, str],
+               meta: Dict[str, str]) -> Dict[str, Any]:
+    """One pass over the rows: counts, ranges, gene set, duplicates per (term, contrast), contrasts."""
+    index = {column: position for position, column in enumerate(columns)}
+
+    def position(anthive: str) -> Optional[int]:
+        source = mapped.get(anthive)
+        return index[source] if source is not None else None
+    p_at, q_at, gene_at = position('pvalue'), position('padj'), position('gene')
+    effect_name = 'log2fc' if 'log2fc' in mapped else ('estimate' if 'estimate' in mapped else None)
+    effect_at = position(effect_name) if effect_name else None
+    term_at, contrast_at = position('term'), position('contrast')
+    fixed_contrast = str(meta.get('de_contrast') or '')
+    stats: Dict[str, Any] = {'rows': 0, 'out_of_range': {}, 'has_p': p_at is not None or q_at is not None,
+                             'pairs': 0, 'below': 0, 'effect_name': effect_name, 'bad_effects': 0, 'genes': set(),
+                             'duplicates': 0, 'contrasts': set()}
+    seen: Set[Tuple[str, str, str]] = set()
+
+    def cell(row: List[str], at: Optional[int]) -> str:
+        return row[at] if at is not None and at < len(row) else ''
+    for row in rows:
+        stats['rows'] += 1
+        p_value, q_value = _number(cell(row, p_at)), _number(cell(row, q_at))
+        for name, value in (('pvalue', p_value), ('padj', q_value)):
+            if value is not None and (math.isnan(value) or not 0 <= value <= 1):
+                stats['out_of_range'][name] = stats['out_of_range'].get(name, 0) + 1
+        if p_value is not None and q_value is not None and not math.isnan(p_value) and not math.isnan(q_value):
+            stats['pairs'] += 1
+            stats['below'] += q_value < p_value - 1e-12
+        if effect_at is not None:
+            effect = _number(cell(row, effect_at))
+            if effect is not None and not math.isfinite(effect):
+                stats['bad_effects'] += 1
+        gene = cell(row, gene_at).strip()
+        if gene:
+            stats['genes'].add(gene)
+        contrast = cell(row, contrast_at).strip() if contrast_at is not None else fixed_contrast.strip()
+        if contrast:
+            stats['contrasts'].add(contrast)
+        key = (cell(row, term_at), contrast, gene)
+        if key in seen:
+            stats['duplicates'] += 1
+        seen.add(key)
+    return stats
+

@@ -421,7 +421,7 @@ def test_purge_deletes_exactly_the_listed_keys_and_leaves_a_tombstone(tmp_path, 
     entry = _index(tmp_path).get('PU1', 'int', 'volcano')
     assert entry.versions[1].state == 'purged' and entry.versions[1].purged_by == 'root'
     assert entry.versions[1].purged_by_admin and entry.latest == 2
-    tombstone = artefacts.tombstone(entry.versions[1], artefacts.Viewer(sees_internal=True))
+    tombstone = artefacts.tombstone(entry.versions[1], artefacts.Viewer(sees_internal=True, user='alice'))
     assert tombstone['purged_by'] == 'an admin' and tombstone['purge_reason'] == 'wrong contrast'
     deleted = [call[1] for call in s3.calls if call[0] == 'delete' and call[1].startswith(CATALOG)]
     assert all(key.startswith(base + 'v1/') for key in deleted) and len(deleted) == 3   # 2 files + manifest
