@@ -465,7 +465,7 @@ def test_help_page_lists_the_new_mcp_tools():
 @pytest.mark.parametrize('topic', ['facet-overview', 'facet-replication', 'r-value', 'k-of-m', 'fdr', 'per-cell-per-donor',
                                    'differential-expression', 'rank-among-gene-sets', 'module-replication', 'donor-plots',
                                    'donor-variability', 'facet-replicate-unit', 'facet-tested', 'module-scores',
-                                   'facet-effects', 'facet-scopes'])
+                                   'facet-effects', 'facet-scopes', 'artefacts'])
 def test_every_explain_target_named_in_the_mcp_exists(topic):
     import sys  # noqa: PLC0415
     sys.path.insert(0, str(REPO_ROOT / 'lib'))

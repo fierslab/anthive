@@ -235,6 +235,12 @@ and `lib/config.py` (anthive.yaml loader).
   `artefacts_enabled` is on, admins always there; the generic routes accept all three kinds (the service shows a
   caller only their own deposits). `POST /artefacts/{gid}/{scope}/{id}/{version}/purge` records a purge request
   (202); the watcher carries it out. Tests: `tests/test_artefact_deposit_api.py` (rights matrix).
+- **Collections and artefacts over MCP** (2.47): `list_collections` (`GET /collections`), `list_artefacts`, `get_artefact`,
+  open to every caller (the API decides visibility; no role gate). Depositor text is labelled as such, download links are
+  `public_api_url` + the API download route, never a signed URL. `_deposit_groups` adds `artefacts_upload_groups` and
+  `collections_create_groups` where `artefacts_enabled`, so analysts see `my_deposits` / `deposit_status`. No upload
+  over MCP. Tests: `tests/test_mcp_artefacts.py`. `GET /collections` (visibility: a dataset collection with a visible
+  dataset, an analysis collection by its index.md access) is tested in `tests/test_artefacts_api.py`.
 - **Catalog scan** walks the store with `lib/h5adstore.catalog_dataset_mds` (2.46.1), the same helper
   `ant-stack check` counts with: store-root documents, `static/` documents, `index.md`/`README.md`,
   `_` folders and inactive datasets are never datasets.
