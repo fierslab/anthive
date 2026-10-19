@@ -28,7 +28,7 @@ _SERVE_WANTED = {'_require_dataset_uploader', '_deposit_call', '_caller_is_admin
                  'dataset_deposit_vocab', 'dataset_deposit_list', 'dataset_deposit_create', 'dataset_deposit_status',
                  'dataset_deposit_report', 'dataset_deposit_urls', 'dataset_deposit_complete',
                  'dataset_deposit_withdraw', 'dataset_deposit_approve', 'dataset_deposit_reject', 'dataset_deposit_retry',
-                 'dataset_deposit_set_owner', 'dataset_deposit_expire', 'dataset_deposit_group'}
+                 'dataset_deposit_set_owner', 'dataset_deposit_expire', 'dataset_deposit_group', '_deposit_rights'}
 
 CURATOR = {'Remote-User': 'alice', 'Remote-Groups': 'users,curators', 'Remote-Email': 'alice@example.org',
            'Remote-Name': 'Alice Smith'}
