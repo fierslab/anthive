@@ -183,7 +183,9 @@ def make_service(tmp_path: Path, clock: List[float], s3: Optional[DepositFakeS3]
                                   **{key: value for key, value in overrides.items()})
     state_dir = tmp_path / 'state'
     store = dd.DepositStore(state_dir / dd.DB_FILE)
-    return dd.DepositService(settings, store, s3, store_root, state_dir, clock=lambda: clock[0])
+    # the server's service class (artefacts off): every 2.46 deposit test also guards the 2.47 subclass
+    import artefact_deposit  # noqa: PLC0415
+    return artefact_deposit.ArtefactDepositService(settings, store, s3, store_root, state_dir, clock=lambda: clock[0])
 
 
 ALICE = dd.Identity(user='alice', name='Alice Smith', email='alice@example.org')

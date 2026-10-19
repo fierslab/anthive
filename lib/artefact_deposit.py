@@ -29,7 +29,7 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 import yaml
@@ -41,8 +41,10 @@ from dataset_deposit import (DEPOSIT_ID_RE, MiB, SHA256_RE, SINGLE_PUT_HARD_MAX,
 ARTEFACT_DEPOSIT_KINDS = ('artefact', 'collection')
 #: the folder below ``<incoming prefix><data_project>/`` that only artefact and collection deposits use
 INCOMING_DIR = 'artefacts'
-#: kinds that phase A2 does not accept yet (DE tables as artefacts come with A3)
-DEFERRED_KINDS = ('de_table',)
+#: kinds not accepted yet (none since A3: ``de_table`` artefacts are imported into the dataset's DE tables)
+DEFERRED_KINDS: Tuple[str, ...] = ()
+#: ``deposit_kind: "de_only"`` (2.46) is accepted as an alias of a ``de_table`` artefact until this release
+DE_ONLY_ALIAS_UNTIL = '2.48.0'
 
 #: allowed file endings per kind (design 2.1); ``other`` takes any of them plus plain data formats
 KIND_EXTENSIONS: Dict[str, Tuple[str, ...]] = {
@@ -222,10 +224,25 @@ def provenance_missing(declared: Any) -> List[str]:
     return missing
 
 
+def _implied_first(entries: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """The version before the first changelog entry when that entry is a patch bump (``1.0.1`` follows ``1.0.0``):
+    a dataset published before it had a changelog keeps its first version known."""
+    if not entries:
+        return None
+    parts = str(entries[0].get('version') or '').split('.')
+    if len(parts) == 3 and all(part.isdigit() for part in parts) and int(parts[2]) > 0:
+        return f'{parts[0]}.{parts[1]}.{int(parts[2]) - 1}'
+    return None
+
+
 def changelog_versions(meta: Mapping[str, Any]) -> List[str]:
-    """Every version a dataset ``.md`` knows: its changelog entries and its current version."""
-    versions = [str(entry.get('version')) for entry in (meta.get('changelog') or [])
-                if isinstance(entry, dict) and entry.get('version') is not None]
+    """Every version a dataset ``.md`` knows: the one implied before its first patch entry, its changelog
+    entries and its current version."""
+    entries = [entry for entry in (meta.get('changelog') or []) if isinstance(entry, dict)]
+    versions = [str(entry.get('version')) for entry in entries if entry.get('version') is not None]
+    implied = _implied_first(entries)
+    if implied and implied not in versions:
+        versions.insert(0, implied)
     if meta.get('version') is not None:
         versions.append(str(meta['version']))
     return versions
@@ -238,8 +255,11 @@ def h5ad_sha256_at(meta: Mapping[str, Any], version: str) -> Optional[str]:
     current = str(meta.get('version')) if meta.get('version') is not None else None
     names = [str(entry.get('version')) for entry in entries]
     if version not in names and version != current:
-        return None
-    later = entries[names.index(version) + 1:] if version in names else []
+        if version != _implied_first(entries):
+            return None
+        later = entries                                   # the implied first version precedes every entry
+    else:
+        later = entries[names.index(version) + 1:] if version in names else []
     for entry in later:
         previous = str(entry.get('previous_sha256') or '').lower()
         if SHA256_RE.fullmatch(previous):
@@ -385,10 +405,13 @@ class ArtefactDepositService(DepositService):
             return self.create_artefact(identity, body, context)
         if kind == 'collection':
             return self.create_collection(identity, body, context)
-        if kind not in (None, 'dataset'):
+        if kind not in (None, 'dataset', 'de_only'):
             raise DepositError(422, 'invalid', 'deposit_kind is dataset, artefact or collection')
+        if (kind == 'de_only' or is_de_only_body(body)) and self.artefacts_active:
+            return self.create_de_only_alias(identity, body, context)
         if not self.settings.active:
             super()._require_active()
+        body = {key: value for key, value in body.items() if key != 'deposit_kind'}
         return super().create(identity, body)
 
     def refresh_urls(self, identity: Identity, deposit_id: str, body: Any) -> Dict[str, Any]:
@@ -419,8 +442,46 @@ class ArtefactDepositService(DepositService):
         if incomplete:
             raise DepositError(409, 'incomplete', 'not every file is uploaded completely', files=incomplete)
         rows = {row['name']: row for row in self.store.files(deposit_id)}
+        if record.get('deposit_kind') == 'artefact' and json.loads(record.get('artefact') or '{}').get('kind') == \
+                'de_table':
+            from dataset_deposit import StagingChanged  # noqa: PLC0415
+            try:
+                errors = self._check_de_table_sidecars(record, rows)
+            except StagingChanged:
+                raise self._staging_changed_error()
+            except DepositError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise DepositError(502, 's3_error', f'reading a sidecar back failed ({_error_code(exc)})')
+            if errors:
+                raise DepositError(422, 'de_mismatch', '; '.join(errors) + '. Withdraw and deposit the tables again '
+                                                                           'with corrected sidecars.')
         self._check_keys(Identity(user=record['user'], is_admin=bool(record['is_admin'])), list(rows.values()))
         return rows, []
+
+    def _check_de_table_sidecars(self, record: Dict[str, Any], rows: Dict[str, Dict[str, Any]]) -> List[str]:
+        """Errors of the sidecars of a ``de_table`` deposit (read back from staging, verified ETag): the keys
+        their format needs, the scope dataset named, one study id per table."""
+        from ingest_pipeline import de_sidecar_names, de_sidecar_problems, de_study_id, parse_sidecar_text  # noqa: PLC0415
+        block = json.loads(record.get('artefact') or '{}')
+        db_id = str(record.get('update_of') or '')
+        file_id = db_id.split('/')[-1]
+        errors: List[str] = []
+        studies: Dict[str, str] = {}
+        for name, row in rows.items():
+            if not name.endswith('.mus'):
+                continue
+            meta = parse_sidecar_text(self._read_staged(row))
+            errors += [f'{name}: {problem}' for problem in de_sidecar_problems(meta)]
+            if not de_sidecar_names(meta, file_id, block.get('dataset_basename') or '', db_id):
+                errors.append(f'{name} names neither de_dataset_id={file_id} (or {db_id}) nor '
+                              f'de_dataset_h5ad={block.get("dataset_basename")}.h5ad')
+            table = name[:-len('.mus')]
+            study = de_study_id(meta, PurePosixPath(table).name)
+            if study in studies:
+                errors.append(f'{table} and {studies[study]} have the same study id {study}')
+            studies[study] = table
+        return errors
 
     def _view(self, record: Dict[str, Any], detail: bool, identity: Identity) -> Dict[str, Any]:
         view = super()._view(record, detail, identity)
@@ -458,8 +519,8 @@ class ArtefactDepositService(DepositService):
             raise DepositError(413, 'too_large', f'the artefact block is at most {ARTEFACT_BLOCK_MAX_BYTES // 1024} kB')
         return block
 
-    def create_artefact(self, identity: Identity, body: Dict[str, Any], context: Optional[ArtefactContext]
-                        ) -> Dict[str, Any]:
+    def create_artefact(self, identity: Identity, body: Dict[str, Any], context: Optional[ArtefactContext],
+                        relaxed_provenance: bool = False) -> Dict[str, Any]:
         """``POST /datasets/deposit`` with ``deposit_kind: "artefact"`` (design 4.1)."""
         self._require_artefacts_active()
         if context is None:
@@ -489,13 +550,17 @@ class ArtefactDepositService(DepositService):
         if kind not in artefacts.KINDS:
             raise DepositError(422, 'invalid_kind', f'kind is one of {", ".join(artefacts.KINDS)}')
         if kind in DEFERRED_KINDS:
-            raise DepositError(422, 'invalid_kind', 'DE tables are deposited with the DE route for now '
-                                                    '(vark datasets de upload); de_table artefacts come later')
+            raise DepositError(422, 'invalid_kind', f'{kind} artefacts are not accepted yet')
+        if kind == 'de_table' and scope_db_id is None:
+            raise DepositError(422, 'invalid_scope', 'a de_table belongs to a dataset (its DE tables are imported '
+                                                     'into it); scope is the dataset file id, not _group')
         artefact_id = block.get('artefact_id')
         if not artefacts.valid_artefact_id(artefact_id):
             raise DepositError(422, 'invalid_artefact_id', 'artefact_id: 2 to 64 lower-case letters, digits and '
                                                            'dashes, starting with a letter or digit')
-        clean = self._clean_block(block, kind, scope_db_id, context)
+        clean = self._clean_block(block, kind, scope_db_id, context, strict=not relaxed_provenance)
+        if kind == 'de_table':
+            clean['dataset_basename'] = Path(context.dataset_md[scope_db_id]).stem
         ref = artefacts.format_ref(group_id, scope, artefact_id)
         new_version_of = block.get('new_version_of')
         existing = context.index.get(group_id, scope, artefact_id)
@@ -523,6 +588,8 @@ class ArtefactDepositService(DepositService):
                 raise DepositError(413, 'quota_exceeded', f'{ref} has the maximum number of versions; purge old '
                                                           f'ones first')
         files = self._artefact_files(body.get('files'), kind)
+        if kind == 'de_table':
+            de_table_problem(files)
         total = sum(entry['size'] for entry in files)
         if total > self._limit('artefacts_max_deposit_gb', 200) * 1024 ** 3:
             raise DepositError(413, 'too_large', f'{total / 1024 ** 3:.1f} GB is over the '
@@ -587,7 +654,7 @@ class ArtefactDepositService(DepositService):
                          'status': f'/datasets/deposit/{deposit_id}'}}
 
     def _clean_block(self, block: Mapping[str, Any], kind: str, scope_db_id: Optional[str],
-                     context: ArtefactContext) -> Dict[str, Any]:
+                     context: ArtefactContext, strict: bool = True) -> Dict[str, Any]:
         """The checked fields of the artefact block (``recorded`` keys of the request are dropped)."""
         warnings: List[str] = []
         title = block.get('title')
@@ -630,7 +697,7 @@ class ArtefactDepositService(DepositService):
             raise DepositError(422, 'made_from_unknown', f'made_from must include the scope dataset {scope_db_id}')
         declared = block.get('declared')
         missing = provenance_missing(declared)
-        if missing and kind in PROVENANCE_STRICT_KINDS:
+        if missing and kind in PROVENANCE_STRICT_KINDS and strict:
             raise DepositError(422, 'provenance_incomplete', 'provenance is incomplete: ' + ', '.join(missing),
                                missing=missing)
         if missing:
@@ -668,6 +735,10 @@ class ArtefactDepositService(DepositService):
             if not SHA256_RE.fullmatch(sha):
                 raise DepositError(422, 'invalid', f'{name}: sha256 must be 64 hex characters')
             role = entry.get('role', 'main' if not clean else 'supporting')
+            if kind == 'de_table' and name.lower().endswith('.mus'):
+                role = 'sidecar'                         # a DE table's .mus is always its sidecar
+            elif kind == 'de_table' and role == 'sidecar':
+                raise DepositError(422, 'invalid', f'{name}: only a .mus is a sidecar')
             if role not in FILE_ROLES:
                 raise DepositError(422, 'invalid', f'{name}: role is one of {", ".join(FILE_ROLES)}')
             clean.append({'name': name, 'size': size, 'sha256': sha, 'role': role})
@@ -895,6 +966,71 @@ class ArtefactDepositService(DepositService):
                 for row in rows if identity.is_admin or row['requested_by'] == identity.user
                 if state is None or row['state'] == state]
 
+    # de_only alias ---------------------------------------------------------
+    def create_de_only_alias(self, identity: Identity, body: Dict[str, Any], context: Optional[ArtefactContext]
+                             ) -> Dict[str, Any]:
+        """A 2.46 DE-only deposit (``update_of`` + files of kind ``de``, or ``deposit_kind: "de_only"``) taken as
+        a ``de_table`` artefact of the dataset (design 13; until 2.48.0). The artefact id comes from the first
+        table's name; a table that is already an artefact of the dataset becomes its next version when the
+        caller owns it (or is an admin). Provenance gaps are warnings here: the 2.46 request carries none."""
+        self._require_artefacts_active()
+        if context is None:
+            raise DepositError(503, 'disabled', 'the artefact index is not loaded yet; try again')
+        db_id = body.get('update_of')
+        data_project = body.get('data_project')
+        if not isinstance(db_id, str) or not artefacts.DB_ID_RE.fullmatch(db_id):
+            raise DepositError(422, 'invalid', 'DE tables alone are added to a published dataset: give "update_of": '
+                                               '"<db_id>"')
+        if db_id not in context.dataset_md or context.dataset_folder.get(db_id) != data_project \
+                or not context.policy.dataset_visible(db_id, context.viewer):
+            raise DepositError(422, 'update_of_unknown', f'{data_project}/{db_id} is not a published dataset')
+        files = body.get('files')
+        if not isinstance(files, list) or not files or not all(isinstance(entry, dict) for entry in files):
+            raise DepositError(422, 'invalid', 'files must be a non-empty list')
+        tables = [entry.get('name') for entry in files if isinstance(entry.get('name'), str)
+                  and not entry['name'].endswith('.mus')]
+        if not tables:
+            raise DepositError(422, 'invalid', 'a DE deposit needs at least one table with its .mus')
+        stem = PurePosixPath(tables[0]).name
+        for ending in ('.tsv.gz', '.csv.gz', '.tsv', '.csv'):
+            if stem.lower().endswith(ending):
+                stem = stem[:-len(ending)]
+                break
+        artefact_id = alias_artefact_id(stem)
+        scope = db_id.split('/')[1]
+        group_id = db_id.split('/')[0]
+        meta = read_md_meta(context.dataset_md[db_id])
+        new_version_of = None
+        existing = context.index.get(group_id, scope, artefact_id)
+        if existing is not None and existing.latest is not None:
+            if existing.owner != identity.user and not identity.is_admin:
+                raise DepositError(409, 'artefact_exists', f'the DE table {stem} is already an artefact of {db_id}, '
+                                                           f'deposited by someone else; give your table another name '
+                                                           f'or ask an admin')
+            new_version_of = existing.latest
+        names = ', '.join(tables)
+        artefact = {
+            'kind': 'de_table', 'artefact_id': artefact_id, 'title': f'DE table {stem}'[:artefacts.TITLE_MAX_CHARS],
+            'description': (f'Differential expression results ({names}) for {db_id}, deposited through the DE-only '
+                            f'route (deposit_kind de_only, an alias of de_table artefacts until '
+                            f'{DE_ONLY_ALIAS_UNTIL}). The table sidecars hold the method and the comparison.'),
+            'access': 'inherit', 'new_version_of': new_version_of,
+            'change_note': 'a new deposit through the DE-only route' if new_version_of else None,
+            'made_from': [{'db_id': db_id, 'dataset_version': str(meta.get('version') or '')}],
+            'declared': {'author': {'name': identity.name or identity.user}, 'created': _dt.date.today().isoformat(),
+                         'code': {'none': 'deposited through the DE-only route (no provenance in the request)'}},
+        }
+        alias_body = {'deposit_kind': 'artefact', 'data_project': data_project, 'scope': scope,
+                      'artefact': artefact,
+                      'files': [{'name': entry.get('name'), 'size': entry.get('size'), 'sha256': entry.get('sha256'),
+                                 'kind': 'artefact_file'} for entry in files]}
+        answer = self.create_artefact(identity, alias_body, context, relaxed_provenance=True)
+        answer['alias_of'] = 'de_only'
+        answer.setdefault('warnings', []).append(
+            f'deposit_kind de_only is an alias of a de_table artefact ({answer["artefact"]["ref_without_version"]}) '
+            f'until {DE_ONLY_ALIAS_UNTIL}; deposit DE tables with deposit_kind artefact and kind de_table')
+        return answer
+
     # vocabulary ------------------------------------------------------------
     def vocab(self, identity: Optional[Identity] = None) -> Dict[str, Any]:
         answer = super().vocab(identity)
@@ -927,6 +1063,33 @@ class ArtefactDepositService(DepositService):
             'hold_public': bool(settings.get('artefacts_hold_public', True)),
             'incoming_key': '<prefix><data_project>/artefacts/<deposit_id>/<name>',
         }
+
+
+def is_de_only_body(body: Any) -> bool:
+    """A 2.46 DE-only deposit request: ``update_of`` and every file of kind ``de``."""
+    files = body.get('files') if isinstance(body, dict) else None
+    return bool(isinstance(body, dict) and body.get('update_of') and isinstance(files, list) and files
+                and all(isinstance(entry, dict) and entry.get('kind') == 'de' for entry in files))
+
+
+def alias_artefact_id(stem: str) -> str:
+    """An artefact id from a table name: lower case, runs of other characters as one dash, at most 64."""
+    slug = re.sub(r'[^a-z0-9]+', '-', stem.lower()).strip('-')[:64].strip('-')
+    return slug if artefacts.valid_artefact_id(slug) else 'de-table'
+
+
+def de_table_problem(files: Sequence[Dict[str, Any]]) -> None:
+    """A ``de_table`` holds DE tables, each with its ``<table>.mus``, and nothing else (422 otherwise)."""
+    names = {entry['name'] for entry in files}
+    tables = [name for name in names if not name.lower().endswith('.mus')]
+    if not tables:
+        raise DepositError(422, 'invalid', 'a de_table holds at least one DE table (.tsv, .csv, gzip of those)')
+    for table in tables:
+        if table + '.mus' not in names:
+            raise DepositError(422, 'invalid', f'every DE table needs its sidecar: {table}.mus is missing')
+    for name in names:
+        if name.lower().endswith('.mus') and name[:-4] not in names:
+            raise DepositError(422, 'invalid', f'{name}: a sidecar without its table')
 
 
 def analysis_index_md_vocab() -> Dict[str, Any]:

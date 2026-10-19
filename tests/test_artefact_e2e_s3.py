@@ -116,6 +116,7 @@ def test_artefact_route_on_the_real_bucket(tmp_path):
         publisher.bucket = bucket
         publisher.prefix = INCOMING
         publisher.catalog_prefix = CATALOG
+        publisher.dataset_catalog_prefix = CATALOG
         for _ in range(3):
             clock[0] += 10
             publisher.poll(_listing(client, bucket))
@@ -161,6 +162,26 @@ def test_artefact_route_on_the_real_bucket(tmp_path):
             publisher.poll(_listing(client, bucket))
         assert db.get(f'artefact:{created["deposit_id"]}')['state'] == 'live'
         assert (store_root / 'Fiers2026' / 'index.md').is_file()
+        # 6. a de_table, imported into the dataset with the real ant-de-ingest, then purged
+        helpers.make_dataset_duckdb(store_root)
+        de_payloads = helpers.de_files()
+        de_answer = service.create(helpers.ANALYST, helpers.artefact_body(de_payloads, artefact_id='tvc',
+                                                                          **helpers.DE_INTERNAL),
+                                   helpers.context(store_root))
+        for entry in de_answer['files']:
+            assert _http('PUT', entry['url'], de_payloads[entry['name']], entry['headers'])[0] == 200
+        assert service.complete(helpers.ANALYST, de_answer['deposit_id'])['state'] == 'uploaded'
+        for _ in range(3):
+            clock[0] += 10
+            publisher.poll(_listing(client, bucket))
+        de_row = db.get(f'artefact:{de_answer["deposit_id"]}')
+        assert de_row['state'] == 'live', de_row['error']
+        assert 'artefact PU1/int/tvc@v1' in (store_root / 'Public2021' / 'int.md').read_text()
+        client.head_object(Bucket=bucket, Key=f'{CATALOG}Public2021/int.de.parquet')
+        service.request_purge(helpers.ADMIN, helpers.context(store_root), 'PU1', 'int', 'tvc', 'v1',
+                              {'reason': 'end to end test', 'confirm': 'PU1/int/tvc@v1'})
+        publisher.poll(_listing(client, bucket))
+        assert 'removed: purged artefact PU1/int/tvc@v1' in (store_root / 'Public2021' / 'int.md').read_text()
     finally:
         after = set().union(*(_keys(client, bucket, prefix) for prefix in TEST_PREFIXES))
         created_keys = sorted(after - before)

@@ -124,7 +124,8 @@ class ArtefactPublisher:
                  git_identity: str = 'anthive ingest-watch <noreply@anthive.local>',
                  delete_incoming: bool = True, notify_settings: Optional[Dict[str, Any]] = None,
                  stop_requested: Callable[[], bool] = lambda: False, server_version: str = '',
-                 site_id: str = '', run: Optional[Callable[..., Any]] = None):
+                 site_id: str = '', run: Optional[Callable[..., Any]] = None, de_runner: Any = None,
+                 dataset_catalog_prefix: Optional[str] = None):
         self.store_root = Path(store_root)
         self.state_dir = Path(state_dir)
         self.work_root = Path(work_root)
@@ -146,6 +147,13 @@ class ArtefactPublisher:
         self.server_version = server_version
         self.site_id = site_id
         self.run = run or (lambda cmd: subprocess.run([str(part) for part in cmd], capture_output=True, text=True))
+        #: runs ant-de-ingest for de_table artefacts (``run(label, cmd, cwd)`` -> ``(code, output)``)
+        if de_runner is None:
+            from ingest_pipeline import SubprocessRunner  # noqa: PLC0415
+            de_runner = SubprocessRunner(log_path=self.state_dir / 'logs' / 'artefact_de.log')
+        self.de_runner = de_runner
+        #: where a dataset's ``.de.parquet`` lives in the bucket (the dataset route's catalog prefix)
+        self.dataset_catalog_prefix = catalog_prefix if dataset_catalog_prefix is None else dataset_catalog_prefix
         self._marks: Dict[Tuple[str, str], str] = {}
 
     # ── the poll ────────────────────────────────────────────────────────────
@@ -456,14 +464,18 @@ class ArtefactPublisher:
     def _keep_bytes(self, kind: str, name: str, size: int) -> bool:
         """Read into the work dir: inline files and files whose content the checks read."""
         ending = rules.file_extension(name)
+        if kind == 'de_table':
+            return True                       # read in full by the DE checks and the import
         inline = kind == 'figure' or size <= float(self.settings.get('artefacts_inline_max_mb', 2)) * 1024 ** 2
         content = ending in rules.TEXT_EXTENSIONS or ending in rules.TABLE_EXTENSIONS or ending == '.zip' \
             or kind in ('notebook', 'figure')
         return inline or (content and size <= float(self.settings.get('artefacts_content_check_max_gb', 2)) * 1024 ** 3)
 
     def _qc(self, record: Dict[str, Any], block: Dict[str, Any], checks: List[FileCheck], declared_rows: List[Dict[str, Any]],
-            public: bool, approval: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """Section 6.1 generic checks. Returns the report; raises Stop for errors and held reasons."""
+            public: bool, approval: Optional[Dict[str, Any]],
+            extra: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        """Section 6.1 generic checks plus ``extra`` (the DE checks of section 6.2). Returns the report; raises
+        Stop for errors and held reasons."""
         kind = block['kind']
         results: List[Dict[str, Any]] = []
 
@@ -545,6 +557,7 @@ class ArtefactPublisher:
         if public and self.settings.get('artefacts_hold_public', True):
             held.append('public_access')
             add('access.public', 'held', 'the artefact will be public: an admin publishes it')
+        results.extend(extra or [])
         approved = set((approval or {}).get('reasons') or [])
         remaining = [reason for reason in held if reason not in approved]
         failed = [entry for entry in results if entry['status'] == 'fail']
@@ -632,7 +645,7 @@ class ArtefactPublisher:
         except (TypeError, ValueError) as exc:
             raise Stop('failed', f'the deposit names no valid artefact ({exc})')
         if kind in rules.DEFERRED_KINDS:
-            raise Stop('failed', 'de_table artefacts are not accepted yet')
+            raise Stop('failed', f'{kind} artefacts are not accepted yet')
         ref = artefacts.format_ref(group_id, scope, artefact_id)
         outcome = Outcome()
         # scope ---------------------------------------------------------------
@@ -677,7 +690,11 @@ class ArtefactPublisher:
                 if keep is not None:
                     ensure_inside(keep, work)
                 checks.append(self._hash(obj, entry, keep))
-            report = self._qc(record, block, checks, files, public, approval)
+            de_checks: List[Dict[str, Any]] = []
+            de_tables: List[Dict[str, Any]] = []
+            if kind == 'de_table':
+                de_checks, de_tables = self._de_checks(scope_db_id, scope_md, files, work)
+            report = self._qc(record, block, checks, files, public, approval, extra=de_checks)
         # version, placement, manifest, head record: under the scope's writer lock ---------------------------
         lock = self._scope_lock_path(path, scope_md)
         with writer_lock(lock, timeout=600):
@@ -708,6 +725,7 @@ class ArtefactPublisher:
                           'files': {check.name: {'sha256': check.sha256, 'size': check.size, 'etag': check.etag}
                                     for check in checks},
                           'made_from': made_from, 'warnings': outcome.warnings, 'report': report,
+                          'de_tables': de_tables if kind == 'de_table' else None,
                           'approval': ({'by': approval.get('by'), 'reasons': approval.get('reasons') or [],
                                         'date': approval.get('date')} if approval else None)}
                 self.save_marker(record['id'], marker)
@@ -719,6 +737,10 @@ class ArtefactPublisher:
             for obj, entry in zip(objs, files):
                 info = marker['files'][entry['name']]
                 self._place(path, number, entry['name'], obj, info, record, ref)
+            if kind == 'de_table' and 'imported' not in marker['steps']:
+                self._de_import(record, path, ref, number, scope_db_id, scope_md, objs, files, work, marker, outcome)
+                marker['steps'].append('imported')
+                self.save_marker(record['id'], marker)
             if 'local' not in marker['steps']:
                 self._local_copies(path, number, kind, files, work, marker, outcome)
                 marker['steps'].append('local')
@@ -740,9 +762,14 @@ class ArtefactPublisher:
                 marker['steps'].append('head')
                 self.save_marker(record['id'], marker)
         # serve, commit, done ------------------------------------------------------------------------------
+        commit_paths = [path.head_rel, path.manifest_rel(number)]
+        if kind == 'de_table':
+            self._push_de_sidecar(scope_md, outcome.warnings)
+            commit_paths.append(PurePosixPath(scope_md.relative_to(self.store_root)))
+            self._full_rescan(outcome.warnings)
         outcome.served = self._rescan_and_check(f'/artefacts/{group_id}/{scope}/{artefact_id}/v{number}',
                                                 outcome.warnings)
-        outcome.git_commit = self._commit([path.head_rel, path.manifest_rel(number)],
+        outcome.git_commit = self._commit(commit_paths,
                                           f'artefact {ref}@v{number} ({kind})\n\nDeposit {record["id"]} by '
                                           f'{record["user"]}.\n', record, outcome.warnings)
         outcome.consumed = {obj.key: obj.etag for obj in objs}
@@ -926,7 +953,7 @@ class ArtefactPublisher:
                          'site_id': self.site_id, 'server_version': self.server_version,
                          'checks': {entry['id']: entry['status'] for entry in (marker.get('report') or {}).get('checks') or []},
                          **({'approval': marker['approval']} if marker.get('approval') else {})},
-            'de': None,
+            'de': marker.get('de') if path.kind == 'de_table' else None,
         }
         problems = artefacts.validate_manifest(manifest, path, group_id, number)
         if problems:
@@ -1131,6 +1158,10 @@ class ArtefactPublisher:
             if hashlib.sha256(raw).hexdigest() != entry['manifest_sha256']:
                 return 'needs_decision', 'the local manifest differs from the head record; nothing deleted'
             manifest = json.loads(raw.decode('utf-8'))
+            if path.kind == 'de_table':
+                removal = self._de_remove_for_purge(row, path, number, head, manifest, scope_md)
+                if removal is not None:
+                    return 'needs_decision', removal
             if entry['state'] != 'purging':
                 entry['state'] = 'purging'
                 self._write_head(path, {**head, 'versions': head['versions'],
@@ -1166,7 +1197,312 @@ class ArtefactPublisher:
             live = [v['version'] for v in head['versions'] if v['state'] == 'live']
             self._write_head(path, {**head, 'latest': max(live) if live else None})
         warnings: List[str] = []
+        commit_paths = [path.head_rel, path.manifest_rel(number)]
+        if path.kind == 'de_table' and scope_md is not None:
+            self._push_de_sidecar(scope_md, warnings)
+            commit_paths.append(PurePosixPath(scope_md.relative_to(self.store_root)))
+            self._full_rescan(warnings)
         self._rescan_and_check(f'/artefacts/{row["ref"]}/versions', warnings)
-        self._commit([path.head_rel, path.manifest_rel(number)], f'purge {row["ref"]}@v{number}\n\nRequested by '
+        self._commit(commit_paths, f'purge {row["ref"]}@v{number}\n\nRequested by '
                      f'{row["requested_by"]}: {row.get("reason") or ""}\n', None, warnings)
         return 'done', 'purged' + (f' ({"; ".join(warnings)})' if warnings else '')
+
+    # ── de_table artefacts (phase A3) ────────────────────────────────────────
+    def _dataset_genes(self, scope_md: Path) -> Optional[set]:
+        """Gene names of the scope dataset (its local ``.duckdb``, read-only); None when unreadable."""
+        duckdb_path = scope_md.with_suffix('.duckdb')
+        if not duckdb_path.is_file():
+            return None
+        try:
+            import duckdb  # noqa: PLC0415
+            connection = duckdb.connect(str(duckdb_path), read_only=True)
+            try:
+                return {str(row[0]) for row in connection.execute('SELECT gene_name FROM __genes').fetchall()}
+            finally:
+                connection.close()
+        except Exception:  # noqa: BLE001 - a busy or odd duckdb: the gene check becomes a warning
+            return None
+
+    def _de_checks(self, scope_db_id: str, scope_md: Path, files: List[Dict[str, Any]], work: Path
+                   ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Section 6.2 checks of every table (``lib/artefact_de.py``) and the facts for the manifest."""
+        import artefact_de  # noqa: PLC0415
+        from ingest_pipeline import de_study_id, parse_sidecar_text  # noqa: PLC0415
+
+        checks: List[Dict[str, Any]] = []
+        tables: List[Dict[str, Any]] = []
+        if not scope_md.with_suffix('.duckdb').is_file():
+            checks.append({'id': 'de.dataset_local', 'status': 'fail', 'summary': f'the duckdb of {scope_db_id} is '
+                           f'not on the host that publishes; DE tables cannot be imported here', 'fix': 'an admin pulls '
+                           f'the dataset (ant sync pull) and retries'})
+            return checks, tables
+        genes = self._dataset_genes(scope_md)
+        limit = float(self.settings.get('artefacts_content_check_max_gb', 2)) * 1024 ** 3
+        names = {entry['name'] for entry in files}
+        studies: Dict[str, str] = {}
+        for entry in files:
+            name = entry['name']
+            if name.lower().endswith('.mus') or name + '.mus' not in names:
+                continue
+            if int(entry['size']) > limit:
+                checks.append({'id': 'de.read', 'status': 'fail', 'summary': f'{name} is larger than the DE check '
+                               f'limit (artefacts_content_check_max_gb)', 'fix': ''})
+                continue
+            meta = parse_sidecar_text((work / (name + '.mus')).read_text(encoding='utf-8', errors='replace'))
+            study = de_study_id(meta, PurePosixPath(name).name)
+            if study in studies:
+                checks.append({'id': 'de.study_id', 'status': 'fail', 'summary': f'{name} and {studies[study]} have '
+                               f'the same study id {study}', 'fix': 'set de_study_id in one of the sidecars'})
+            studies[study] = name
+            result = artefact_de.check_table(work / name, name, name + '.mus', meta, file_id=scope_db_id.split('/')[1],
+                                             dataset_basename=scope_md.stem, db_id=scope_db_id, genes=genes,
+                                             study_id=study)
+            checks.extend(result.checks)
+            tables.append(result.manifest_entry())
+        return checks, tables
+
+    def _own_studies(self, path: artefacts.ArtefactPath, head: Optional[Dict[str, Any]], exclude: int) -> set:
+        """Study ids that live versions of this artefact (other than ``exclude``) imported."""
+        owned: set = set()
+        for version in (head or {}).get('versions') or []:
+            if version['state'] != 'live' or version['version'] == exclude:
+                continue
+            manifest_path = self.store_root / str(path.manifest_rel(version['version']))
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                continue
+            owned |= set(((manifest.get('de') or {}).get('imported') or {}).get('study_ids') or [])
+        return owned
+
+    def _ensure_work_copy(self, obj: ObjInfo, entry: Dict[str, Any], work: Path, sha256: str) -> Path:
+        """The work-dir copy of a file, read again (pinned to its ETag) when a restart lost it."""
+        target = work / entry['name']
+        ensure_inside(target, work)
+        if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == sha256:
+            return target
+        check = self._hash(obj, entry, target)
+        if check.sha256 != sha256:
+            raise Stop('needs_decision', f'{entry["name"]} in incoming is not the checked file any more')
+        return target
+
+    def _de_import(self, record: Dict[str, Any], path: artefacts.ArtefactPath, ref: str, number: int,
+                   scope_db_id: str, scope_md: Path, objs: List[ObjInfo], files: List[Dict[str, Any]], work: Path,
+                   marker: Dict[str, Any], outcome: Outcome) -> None:
+        """Import the tables into the dataset's DE tables, all or nothing (``import_de_all_or_nothing``),
+        under the dataset's writer lock (held by the caller). Study ids of this artefact's earlier versions are
+        replaced; a study id another artefact or an earlier route imported is refused unless an admin
+        deposited it (then the previous study is archived). On failure the version's copies are removed and
+        nothing else changed. Idempotent across a kill: a changelog that already names this version means the
+        import happened."""
+        import md_edit  # noqa: F401,PLC0415  (import_de_all_or_nothing uses it)
+        from ingest_md_fill import today_iso  # noqa: PLC0415
+        from ingest_pipeline import (DeImportFailed, friendly_de_error, import_de_all_or_nothing,  # noqa: PLC0415
+                                     parse_sidecar_text)
+
+        token = f'artefact {ref}@v{number} (deposit {record["id"]})'
+        if token in scope_md.read_text(encoding='utf-8'):
+            marker.setdefault('de', self._de_block(marker, None))
+            return                                     # imported before a kill; the changelog says so
+        studies = [table['study_id'] for table in marker.get('de_tables') or []]
+        duckdb_path = scope_md.with_suffix('.duckdb')
+        try:
+            existing = self._list_studies(duckdb_path)
+        except Exception as exc:  # noqa: BLE001
+            raise TransientError(f'cannot read the DE studies of {scope_db_id}: {exc}') from exc
+        own = self._own_studies(path, self._read_head(path), exclude=number)
+        clashes = sorted(set(studies) & existing)
+        foreign = [study for study in clashes if study not in own]
+        if foreign and not record.get('is_admin'):
+            self._remove_version_copies(path, number, marker)
+            raise Stop('failed', f'{scope_db_id} already has the DE study {", ".join(foreign)} (imported by another '
+                                 f'route or artefact); give the table another de_study_id, or ask an admin to replace '
+                                 f'it')
+        tables = []
+        for entry, obj in zip(files, objs):
+            if entry['name'].lower().endswith('.mus'):
+                continue
+            data = self._ensure_work_copy(obj, entry, work, marker['files'][entry['name']]['sha256'])
+            sidecar_entry = next(item for item in files if item['name'] == entry['name'] + '.mus')
+            sidecar_obj = objs[files.index(sidecar_entry)]
+            sidecar = self._ensure_work_copy(sidecar_obj, sidecar_entry, work,
+                                             marker['files'][sidecar_entry['name']]['sha256'])
+            meta = parse_sidecar_text(sidecar.read_text(encoding='utf-8', errors='replace'))
+            study = next(table['study_id'] for table in marker['de_tables'] if table['file'] == entry['name'])
+            tables.append((data, meta, study))
+        added = [study for study in studies if study not in clashes]
+
+        def change(archived: List[str]) -> str:
+            return (f'DE from {token} by {record["user"]}: '
+                    + (f'added {", ".join(added)}' if added else '')
+                    + ('; ' if added and clashes else '')
+                    + (f'replaced {", ".join(clashes)} (previous archived at {", ".join(archived) or "-"})'
+                       if clashes else '') + '.')
+
+        class _Api:                                    # release / restore through the publisher's API client
+            def __init__(self, api: Any) -> None:
+                self.api = api
+
+            def release(self, db_id: str) -> None:
+                if self.api is not None:
+                    self.api.post_with_retry(f'/admin/release/{db_id}')
+
+            def restore(self, db_id: str) -> None:
+                if self.api is not None:
+                    self.api.post_with_retry(f'/admin/restore/{db_id}')
+        import_work = self.work_root / f'artefact_{record["id"]}_import'
+        shutil.rmtree(import_work, ignore_errors=True)
+        try:
+            version, archived, warnings = import_de_all_or_nothing(
+                store_root=self.store_root, md=scope_md, db_id=scope_db_id, work=import_work, tables=tables,
+                replace=clashes, runner=self.de_runner, api=_Api(self.api), today=today_iso(), change=change,
+                archive=self._archive_study)
+        except DeImportFailed as exc:
+            self._remove_version_copies(path, number, marker)
+            raise Stop('failed', f'the DE table {exc.table} could not be imported: {friendly_de_error(exc.output)} '
+                                 f'Nothing was changed; correct the table or its .mus and deposit it again.')
+        finally:
+            shutil.rmtree(import_work, ignore_errors=True)
+        outcome.warnings.extend(warnings)
+        rows = {}
+        try:
+            rows = self._study_rows(duckdb_path, studies)
+        except Exception as exc:  # noqa: BLE001
+            outcome.warnings.append(f'row counts of the imported studies not read ({exc})')
+        marker['de'] = self._de_block(marker, {'study_ids': studies, 'rows': rows, 'imported_at': _now_iso(),
+                                               'dataset_version_after': version, 'replaced': clashes,
+                                               'archived': archived})
+
+    @staticmethod
+    def _de_block(marker: Dict[str, Any], imported: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        block = {'tables': marker.get('de_tables') or []}
+        if imported is None:
+            imported = {'study_ids': [table['study_id'] for table in block['tables']], 'rows': {},
+                        'imported_at': None, 'dataset_version_after': None, 'replaced': [], 'archived': [],
+                        'note': 'recovered after an interruption; see the dataset changelog'}
+        block['imported'] = imported
+        return block
+
+    @staticmethod
+    def _list_studies(duckdb_path: Path) -> set:
+        import duckdb  # noqa: PLC0415
+        connection = duckdb.connect(str(duckdb_path), read_only=True)
+        try:
+            tables = {row[0] for row in connection.execute('SELECT table_name FROM information_schema.tables').fetchall()}
+            if '__de_study' not in tables:
+                return set()
+            return {str(row[0]) for row in connection.execute('SELECT study_id FROM __de_study').fetchall()}
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _study_rows(duckdb_path: Path, studies: Sequence[str]) -> Dict[str, int]:
+        import duckdb  # noqa: PLC0415
+        connection = duckdb.connect(str(duckdb_path), read_only=True)
+        try:
+            return {study: int(connection.execute('SELECT count(*) FROM __de WHERE study_id = ?',
+                                                  [study]).fetchone()[0]) for study in studies}
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _archive_study(served_duckdb: Path, served_sidecar: Path, study: str, target: Path) -> bool:
+        """The DE-only route's archive of a replaced study (only that study, else the whole sidecar)."""
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            from de_storage import write_sidecar  # noqa: PLC0415
+            if write_sidecar(target, served_duckdb, only_study=study) > 0:
+                return True
+        except Exception:  # noqa: BLE001
+            target.unlink(missing_ok=True)
+        if served_sidecar.exists():
+            shutil.copy2(served_sidecar, target)
+            return True
+        return False
+
+    def _remove_version_copies(self, path: artefacts.ArtefactPath, number: int, marker: Dict[str, Any]) -> None:
+        """A version that will not be published: delete its copies (only keys of this version carrying the
+        sha256 this deposit placed) and its marker, so a later deposit gets the same number cleanly."""
+        version_prefix = artefacts.s3_key(self.catalog_prefix, path.version_rel(number)) + '/'
+        for name, info in (marker.get('files') or {}).items():
+            key = artefacts.s3_key(self.catalog_prefix, path.file_rel(number, name))
+            try:
+                self._guarded_delete(key, version_prefix, info['sha256'], f'abandon:{marker.get("ref")}@v{number}')
+            except TransientError as exc:
+                self.log(f'artefacts: copy {key} of an abandoned version kept ({exc})')
+        self.drop_marker(marker['deposit_id'])
+
+    def _push_de_sidecar(self, scope_md: Path, warnings: List[str]) -> None:
+        """Push the dataset's ``.de.parquet`` to the catalog (or delete its catalog copy when it is gone)."""
+        sidecar = scope_md.with_name(f'{scope_md.stem}.de.parquet')
+        rel = scope_md.parent.relative_to(self.store_root)
+        key = f'{self.dataset_catalog_prefix}{rel}/{sidecar.name}'
+        try:
+            if sidecar.exists():
+                data = sidecar.read_bytes()
+                self.s3.put_object(Bucket=self.bucket, Key=key, Body=data,
+                                   Metadata={'sha256': hashlib.sha256(data).hexdigest()})
+            elif self._head_or_none(key) is not None:
+                self.s3.delete_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f'push of {sidecar.name} failed ({exc}); ant-sync push carries it later')
+
+    def _full_rescan(self, warnings: List[str]) -> None:
+        if self.api is None:
+            return
+        try:
+            self.api.post_with_retry('/admin/rescan')
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f'rescan failed ({exc})')
+
+    def _de_remove_for_purge(self, row: Dict[str, Any], path: artefacts.ArtefactPath, number: int,
+                             head: Dict[str, Any], manifest: Dict[str, Any], scope_md: Optional[Path]) -> Optional[str]:
+        """Before a de_table version's files go: remove its studies from the dataset (a patch version with a
+        changelog line and a caveat), unless a newer live version of the artefact imported the same study
+        (it owns it now) or the study is gone already. Returns a reason to stop, or None."""
+        from ingest_md_fill import curation_caveat, today_iso  # noqa: PLC0415
+        from ingest_pipeline import DeImportFailed, import_de_all_or_nothing  # noqa: PLC0415
+
+        studies = list(((manifest.get('de') or {}).get('imported') or {}).get('study_ids') or [])
+        if not studies:
+            return None
+        if scope_md is None:
+            return 'the dataset of this de_table is not served here; its study cannot be removed (nothing deleted)'
+        duckdb_path = scope_md.with_suffix('.duckdb')
+        try:
+            existing = self._list_studies(duckdb_path)
+        except Exception as exc:  # noqa: BLE001
+            raise TransientError(f'cannot read the DE studies ({exc})') from exc
+        kept_by_newer = self._own_studies(path, head, exclude=number)
+        remove = [study for study in studies if study in existing and study not in kept_by_newer]
+        if not remove:
+            return None
+        ref = f'{row["ref"]}@v{number}'
+        reason = row.get('reason') or ''
+        message = f'DE study {", ".join(remove)} removed: purged artefact {ref}' + (f' ({reason})' if reason else '')
+        caveat = curation_caveat(message, 'de_study_removed', today_iso(), detected_by='ant-ingest-watch')
+
+        class _Api:
+            def __init__(self, api: Any) -> None:
+                self.api = api
+
+            def release(self, db_id: str) -> None:
+                if self.api is not None:
+                    self.api.post_with_retry(f'/admin/release/{db_id}')
+
+            def restore(self, db_id: str) -> None:
+                if self.api is not None:
+                    self.api.post_with_retry(f'/admin/restore/{db_id}')
+        db_id = manifest.get('db_id') or ''
+        work = self.work_root / f'purge_{hashlib.sha1(ref.encode()).hexdigest()[:12]}'
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            import_de_all_or_nothing(store_root=self.store_root, md=scope_md, db_id=db_id, work=work, tables=[],
+                                     replace=[], remove=remove, runner=self.de_runner, api=_Api(self.api),
+                                     today=today_iso(), change=lambda _archived: message + '.', caveat=caveat)
+        except DeImportFailed as exc:
+            return f'the DE study could not be removed ({exc.output}); nothing deleted'
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        return None
+

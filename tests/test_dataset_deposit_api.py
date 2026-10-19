@@ -53,6 +53,7 @@ def serve_app(tmp_path, monkeypatch, auth=None, cfg_extra=None):
         'log': logging.getLogger('test-deposit'),
         'get_auth_settings': lambda cfg_arg=None: config.get_auth_settings(cfg),
         '_deposit_service': lambda: service,
+        '_artefact_context': lambda request: None,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     return TestClient(app), service

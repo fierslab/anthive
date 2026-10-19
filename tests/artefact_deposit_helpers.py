@@ -249,3 +249,47 @@ def poll_until_final(publisher, s3, clock, polls: int = 4) -> None:
 
 def watch_row(db, deposit_id: str) -> Dict[str, Any]:
     return db.get(f'artefact:{deposit_id}') or {}
+
+
+GENES = ['Apoe', 'Trem2', 'Cst7', 'Lpl', 'Itgax', 'Spp1', 'Cd74', 'H2-Aa', 'P2ry12', 'Tmem119', 'Cx3cr1', 'Sall1',
+         'Hexb', 'Csf1r', 'Tyrobp', 'Ctsb', 'Ctsd', 'Lyz2', 'Ccl3', 'Ccl4']
+
+
+def make_dataset_duckdb(store_root: Path, stem: str = 'int', genes=GENES) -> Path:
+    """A minimal served duckdb for PU1/<stem>: __genes and __cells (what ant-de-ingest needs)."""
+    import duckdb
+    path = store_root / 'Public2021' / f'{stem}.duckdb'
+    path.unlink(missing_ok=True)
+    connection = duckdb.connect(str(path))
+    try:
+        connection.execute('CREATE TABLE __genes (gene_id INTEGER, gene_name VARCHAR)')
+        connection.executemany('INSERT INTO __genes VALUES (?, ?)', list(enumerate(genes)))
+        connection.execute('CREATE TABLE __cells (cell_id INTEGER, cell_name VARCHAR)')
+        connection.execute("INSERT INTO __cells VALUES (0, 'c0')")
+    finally:
+        connection.close()
+    return path
+
+
+def deseq2_table(genes=GENES, scale: float = 1.0) -> bytes:
+    lines = ['gene\tbaseMean\tlog2FoldChange\tlfcSE\tpvalue\tpadj']
+    for index, gene in enumerate(genes):
+        p_value = (index + 1) / 100
+        lines.append(f'{gene}\t{100 + index}\t{scale * (index - 10) / 10:.3f}\t0.1\t{p_value:.4f}\t'
+                     f'{min(1, p_value * 2):.4f}')
+    return ('\n'.join(lines) + '\n').encode()
+
+
+def de_sidecar(study: str = 'treated_vs_control', **extra) -> bytes:
+    fields = {'de_format': 'deseq2', 'de_term': 'treatment', 'de_contrast': 'Treated_vs_Control',
+              'de_method': 'DESeq2', 'de_dataset_id': 'int', 'de_study_id': study,
+              'de_description': 'DESeq2 treated against control', **extra}
+    return ''.join(f'{key}={value}\n' for key, value in fields.items() if value is not None).encode()
+
+
+def de_files(study: str = 'treated_vs_control', table: bytes = None, folder: str = 'deseq2', **extra):
+    table = table if table is not None else deseq2_table()
+    return {f'{folder}/{study}.tsv': table, f'{folder}/{study}.tsv.mus': de_sidecar(study, **extra)}
+
+
+DE_INTERNAL = {'kind': 'de_table', 'scope': 'int', 'made_from': [{'db_id': 'PU1/int', 'dataset_version': '1.0.0'}]}

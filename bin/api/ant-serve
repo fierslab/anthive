@@ -17294,8 +17294,11 @@ def dataset_deposit_create(request: Request, body: Any = Body(None)):
         return _deposit_call(request, lambda service, identity: service.create(identity, body,
                                                                                _artefact_context(request)),
                              status_code=201, kinds=(kind,))
-    return _deposit_call(request, lambda service, identity: service.create(identity, body), status_code=201,
-                         kinds=('dataset',))
+    # a 2.46 DE-only body (update_of + kind de files) becomes a de_table artefact where artefacts are on, so it
+    # gets the artefact context too (deposit_kind de_only, alias until 2.48.0)
+    return _deposit_call(request, lambda service, identity: service.create(identity, body,
+                                                                           _artefact_context(request)),
+                         status_code=201, kinds=('dataset',))
 
 
 @app.post("/artefacts/{group_id}/{scope}/{artefact_id}/{version}/purge", tags=["artefacts"],

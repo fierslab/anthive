@@ -164,7 +164,7 @@ def test_dataset_deposits_still_need_their_own_switch(tmp_path, clock):
 
 @pytest.mark.parametrize('changes, status, word', [
     ({'kind': 'video'}, 422, 'invalid_kind'),
-    ({'kind': 'de_table'}, 422, 'invalid_kind'),
+    ({'kind': 'de_table'}, 422, 'invalid_name'),           # a de_table holds DE tables, not a png
     ({'artefact_id': 'Bad_Id'}, 422, 'invalid_artefact_id'),
     ({'artefact_id': 'a'}, 422, 'invalid_artefact_id'),
     ({'artefact_id': 'ok\n'}, 422, 'invalid_artefact_id'),
@@ -476,7 +476,7 @@ def test_vocab_describes_artefacts_and_analysis_collections(tmp_path, clock):
     service, _s3 = make_service(tmp_path, clock)
     vocab = service.vocab(ANALYST)
     assert vocab['artefacts']['uploads_enabled'] is True
-    assert 'de_table' not in vocab['artefacts']['kinds'] and vocab['artefacts']['deferred_kinds'] == ['de_table']
+    assert 'de_table' in vocab['artefacts']['kinds'] and vocab['artefacts']['deferred_kinds'] == []
     spec = vocab['analysis_index_md']['required_spec']
     assert 'default_dataset' in spec['not_required'] and spec['equals']['collection_kind'] == 'analysis'
     assert vocab['index_md']['required_spec']['keys'] == ['group', 'group_id', 'year', 'default_dataset']
