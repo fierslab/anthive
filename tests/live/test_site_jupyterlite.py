@@ -299,8 +299,8 @@ def test_shipped_notebook_runs(lite, connected, notebook):
     code_cells = [cell for cell in lite.notebook_cells(notebook) if cell["type"] == "code"]
     count = len(code_cells) if connected["n_databases"] else 1
     results = lite.run_first_code_cells(notebook, count)
-    for index, result in enumerate(results):
-        assert result.ok, f"{notebook} code cell {index + 1}: {result.describe()}"
+    for result in results:
+        assert result.ok, result.describe()
     assert len(results) == count
 
 
@@ -310,7 +310,9 @@ def test_warming_up_answer_is_retried_in_pyodide(lite, connected):
     result = lite.run(WARMUP_CODE)
     assert result.ok, result.describe()
     payload = parse_last_json(result.stdout)
-    assert counters == {"503": 1, "passed": 1}, counters
+    assert counters == {"503": 1, "passed": 1}, (
+        f"vark did not retry the 503 warming_up answer (requests seen: {counters}, "
+        f"kernel output: {payload})")
     assert payload["version"] == connected["api_version"]
     assert "ServerWarmingUpWarning" in payload["warnings"], payload
 
