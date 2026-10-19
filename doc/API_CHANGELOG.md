@@ -228,6 +228,22 @@ Collection deposits create `<Group>/index.md`; a public one is held.
   deposit is refused (409).
 - The per-user stored-bytes quota counts the user's pending artefact deposits.
 
+### Fixes from the second review
+
+- `kind: "de_table"` and the `de_only` alias need the right to update the dataset (admin,
+  `datasets_deposit_update_policy: any`, or the dataset's owner): 403 `forbidden` at create, `failed`
+  (`not_owner`) at publication when it changed since.
+- A new version of an artefact whose versions are all purged names the highest purged version in
+  `new_version_of` (`latest` stays null); the alias does that by itself.
+- Manifests of de_table versions add `de.imported.fingerprints` (`{study_id: "<rows>:<hash sum>"}`). Purging
+  a de_table version restores the newest other live version's table when the purged version wrote the
+  study's rows, leaves rows another version wrote, and stops (`needs_decision`) for rows no version recorded.
+  The tombstone of a de_table on an inactive dataset has `de_removal_deferred: [study ids]`.
+- New held reason `de_not_checked` (a DE table too large for the duplicate check).
+- A deposit that fails after its DE import has the import rolled back (caveat `de_import_rolled_back` on
+  the dataset); one that fails after transient errors or an internal error leaves its version `failed`, not
+  `reserved`.
+
 ## 2.46.2 (unreleased)
 
 Security patch. No endpoint, parameter or response field changes. Clients do not need to update.

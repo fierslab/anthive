@@ -804,9 +804,15 @@ Choices:
   version carrying the sha256 this deposit placed), its head entry is marked `failed` and its marker dropped;
   the next deposit gets the next number (section 20). A kill after the import is recognised by the changelog line naming `artefact <ref>@v<N>
   (deposit <id>)`; the study is never imported twice.
+- **Who may deposit a de_table.** A de_table changes its dataset (a patch version and DE studies), so it
+  needs the right to update the dataset, the 2.46 rule of `_existing_dataset`: an admin,
+  `datasets_deposit_update_policy: any`, or the dataset's owner (assigned by an admin, else the depositor of
+  its newest live version). Checked at create (403) and again at publication. This is the security default
+  (Mark may revise it); a member who may not update the dataset can still deposit the table as kind `table`.
 - **Study ownership.** A study id belongs to the artefact whose live versions list it in `de.imported`. A
   new version of that artefact replaces it (archived, as an admin replacement in 2.46); any other clash needs
-  an admin, as in 2.46. Purge removes a study only when no other live version of the artefact lists it.
+  an admin, as in 2.46. Which version wrote the rows a study serves now is decided by fingerprints
+  (section 21), not by study id.
 - **Sign convention.** The table cannot prove the direction of a comparison. The check reads the contrast:
   `A_vs_B` (or `A vs B`) is recorded as "positive log2 fold change = higher in A than in B"; any other contrast
   is a warning. Nothing compares the sign with the data.
@@ -816,10 +822,10 @@ Choices:
 - **Sidecars.** API deposits keep the `.mus` as uploaded (a warning names keys such as `abspath`,
   `eln_*`, `s3_*`, which are served with the table); the migration copies only the DE keys.
 - **`de_only` alias.** Only where artefacts are on, for one minor release; the rights of the 2.46 route
-  (dataset uploaders) still apply to it. The artefact id comes from the first table's name, not from the
+  (the dataset update rule above) apply to it. The artefact id comes from the first table's name, not from the
   sidecar's `de_study_id`, because the sidecar is not uploaded yet when the deposit is created.
 - **Migration dry run on the dev store (2026-10-19, `/data/1/project/h5adstore`, read-only: no file in the
-  store changed).** Four tables found. `Sierksma2020/de_sources/de/DE_ARM_vs_HM1.tsv.gz` and
+  store changed; superseded by the rerun in section 21).** Four tables found. `Sierksma2020/de_sources/de/DE_ARM_vs_HM1.tsv.gz` and
   `DE_HM1_vs_HM2.tsv.gz` would become `S20/SIE/de-arm-vs-hm1` and `S20/SIE/de-hm1-vs-hm2`, but the served duckdb
   holds no DE study at all (no `__de_study`, no `.de.parquet`): the imports were lost or never made, so these
   would be artefacts without an import record. The two `Sun2026/de_sources/*/res_TvsC_sh*.tsv` tables are
@@ -872,3 +878,49 @@ An independent review probed the A1 + A2 code (probes kept as `tests/test_artefa
 Left for A6: the head record's description and the change notes are markdown written by depositors. They are
 served as text today; when the web UI renders them, it must sanitise (no raw HTML, no `javascript:` links, no
 images from other hosts).
+
+## 21. Second review of the artefact store (2026-10-19)
+
+A second review checked the section 20 fixes and A3 (probes kept as `tests/test_artefact_review2.py`).
+
+- **De_table rights (N1).** See section 19: the dataset update rule at create and at publication, for
+  de_table artefacts and the `de_only` alias. The alias now also carries a server-set `alias_of` in the stored
+  block, so the watcher applies the relaxed provenance it was accepted with (before, an alias deposit could
+  never be published: the watcher held de_table provenance to the strict rule).
+- **Who wrote a study (N2).** Every de_table version records, per imported study, a fingerprint of the rows
+  it imported (`de.imported.fingerprints`: row count and the summed `hash()` of the `__de` columns). A purge
+  compares each study with what the dataset serves now:
+  - rows another de_table version in the scope recorded stay (another artefact replaced the study);
+  - rows of the purged version are replaced by the newest other live version of the same artefact that
+    lists the study (its table is read from the local copy or the catalog, imported with `--replace`, the
+    purged rows archived), or removed when no such version exists;
+  - rows no version recorded (a hand edit or import since, or a version without fingerprints) stop the purge
+    for an admin; nothing is deleted.
+
+  All of it is one all-or-nothing import with a patch version and a caveat. The fingerprint is computed by
+  the DuckDB that compares it; an upgrade that changes `hash` makes the comparison stop for an admin, never
+  remove the wrong rows.
+- **Rollback (N3).** The study plan (`added`, `replaced`) is saved in the resume marker before the import. A
+  version abandoned after its import is rolled back: added studies removed, replaced ones restored from their
+  `_versions/<basename>/de/<study>/` archives (`import_de_all_or_nothing(restore=...)`), a patch version and
+  the caveat `de_import_rolled_back`. The failure text says whether it worked; a rollback that fails says that
+  an admin must remove the study.
+- **Give-up and bugs (S3 residue).** A deposit that fails after 8 transient errors or through an
+  unexpected exception abandons its reserved version like a stop does (rollback, copies removed, entry
+  `failed`), so nothing is left `reserved`.
+- **DE duplicate check (S4 residue).** 64-bit hashes of `(term, contrast, gene)`, at most 2,000,000; a larger
+  table is held (`de_not_checked`).
+- **Checks against a moving dataset.** The version and sha256 of the scope and `made_from` datasets are read
+  before the checks and again under the scope lock; a change means the checks run again at the next attempt.
+- **Purge of a de_table on an inactive dataset.** The files go, the study removal is recorded as
+  `de_removal_deferred` on the tombstone; an admin removes the study after the dataset is active again.
+- **Migration.** `apply` checks the head record locally and on S3 first; files are written only when absent
+  (an existing file with the same sha256 is a resumed run); a manifest is never overwritten; only a 404 counts
+  as absent. The script uses the `s3` block's write key. Study ids match changelog lines as whole ids. Tables
+  of retired datasets (a `_`-prefixed folder such as `_deleted_2026-10-05/`) are skipped. Studies already in
+  the duckdb get their fingerprint.
+- **Dev store dry run again (2026-10-19, read-only, no store file changed).**
+  `Sierksma2020/de_sources/de/DE_ARM_vs_HM1.tsv.gz` (79,582 rows) and `DE_HM1_vs_HM2.tsv.gz` (16,148 rows) now
+  link to the studies Mark imported by hand into S20/SIE 0.3.0 (made_from 0.3.0, from the changelog entry
+  naming each study). Both `Sun2026` tables are skipped: their targets AQN and AQB are retired datasets
+  (`Sun2026/_deleted_2026-10-05/`).
