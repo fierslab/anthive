@@ -137,14 +137,19 @@ built with the same model. Changing the model means a full index rebuild
 
 - [ ] **Scratch-site check.** Before announcing a release, deploy it once on
       a scratch site following DEPLOY_CONTAINERS.md word for word (fresh
-      `state_dir`, anonymous pulls with an empty `DOCKER_CONFIG`; on the
-      build host `docker image rm` the release images first, or the pull
-      downloads nothing and proves little). Also change a setting afterwards
+      `state_dir`, anonymous pulls with an empty `DOCKER_CONFIG`). On the
+      build host the pull downloads nothing even after `docker image rm`,
+      because the layers stay on disk; either use a host that never had the
+      images, or prove anonymous access by hand: an anonymous token from
+      `https://gitlab.kuleuven.be/jwt/auth?service=container_registry&scope=repository:bdslab/anthive/anthive4/anthive-app:pull`,
+      the manifest of the tag, and a ranged GET (206) on a layer new in this
+      release. Also change a setting afterwards
       and check with `ant-stack up` that it takes effect. With
       `auth.internal_requires_auth` you need an internal dataset pulled, and
       on an authelia site Caddy refuses every anonymous request, so look from
-      inside the network: `docker compose ... exec web` and fetch
-      `http://api:8080/databases`, which carries no identity. Release 2.37.2 found
+      inside the network:
+      `docker exec <site.name>-web-1 python -c "import urllib.request; print(urllib.request.urlopen('http://api:8080/databases').read()[:400])"`
+      carries no identity, so it shows what an anonymous caller gets. Release 2.37.2 found
       four real problems that way, 2.45.0 found that `up` ignored config-only
       changes. After `up`, run the live checks from this checkout against the
       scratch site with a seeded account:

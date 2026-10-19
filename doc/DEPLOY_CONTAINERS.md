@@ -337,8 +337,10 @@ bin/ops/ant-stack check
 ```
 
 It prints the resolved plan and ends with `OK: ready for ant-stack up`, or it
-lists each `PROBLEM` with the fix. Repeat until it says OK. A `WARNING` about
-datasets without a local `.duckdb` is expected at this point; step 5 fixes it.
+lists each `PROBLEM` with the fix. Repeat until the only problems left are the
+two `image ... not present locally` lines (on a host that never had the images;
+step 5's `pull` fixes them). A `WARNING` about datasets without a local
+`.duckdb` is expected at this point; step 5 fixes it too.
 
 `check` also compares the keys of `site.yaml` with `site.example.yaml`. A key it
 does not know under `auth`, `tls`, `ports`, `s3`, `services`, `datasets` or
