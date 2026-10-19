@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from pathlib import Path
 
 import duckdb
 import pytest
@@ -422,3 +423,43 @@ def test_migration_never_overwrites_a_manifest_already_on_s3(tmp_path, clock):
         artefact_migrate.apply(store, artefact_migrate.plan(store), s3, 'bucket', CATALOG, log=lambda message: None)
     assert s3.objects[manifest_key]['body'] == b'{"other": true}'
     assert not (store / str(path.head_rel)).exists()
+
+
+# ── review round 3, nit 8: the system owner name "migration" is never a login ────────────────────────────
+
+def test_owned_by_never_matches_a_system_owner():
+    assert artefacts.owned_by('ana', 'ana') and not artefacts.owned_by('ana', 'otto')
+    assert not artefacts.owned_by('migration', 'migration') and not artefacts.owned_by('', '')
+
+
+def test_a_login_named_migration_cannot_purge_migrated_artefacts(tmp_path, clock):
+    from tests.artefact_helpers import write_artefact
+    service, _s3, _publisher, _db, _api = _setup(tmp_path, clock)
+    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'de_table', 'migrated',
+                   [{'files': {'a.tsv': b'gene\\tx\\n'}, 'manifest': {'recorded': {'uploaded_by': 'migration'}}}],
+                   owner='migration')
+    impostor = dd.Identity(user='migration', name='x', email='x@example.org')
+    with pytest.raises(dd.DepositError) as caught:
+        _purge(service, impostor, 'migrated', 1)
+    assert caught.value.status == 403
+
+
+def test_reserved_logins_agree_everywhere(tmp_path):
+    import importlib.machinery
+    import importlib.util
+    repo = Path(__file__).resolve().parent.parent
+    source = (repo / 'bin' / 'ops' / 'ant-adduser').read_text()
+    assert 'RESERVED_LOGINS = frozenset({"migration"})' in source
+    loader = importlib.machinery.SourceFileLoader('ant_stack_reserved', str(repo / 'bin' / 'ops' / 'ant-stack'))
+    spec = importlib.util.spec_from_loader('ant_stack_reserved', loader)
+    ant_stack = importlib.util.module_from_spec(spec)
+    loader.exec_module(ant_stack)
+    assert ant_stack.RESERVED_LOGINS == artefacts.SYSTEM_OWNERS
+    import yaml
+    (tmp_path / 'store').mkdir()
+    site = {'site': {'name': 'unit', 'public_url': 'https://anthive.example.org'},
+            'data': {'h5adstore': str(tmp_path / 'store')}, 'state_dir': str(tmp_path / 'state'),
+            'auth': {'mode': 'authelia', 'admins': ['boss'], 'users': [{'name': 'migration', 'groups': []}]}}
+    (tmp_path / 'site.yaml').write_text(yaml.safe_dump(site))
+    with pytest.raises(ant_stack.SiteError, match='reserved'):
+        ant_stack.load_site(tmp_path / 'site.yaml')

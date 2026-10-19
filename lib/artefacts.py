@@ -161,6 +161,16 @@ def casefold_clashes(names: Iterable[str]) -> List[str]:
     return clashes
 
 
+#: owner names the system writes into head records (ant-artefacts-migrate-de): no login may carry them, and an
+#: ownership check never matches them (review round 3). Keep equal to RESERVED_LOGINS in bin/ops/ant-adduser.
+SYSTEM_OWNERS = frozenset({'migration'})
+
+
+def owned_by(owner: Any, user: Any) -> bool:
+    """``user`` is the owner ``owner`` names, and neither is a system owner name."""
+    return bool(user) and owner == user and str(user).lower() not in SYSTEM_OWNERS
+
+
 #: content types a browser runs or renders as active content; never served or recorded as such (review round 3)
 ACTIVE_CONTENT_MARKERS = ('html', 'xml', 'javascript', 'ecmascript', 'svg', 'x-shockwave', 'xsl')
 

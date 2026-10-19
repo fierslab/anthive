@@ -85,6 +85,8 @@ COMPOSE_FILE = REPO / 'docker' / 'compose.yaml'
 EXAMPLE = REPO / 'site.example.yaml'
 
 AUTH_MODES = ('authelia', 'basic', 'trusted-proxy', 'none')
+# names the system writes as artefact owners (lib/artefacts.py SYSTEM_OWNERS): never a login
+RESERVED_LOGINS = frozenset({'migration'})
 TLS_MODES = ('internal', 'acme', 'off')
 # What the api container may do on S3 (s3.api_access). The serving stack
 # needs no S3 keys when the data is local; ingest and host-side sync always
@@ -250,6 +252,11 @@ def validate_site(site: dict, path: Path) -> dict:
         raise SiteError("auth.mode authelia requires an https public_url (Authelia refuses http cookies)")
     if auth_mode == 'basic' and not site['auth'].get('users'):
         raise SiteError("auth.mode basic needs at least one entry in auth.users")
+    reserved = [str(user.get('name')) for user in site['auth'].get('users') or []
+                if isinstance(user, dict) and str(user.get('name') or '').lower() in RESERVED_LOGINS]
+    if reserved:
+        raise SiteError(f"auth.users: {', '.join(reserved)} is a reserved system name (artefact owner of the "
+                        f"migration); choose another login")
     if not isinstance(site['auth'].get('internal_requires_auth', True), bool):
         raise SiteError("auth.internal_requires_auth must be true or false")
     facets_visible = site['site'].get('facets_visible')

@@ -940,7 +940,7 @@ class ArtefactPublisher:
                 if marker is None:
                     if block.get('new_version_of') is None:
                         raise Stop('failed', f'artefact_exists: {ref} exists (latest {latest})')
-                    if head.get('owner') != record['user'] and not record['is_admin']:
+                    if not artefacts.owned_by(head.get('owner'), record['user']) and not record['is_admin']:
                         raise Stop('failed', f'not_owner: new versions of {ref} are deposited by its owner or an '
                                              f'admin')
                     if block.get('new_version_of') != latest:

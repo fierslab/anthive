@@ -63,6 +63,8 @@ DEFAULT_CONFIG_FILE = REPO_ROOT / "config" / "authelia" / "configuration.yml"
 
 EMAIL_RE = re.compile(r"^[^@\s\x00-\x1f\x7f]+@[^@\s\x00-\x1f\x7f]+\.[^@\s\x00-\x1f\x7f]+$")
 LOGIN_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+# names the system writes as artefact owners (lib/artefacts.py SYSTEM_OWNERS): never a login
+RESERVED_LOGINS = frozenset({"migration"})
 
 
 def die(message: str) -> None:
@@ -108,6 +110,9 @@ def confirm_login(suggestion: str, existing: dict[str, str | None],
         if not LOGIN_RE.fullmatch(choice):
             print("  invalid: lowercase, start with a letter, a-z 0-9 _ -",
                   file=sys.stderr)
+            continue
+        if choice in RESERVED_LOGINS:
+            print(f"  invalid: {choice!r} is reserved for the system", file=sys.stderr)
             continue
         if choice not in existing:
             return choice
@@ -252,6 +257,8 @@ def main() -> None:
         if not LOGIN_RE.fullmatch(args.login):
             die(f"login {args.login!r} must be lowercase, start with a letter, "
                 f"and contain only a-z 0-9 _ -")
+        if args.login in RESERVED_LOGINS:
+            die(f"login {args.login!r} is reserved for the system")
         desired = args.login
         suggestions = [args.login] + [f"{args.login}{n}" for n in range(2, 100)]
     else:

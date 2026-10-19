@@ -17286,6 +17286,9 @@ def _require_dataset_uploader(request: Request, admin_ok: bool = False, kinds: T
     raw_groups = request.headers.get('Remote-Groups') or ''
     groups = {g.strip().lower() for g in raw_groups.split(',') if g.strip()}
     user = (request.headers.get('Remote-User') or '').strip()
+    from artefacts import SYSTEM_OWNERS  # noqa: PLC0415
+    if user.lower() in SYSTEM_OWNERS:
+        user = ''                                     # a reserved system name never acts as a login
     if get_auth_settings()['mode'] != 'none' and user:
         is_admin = _caller_is_admin(request)
         # admins may always deposit artefacts and create collections (design 4.1) where artefacts are on
@@ -17400,9 +17403,10 @@ def _deposit_rights(request: Request, service) -> Dict[str, bool]:
 def _signed_in_identity(request: Request):
     """(Identity, None) for any signed-in caller (no upload group needed), else (None, 403). Used where the
     service decides by ownership: purges of one's own versions, one's own purge requests."""
+    from artefacts import SYSTEM_OWNERS  # noqa: PLC0415
     from dataset_deposit import Identity  # noqa: PLC0415
     user = (request.headers.get('Remote-User') or '').strip()
-    if get_auth_settings()['mode'] != 'none' and user:
+    if get_auth_settings()['mode'] != 'none' and user and user.lower() not in SYSTEM_OWNERS:
         return Identity(user=user, name=(request.headers.get('Remote-Name') or '').strip(),
                         email=(request.headers.get('Remote-Email') or '').strip(),
                         is_admin=_caller_is_admin(request)), None

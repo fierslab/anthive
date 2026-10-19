@@ -619,7 +619,7 @@ class ArtefactDepositService(DepositService):
             if new_version_of is None:
                 raise DepositError(409, 'artefact_exists', f'{ref} exists; a new version gives "new_version_of": '
                                                            f'{follows}', latest=existing.latest)
-            if existing.owner != identity.user and not identity.is_admin:
+            if not artefacts.owned_by(existing.owner, identity.user) and not identity.is_admin:
                 raise DepositError(403, 'not_owner', f'new versions of {ref} are deposited by its owner or an admin')
             if existing.path.kind != kind:
                 raise DepositError(422, 'invalid_kind', f'{ref} is a {existing.path.kind}; the kind cannot change')
@@ -1018,7 +1018,8 @@ class ArtefactDepositService(DepositService):
         if version.state == 'failed' and not identity.is_admin:
             raise DepositError(403, 'forbidden', f'{ref} is a failed publication: an admin cleans it up')
         uploader = ((version.manifest or {}).get('recorded') or {}).get('uploaded_by')
-        if not (identity.is_admin or identity.user in (uploader, entry.owner)):
+        if not (identity.is_admin or artefacts.owned_by(uploader, identity.user)
+                or artefacts.owned_by(entry.owner, identity.user)):
             raise DepositError(403, 'forbidden', f'only the uploader of {ref}, the owner of the artefact or an admin '
                                                  f'may purge it')
         if not isinstance(body, dict):
@@ -1095,7 +1096,7 @@ class ArtefactDepositService(DepositService):
         existing = context.index.get(group_id, scope, artefact_id)
         follows = version_followed(existing) if existing is not None else None
         if follows is not None:
-            if existing.owner != identity.user and not identity.is_admin:
+            if not artefacts.owned_by(existing.owner, identity.user) and not identity.is_admin:
                 raise DepositError(409, 'artefact_exists', f'the DE table {stem} is already an artefact of {db_id}, '
                                                            f'deposited by someone else; give your table another name '
                                                            f'or ask an admin')
