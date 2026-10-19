@@ -696,6 +696,30 @@ def test_pull_and_check_stage_and_up_applies(tmp_path, ant_stack, monkeypatch):
     assert oct((stack / 'anthive-api.yaml').stat().st_mode & 0o777) == '0o600'
 
 
+
+def test_ingest_applies_only_its_own_config(tmp_path, ant_stack, monkeypatch):
+    """2.46.3 scratch site: S3 keys written after `init` stayed staged, so the first
+    `ant-stack ingest -- ant sync pull` failed. `ingest` now applies the ingest config
+    (read only by on-demand runs) and leaves the running services' files alone."""
+    path = _write_site(tmp_path, images={'tag': '2.46.0'})
+    site = ant_stack.load_site(path)
+    ant_stack.ensure_secrets(site)
+    ant_stack.render(site, quiet=True)
+    stack = site['_state'] / 'stack'
+    live_before = {name: (stack / name).read_bytes() for name in ('anthive-api.yaml', 'anthive.yaml', '.env',
+                                                                     'compose.site.yaml')}
+    _write_site(tmp_path, images={'tag': '2.46.1'}, anthive={'max_obscat_values': 77})
+    calls = []
+    monkeypatch.setattr(ant_stack, 'run_compose', lambda site, *cmd, check=True: calls.append(cmd) or 0)
+    args = argparse.Namespace(site=str(path), cmd=['--', 'ant', 'sync', 'pull'])
+    assert ant_stack.cmd_ingest(args) == 0
+    assert calls and calls[0][-3:] == ('ant', 'sync', 'pull')
+    assert 'max_obscat_values: 77' in (stack / 'anthive-ingest.yaml').read_text()
+    assert {name: (stack / name).read_bytes() for name in live_before} == live_before
+    site = ant_stack.load_site(path)
+    assert 'anthive-ingest.yaml' not in ant_stack.staged_changes(site)
+    assert oct((stack / 'anthive-ingest.yaml').stat().st_mode & 0o777) == '0o600'
+
 def test_staged_compose_digest_matches_the_applied_files(tmp_path, ant_stack):
     """`up` recreates exactly the services whose config changed: the digest in the staged
     compose file must equal the digest of the files once they are in place."""
