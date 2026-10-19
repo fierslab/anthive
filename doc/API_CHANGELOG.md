@@ -274,6 +274,25 @@ Collection deposits create `<Group>/index.md`; a public one is held.
   moved to `message`.
 - The de_only alias no longer warns about a missing `declared.software` (a 2.46 request cannot carry one).
 
+### Security review round 3
+
+- Every POST, PUT, PATCH and DELETE that a browser marks as coming from another site (`Sec-Fetch-Site` other
+  than `same-origin` or `none`, or an `Origin` that is not this site) is refused with 403 `cross_site`. A request
+  body that is not `application/json` (or `+json`) or `multipart/form-data` is refused with 415
+  `unsupported_media_type`. Clients that send no `Origin` (vark, pyvark, ant-mcp, scripts) are unaffected as long
+  as they send JSON with its content type; an empty POST needs none.
+- Artefact manifests record active content (HTML, XML, SVG, JavaScript) as `application/octet-stream`, and the
+  presigned and local downloads answer with that type whatever an older manifest says.
+- Manifests gain `previews: [{file, name, size, sha256}]` for the previews the watcher made; `ant sync pull`
+  checks previews against it and pulls only the ones listed.
+- MCP `get_artefact`, `list_artefacts`, `list_collections`: server facts first; every string a depositor wrote
+  is a labelled JSON string on one line (`depositor's description: "..."`). Scripts that parsed the old lines
+  must follow.
+- A login named `migration` (the owner the de_sources migration writes) is never accepted; ownership checks
+  never match it.
+- Markdown bodies (dataset `.md`, collection `index.md`, gene set and paper notes) render without raw HTML in the
+  web UI; a collection deposit writes `<` in its description as `&lt;`.
+
 ### Deployment and sync (phase A4)
 
 - `site.yaml` gains an `artefacts:` block (`enabled`, `upload_groups`, `collections_create_groups`, size and

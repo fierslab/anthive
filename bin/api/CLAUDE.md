@@ -241,6 +241,10 @@ and `lib/config.py` (anthive.yaml loader).
   `collections_create_groups` where `artefacts_enabled`, so analysts see `my_deposits` / `deposit_status`. No upload
   over MCP. Tests: `tests/test_mcp_artefacts.py`. `GET /collections` (visibility: a dataset collection with a visible
   dataset, an analysis collection by its index.md access) is tested in `tests/test_artefacts_api.py`.
+- **Cross-site guard** (review round 3): `_CrossSiteGuard` (pure ASGI, outermost) refuses POST/PUT/PATCH/DELETE
+  with a cross-site `Sec-Fetch-Site` or a foreign `Origin` (403 `cross_site`) and bodies that are not JSON or
+  multipart (415). Clients without `Origin` pass. Tests: `tests/test_cross_site_guard.py`. Never add a route that
+  reads a form-urlencoded or text body.
 - **Catalog scan** walks the store with `lib/h5adstore.catalog_dataset_mds` (2.46.1), the same helper
   `ant-stack check` counts with: store-root documents, `static/` documents, `index.md`/`README.md`,
   `_` folders and inactive datasets are never datasets.

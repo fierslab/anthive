@@ -958,3 +958,25 @@ A second review checked the section 20 fixes and A3 (probes kept as `tests/test_
   and the scratch folder were removed, and the one S3 object left (the tombstone head record) was deleted; no
   object remains under the test prefixes. The published image (anonymous pull) could not be used: no image of
   this branch is published.
+
+## 23. Security review round 3 (2026-10-19)
+
+- **Stored XSS through an analysis collection (serious).** A collection deposit wrote the depositor's description
+  into `index.md`, and once the collection listed a dataset the folder page rendered it with python-markdown and
+  `|safe`. Fixed at both ends: `render_analysis_index_md` writes `<` as `&lt;`, and the web UI renders every
+  markdown body (dataset `.md`, collection `index.md`, gene set and experiment bodies, paper notes) through
+  `safe_markdown` (`_store_markdown`). 2.46 dataset deposits write seed `.md` and `index.md` files too, so no body
+  is trusted; the store uses no raw HTML today.
+- **safe_markdown** parses with markdown-it-py (CommonMark, tables, strikethrough, raw HTML off) and keeps the
+  allowlist re-serialisation; hrefs with a backslash or a control character are refused (`/\host` is another
+  site to a browser); relative links are kept; plot thumbnails survive for store bodies. The 31 review payloads
+  are tests.
+- **ant-sync and symbolic links.** `artefact_sync.checked_path` refuses any component below
+  `<group>/static/artefacts` that is a symbolic link and any path resolving outside that tree, for planning,
+  deletes and downloads.
+- **MCP.** Depositor text is a labelled JSON string on one line, after the server facts.
+- **CSRF.** `_CrossSiteGuard` in ant-serve (see the changelog); ant-browse has no state-changing routes. The
+  FastAPI floor of ant-serve and ant-browse is 0.141.1 (the pinned version).
+- **Content types, the system owner, previews.** Active types are `application/octet-stream` in manifests and
+  downloads; `migration` is reserved (ant-adduser, ant-stack, ant-serve, ownership checks); previews are recorded
+  in the manifest and checked against it by `ant sync pull`.
