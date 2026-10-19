@@ -1463,9 +1463,17 @@ def _check_artefacts(site: dict) -> list[str]:
     else:
         if site['auth']['mode'] == 'none':
             _warn("artefacts.enabled is on but auth.mode is none: nobody can deposit artefacts (a login is required)")
-        if _deposit_key_source(site) is None:
+        source = _deposit_key_source(site)
+        if source is None:
             problems.append(f"artefacts.enabled is on but neither secrets/{S3_INCOMING_KEY_FILES[0]} (+ "
                             f"{S3_INCOMING_KEY_FILES[1]}) nor the read-write pair exists for presigning")
+        elif not _deposit_enabled(site):        # the dataset check says these two otherwise
+            if source == 'write':
+                _warn(f"artefact deposits presign with the read-write S3 keys, so the api container holds them; "
+                      f"put a key pair limited to the incoming prefixes in secrets/{S3_INCOMING_KEY_FILES[0]} "
+                      f"and {S3_INCOMING_KEY_FILES[1]} if the object store can scope keys")
+            _say("artefact deposits: give the bucket a lifecycle rule AbortIncompleteMultipartUpload for __deposits/ "
+                 "and __incoming/ (doc/DEPLOY_CONTAINERS.md)")
         groups = block.get('upload_groups') or ['admins', 'analysts']
         _say(f"artefact deposits: on for {', '.join(groups)} (collections: "
              f"{', '.join(block.get('collections_create_groups') or ['admins', 'analysts'])}); the same watcher "

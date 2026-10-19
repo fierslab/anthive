@@ -924,3 +924,37 @@ A second review checked the section 20 fixes and A3 (probes kept as `tests/test_
   link to the studies Mark imported by hand into S20/SIE 0.3.0 (made_from 0.3.0, from the changelog entry
   naming each study). Both `Sun2026` tables are skipped: their targets AQN and AQB are retired datasets
   (`Sun2026/_deleted_2026-10-05/`).
+
+## 22. Phase A4 as built (2026-10-19)
+
+`lib/artefact_sync.py` with `ant-sync pull`, the `artefacts:` block and `_check_artefacts` in `ant-stack`,
+`doc/DEPLOY_CONTAINERS.md` ("Let analysts deposit artefacts"), `site.example.yaml`. Tests:
+`tests/test_artefact_sync.py`, `tests/test_ant_stack_artefacts.py`. Choices:
+
+- **Head records and manifests are not pulled by ant-sync** (section 11 said "always"). The watcher commits
+  them to the h5adstore repository, so they arrive with `git pull`; writing them from S3 into the checkout
+  would make the next `git pull` refuse to overwrite untracked files. ant-sync reads them locally to decide
+  what to fetch, and notes a live version whose manifest is not in the checkout yet.
+- **Inline files and previews** are pulled for every live version, verified against the manifest's sha256
+  (previews against the object's `sha256` metadata; a preview without it is not pulled). They are not counted
+  in the `sync_policy.mode: priority` budget: they are at most `artefacts_inline_max_mb` each.
+- **`--artefacts PATTERN`** pulls the other files of the artefacts it names; a FILTER glob without it skips
+  the artefact part of the pull, `--no-artefacts` always does.
+- **An artefact-only site** (`artefacts.enabled`, `services.dataset_deposit` off) gets the same watcher,
+  tools listener and presigning pair as a deposit site: one watcher publishes both.
+- **Scratch-site check (2026-10-19).** Built the app image from the branch (`ant-stack build --app-only`; the
+  ingest image was the app image retagged, since nothing here needs R), then followed DEPLOY_CONTAINERS.md on a
+  scratch site with a fresh `state_dir`: `init` twice, key files, `check` (OK), `up`; basic login, `tls.mode:
+  off`, ports 18580 / 18579, S3 on the lab bucket under the test prefixes only (`__ingest_test_catalog/`,
+  `__incoming_test/`, `__deposits_test/`). Through the running stack: an artefact deposit into an internal
+  analysis collection (create, presigned PUT, complete), `ant-stack watch -- --once` published it (live v1, the
+  inline copy in the store), the listing and detail answered, the download was a 307 to a signed link with
+  `Cache-Control: no-store, private` and `Referrer-Policy: no-referrer`, the signed GET returned the same bytes
+  as `attachment`, and the Caddy access log held the `Location` with `?REDACTED` instead of the signature.
+  Changing `artefacts.max_file_gb` and running `up` changed the vocabulary at once. `ant-stack ingest -- ant
+  sync pull --no-library` (dry run, then for real) brought back a deleted inline copy. A purge through the API
+  was carried out by the next `watch --once`. Found and fixed: `check` did not warn that an artefact-only site
+  presigns with the read-write pair, nor remind of the lifecycle rule. Afterwards `down`, the volumes, images
+  and the scratch folder were removed, and the one S3 object left (the tombstone head record) was deleted; no
+  object remains under the test prefixes. The published image (anonymous pull) could not be used: no image of
+  this branch is published.

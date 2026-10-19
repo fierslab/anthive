@@ -144,7 +144,10 @@ def test_check_warns_when_the_api_cannot_sign_artefact_links(tmp_path, ant_stack
     site = _site(ant_stack, tmp_path, s3=S3_ON, artefacts={'enabled': True})
     assert ant_stack._check_artefacts(site) == []
     output = capsys.readouterr()
-    assert 'only files with a local copy' in output.out + output.err
+    text = output.out + output.err
+    assert 'only files with a local copy' in text
+    # an artefact-only site presigns with the read-write pair: said here, as the dataset check would
+    assert 'presign with the read-write S3 keys' in text and 'AbortIncompleteMultipartUpload' in text
 
 
 def test_the_caddy_log_filter_drops_signed_query_strings():
