@@ -4,7 +4,7 @@ This is the one supported way to run anthive: a docker compose stack,
 described by one file (`site.yaml`) and driven by one tool
 (`bin/ops/ant-stack`). Follow the steps in order.
 
-Every command below was run end to end on a fresh checkout for release 2.46.2.
+Every command below was run end to end on a fresh checkout for release 2.46.3.
 
 Plan about an hour, plus the time it takes to download the data.
 
@@ -183,7 +183,7 @@ sudo mkdir -p /srv/anthive && sudo chown $USER /srv/anthive
 cd /srv/anthive
 git clone https://gitlab.kuleuven.be/bdslab/anthive/anthive4.git
 cd anthive4
-git checkout v2.46.2
+git checkout v2.46.3
 ```
 
 Always check out a release tag, and use the same number as the image tag in
@@ -271,7 +271,7 @@ ports:
 
 images:
   registry: registry.gitlab.kuleuven.be/bdslab/anthive/anthive4
-  tag: 2.46.2                                 # same number as the git tag (step 2)
+  tag: 2.46.3                                 # same number as the git tag (step 2)
 
 s3:                                           # skip if you have no S3 keys
   enabled: true
@@ -899,6 +899,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.46.0** | Dataset deposits through the API: signed-in members of `datasets.upload_groups` get presigned uploads into the S3 watcher's incoming prefix and follow their deposit in the API (and two read-only MCP tools). Off by default; nothing changes for a site that leaves it off. `ant sync push` now sets `x-amz-meta-sha256` on uploaded `.h5ad` objects. | optional: `services: dataset_deposit: true`, the `datasets:` block, a presigning key pair and the watcher on the host (see "Let depositors add datasets"); `ant-stack check`. The primary site, once, for metadata-only updates of datasets pushed before: `bin/ops/ant-stack ingest -- ant sync stamp-sha256 --dry-run`, then without `--dry-run` |
 | **2.46.1** | Fixes. (1) `ant sync pull --dry-run` changes nothing on every path (before, with `--include-duckdb` or `--only` it downloaded and overwrote files); `ant sync push --dry-run` exists. (2) `sync_policy.mode: priority` pulls each kept dataset with its layer, DE and score parquets plus the shared indexes, caches, `_facet_tests/` and `static/`, never `.h5ad`; `--include-duckdb` no longer bypasses it. (3) `pull` and `check` stage the rendered config, `up` applies it; the api warns about unknown config keys instead of stopping. (4) `check` counts datasets like the api (store-root documents and `static/*.md` are not datasets) and says "no datasets yet" for an empty store. (5) Facet routes answer 503 `warming_up` with `Retry-After` while the start-up warm-up builds their caches, instead of blocking for a minute; the web says "warming up, try again in a minute". (6) `publish-library --s3-host-config <path>`; it says "records: up to date" when there was nothing to push. (7) Deposit watcher: `ant-stack watch`, a watcher config with host paths (`config-path --role watcher`), the api reachable through Caddy's tools listener on `127.0.0.1:<ports.tools>`, and the full command in `check`. (8) `POST /api/me/mcp/links` also accepts `{"name": ...}`. | `git checkout v2.46.1`, set `images: tag: 2.46.1`, `ant-stack check`, `ant-stack pull`, then `ant-stack up` at once. A priority site: replace any `ant sync pull --include-duckdb` in cron with `ant sync pull` (add `--evict` if wanted), try it with `--dry-run`. A deposit site: replace the watcher's `ANTHIVE_CONFIG=... --role ingest` setup with `ant-stack watch` (`config/examples/anthive-ingest-watch-stack.service.example`); `up` publishes `127.0.0.1:8079` (`ports.tools`). A site with S3 keys only on the host: replace the two-step library publishing with `publish-library --s3-host-config <path>`. |
 | **2.46.2** | Security and scratch-site fixes. (1) The Caddy access log no longer writes the presigned query (signature) of a download redirect. (2) Validators refuse values with a trailing newline. (3) `check` refuses unknown keys in the `auth`, `tls`, `ports`, `s3`, `services`, `datasets` and `data` sections of `site.yaml` and warns about unknown keys elsewhere, with the closest known key. (4) An invalid rendered config is one `PROBLEM` line; `ant sync` with an unreachable S3 endpoint says so in one line. (5) The MCP instructions name `<public_url>/mcp`, not the container listener. (6) The deposit watcher gives up a listing of an unreachable endpoint within about a minute and logs every failed attempt; a second SIGTERM stops it at once. `ant-stack watch` prints the command it runs. | Fix every `site.yaml: unknown key` that `check` reports (typos there were silently ignored before), then `ant-stack pull` and `ant-stack up`. |
+| **2.46.3** | JupyterLite works again. The `Getting_Started` notebook failed at its first cell (`No module named 'requests'`) and the bundled Python client was pyvark 0.9.0; it is now 0.11.0, and the dataset and plot notebooks no longer install an old pyvark from PyPI. No API or configuration change. | `ant-stack pull` and `ant-stack up`. Optionally run `make test-live-site URL=<public_url>` from a checkout of v2.46.3 to confirm JupyterLite after the login. |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.
