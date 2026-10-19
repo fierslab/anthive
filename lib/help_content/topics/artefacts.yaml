@@ -1,0 +1,21 @@
+id: artefacts
+title: Artefacts
+summary: Artefacts are versioned analysis files deposited with a dataset or a collection, such as DE tables, figures, tables, notebooks, reports and models.
+related:
+- differential-expression
+- dataset-versions
+aliases:
+- artefact
+- artifacts
+- analysis files
+- supplementary files
+body_html: |
+  <p>Artefacts are new and shown as a preview while they are reviewed.</p>
+  <ul>
+    <li><strong>Where they are.</strong> The Artefacts tab of a dataset page lists the files deposited with that dataset. A collection page lists the artefacts of the collection and of all its datasets. An analysis collection holds only artefacts and has no single-cell data of its own.</li>
+    <li><strong>Versions.</strong> A published version never changes. A correction is a new version with a note on what changed; older versions stay until their owner or an admin purges them, and a purged version stays listed with who purged it, when and why.</li>
+    <li><strong>Made from.</strong> Each version names the datasets and dataset versions it was made from. A dataset you cannot see is listed as "made from a dataset you cannot see".</li>
+    <li><strong>Downloads.</strong> Files come straight from the object store through a link that is valid for a few minutes, or from this site's copy. They are always downloaded, never opened inside the page, so a notebook or an HTML report is saved to your computer. The raw data of a dataset stays under its Downloads tab.</li>
+    <li><strong>DE tables.</strong> A DE table artefact is also imported into the dataset's differential expression results (see <a href="#differential-expression">differential expression</a>); purging it removes or restores that study.</li>
+    <li><strong>Who sees them.</strong> An artefact is visible to whoever can see its dataset or collection; artefacts marked internal need a sign-in. Members of the analysts group deposit artefacts with the vark command line client; a public artefact is published by an admin.</li>
+  </ul>
