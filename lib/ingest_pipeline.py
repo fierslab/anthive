@@ -2143,12 +2143,14 @@ def import_de_all_or_nothing(*, store_root: Path, md: Path, db_id: str, work: Pa
                              tables: Sequence[Tuple[Path, Dict[str, str], str]], replace: Sequence[str],
                              runner: Any, api: Any, today: str, change: Callable[[List[str]], str],
                              remove: Sequence[str] = (), archive: Optional[Callable[..., bool]] = None,
-                             caveat: Optional[Dict[str, Any]] = None) -> Tuple[Optional[str], List[str], List[str]]:
+                             caveat: Optional[Dict[str, Any]] = None,
+                             restore: Sequence[Tuple[Path, str]] = ()) -> Tuple[Optional[str], List[str], List[str]]:
     """Import DE tables into (and remove studies from) a dataset, all or nothing. Call under its writer lock.
 
     The served ``.duckdb`` (and ``.de.parquet``) are copied into ``work``; every table of ``tables``
     (``(data file, sidecar keys, study id)``) is imported into the copy with ``ant-de-ingest``
-    (``--replace`` for the study ids in ``replace``) and the studies in ``remove`` are deleted from it. Only
+    (``--replace`` for the study ids in ``replace``), the studies in ``remove`` are deleted from it and each
+    ``(archived .de.parquet, study id)`` of ``restore`` is restored from its archive (a rollback). Only
     when all of that succeeded, the replaced studies are archived (``archive(served_duckdb, served_sidecar,
     study, target)``, under ``_versions/<basename>/de/<study>/``), the copy replaces the served files
     (release / restore in ant-serve) and the ``.md`` gets a patch version whose changelog line is
@@ -2180,9 +2182,9 @@ def import_de_all_or_nothing(*, store_root: Path, md: Path, db_id: str, work: Pa
         if code != 0:
             shutil.rmtree(work, ignore_errors=True)
             raise DeImportFailed(staged_data.name, tail)
-    if remove:
+    if remove or restore:
         import duckdb  # noqa: PLC0415
-        from de_storage import write_sidecar  # noqa: PLC0415
+        from de_storage import _restore_studies, write_sidecar  # noqa: PLC0415
 
         try:
             connection = duckdb.connect(str(copy_duckdb))
@@ -2190,14 +2192,17 @@ def import_de_all_or_nothing(*, store_root: Path, md: Path, db_id: str, work: Pa
                 for study in remove:
                     connection.execute('DELETE FROM __de WHERE study_id = ?', [study])
                     connection.execute('DELETE FROM __de_study WHERE study_id = ?', [study])
+                for archived_sidecar, study in restore:
+                    _restore_studies(connection, Path(archived_sidecar), [study])
             finally:
                 connection.close()
             work_sidecar = work_group / served_sidecar.name
             work_sidecar.unlink(missing_ok=True)
             write_sidecar(work_sidecar, copy_duckdb)       # every remaining study; none: no sidecar
-        except Exception as exc:  # noqa: BLE001 - a study that cannot be removed changes nothing
+        except Exception as exc:  # noqa: BLE001 - a study that cannot be removed or restored changes nothing
             shutil.rmtree(work, ignore_errors=True)
-            raise DeImportFailed(', '.join(remove), f'removing the study failed: {exc}') from exc
+            what = ', '.join(list(remove) + [study for _archived, study in restore])
+            raise DeImportFailed(what, f'removing or restoring the study failed: {exc}') from exc
     archived: List[str] = []
     for study in replace:                    # an admin (or the artefact owning it) replaces: keep the previous one
         target = store_dir / ingest_versions.VERSIONS_DIR / basename / 'de' / study / \
@@ -2210,7 +2215,7 @@ def import_de_all_or_nothing(*, store_root: Path, md: Path, db_id: str, work: Pa
         place_file(copy_duckdb, served_duckdb)
         if (work_group / served_sidecar.name).exists():
             place_file(work_group / served_sidecar.name, served_sidecar)
-        elif remove and served_sidecar.exists():
+        elif (remove or restore) and served_sidecar.exists():
             served_sidecar.unlink()             # the last study went: no sidecar, or ant-convert re-imports it
     finally:
         api.restore(db_id)
