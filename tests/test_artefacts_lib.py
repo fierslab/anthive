@@ -562,8 +562,10 @@ def test_dangerous_types_are_still_attachments_and_odd_types_are_neutralised(tmp
     service.deliver(entry, entry.versions[2], 'page.html', 'k')
     params = s3.calls[1][2]
     assert params['ResponseContentDisposition'].startswith('attachment;')
+    assert params['ResponseContentType'] == 'application/octet-stream'        # review round 3: never text/html
     assert artefacts.safe_content_type('text/html\r\nSet-Cookie: x') == 'application/octet-stream'
-    assert artefacts.safe_content_type('TEXT/HTML') == 'text/html'
+    assert artefacts.safe_content_type('TEXT/HTML') == 'application/octet-stream'
+    assert artefacts.safe_content_type('TEXT/PLAIN') == 'text/plain'
     with pytest.raises(ValueError):
         artefacts.presign_get(s3, 'b', 'k', 'a"b', 'text/plain', 300)
 

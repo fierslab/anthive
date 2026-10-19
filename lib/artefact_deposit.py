@@ -133,7 +133,9 @@ def extension_problem(kind: str, name: str) -> Optional[str]:
 
 
 def content_type_for(name: str) -> str:
-    return CONTENT_TYPES.get(file_extension(name), 'application/octet-stream')
+    """The content type recorded for a file: by its ending, active types (html, svg, xml, ...) as
+    application/octet-stream (artefacts.safe_content_type)."""
+    return artefacts.safe_content_type(CONTENT_TYPES.get(file_extension(name), 'application/octet-stream'))
 
 
 def magic_problem(name: str, head: bytes, tail: bytes, size: int) -> Optional[str]:

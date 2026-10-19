@@ -387,3 +387,28 @@ def test_ranged_reader_lists_a_zip_without_downloading_it(tmp_path, clock):
     with zipfile.ZipFile(reader) as archive:
         assert archive.namelist() == ['weights/model.bin']
     assert sum(end - start + 1 for start, end in ranges) < len(body)          # the member was never read
+
+
+# ── review round 3, nit 7: active content types are never recorded or served as such ─────────────────────
+
+@pytest.mark.parametrize('value', ['text/html', 'image/svg+xml', 'application/javascript', 'text/javascript',
+                                   'application/xml', 'text/xml', 'application/xhtml+xml', 'TEXT/HTML'])
+def test_active_content_types_become_octet_stream(value):
+    assert artefacts.safe_content_type(value) == 'application/octet-stream'
+
+
+def test_plain_content_types_are_kept():
+    assert artefacts.safe_content_type('image/png') == 'image/png'
+    assert artefacts.safe_content_type('text/tab-separated-values') == 'text/tab-separated-values'
+
+
+def test_an_html_report_is_recorded_as_octet_stream_in_its_manifest(tmp_path, clock):
+    service, s3 = make_service(tmp_path, clock)
+    publisher, db, _git, _api = make_publisher(tmp_path, s3, clock)
+    answer = deposit(service, s3, ANALYST, {'report.html': b'<html><body>x</body></html>'}, kind='report',
+                     artefact_id='report', **INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    assert watch_row(db, answer['deposit_id'])['state'] == 'live'
+    index, _policy = _fresh(tmp_path)
+    manifest = index.get('PU1', 'int', 'report').versions[1].manifest
+    assert manifest['files'][0]['content_type'] == 'application/octet-stream'

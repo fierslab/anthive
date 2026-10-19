@@ -161,10 +161,18 @@ def casefold_clashes(names: Iterable[str]) -> List[str]:
     return clashes
 
 
+#: content types a browser runs or renders as active content; never served or recorded as such (review round 3)
+ACTIVE_CONTENT_MARKERS = ('html', 'xml', 'javascript', 'ecmascript', 'svg', 'x-shockwave', 'xsl')
+
+
 def safe_content_type(value: Any) -> str:
-    """``value`` when it is a plain ``type/subtype``, else ``application/octet-stream``."""
+    """``value`` when it is a plain ``type/subtype`` that is not active content (HTML, XML, SVG, JavaScript and
+    relatives), else ``application/octet-stream``. Used for the manifest, the presigned ResponseContentType and
+    local downloads."""
     if isinstance(value, str) and CONTENT_TYPE_RE.fullmatch(value.strip().lower()):
-        return value.strip().lower()
+        lowered = value.strip().lower()
+        if not any(marker in lowered for marker in ACTIVE_CONTENT_MARKERS):
+            return lowered
     return 'application/octet-stream'
 
 
