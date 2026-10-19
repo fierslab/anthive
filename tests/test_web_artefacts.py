@@ -142,7 +142,7 @@ def test_depositor_text_is_sanitised_on_the_artefact_page(make_client):
     html = make_client().get('/artefacts/GroupA/ds1/volcano').text
     body = html[html.index('class="art-page"'):]
     assert '<script>alert' not in body and 'onerror=alert' not in body.replace('onerror=alert(1)&gt;', '')
-    assert 'javascript:' not in body
+    assert not re.search(r'href="\s*javascript:', body) and not re.search(r'href="[^"]*evil', body)
     assert 'evil.example' not in body
     assert '<a href="https://doi.org/10.1/x" rel="nofollow noopener noreferrer">paper</a>' in body
     assert 'img src=x' not in body.replace('&lt;img src=x', '')

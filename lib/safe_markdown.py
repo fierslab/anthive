@@ -1,17 +1,20 @@
-"""Markdown written by depositors (artefact titles, descriptions and change notes), rendered safely.
+"""Markdown from the store, the library and depositors, rendered without raw HTML.
 
-Collection and dataset ``.md`` bodies are curated by admins and rendered as they are (``web/browser.py``).
-Artefact text comes from any member allowed to deposit, so it must never carry markup of its own:
+Dataset ``.md`` bodies, collection ``index.md`` bodies (which dataset and collection deposits write), paper
+notes, gene set bodies and artefact titles, descriptions and change notes can all come from people outside the
+admins, so none of them may carry markup of their own (security review round 3):
 
-1. the source is HTML-escaped before markdown runs, so raw HTML (``<script>``, ``<img onerror>``,
-   ``<iframe>``) can only ever show as text;
-2. the markdown output is re-serialised through an allowlist: paragraphs, emphasis, code, lists, quotes,
-   headings (demoted to h4 to h6), tables, rules and links. Every attribute is dropped except a link's
-   ``href``, which must be ``http(s)``, ``mailto`` or a site-relative path (``javascript:``, ``data:``,
-   protocol-relative ``//host`` and anything else is removed, the text kept). Links get
-   ``rel="nofollow noopener noreferrer"``. Images are dropped (no requests to other hosts from a page view).
+1. markdown-it-py parses CommonMark plus tables and strikethrough with raw HTML disabled: ``<script>``,
+   ``<img onerror>`` and friends become text, entities, code spans and autolinks render correctly;
+2. its output is re-serialised through an allowlist: paragraphs, emphasis, code, lists, quotes, headings, tables,
+   rules, strikethrough and links. Every attribute is dropped except a link's ``href``, which must be ``http(s)``,
+   ``mailto``, a fragment, a site path (``/x``, not ``//host``) or a relative path without a scheme; a backslash or
+   a control character anywhere refuses it (``/\\host`` is another site to a browser). Refused links keep their
+   text. Links get ``rel="nofollow noopener noreferrer"``. Images are dropped, except plot thumbnails
+   (``![caption](plot:GEOM?...)``) when the caller allows them; the web UI turns those into its own plot PNG URL.
 
-Input: a string (or None). Output: an HTML string safe to insert with Jinja's ``|safe``.
+``render(text, demote_headings=True, allow_plot_images=False)``: artefact text demotes headings (h1 becomes h4);
+store bodies keep them. Output: an HTML string safe to insert with Jinja's ``|safe``.
 """
 from __future__ import annotations
 
@@ -21,35 +24,60 @@ from html.parser import HTMLParser
 from typing import List, Optional, Tuple
 
 ALLOWED_TAGS = {'p', 'br', 'em', 'strong', 'code', 'pre', 'ul', 'ol', 'li', 'blockquote', 'hr', 'a',
-                'h4', 'h5', 'h6', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'del'}
-VOID_TAGS = {'br', 'hr'}
-HEADING_MAP = {'h1': 'h4', 'h2': 'h4', 'h3': 'h5', 'h4': 'h5', 'h5': 'h6', 'h6': 'h6'}
-SAFE_HREF_RE = re.compile(r'(?:https?://[^\s/][^\s]*|mailto:[^\s]+|/(?!/)[^\s]*|#[^\s]*)', re.I)
-MAX_SOURCE_CHARS = 20000
+                'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 's', 'del'}
+VOID_TAGS = {'br', 'hr', 'img'}
+DEMOTED = {'h1': 'h4', 'h2': 'h4', 'h3': 'h5', 'h4': 'h5', 'h5': 'h6', 'h6': 'h6'}
+SCHEME_RE = re.compile(r'([A-Za-z][A-Za-z0-9+.-]*):')
+PLOT_SRC_RE = re.compile(r'plot:[a-z0-9_]+(?:\?[^\s"<>\\]*)?')
+MAX_SOURCE_CHARS = 200000
 
 
 def safe_href(value: Optional[str]) -> Optional[str]:
-    """``value`` when it is an http(s), mailto, site-relative or fragment link, else None."""
+    """``value`` when it is a safe link target (see the module docstring), else None."""
     if not value:
         return None
     value = value.strip()
-    if any(ord(char) < 32 for char in value):
+    if not value or '\\' in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
         return None
-    return value if SAFE_HREF_RE.fullmatch(value) else None
+    lowered = value.lower()
+    if lowered.startswith(('http://', 'https://')):
+        return value if len(value) > len('https://') and not value.split('://', 1)[1].startswith('/') else None
+    if lowered.startswith('mailto:'):
+        return value if len(value) > len('mailto:') else None
+    if value.startswith('//'):
+        return None                                      # protocol-relative: another host
+    if value.startswith(('/', '#', '?')):
+        return value
+    head = re.split(r'[/?#]', value, maxsplit=1)[0]
+    if SCHEME_RE.match(head) and ':' in head:
+        return None                                      # any other scheme (javascript:, data:, vbscript:, ...)
+    return value                                         # a relative path
 
 
 class _Allowlist(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=False)
+    def __init__(self, demote_headings: bool, allow_plot_images: bool) -> None:
+        super().__init__(convert_charrefs=True)
         self.out: List[str] = []
         self.stack: List[str] = []
+        self.demote = demote_headings
+        self.plots = allow_plot_images
+
+    def _tag(self, tag: str) -> str:
+        return DEMOTED.get(tag, tag) if self.demote else tag
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
-        tag = HEADING_MAP.get(tag, tag)
+        values = dict(attrs)
+        if tag == 'img':
+            src = values.get('src') or ''
+            if self.plots and PLOT_SRC_RE.fullmatch(src):
+                alt = values.get('alt') or ''
+                self.out.append(f'<img src="{html.escape(src, quote=True)}" alt="{html.escape(alt, quote=True)}">')
+            return
+        tag = self._tag(tag)
         if tag not in ALLOWED_TAGS:
             return
         if tag == 'a':
-            href = safe_href(dict(attrs).get('href'))
+            href = safe_href(values.get('href'))
             if href is None:
                 self.stack.append('a-dropped')
                 return
@@ -62,10 +90,10 @@ class _Allowlist(HTMLParser):
 
     def handle_startendtag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
         if tag in VOID_TAGS:
-            self.out.append(f'<{tag}>')
+            self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
-        tag = HEADING_MAP.get(tag, tag)
+        tag = self._tag(tag)
         if tag == 'a' and self.stack and self.stack[-1] == 'a-dropped':
             self.stack.pop()
             return
@@ -79,13 +107,7 @@ class _Allowlist(HTMLParser):
                 break
 
     def handle_data(self, data: str) -> None:
-        self.out.append(html.escape(data, quote=False))
-
-    def handle_entityref(self, name: str) -> None:
-        self.out.append(f'&{name};' if re.fullmatch(r'[A-Za-z][A-Za-z0-9]{1,31}', name) else html.escape(f'&{name}'))
-
-    def handle_charref(self, name: str) -> None:
-        self.out.append(f'&#{name};' if re.fullmatch(r'[0-9]{1,7}|[xX][0-9a-fA-F]{1,6}', name) else '')
+        self.out.append(html.escape(data, quote=True))
 
     def close_all(self) -> str:
         while self.stack:
@@ -95,14 +117,23 @@ class _Allowlist(HTMLParser):
         return ''.join(self.out)
 
 
-def render(text: Optional[str]) -> str:
-    """Safe HTML for depositor markdown (see the module docstring)."""
+_PARSER = None
+
+
+def _markdown_it():
+    global _PARSER
+    if _PARSER is None:
+        from markdown_it import MarkdownIt  # noqa: PLC0415
+        _PARSER = MarkdownIt('commonmark', {'html': False}).enable(['table', 'strikethrough'])
+    return _PARSER
+
+
+def render(text: Optional[str], demote_headings: bool = True, allow_plot_images: bool = False) -> str:
+    """Safe HTML for untrusted markdown (see the module docstring)."""
     if not text:
         return ''
-    import markdown  # noqa: PLC0415
-    source = html.escape(str(text)[:MAX_SOURCE_CHARS], quote=False)
-    rendered = markdown.markdown(source, extensions=['tables', 'fenced_code', 'sane_lists'])
-    parser = _Allowlist()
+    rendered = _markdown_it().render(str(text)[:MAX_SOURCE_CHARS])
+    parser = _Allowlist(demote_headings, allow_plot_images)
     parser.feed(rendered)
     parser.close()
     return parser.close_all()
