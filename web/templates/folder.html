@@ -135,7 +135,7 @@
 {% if analysis %}
 {% from "_macros.html" import review_banner as _ac_banner %}
 {{ _ac_banner('artefacts') }}
-<p class="muted" style="margin:4px 0 10px">Analysis collection{% if analysis_authors %} by {{ analysis_authors|join(', ') }}{% endif %}{% if analysis_year %}, {{ analysis_year }}{% endif %}. It holds analyses, no single-cell data of its own{% if analysis_internal %}; only signed-in members see it{% endif %}.</p>
+<p class="muted" style="margin:4px 0 10px;font-size:13px">Analysis collection{% if analysis_authors %} by {{ analysis_authors|join(', ') }}{% endif %}{% if analysis_year %}, {{ analysis_year }}{% endif %}. It holds analyses, no single-cell data of its own{% if analysis_internal %}; only signed-in members see it{% endif %}.</p>
 {% endif %}
 
 {% if collection_pills %}
