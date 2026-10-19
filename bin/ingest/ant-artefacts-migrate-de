@@ -1,0 +1,101 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "boto3",
+#   "duckdb>=1.3,<1.6",
+#   "numpy>=1.24.0",
+#   "pyyaml>=6.0",
+# ]
+# ///
+"""ant-artefacts-migrate-de: turn the DE source tables under <Group>/de_sources/ into de_table artefacts.
+
+Design: doc/DESIGN_artefacts.md section 13 (phase A3). Each table with its .mus becomes version 1 of a
+de_table artefact of its dataset; nothing is imported again (the study is in the dataset's duckdb already),
+and de_sources/ is left in place (removed in a separate, reviewed commit after the served check).
+
+    ant artefacts-migrate-de --dry-run              # the plan, as text (default: dry run)
+    ant artefacts-migrate-de --dry-run --json       # the plan, as JSON
+    ant artefacts-migrate-de --apply --yes          # write the artefacts (S3, store, git commit by path)
+
+The dry run reads the store only: no S3 call, no lock file, no write. --apply needs --yes and refuses on a
+slave site (config.require_primary).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR.parent.parent / 'lib'))
+
+import config  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser.add_argument('--store', help='the h5adstore (default: h5adstore / ANTHIVE_H5ADSTORE)')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--dry-run', action='store_true', default=True, help='show the plan (default)')
+    mode.add_argument('--apply', action='store_true', help='write the artefacts')
+    parser.add_argument('--yes', action='store_true', help='confirm --apply')
+    parser.add_argument('--json', action='store_true', help='the plan as JSON')
+    args = parser.parse_args()
+
+    import artefact_migrate  # noqa: PLC0415
+
+    cfg = config.get_config()
+    store = Path(args.store).resolve() if args.store else config.get_data_folder(cfg).resolve()
+    items = artefact_migrate.plan(store)
+    rows = [item.as_dict(store) for item in items]
+    if args.json:
+        print(json.dumps({'store': str(store), 'items': rows}, indent=1))
+    else:
+        print(f'store: {store}')
+        for row in rows:
+            state = f'SKIP ({row["skip"]})' if row['skip'] else 'MIGRATE'
+            print(f'- {row["table"]}: {state}')
+            if not row['skip']:
+                print(f'    -> {row["ref"]}@v1  study {row["study_id"]} (in duckdb: {row["study_in_duckdb"]}, '
+                      f'rows {row["rows"]})')
+                print(f'    made_from {row["db_id"]} {row["made_from"]} ({row["made_from_basis"]})')
+                print(f'    {row["size"]} bytes, sha256 {row["sha256"][:16]}...; sidecar keys dropped: '
+                      f'{", ".join(row["sidecar_keys_dropped"]) or "-"}')
+                for problem in row['problems']:
+                    print(f'    note: {problem}')
+        todo = sum(1 for row in rows if not row['skip'])
+        print(f'{todo} table(s) to migrate, {len(rows) - todo} skipped.'
+              + ('' if args.apply else ' Dry run: nothing was written.'))
+    if not args.apply:
+        return 0
+    if not args.yes:
+        print('ERROR: --apply writes to S3 and the store; add --yes', file=sys.stderr)
+        return 2
+    config.require_primary(cfg, tool='ant-artefacts-migrate-de')
+    settings = config.get_artefact_settings(cfg)
+    s3_cfg = settings['s3']
+    import boto3  # noqa: PLC0415
+    endpoint = s3_cfg.get('endpoint') or None
+    if endpoint and '://' not in endpoint:
+        endpoint = 'https://' + endpoint
+    client = boto3.client('s3', endpoint_url=endpoint, region_name=s3_cfg.get('region') or 'us-east-1',
+                          aws_access_key_id=s3_cfg.get('access_key_id'),
+                          aws_secret_access_key=s3_cfg.get('secret_access_key'))
+
+    def commit(paths, message):
+        if not (store / '.git').exists():
+            return
+        subprocess.run(['git', '-C', str(store), 'add', '--', *paths], check=False)
+        subprocess.run(['git', '-C', str(store), 'commit', '--only', '-m', message, '--', *paths], check=False)
+    artefact_migrate.apply(store, items, client, settings['bucket'], settings['catalog_prefix'],
+                           site_id=config.deposit_site_id(cfg), commit=commit)
+    print('Next: POST /api/admin/rescan?what=artefacts, check the artefacts, then remove de_sources/ in its own '
+          'commit.')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
