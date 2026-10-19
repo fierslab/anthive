@@ -76,7 +76,11 @@ def main() -> int:
         return 2
     config.require_primary(cfg, tool='ant-artefacts-migrate-de')
     settings = config.get_artefact_settings(cfg)
-    s3_cfg = settings['s3']
+    # the write key of the s3 block (the artefacts_s3 key of the server only HEADs and signs GETs)
+    s3_cfg = cfg.get('s3') or {}
+    if not s3_cfg.get('access_key_id') or not s3_cfg.get('bucket'):
+        print('ERROR: the s3 block of anthive.yaml holds no write key and bucket', file=sys.stderr)
+        return 2
     import boto3  # noqa: PLC0415
     endpoint = s3_cfg.get('endpoint') or None
     if endpoint and '://' not in endpoint:
@@ -90,7 +94,7 @@ def main() -> int:
             return
         subprocess.run(['git', '-C', str(store), 'add', '--', *paths], check=False)
         subprocess.run(['git', '-C', str(store), 'commit', '--only', '-m', message, '--', *paths], check=False)
-    artefact_migrate.apply(store, items, client, settings['bucket'], settings['catalog_prefix'],
+    artefact_migrate.apply(store, items, client, s3_cfg['bucket'], settings['catalog_prefix'],
                            site_id=config.deposit_site_id(cfg), commit=commit)
     print('Next: POST /api/admin/rescan?what=artefacts, check the artefacts, then remove de_sources/ in its own '
           'commit.')

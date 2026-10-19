@@ -52,6 +52,7 @@ class Item:
     made_from_basis: str = ''
     study_in_duckdb: Optional[bool] = None
     rows: Optional[int] = None
+    fingerprint: Optional[str] = None
     dropped_keys: List[str] = field(default_factory=list)
     problems: List[str] = field(default_factory=list)
     skip: Optional[str] = None
@@ -66,6 +67,7 @@ class Item:
         return {'group': self.group, 'table': str(self.table.relative_to(store_root)),
                 'sidecar': str(self.sidecar.relative_to(store_root)), 'db_id': self.db_id, 'ref': self.ref(),
                 'study_id': self.study_id, 'study_in_duckdb': self.study_in_duckdb, 'rows': self.rows,
+                'fingerprint': self.fingerprint,
                 'made_from': self.made_from_version, 'made_from_basis': self.made_from_basis,
                 'sidecar_keys_dropped': self.dropped_keys, 'size': self.table.stat().st_size,
                 'sha256': hashlib.sha256(self.table.read_bytes()).hexdigest(), 'problems': self.problems,
@@ -119,12 +121,51 @@ def _study_rows(duckdb_path: Path, study: str) -> Tuple[Optional[bool], Optional
         connection.close()
 
 
+def names_study(text: str, study: str) -> bool:
+    """Does a changelog line name ``study`` as a whole id (not as part of a longer id such as
+    ``<study>_v2``)?"""
+    return re.search(rf'(?<![A-Za-z0-9_.\-]){re.escape(study)}(?![A-Za-z0-9_\-]|\.[A-Za-z0-9])', text) is not None
+
+
+def _fingerprint(duckdb_path: Path, study: str) -> Optional[str]:
+    """The study's fingerprint (``artefact_pipeline.study_fingerprints``), so a later purge of the migrated
+    artefact knows these rows are its own; None when the duckdb cannot be read."""
+    try:
+        from artefact_pipeline import study_fingerprints  # noqa: PLC0415
+        return study_fingerprints(duckdb_path, [study]).get(study)
+    except Exception:  # noqa: BLE001 - held by a writer: no fingerprint, a purge then asks an admin
+        return None
+
+
 def _made_from(meta: Dict[str, Any], study: str) -> Tuple[Optional[str], str]:
     for entry in meta.get('changelog') or []:
-        if isinstance(entry, dict) and study in json.dumps(entry.get('changes') or [], default=str):
+        if not isinstance(entry, dict):
+            continue
+        changes = entry.get('changes') or []
+        changes = changes if isinstance(changes, list) else [changes]
+        if any(names_study(str(change), study) for change in changes):
             return str(entry.get('version')), 'the changelog entry that names the study'
     return (str(meta['version']) if meta.get('version') else None,
             'the current version (no changelog entry names the study)')
+
+
+def _retired(group_dir: Path, declared_id: Optional[str], basename: Optional[str]) -> Optional[str]:
+    """The ``_``-prefixed folder (``_deleted_<date>/``, ...) holding a retired dataset with this file id or
+    basename, else None."""
+    from metadata import parse_md_file  # noqa: PLC0415
+    for folder in sorted(path for path in group_dir.iterdir() if path.is_dir() and path.name.startswith('_')):
+        for md in sorted(folder.glob('*.md')):
+            if md.name == 'index.md' or md.name.endswith('.index.md'):
+                continue
+            if basename and md.stem == basename:
+                return folder.name
+            try:
+                meta = parse_md_file(md)[0] or {}
+            except Exception:  # noqa: BLE001
+                continue
+            if declared_id and str(meta.get('id') or '').upper() == declared_id:
+                return folder.name
+    return None
 
 
 def plan(store_root: Path) -> List[Item]:
@@ -156,15 +197,20 @@ def plan(store_root: Path) -> List[Item]:
             meta = parse_sidecar_text(sidecar.read_text(encoding='utf-8', errors='replace'))
             rel = table.relative_to(sources).parts
             target = None
+            declared, basename = None, None
             if meta.get('de_dataset_id'):
                 declared = meta['de_dataset_id'].split('/')[-1].upper()
                 target = by_file_id.get((group_dir.name, declared))
             elif meta.get('de_dataset_h5ad'):
-                target = datasets.get(f'{group_dir.name}/{meta["de_dataset_h5ad"][:-len(".h5ad")]}')
+                basename = meta['de_dataset_h5ad'][:-len('.h5ad')]
+                target = datasets.get(f'{group_dir.name}/{basename}')
             elif len(rel) == 3:
+                basename = rel[0]
                 target = datasets.get(f'{group_dir.name}/{rel[0]}')
             if target is None:
-                item.skip = 'the dataset it belongs to is not served (or the sidecar names none)'
+                retired = _retired(group_dir, declared, basename)
+                item.skip = (f'target dataset retired ({group_dir.name}/{retired}/): no artefact for it'
+                             if retired else 'the dataset it belongs to is not served (or the sidecar names none)')
                 continue
             item.db_id, item.md = target
             item.study_id = de_study_id(meta, table.name)
@@ -177,6 +223,8 @@ def plan(store_root: Path) -> List[Item]:
             md_meta = parse_md_file(item.md)[0] or {}
             item.made_from_version, item.made_from_basis = _made_from(md_meta, item.study_id)
             item.study_in_duckdb, item.rows = _study_rows(item.md.with_suffix('.duckdb'), item.study_id)
+            if item.study_in_duckdb:
+                item.fingerprint = _fingerprint(item.md.with_suffix('.duckdb'), item.study_id)
             if item.study_in_duckdb is False:
                 item.problems.append('the dataset duckdb does not hold this study (migrated without an import '
                                      'record)')
@@ -223,6 +271,8 @@ def _manifest(store_root: Path, item: Item, files: Sequence[Tuple[str, bytes]], 
                            **{key: meta[key] for key in artefact_de.DE_KEYS if meta.get(key)}}],
                'imported': {'study_ids': [item.study_id] if item.study_in_duckdb else [],
                             'rows': {item.study_id: item.rows} if item.study_in_duckdb else {},
+                            'fingerprints': ({item.study_id: item.fingerprint}
+                                             if item.study_in_duckdb and item.fingerprint else {}),
                             'imported_at': None, 'dataset_version_after': None, 'replaced': [], 'archived': [],
                             'note': 'imported by the DE-only route before artefacts existed'}},
     }
@@ -230,6 +280,39 @@ def _manifest(store_root: Path, item: Item, files: Sequence[Tuple[str, bytes]], 
     if problems:
         raise ValueError(f'{item.table}: the manifest would not be valid: {"; ".join(problems)}')
     return path, manifest
+
+
+def _absent(s3: Any, bucket: str, key: str) -> Optional[Dict[str, Any]]:
+    """The HEAD of ``key``, or None when it is absent (404 only: any other error, 403 or 503 included, raises:
+    a migration never writes on a guess)."""
+    try:
+        return s3.head_object(Bucket=bucket, Key=key)
+    except Exception as exc:  # noqa: BLE001
+        response = getattr(exc, 'response', None)
+        code = str(((response.get('Error') or {}).get('Code')) or '') if isinstance(response, dict) else ''
+        if code in ('404', 'NoSuchKey', 'NotFound'):
+            return None
+        raise RuntimeError(f'HEAD {key} failed ({code or exc}); nothing written') from exc
+
+
+def _put_once(s3: Any, bucket: str, key: str, data: bytes, metadata: Dict[str, str]) -> None:
+    """Write ``key`` unless it exists; an existing key with the same sha256 is fine (a resumed run), any other
+    content stops the migration."""
+    head = _absent(s3, bucket, key)
+    if head is not None:
+        if (head.get('Metadata') or {}).get('sha256') != metadata['sha256']:
+            raise RuntimeError(f'{key} exists with other content; not overwritten')
+        return
+    s3.put_object(Bucket=bucket, Key=key, Body=data, Metadata=metadata)
+
+
+def _write_local_once(path: Path, data: bytes) -> None:
+    if path.exists():
+        if path.read_bytes() != data:
+            raise RuntimeError(f'{path} exists with other content; not overwritten')
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
 
 
 def apply(store_root: Path, items: Sequence[Item], s3: Any, bucket: str, catalog_prefix: str,
@@ -249,26 +332,25 @@ def apply(store_root: Path, items: Sequence[Item], s3: Any, bucket: str, catalog
         table_name = f'{folder}/{item.table.name}' if artefacts.valid_segment(folder) else item.table.name
         files = [(table_name, item.table.read_bytes()), (table_name + '.mus', cleaned.encode('utf-8'))]
         path, manifest = _manifest(store_root, item, files, meta, site_id, server_version)
+        if (store_root / str(path.head_rel)).exists() \
+                or _absent(s3, bucket, artefacts.s3_key(catalog_prefix, path.head_rel)) is not None:
+            raise RuntimeError(f'{item.ref()} exists already (head record); not migrated again')
         for name, data in files:
             key = artefacts.s3_key(catalog_prefix, path.file_rel(1, name))
             sha = hashlib.sha256(data).hexdigest()
-            try:
-                head = s3.head_object(Bucket=bucket, Key=key)
-                if (head.get('Metadata') or {}).get('sha256') != sha:
-                    raise RuntimeError(f'{key} exists with other content; not overwritten')
-            except RuntimeError:
-                raise
-            except Exception:  # noqa: BLE001 - absent: write it
-                s3.put_object(Bucket=bucket, Key=key, Body=data, Metadata={'sha256': sha, 'artefact': manifest['ref']})
-            local = store_root / str(path.file_rel(1, name))
+            _put_once(s3, bucket, key, data, {'sha256': sha, 'artefact': manifest['ref']})
             if len(data) <= 2 * 1024 * 1024:
-                local.parent.mkdir(parents=True, exist_ok=True)
-                local.write_bytes(data)
+                _write_local_once(store_root / str(path.file_rel(1, name)), data)
         raw = (json.dumps(manifest, indent=2) + '\n').encode('utf-8')
         manifest_sha = hashlib.sha256(raw).hexdigest()
-        s3.put_object(Bucket=bucket, Key=artefacts.s3_key(catalog_prefix, path.manifest_rel(1)), Body=raw,
+        manifest_key = artefacts.s3_key(catalog_prefix, path.manifest_rel(1))
+        if _absent(s3, bucket, manifest_key) is not None:
+            raise RuntimeError(f'{manifest_key} exists; a manifest is never overwritten')
+        if (store_root / str(path.manifest_rel(1))).exists():
+            raise RuntimeError(f'{path.manifest_rel(1)} exists locally; not overwritten')
+        s3.put_object(Bucket=bucket, Key=manifest_key, Body=raw,
                       Metadata={'sha256': manifest_sha, 'artefact': manifest['ref']})
-        (store_root / str(path.manifest_rel(1))).write_bytes(raw)
+        _write_local_once(store_root / str(path.manifest_rel(1)), raw)
         today = _dt.date.today().isoformat()
         head = {'artefact_id': item.artefact_id, 'kind': 'de_table', 'scope': path.scope, 'owner': MIGRATION_USER,
                 'created': today, 'title': manifest['title'], 'latest': 1,

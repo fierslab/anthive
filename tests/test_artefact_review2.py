@@ -315,3 +315,107 @@ def test_a_dataset_change_during_the_checks_runs_them_again(tmp_path, clock, mon
     clock[0] += 4000
     publisher.poll(listing(s3))
     assert watch_row(db, answer['deposit_id'])['state'] == 'live' and len(calls) == 2
+
+
+# ── concerns: the de_sources migration ──────────────────────────────────────────────────────────────────
+
+def _migration_store(tmp_path):
+    from tests.artefact_deposit_helpers import de_sidecar
+    store = tmp_path / 'store'
+    folder = store / 'Public2021' / 'de_sources' / 'int' / 'deseq2'
+    folder.mkdir(parents=True)
+    (folder / 'treated_vs_control.tsv').write_bytes(deseq2_table())
+    (folder / 'treated_vs_control.tsv.mus').write_bytes(de_sidecar())
+    return store
+
+
+def _hand_import(tmp_path, publisher):
+    """The study imported by hand (ant-de-ingest through the DE-only import), as Sierksma2020 was."""
+    import ingest_pipeline
+    from tests.artefact_deposit_helpers import de_sidecar
+    store = tmp_path / 'store'
+    table = tmp_path / 'hand' / 'treated_vs_control.tsv'
+    table.parent.mkdir()
+    table.write_bytes(deseq2_table())
+    meta = ingest_pipeline.parse_sidecar_text(de_sidecar().decode())
+    ingest_pipeline.import_de_all_or_nothing(
+        store_root=store, md=store / MD, db_id='PU1/int', work=tmp_path / 'hand_work',
+        tables=[(table, meta, 'treated_vs_control')], replace=[], runner=publisher.de_runner,
+        api=type('NoApi', (), {'release': lambda self, db_id: None, 'restore': lambda self, db_id: None})(),
+        today='2026-10-19', change=lambda _archived: 'DE treated_vs_control imported by hand.')
+
+
+def test_migration_skips_tables_of_retired_datasets(tmp_path, clock):
+    import artefact_migrate
+    from tests.artefact_deposit_helpers import de_sidecar
+    make_service(tmp_path, clock)
+    store = _migration_store(tmp_path)
+    make_dataset_duckdb(store)
+    retired = store / 'Public2021' / '_deleted_2026-10-05'
+    retired.mkdir()
+    (retired / 'old.md').write_text('---\nid: AQB\ntitle: Retired cells\nversion: 1.0.0\n---\n')
+    sources = store / 'Public2021' / 'de_sources' / 'aqb'
+    sources.mkdir()
+    (sources / 'res_TvsC.tsv').write_bytes(deseq2_table())
+    (sources / 'res_TvsC.tsv.mus').write_bytes(de_sidecar('res_TvsC', de_dataset_id='AQB'))
+    rows = {item.table.name: item for item in artefact_migrate.plan(store)}
+    assert rows['res_TvsC.tsv'].skip.startswith('target dataset retired (Public2021/_deleted_2026-10-05/)')
+
+
+def test_migration_links_a_hand_imported_study_and_its_purge_removes_it(tmp_path, clock):
+    import artefact_migrate
+    service, s3, publisher, _db, _api = _setup(tmp_path, clock)
+    store = _migration_store(tmp_path)
+    _hand_import(tmp_path, publisher)
+    assert _studies(tmp_path) == {'treated_vs_control': len(GENES)}
+    items = artefact_migrate.plan(store)
+    item = next(entry for entry in items if entry.table.name == 'treated_vs_control.tsv')
+    assert item.study_in_duckdb and item.fingerprint and item.made_from_version == '1.0.1'
+    assert artefact_migrate.apply(store, items, s3, 'bucket', CATALOG, log=lambda message: None) == \
+        ['PU1/int/treated-vs-control']
+    service.store.set_owner('PU1/int', 'ana', 'root')
+    _purge(service, ADMIN, 'treated-vs-control', 1)
+    publisher.poll(listing(s3))
+    assert service.purges(ADMIN)[0]['state'] == 'done'
+    assert _studies(tmp_path) == {}
+
+
+def test_migration_matches_study_ids_exactly(tmp_path):
+    import artefact_migrate
+    assert artefact_migrate.names_study('DE from deposit x: added treated_vs_control.', 'treated_vs_control')
+    assert not artefact_migrate.names_study('added treated_vs_control_v2', 'treated_vs_control')
+    assert not artefact_migrate.names_study('added old.treated_vs_control', 'treated_vs_control')
+    meta = {'version': '1.0.2', 'changelog': [
+        {'version': '1.0.1', 'changes': ['DE treated_vs_control_v2 imported']},
+        {'version': '1.0.2', 'changes': ['DE treated_vs_control imported']}]}
+    assert artefact_migrate._made_from(meta, 'treated_vs_control')[0] == '1.0.2'
+
+
+def test_migration_aborts_on_a_head_error_other_than_404(tmp_path, clock):
+    import artefact_migrate
+    from tests.ingest_watch_helpers import S3Error
+    _service, s3 = make_service(tmp_path, clock)
+    store = _migration_store(tmp_path)
+    make_dataset_duckdb(store)
+
+    def forbidden(Bucket, Key):  # noqa: N803
+        raise S3Error('403')
+    s3.__dict__['head_object'] = forbidden
+    with pytest.raises(RuntimeError, match='403'):
+        artefact_migrate.apply(store, artefact_migrate.plan(store), s3, 'bucket', CATALOG, log=lambda message: None)
+    assert s3.keys(CATALOG) == []
+    assert not (store / 'Public2021' / 'static').exists()
+
+
+def test_migration_never_overwrites_a_manifest_already_on_s3(tmp_path, clock):
+    import artefact_migrate
+    _service, s3 = make_service(tmp_path, clock)
+    store = _migration_store(tmp_path)
+    make_dataset_duckdb(store)
+    path = artefacts.ArtefactPath('Public2021', 'int', 'de_table', 'treated-vs-control')
+    manifest_key = artefacts.s3_key(CATALOG, path.manifest_rel(1))
+    s3.put(manifest_key, b'{"other": true}', clock[0], metadata={'sha256': 'x' * 64})
+    with pytest.raises(RuntimeError, match='never overwritten'):
+        artefact_migrate.apply(store, artefact_migrate.plan(store), s3, 'bucket', CATALOG, log=lambda message: None)
+    assert s3.objects[manifest_key]['body'] == b'{"other": true}'
+    assert not (store / str(path.head_rel)).exists()
