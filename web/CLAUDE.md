@@ -426,9 +426,11 @@ colour, palette, transforms) preserved; unresolved `db` → an inline hint, not 
 broken image. Authors never hand-write it — the plot toolbar's **🖼 copy
 thumbnail md** button emits the token (drops size/format, appends `&db=`).
 No ant-serve change: the plot PNG endpoint already exists.
-(Markdown is rendered **unsanitised** — raw HTML/`<script>` passes through and
-there is no CSP; acceptable only because `.md` editing is admin-gated. Harden
-with `nh3`/`bleach` + a CSP if editing ever widens.)
+(Since the round-3 security review every markdown body (dataset `.md`, collection `index.md`, gene set and
+paper notes) goes through `_store_markdown` = `safe_markdown.render(..., demote_headings=False,
+allow_plot_images=True)`: markdown-it-py with raw HTML off and the link allowlist. Deposits write seed `.md`
+and `index.md` files, so no body is trusted. Plot thumbnails survive as `<img src="plot:...">` for
+`_expand_plot_thumbnails`; every other image is dropped. Never call `markdown.markdown` on store text.)
 
 ## Admin editors (Authelia `admins` group, `_is_admin(request)`)
 
@@ -1018,10 +1020,10 @@ These rules come from the site audit (Fable, 2026-10-13) with Mark's overrides. 
   ("made from a dataset you cannot see") and logins. The purge form (`#art-purge-form`, POST
   `/api/artefacts/.../v{N}/purge` with reason + typed ref) shows only to the artefact owner, the version's uploader
   and admins (`_may_purge`); the API is the authority.
-- **Depositor text is never rendered raw** (unlike curated `.md` bodies): titles through `safe_markdown.plain`,
-  descriptions and change notes through `safe_markdown.render` (`lib/safe_markdown.py`: source escaped before
-  markdown, allowlist re-serialisation, http(s)/mailto/relative links only with `rel=nofollow noopener noreferrer`,
-  images dropped). The description of an analysis collection (written from a collection deposit) goes through it too.
+- **Depositor text is never rendered raw**: titles through `safe_markdown.plain`, descriptions and change notes
+  through `safe_markdown.render` (`lib/safe_markdown.py`: markdown-it-py with raw HTML off, allowlist
+  re-serialisation, http(s)/mailto/relative links only, no backslashes, `rel=nofollow noopener noreferrer`,
+  images dropped, headings demoted). Store bodies use the same renderer (see "Plot thumbnails in markdown").
 - File links point at the API download route with `download`; the API answers a 307 to a signed attachment link or
   an attachment with `CSP: sandbox`, so active types (html, svg, notebooks) are never opened in the page. Only
   `.webp` previews are shown inline (`/api/.../preview/...`).

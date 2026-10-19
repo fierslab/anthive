@@ -18,7 +18,6 @@ from urllib.parse import parse_qsl, quote as url_quote, unquote, urlencode
 
 import contextvars
 
-import markdown
 import requests
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -606,6 +605,14 @@ def _resolve_gene_panel(top_genes, cell_type_term):
 _PLOT_IMG_RE = re.compile(r'<img\b[^>]*\bsrc="plot:([^"]*)"[^>]*>', re.IGNORECASE)
 _PLOT_ALT_RE = re.compile(r'\balt="([^"]*)"', re.IGNORECASE)
 _PLOT_THUMB_DEFAULTS = {'width': '4', 'height': '3', 'dpi': '80'}
+
+
+def _store_markdown(text: Optional[str]) -> str:
+    """HTML of a markdown body from the store or the library (dataset .md, collection index.md, gene set and paper
+    notes). Deposits write some of these (a dataset's seed .md, a collection's index.md, paper notes), so every body
+    goes through safe_markdown: raw HTML off, the link allowlist, no images but plot thumbnails (security review
+    round 3; the store's curated bodies use no raw HTML)."""
+    return safe_markdown.render(text, demote_headings=False, allow_plot_images=True)
 
 
 def _expand_plot_thumbnails(html_text: Optional[str], default_db: Optional[str] = None) -> Optional[str]:
@@ -2235,9 +2242,7 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             if lines and lines[0].lstrip().startswith('# '):
                 body = '\n'.join(lines[1:]).strip()
             if body:
-                description_html = markdown.markdown(
-                    body, extensions=['tables', 'fenced_code']
-                )
+                description_html = _store_markdown(body)
                 # collection markdown has no implicit dataset — plot: tokens
                 # must carry &db=<group>/<file>.
                 description_html = _expand_plot_thumbnails(description_html, default_db=None)
@@ -3226,7 +3231,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     _md_lines = raw_md.lstrip().split('\n')
     _desc_md = ('\n'.join(_md_lines[1:]) if (_md_lines and _md_lines[0].lstrip().startswith('#'))
                 else raw_md).strip()
-    markdown_content = markdown.markdown(_desc_md, extensions=['tables', 'fenced_code']) if _desc_md else None
+    markdown_content = _store_markdown(_desc_md) if _desc_md else None
     markdown_content = _expand_plot_thumbnails(markdown_content, default_db=db_id)
 
     # Context bar — same abbrev maps as landing / folder pages.  Uses single-db
@@ -4814,7 +4819,7 @@ async def geneset_experiment_view(request: Request, study: str, experiment: str)
             status_code=404,
         )
 
-    body_html = markdown.markdown(payload.get('body') or '', extensions=['tables'])
+    body_html = _store_markdown(payload.get('body') or '')
     meta = payload.get('metadata', {})
     catalog = f"{study}/{experiment}"
     dataset_annotations = _build_dataset_annotations(api_url)
@@ -4887,8 +4892,8 @@ async def geneset_view(request: Request, study: str, experiment: str, name: str)
             status_code=404,
         )
 
-    geneset_body_html = markdown.markdown(payload.get('geneset_body') or '', extensions=['tables'])
-    experiment_body_html = markdown.markdown(payload.get('experiment_body') or '', extensions=['tables'])
+    geneset_body_html = _store_markdown(payload.get('geneset_body') or '')
+    experiment_body_html = _store_markdown(payload.get('experiment_body') or '')
 
     catalog = f"{study}/{experiment}"
     dataset_annotations = _build_dataset_annotations(api_url)
@@ -4994,9 +4999,7 @@ async def geneset_study_view(request: Request, study: str):
         try:
             exp_payload = _api_get(api_url, f'/genesets/{study}/{exp_name}') or {}
             meta = exp_payload.get('metadata') or {}
-            body_html = markdown.markdown(
-                exp_payload.get('body') or '', extensions=['tables']
-            )
+            body_html = _store_markdown(exp_payload.get('body') or '')
         except Exception as error:
             print(f"API error (/genesets/{study}/{exp_name}): {error}")
         # Study-level provenance: first non-empty wins. Every experiment
@@ -6109,7 +6112,7 @@ async def paper_view(request: Request, citekey: str):
     notes = (record.get('notes') or '').strip()
     notes_html = ''
     if notes and 'no notes yet' not in notes.lower():
-        notes_html = markdown.markdown(notes, extensions=['tables', 'fenced_code'])
+        notes_html = _store_markdown(notes)
     abstract = ((record.get('fields') or {}).get('abstract') or record.get('abstract') or '').strip()
     own_role = str(record.get('role') or 'background').lower()
     fields = record.get('fields') or {}

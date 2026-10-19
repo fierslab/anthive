@@ -172,3 +172,44 @@ def test_unknown_or_malformed_artefacts_are_404(make_client):
 
 def test_the_artefacts_view_is_registered_and_not_approved():
     assert 'artefacts' in browser.VIEW_REGISTRY and not browser.view_approved('artefacts')
+
+
+# ── security review round 3: every store body is rendered without raw HTML ────────────────────────────────
+
+XSS_BODY = 'Our atlas.\n\n<img src=x onerror="fetch(\'/api/me\')">\n\n<script>alert(1)</script> [x](javascript:alert(2))'
+
+
+def test_a_collection_description_with_markup_renders_as_text_once_it_has_datasets(make_client, monkeypatch):
+    import copy
+    from tests import test_web_browser
+    databases = copy.deepcopy(test_web_browser._DATABASES)
+    for db in databases:
+        if (db.get('group_id') or db['id'].split('/')[0]) == 'GroupA':
+            db.setdefault('collection', {})['description'] = XSS_BODY
+    monkeypatch.setattr(test_web_browser, '_DATABASES', databases)
+    html = make_client().get('/browse/GroupA').text
+    about = html[html.index('About this collection'):html.index('About this collection') + 2000]
+    assert '<img' not in about and '<script>alert' not in about and 'onerror="' not in about
+    assert '&lt;img' in about and not re.search(r'href="\s*javascript:', about)
+
+
+def test_a_dataset_description_with_markup_renders_as_text(make_client, monkeypatch):
+    import copy
+    from tests import test_web_browser
+    info = copy.deepcopy(test_web_browser._INFO)
+    info['GroupA/ds1']['markdown'] = '# Dataset One\n\n' + XSS_BODY + '\n\n![umap](plot:scatter?x=X_umap)'
+    monkeypatch.setattr(test_web_browser, '_INFO', info)
+    html = make_client().get('/browse/GroupA/ds1').text
+    desc = html[html.index('ds-desc md-body'):html.index('ds-desc md-body') + 3000]
+    assert '<script>alert' not in desc and 'onerror="' not in desc and '&lt;img' in desc
+    assert 'class="md-plot-thumb"' in desc                     # plot thumbnails still work
+
+
+def test_the_collection_deposit_escapes_markup_in_index_md():
+    import artefact_deposit
+    import artefacts as artefacts_lib
+    block = {'title': 'Atlas analyses', 'authors': ['Ana Lyst'], 'access': 'internal', 'papers': {},
+             'description': XSS_BODY}
+    text = artefact_deposit.render_analysis_index_md('Atlas2026', 'A26', block, 'ana', '2026-10-19')
+    _meta, body = artefacts_lib.split_front_matter(text)
+    assert '<img' not in body and '<script' not in body and '&lt;img' in body

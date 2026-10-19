@@ -305,7 +305,9 @@ def render_analysis_index_md(data_project: str, group_id: str, collection: Mappi
             meta[key] = collection[key]
     if collection.get('papers'):
         meta['papers'] = dict(collection['papers'])
-    body = (collection.get('description') or '').strip()
+    # the description is a depositor's markdown: no raw HTML ever reaches index.md, whatever renders it later
+    # (security review round 3); markdown renderers show &lt; as a plain "<"
+    body = (collection.get('description') or '').strip().replace('<', '&lt;')
     text = '---\n' + yaml.safe_dump(meta, sort_keys=False, allow_unicode=True, width=10 ** 6) + '---\n'
     return text + (f'\n{body}\n' if body else '')
 
