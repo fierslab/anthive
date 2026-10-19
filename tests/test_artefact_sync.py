@@ -127,3 +127,93 @@ def test_actions_outside_the_artefact_store_are_refused(tmp_path):
     with pytest.raises(ValueError):
         artefact_sync.apply([artefact_sync.Action('delete', 'Public2021/static/papers')], tmp_path, None, BUCKET,
                             log=lambda message: None)
+
+
+# ── security review round 3: symbolic links in the checkout ──────────────────────────────────────────────
+
+class _ListingS3:
+    def __init__(self, objects):
+        self.objects = objects
+
+    def get_paginator(self, name):
+        objects = self.objects
+
+        class Pages:
+            def paginate(self, Bucket, Prefix):  # noqa: N803
+                yield {'Contents': [{'Key': key, 'Size': len(body)} for key, body in objects.items()
+                                    if key.startswith(Prefix)]}
+        return Pages()
+
+    def head_object(self, Bucket, Key):  # noqa: N803
+        import hashlib
+        return {'Metadata': {'sha256': hashlib.sha256(self.objects[Key]).hexdigest()}}
+
+    def get_object(self, Bucket, Key):  # noqa: N803
+        import io
+        return {'Body': io.BytesIO(self.objects[Key])}
+
+
+def test_a_symlinked_purged_version_is_never_followed_by_the_delete(tmp_path):
+    import os
+    from tests.artefact_helpers import write_artefact, write_index_md
+    store = tmp_path / 'store'
+    outside = tmp_path / 'precious'
+    (outside / 'files').mkdir(parents=True)
+    (outside / 'files' / 'thesis.txt').write_text('years of work')
+    write_index_md(store, 'Public2021', group='Public2021', group_id='PU1')
+    info = write_artefact(store, 'Public2021', 'PU1', 'int', 'figure', 'volcano',
+                          [{'files': {'v.png': b'\x89PNG'}, 'state': 'purged'}, {'files': {'w.png': b'\x89PNG2'}}])
+    v1 = info['root'] / 'v1'
+    shutil.rmtree(v1, ignore_errors=True)
+    os.symlink(outside, v1)
+    actions = artefact_sync.plan(store, _ListingS3({}), 'b', '', 2 * 1024 * 1024)
+    counts = artefact_sync.apply(actions, store, _ListingS3({}), 'b', log=lambda message: None)
+    assert (outside / 'files' / 'thesis.txt').read_text() == 'years of work'
+    assert counts['deleted'] == 0 and counts['failed'] >= 1
+
+
+def test_a_symlinked_files_folder_never_receives_a_download(tmp_path):
+    import os
+    from tests.artefact_helpers import write_artefact, write_index_md
+    store = tmp_path / 'store'
+    outside = tmp_path / 'elsewhere'
+    outside.mkdir()
+    write_index_md(store, 'Public2021', group='Public2021', group_id='PU1')
+    body = b'\x89PNG payload'
+    info = write_artefact(store, 'Public2021', 'PU1', 'int', 'figure', 'volcano', [{'files': {'v.png': body}}],
+                          local_files=False)
+    files_dir = info['root'] / 'v1' / 'files'
+    shutil.rmtree(files_dir, ignore_errors=True)
+    os.symlink(outside, files_dir)
+    key = 'Public2021/static/artefacts/int/figure/volcano/v1/files/v.png'
+    s3 = _ListingS3({key: body})
+    counts = artefact_sync.apply(artefact_sync.plan(store, s3, 'b', '', 2 * 1024 * 1024), store, s3, 'b',
+                                 log=lambda message: None)
+    assert list(outside.iterdir()) == [] and counts['downloaded'] == 0 and counts['failed'] == 1
+
+
+def test_a_symlinked_artefact_folder_is_skipped_at_planning(tmp_path):
+    import os
+    from tests.artefact_helpers import write_artefact, write_index_md
+    store = tmp_path / 'store'
+    elsewhere = tmp_path / 'other_store'
+    write_index_md(store, 'Public2021', group='Public2021', group_id='PU1')
+    info = write_artefact(elsewhere, 'Public2021', 'PU1', 'int', 'figure', 'volcano', [{'files': {'v.png': b'x'}}])
+    target = store / 'Public2021' / 'static' / 'artefacts' / 'int' / 'figure'
+    target.mkdir(parents=True)
+    os.symlink(info['root'], target / 'volcano')
+    actions = artefact_sync.plan(store, _ListingS3({}), 'b', '', 2 * 1024 * 1024)
+    assert [action.action for action in actions] == ['note'] and 'symbolic link' in actions[0].reason
+
+
+def test_checked_path_refuses_links_and_escapes(tmp_path):
+    import os
+    base = tmp_path / 'G' / 'static' / 'artefacts'
+    base.mkdir(parents=True)
+    assert artefact_sync.checked_path(tmp_path, 'G/static/artefacts/int/figure/x/v1/files/a.png') == \
+        base / 'int' / 'figure' / 'x' / 'v1' / 'files' / 'a.png'
+    os.symlink(tmp_path, base / 'int')
+    with pytest.raises(artefact_sync.UnsafePath):
+        artefact_sync.checked_path(tmp_path, 'G/static/artefacts/int/figure/x/v1/files/a.png')
+    with pytest.raises(artefact_sync.UnsafePath):
+        artefact_sync.checked_path(tmp_path, 'G/static/artefacts/../x')

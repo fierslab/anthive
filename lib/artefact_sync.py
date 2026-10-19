@@ -46,6 +46,33 @@ class Action:
     reason: str = ''
 
 
+class UnsafePath(ValueError):
+    """A path below ``static/artefacts/`` that goes through a symbolic link or leaves the artefact tree."""
+
+
+def checked_path(store_root: Path, rel: str) -> Path:
+    """The local path of ``rel`` (``<group>/static/artefacts/...``) when no component below
+    ``<group>/static/artefacts`` is a symbolic link (lstat, also components that exist only in part) and the
+    resolved path stays inside the resolved ``<group>/static/artefacts``; else :class:`UnsafePath` (security
+    review round 3: a committed symlink must never make a pull delete or write outside the store)."""
+    parts = PurePosixPath(rel).parts
+    if len(parts) < 4 or tuple(parts[1:3]) != artefacts.ARTEFACTS_PARTS or '..' in parts or parts[0].startswith('.'):
+        raise UnsafePath(f'{rel}: outside static/artefacts/')
+    base = Path(store_root) / parts[0] / artefacts.ARTEFACTS_PARTS[0] / artefacts.ARTEFACTS_PARTS[1]
+    if base.is_symlink():
+        raise UnsafePath(f'{rel}: static/artefacts is a symbolic link')
+    current = base
+    for part in parts[3:]:
+        current = current / part
+        if current.is_symlink():
+            raise UnsafePath(f'{rel}: {current.relative_to(store_root)} is a symbolic link')
+    resolved_base = base.resolve()
+    resolved = current.resolve(strict=False)
+    if resolved != resolved_base and resolved_base not in resolved.parents:
+        raise UnsafePath(f'{rel}: resolves outside {base.relative_to(store_root)}')
+    return current
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, 'rb') as handle:
@@ -106,6 +133,11 @@ def plan(store_root: Path, s3: Any, bucket: str, catalog_prefix: str, inline_max
     actions: List[Action] = []
     for path in head_records(store_root):
         try:
+            checked_path(store_root, str(path.head_rel))
+        except UnsafePath as exc:
+            actions.append(Action('note', str(path.head_rel), reason=f'skipped: {exc}'))
+            continue
+        try:
             head = artefacts.parse_head_record((store_root / str(path.head_rel)).read_text(encoding='utf-8'))
         except Exception as exc:  # noqa: BLE001
             actions.append(Action('note', str(path.head_rel), reason=f'head record unreadable ({exc})'))
@@ -126,7 +158,11 @@ def plan(store_root: Path, s3: Any, bucket: str, catalog_prefix: str, inline_max
                 continue
             if entry.get('state') != 'live':
                 continue
-            manifest_path = store_root / str(path.manifest_rel(number))
+            try:
+                manifest_path = checked_path(store_root, str(path.manifest_rel(number)))
+            except UnsafePath as exc:
+                actions.append(Action('note', str(path.manifest_rel(number)), reason=f'skipped: {exc}'))
+                continue
             if not manifest_path.is_file() or _sha256(manifest_path) != entry.get('manifest_sha256'):
                 actions.append(Action('note', str(path.manifest_rel(number)),
                                       reason=f'{ref}@v{number}: the manifest is not in the checkout (or differs '
@@ -170,13 +206,18 @@ def apply(actions: Sequence[Action], store_root: Path, s3: Any, bucket: str, *, 
     store_root = Path(store_root)
     counts = {'downloaded': 0, 'deleted': 0, 'failed': 0, 'skipped_no_room': 0, 'notes': 0}
     for action in actions:
-        target = store_root / action.rel
         rel_parts = PurePosixPath(action.rel).parts
         if len(rel_parts) < 4 or tuple(rel_parts[1:3]) != artefacts.ARTEFACTS_PARTS or '..' in rel_parts:
             raise ValueError(f'refusing {action.action} outside static/artefacts/: {action.rel}')
         if action.action == 'note':
             counts['notes'] += 1
             log(f'[note]     {action.rel}: {action.reason}')
+            continue
+        try:
+            target = checked_path(store_root, action.rel)
+        except UnsafePath as exc:
+            log(f'  REFUSED {action.rel}: {exc}')
+            counts['failed'] += 1
             continue
         if action.action == 'delete':
             log(f'[{"would delete" if dry_run else "DELETE"}] {action.rel}  ({action.reason})')
@@ -195,6 +236,12 @@ def apply(actions: Sequence[Action], store_root: Path, s3: Any, bucket: str, *, 
             counts['downloaded'] += 1
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            checked_path(store_root, action.rel)          # again after mkdir: nothing raced a link in
+        except UnsafePath as exc:
+            log(f'  REFUSED {action.rel}: {exc}')
+            counts['failed'] += 1
+            continue
         partial = target.with_name(f'.{target.name}.partial')
         digest = hashlib.sha256()
         try:
@@ -211,6 +258,11 @@ def apply(actions: Sequence[Action], store_root: Path, s3: Any, bucket: str, *, 
         if digest.hexdigest() != action.sha256:
             partial.unlink(missing_ok=True)
             log(f'  FAILED {action.rel}: sha256 differs from the manifest; nothing kept')
+            counts['failed'] += 1
+            continue
+        if target.is_symlink():
+            partial.unlink(missing_ok=True)
+            log(f'  REFUSED {action.rel}: the target is a symbolic link')
             counts['failed'] += 1
             continue
         os.replace(partial, target)
