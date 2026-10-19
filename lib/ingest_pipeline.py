@@ -1998,42 +1998,30 @@ class Pipeline:
                 outcome.detail = (f'the dataset already has the DE study {", ".join(clashes)}; give the table another '
                                   f'de_study_id (or ask an admin to replace it)')
                 return outcome
+            added = [study for study in studies if study not in clashes]
+
+            def change_text(archived: List[str]) -> str:
+                return (f'DE through the deposit {deposit.get("id")} by {deposit.get("user")}: '
+                        + (f'added {", ".join(added)}' if added else '')
+                        + ('; ' if added and clashes else '')
+                        + (f'replaced {", ".join(clashes)} (previous archived at {", ".join(archived) or "-"})'
+                           if clashes else '') + '.')
             # the import goes into a copy; the served files change only when every table went in
-            work_group = work_store / data_project
-            work_group.mkdir(parents=True, exist_ok=True)
-            copy_duckdb = work_group / served_duckdb.name
-            shutil.copy2(served_duckdb, copy_duckdb)
-            shutil.copy2(md, work_group / md.name)
-            if (store_dir / 'index.md').exists():
-                shutil.copy2(store_dir / 'index.md', work_group / 'index.md')
-            if served_sidecar.exists():
-                shutil.copy2(served_sidecar, work_group / served_sidecar.name)
-            for obj, mus_obj, meta, study, staged_data, staged_mus in plan:
-                cmd = ['env', f'ANTHIVE_H5ADSTORE={work_store}',
-                       *de_ingest_command(copy_duckdb, staged_data, meta, staged_data.name,
-                                          replace=study in clashes)]
-                code, tail = self.runner.run('ant-de-ingest', cmd, cwd=work)
-                if code != 0:
-                    outcome.state = 'failed'
-                    outcome.detail = (f'the DE table {staged_data.name} could not be imported: '
-                                      f'{friendly_de_error(tail)} Nothing was changed; correct the table or its '
-                                      f'.mus and deposit it again.')
-                    shutil.rmtree(work, ignore_errors=True)
-                    return outcome
-            archived = []
-            for study in clashes:                    # an admin replaces: keep the previous study
-                target = store_dir / ingest_versions.VERSIONS_DIR / basename / 'de' / study / \
-                    f'{time.strftime("%Y%m%dT%H%M%S")}.de.parquet'
-                ensure_inside(target, store_dir)
-                if self.archive_de_study(served_duckdb, served_sidecar, study, target):
-                    archived.append(str(target.relative_to(self.config.store_root)))
-            self.api.release(db_id)
             try:
-                place_file(copy_duckdb, served_duckdb)
-                if (work_group / served_sidecar.name).exists():
-                    place_file(work_group / served_sidecar.name, served_sidecar)
-            finally:
-                self.api.restore(db_id)
+                version, archived, warnings = import_de_all_or_nothing(
+                    store_root=self.config.store_root, md=md, db_id=db_id, work=work,
+                    tables=[(staged_data, meta, study) for _o, _m, meta, study, staged_data, _s in plan],
+                    replace=clashes, runner=self.runner, api=self.api, today=today, change=change_text,
+                    archive=self.archive_de_study)
+            except DeImportFailed as exc:
+                outcome.state = 'failed'
+                outcome.detail = (f'the DE table {exc.table} could not be imported: '
+                                  f'{friendly_de_error(exc.output)} Nothing was changed; correct the table or its '
+                                  f'.mus and deposit it again.')
+                return outcome
+            outcome.warnings.extend(warnings)
+            if version:
+                outcome.version = version
             sources_root = store_dir / 'de_sources' / basename
             for obj, mus_obj, meta, study, staged_data, staged_mus in plan:
                 folder = staged_data.parent.name
@@ -2042,21 +2030,7 @@ class Pipeline:
                 place_file(staged_mus, sources_root / folder / staged_mus.name)
                 outcome.consumed[obj.key] = obj.etag
                 outcome.consumed[mus_obj.key] = mus_obj.etag
-            added = [study for study in studies if study not in clashes]
-            change = (f'DE through the deposit {deposit.get("id")} by {deposit.get("user")}: '
-                      + (f'added {", ".join(added)}' if added else '')
-                      + ('; ' if added and clashes else '')
-                      + (f'replaced {", ".join(clashes)} (previous archived at {", ".join(archived) or "-"})'
-                         if clashes else '') + '.')
-            try:
-                text = md.read_text(encoding='utf-8')
-                new_text = md_edit.apply_edits(text, [md_edit.bump_version([change], today, 'patch')])
-                partial = md.with_name(f'.{md.name}.de-partial')
-                partial.write_text(new_text, encoding='utf-8')
-                os.replace(partial, md)
-                outcome.version = str(md_fill_version(md))
-            except Exception as exc:  # noqa: BLE001 - imported but not versioned: a person adds the entry
-                outcome.warnings.append(f'version bump of {md.name} failed ({exc}); add the changelog entry by hand')
+            change = change_text(archived)
         if self.config.push_catalog and served_sidecar.exists():
             rel = store_dir.relative_to(self.config.store_root)
             try:
@@ -2154,6 +2128,107 @@ def md_fill_version(md: Path) -> Any:
 DE_FLAG_KEYS = {'--term': 'de_term', '--contrast': 'de_contrast', '--method': 'de_method', '--preset': 'de_format',
                 '--study-id': 'de_study_id', '--description': 'de_description', '--covariates': 'de_covariates',
                 '--reference-type': 'de_reference_type', '--map': 'de_map_<column>'}
+
+
+class DeImportFailed(RuntimeError):
+    """``ant-de-ingest`` refused one table; nothing in the store was changed."""
+
+    def __init__(self, table: str, output: str):
+        super().__init__(f'{table}: {output}')
+        self.table = table
+        self.output = output
+
+
+def import_de_all_or_nothing(*, store_root: Path, md: Path, db_id: str, work: Path,
+                             tables: Sequence[Tuple[Path, Dict[str, str], str]], replace: Sequence[str],
+                             runner: Any, api: Any, today: str, change: Callable[[List[str]], str],
+                             remove: Sequence[str] = (), archive: Optional[Callable[..., bool]] = None,
+                             caveat: Optional[Dict[str, Any]] = None) -> Tuple[Optional[str], List[str], List[str]]:
+    """Import DE tables into (and remove studies from) a dataset, all or nothing. Call under its writer lock.
+
+    The served ``.duckdb`` (and ``.de.parquet``) are copied into ``work``; every table of ``tables``
+    (``(data file, sidecar keys, study id)``) is imported into the copy with ``ant-de-ingest``
+    (``--replace`` for the study ids in ``replace``) and the studies in ``remove`` are deleted from it. Only
+    when all of that succeeded, the replaced studies are archived (``archive(served_duckdb, served_sidecar,
+    study, target)``, under ``_versions/<basename>/de/<study>/``), the copy replaces the served files
+    (release / restore in ant-serve) and the ``.md`` gets a patch version whose changelog line is
+    ``change(archived)`` (and ``caveat`` appended to ``caveats``). Shared by the DE-only deposit route and
+    the ``de_table`` artefacts.
+
+    Returns ``(new version, archived paths, warnings)``. Raises :class:`DeImportFailed` (nothing changed).
+    """
+    import md_edit  # noqa: PLC0415
+
+    store_dir, basename = md.parent, md.stem
+    data_project = md.relative_to(store_root).parts[0]
+    served_duckdb = store_dir / f'{basename}.duckdb'
+    served_sidecar = store_dir / f'{basename}.de.parquet'
+    work_store = work / 'store'
+    work_group = work_store / data_project
+    work_group.mkdir(parents=True, exist_ok=True)
+    copy_duckdb = work_group / served_duckdb.name
+    shutil.copy2(served_duckdb, copy_duckdb)
+    shutil.copy2(md, work_group / md.name)
+    if (store_dir / 'index.md').exists():
+        shutil.copy2(store_dir / 'index.md', work_group / 'index.md')
+    if served_sidecar.exists():
+        shutil.copy2(served_sidecar, work_group / served_sidecar.name)
+    for staged_data, meta, study in tables:
+        cmd = ['env', f'ANTHIVE_H5ADSTORE={work_store}',
+               *de_ingest_command(copy_duckdb, staged_data, meta, staged_data.name, replace=study in replace)]
+        code, tail = runner.run('ant-de-ingest', cmd, cwd=work)
+        if code != 0:
+            shutil.rmtree(work, ignore_errors=True)
+            raise DeImportFailed(staged_data.name, tail)
+    if remove:
+        import duckdb  # noqa: PLC0415
+        from de_storage import write_sidecar  # noqa: PLC0415
+
+        try:
+            connection = duckdb.connect(str(copy_duckdb))
+            try:
+                for study in remove:
+                    connection.execute('DELETE FROM __de WHERE study_id = ?', [study])
+                    connection.execute('DELETE FROM __de_study WHERE study_id = ?', [study])
+            finally:
+                connection.close()
+            work_sidecar = work_group / served_sidecar.name
+            work_sidecar.unlink(missing_ok=True)
+            write_sidecar(work_sidecar, copy_duckdb)       # every remaining study; none: no sidecar
+        except Exception as exc:  # noqa: BLE001 - a study that cannot be removed changes nothing
+            shutil.rmtree(work, ignore_errors=True)
+            raise DeImportFailed(', '.join(remove), f'removing the study failed: {exc}') from exc
+    archived: List[str] = []
+    for study in replace:                    # an admin (or the artefact owning it) replaces: keep the previous one
+        target = store_dir / ingest_versions.VERSIONS_DIR / basename / 'de' / study / \
+            f'{time.strftime("%Y%m%dT%H%M%S")}.de.parquet'
+        ensure_inside(target, store_dir)
+        if archive is not None and archive(served_duckdb, served_sidecar, study, target):
+            archived.append(str(target.relative_to(store_root)))
+    api.release(db_id)
+    try:
+        place_file(copy_duckdb, served_duckdb)
+        if (work_group / served_sidecar.name).exists():
+            place_file(work_group / served_sidecar.name, served_sidecar)
+        elif remove and served_sidecar.exists():
+            served_sidecar.unlink()             # the last study went: no sidecar, or ant-convert re-imports it
+    finally:
+        api.restore(db_id)
+    warnings: List[str] = []
+    version: Optional[str] = None
+    try:
+        text = md.read_text(encoding='utf-8')
+        edits = [md_edit.bump_version([change(archived)], today, 'patch')]
+        if caveat is not None:
+            edits.insert(0, md_edit.append_top('caveats', caveat))
+        new_text = md_edit.apply_edits(text, edits)
+        partial = md.with_name(f'.{md.name}.de-partial')
+        partial.write_text(new_text, encoding='utf-8')
+        os.replace(partial, md)
+        version = str(md_fill_version(md))
+    except Exception as exc:  # noqa: BLE001 - imported but not versioned: a person adds the entry
+        warnings.append(f'version bump of {md.name} failed ({exc}); add the changelog entry by hand')
+    return version, archived, warnings
 
 
 def de_sidecar_problems(meta: Dict[str, str]) -> List[str]:
