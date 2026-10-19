@@ -38,6 +38,9 @@ MIN_ROWS = 1
 GENE_MATCH_ERROR = 0.5
 GENE_MATCH_WARN = 0.9
 PADJ_BELOW_P_WARN = 0.01
+#: distinct (term, contrast, gene) keys the duplicate check keeps (64-bit hashes, about 150 MB at the cap); a
+#: larger table is held for an admin, never passed unchecked (review S4)
+DUPLICATE_KEY_CAP = 2_000_000
 MISSING = {'', 'na', 'nan', 'null', 'none'}
 CONTRAST_DIRECTION_RE = re.compile(r'(?P<numerator>.+?)[ _.-]+vs\.?[ _.-]+(?P<denominator>.+)', re.IGNORECASE)
 #: sidecar keys copied into the manifest's ``de`` block (never paths, ELN ids or S3 keys of the uploader)
@@ -223,7 +226,10 @@ def check_table(path: Path, file_name: str, sidecar_name: str, meta: Dict[str, s
         result.genes_matched = round(fraction, 4)
     elif genes is None:
         add('de.genes', 'warn', f'the genes of {db_id} could not be read; not compared')
-    if stats['duplicates']:
+    if stats['duplicates_unchecked']:
+        add('de.duplicates', 'held', f'more than {DUPLICATE_KEY_CAP} (term, contrast, gene) rows: duplicates were '
+                                     f'not checked', 'an admin looks at the table')
+    elif stats['duplicates']:
         add('de.duplicates', 'warn', f'{stats["duplicates"]} duplicated gene(s) within one contrast')
     stated = sorted(stats['contrasts'])
     conventions = {value: sign_convention(value) for value in stated}
@@ -238,7 +244,7 @@ def check_table(path: Path, file_name: str, sidecar_name: str, meta: Dict[str, s
     return result
 
 def _scan_rows(rows: Iterator[List[str]], columns: Sequence[str], mapped: Dict[str, str],
-               meta: Dict[str, str]) -> Dict[str, Any]:
+               meta: Dict[str, str], key_cap: Optional[int] = None) -> Dict[str, Any]:
     """One pass over the rows: counts, ranges, gene set, duplicates per (term, contrast), contrasts."""
     index = {column: position for position, column in enumerate(columns)}
 
@@ -252,8 +258,9 @@ def _scan_rows(rows: Iterator[List[str]], columns: Sequence[str], mapped: Dict[s
     fixed_contrast = str(meta.get('de_contrast') or '')
     stats: Dict[str, Any] = {'rows': 0, 'out_of_range': {}, 'has_p': p_at is not None or q_at is not None,
                              'pairs': 0, 'below': 0, 'effect_name': effect_name, 'bad_effects': 0, 'genes': set(),
-                             'duplicates': 0, 'contrasts': set()}
-    seen: Set[Tuple[str, str, str]] = set()
+                             'duplicates': 0, 'contrasts': set(), 'duplicates_unchecked': False}
+    seen: Set[int] = set()
+    cap = DUPLICATE_KEY_CAP if key_cap is None else key_cap
 
     def cell(row: List[str], at: Optional[int]) -> str:
         return row[at] if at is not None and at < len(row) else ''
@@ -276,9 +283,15 @@ def _scan_rows(rows: Iterator[List[str]], columns: Sequence[str], mapped: Dict[s
         contrast = cell(row, contrast_at).strip() if contrast_at is not None else fixed_contrast.strip()
         if contrast:
             stats['contrasts'].add(contrast)
-        key = (cell(row, term_at), contrast, gene)
+        if stats['duplicates_unchecked']:
+            continue
+        key = hash((cell(row, term_at), contrast, gene))
         if key in seen:
             stats['duplicates'] += 1
-        seen.add(key)
+        elif len(seen) >= cap:
+            stats['duplicates_unchecked'] = True
+            seen.clear()
+        else:
+            seen.add(key)
     return stats
 

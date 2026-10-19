@@ -273,3 +273,45 @@ def test_an_unexpected_exception_abandons_the_reserved_version(tmp_path, clock, 
     assert watch_row(db, first['deposit_id'])['state'] == 'failed'
     assert [entry['state'] for entry in _figure_head(tmp_path)['versions']] == ['failed']
     assert publisher.load_marker(first['deposit_id']) is None
+
+
+# ── S4 residue: the duplicate check keeps a bounded set and holds a table beyond it ─────────────────────────
+
+def test_the_duplicate_check_is_bounded_and_holds_beyond_the_cap(tmp_path, clock, monkeypatch):
+    import artefact_de
+    monkeypatch.setattr(artefact_de, 'DUPLICATE_KEY_CAP', 5)
+    service, s3, publisher, db, _api = _setup(tmp_path, clock)
+    answer = deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    row = watch_row(db, answer['deposit_id'])
+    assert row['state'] == 'held' and 'de_not_checked' in row['held_reasons']
+    assert _studies(tmp_path) == {}
+    service.approve(ADMIN, answer['deposit_id'], 'looked at the table')
+    poll_until_final(publisher, s3, clock)
+    assert watch_row(db, answer['deposit_id'])['state'] == 'live'
+
+
+# ── concern: the checks are compared with the dataset again under the lock ─────────────────────────────────
+
+def test_a_dataset_change_during_the_checks_runs_them_again(tmp_path, clock, monkeypatch):
+    import md_edit
+    service, s3, publisher, db, _api = _setup(tmp_path, clock)
+    real_qc = publisher._qc
+    calls = []
+
+    def qc_while_the_dataset_changes(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:                    # a new dataset version lands while the first checks run
+            md = tmp_path / 'store' / MD
+            md.write_text(md_edit.apply_edits(md.read_text(), [md_edit.bump_version(['other'], '2026-10-19',
+                                                                                    'patch')]))
+        return real_qc(*args, **kwargs)
+    monkeypatch.setattr(publisher, '_qc', qc_while_the_dataset_changes)
+    answer = deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    row = watch_row(db, answer['deposit_id'])
+    assert row['state'] == 'stable' and 'changed during the checks' in row['error']
+    assert not (tmp_path / 'store' / 'Public2021' / 'static' / 'artefacts' / 'int' / 'de_table' / 'tvc').exists()
+    clock[0] += 4000
+    publisher.poll(listing(s3))
+    assert watch_row(db, answer['deposit_id'])['state'] == 'live' and len(calls) == 2

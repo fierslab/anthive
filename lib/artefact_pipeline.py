@@ -786,6 +786,8 @@ class ArtefactPublisher:
             held.append('public_access')
             add('access.public', 'held', 'the artefact will be public: an admin publishes it')
         results.extend(extra or [])
+        if any(entry['status'] == 'held' for entry in extra or []):
+            held.append('de_not_checked')
         for reason, summary in extra_held:
             held.append(reason)
             add(reason.replace('_', '.', 1), 'held', summary)
@@ -901,6 +903,10 @@ class ArtefactPublisher:
         extra_held = [('made_from_internal', f'the artefact will be public but was made from internal '
                                              f'dataset(s) {", ".join(hidden_sources)}: an admin decides (or deposit '
                                              f'it with access internal)')] if hidden_sources else []
+        # the datasets the checks read, as they were before the checks (compared again under the lock)
+        watched = [scope_db_id] if scope_db_id else []
+        watched += [entry['db_id'] for entry in made_from]
+        state_before = self._dataset_state(mds, watched)
         # hash and QC (skipped when a marker shows they passed before the placement started) --------------
         marker = self.load_marker(record['id'])
         work = self.work_root / f'artefact_{record["id"]}'
@@ -944,6 +950,10 @@ class ArtefactPublisher:
                 raise Stop('failed', f'version_conflict: {ref} does not exist')
             if head is not None and head.get('kind') != kind:
                 raise Stop('failed', f'{ref} is a {head.get("kind")}; the kind cannot change')
+            if marker is None and self._dataset_state(mds, watched) != state_before:
+                # a dataset changed while its checks ran (genes, versions): checked again at the next attempt
+                raise TransientError('a dataset this artefact was checked against changed during the checks; '
+                                     'they run again')
             if marker is None:
                 existing_numbers = [v['version'] for v in (head or {}).get('versions') or []]
                 if len(existing_numbers) >= int(self.settings.get('artefacts_max_versions', 100)):
@@ -1561,6 +1571,18 @@ class ArtefactPublisher:
             checks.extend(result.checks)
             tables.append(result.manifest_entry())
         return checks, tables
+
+    @staticmethod
+    def _dataset_state(mds: Dict[str, Path], db_ids: Sequence[str]) -> Dict[str, Tuple[str, str]]:
+        """``{db_id: (version, sha256)}`` of datasets, to notice a change between the checks and the placement
+        (review: the gene and made_from checks are rechecked under the lock). A rebuild changes the sha256, a
+        new version the version; annotation writes (obs columns) change neither and need no recheck."""
+        out: Dict[str, Tuple[str, str]] = {}
+        for db_id in sorted(set(db_ids)):
+            md = mds.get(db_id)
+            meta = rules.read_md_meta(md) if md is not None and md.is_file() else {}
+            out[db_id] = (str(meta.get('version')), str(meta.get('sha256')))
+        return out
 
     def _require_dataset_update(self, record: Dict[str, Any], db_id: str) -> None:
         """Review N1, again at publication: the depositor may still update the dataset (an owner change or a

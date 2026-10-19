@@ -90,6 +90,7 @@ HELD_REASONS = {
     'donor_identifiers': 'a table holds values of the donor crosswalk (internal donor ids)',
     'made_from_internal': 'a public artefact made from an internal dataset: an admin decides',
     'not_scanned': 'a text or table file is larger than the content check limit and was not scanned',
+    'de_not_checked': 'a DE table too large for one of its checks (duplicates): an admin looks at it',
 }
 COLLECTION_TITLE_MAX = artefacts.TITLE_MAX_CHARS
 MAX_AUTHORS = 100
