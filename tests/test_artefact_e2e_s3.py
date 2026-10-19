@@ -164,6 +164,7 @@ def test_artefact_route_on_the_real_bucket(tmp_path):
         assert (store_root / 'Fiers2026' / 'index.md').is_file()
         # 6. a de_table, imported into the dataset with the real ant-de-ingest, then purged
         helpers.make_dataset_duckdb(store_root)
+        store.set_owner('PU1/int', helpers.ANALYST.user, 'root', 'e2e: a de_table needs the right to update')
         de_payloads = helpers.de_files()
         de_answer = service.create(helpers.ANALYST, helpers.artefact_body(de_payloads, artefact_id='tvc',
                                                                           **helpers.DE_INTERNAL),
