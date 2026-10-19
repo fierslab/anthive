@@ -262,6 +262,52 @@ class RangedObject(io.RawIOBase):
         return len(data)
 
 
+class DeApi:
+    """release / restore of a dataset in ant-serve around a DE import (the publisher's API client)."""
+
+    def __init__(self, api: Any) -> None:
+        self.api = api
+
+    def release(self, db_id: str) -> None:
+        if self.api is not None:
+            self.api.post_with_retry(f'/admin/release/{db_id}')
+
+    def restore(self, db_id: str) -> None:
+        if self.api is not None:
+            self.api.post_with_retry(f'/admin/restore/{db_id}')
+
+
+#: the columns of ``__de`` a study fingerprint covers (what the served DE rows say)
+FINGERPRINT_COLUMNS = ('term', 'contrast', 'gene_id', 'log2fc', 'zeff', 'effsize', 'efftype', 'pvalue', 'padj',
+                       'estimate', 'SE', 'ci_low', 'ci_high')
+
+
+def study_fingerprints(duckdb_path: Path, studies: Sequence[str]) -> Dict[str, str]:
+    """``{study: "<rows>:<sum of row hashes>"}`` of the studies present in a dataset's duckdb (read-only).
+
+    The fingerprint identifies which import wrote the rows a study serves now (review N2): every de_table
+    version records the fingerprint of what it imported, and a purge compares. Order independent; computed
+    by the same DuckDB that compares it (a DuckDB upgrade that changes ``hash`` makes every comparison differ,
+    which stops a purge for an admin, never removes the wrong rows)."""
+    import duckdb  # noqa: PLC0415
+    connection = duckdb.connect(str(duckdb_path), read_only=True)
+    try:
+        tables = {row[0] for row in connection.execute('SELECT table_name FROM information_schema.tables').fetchall()}
+        if '__de' not in tables:
+            return {}
+        columns = ', '.join(FINGERPRINT_COLUMNS)
+        out = {}
+        for study in studies:
+            count, total = connection.execute(
+                f'SELECT count(*), coalesce(sum(hash({columns})::HUGEINT), 0) FROM __de WHERE study_id = ?',
+                [study]).fetchone()
+            if count:
+                out[study] = f'{int(count)}:{int(total)}'
+        return out
+    finally:
+        connection.close()
+
+
 @dataclass
 class FileCheck:
     """What the hash step learnt about one file."""
@@ -434,15 +480,15 @@ class ArtefactPublisher:
         except TransientError as exc:
             attempts = int(row.get('attempts') or 0) + 1
             if attempts >= MAX_ATTEMPTS:
-                self._finish(store, record, key, Outcome(state='failed', detail=f'gave up after {attempts} attempts: '
-                                                                                 f'{exc}'), signature)
+                detail = self.abandon_after_error(record, f'gave up after {attempts} attempts: {exc}')
+                self._finish(store, record, key, Outcome(state='failed', detail=detail), signature)
                 return 'failed'
             delay = min(3600, 60 * 2 ** attempts)
             self.db.transition(key, 'stable', f'retry in {delay} s: {exc}', attempts=attempts,
                                next_attempt=self.clock() + delay, error=str(exc))
             return 'retry'
         except Exception as exc:  # noqa: BLE001 - a bug: recorded, never crash the poll
-            outcome = Outcome(state='failed', detail=f'{type(exc).__name__}: {exc}')
+            outcome = Outcome(state='failed', detail=self.abandon_after_error(record, f'{type(exc).__name__}: {exc}'))
         self._finish(store, record, key, outcome, signature, approval=approval)
         if outcome.state == 'live':
             self._delete_incoming(key, outcome.consumed)
@@ -923,9 +969,11 @@ class ArtefactPublisher:
                 head = self._place_version(record, block, path, ref, group, group_id, number, kind, scope_db_id,
                                            scope_md, objs, files, work, marker, outcome, head)
             except Stop as stop:
-                if stop.state != 'held':
-                    self._abandon_version(path, number, marker, record, str(stop))
-                raise
+                if stop.state == 'held':
+                    raise
+                reason = self._abandon_version(path, number, marker, record, str(stop), scope_md=scope_md,
+                                               scope_db_id=scope_db_id)
+                raise Stop(stop.state, reason, stop.report, held=stop.held) from stop
         return self._finish_publication(record, path, ref, group_id, scope, artefact_id, number, kind, scope_md,
                                         objs, work, report, outcome)
 
@@ -1401,7 +1449,11 @@ class ArtefactPublisher:
             if hashlib.sha256(raw).hexdigest() != entry['manifest_sha256']:
                 return 'needs_decision', 'the local manifest differs from the head record; nothing deleted'
             manifest = json.loads(raw.decode('utf-8'))
-            if path.kind == 'de_table':
+            deferred: List[str] = []
+            if path.kind == 'de_table' and scope_md is None:
+                # the dataset is inactive or not on this host: the files go, the study removal waits for it
+                deferred = list(((manifest.get('de') or {}).get('imported') or {}).get('study_ids') or [])
+            elif path.kind == 'de_table':
                 removal = self._de_remove_for_purge(row, path, number, head, manifest, scope_md)
                 if removal is not None:
                     return 'needs_decision', removal
@@ -1436,6 +1488,8 @@ class ArtefactPublisher:
             entry.update({'state': 'purged', 'purged': _today(), 'purged_by': row['requested_by'],
                           'purge_reason': row.get('reason') or '',
                           'access': entry.get('access') or manifest.get('access') or 'inherit'})
+            if deferred:
+                entry['de_removal_deferred'] = deferred
             if row.get('by_admin'):
                 entry['purged_by_admin'] = True
             live = [v['version'] for v in head['versions'] if v['state'] == 'live']
@@ -1449,6 +1503,9 @@ class ArtefactPublisher:
         self._rescan_and_check(f'/artefacts/{row["ref"]}/versions', warnings)
         self._commit(commit_paths, f'purge {row["ref"]}@v{number}\n\nRequested by '
                      f'{row["requested_by"]}: {row.get("reason") or ""}\n', None, warnings)
+        if deferred:
+            warnings.append(f'the dataset is not served here: removal of DE study {", ".join(deferred)} is deferred '
+                            f'until it is active again (recorded as de_removal_deferred in the head record)')
         return 'done', 'purged' + (f' ({"; ".join(warnings)})' if warnings else '')
 
     # ── de_table artefacts (phase A3) ────────────────────────────────────────
@@ -1585,6 +1642,9 @@ class ArtefactPublisher:
             study = next(table['study_id'] for table in marker['de_tables'] if table['file'] == entry['name'])
             tables.append((data, meta, study))
         added = [study for study in studies if study not in clashes]
+        # what a rollback needs if the version is abandoned after the import (review N3); saved before it
+        marker['de_plan'] = {'added': added, 'replaced': clashes, 'started': time.time()}
+        self.save_marker(record['id'], marker)
 
         def change(archived: List[str]) -> str:
             return (f'DE from {token} by {record["user"]}: '
@@ -1619,14 +1679,16 @@ class ArtefactPublisher:
         finally:
             shutil.rmtree(import_work, ignore_errors=True)
         outcome.warnings.extend(warnings)
-        rows = {}
+        rows: Dict[str, int] = {}
+        fingerprints: Dict[str, str] = {}
         try:
             rows = self._study_rows(duckdb_path, studies)
+            fingerprints = study_fingerprints(duckdb_path, studies)
         except Exception as exc:  # noqa: BLE001
             outcome.warnings.append(f'row counts of the imported studies not read ({exc})')
         marker['de'] = self._de_block(marker, {'study_ids': studies, 'rows': rows, 'imported_at': _now_iso(),
                                                'dataset_version_after': version, 'replaced': clashes,
-                                               'archived': archived})
+                                               'archived': archived, 'fingerprints': fingerprints})
 
     @staticmethod
     def _de_block(marker: Dict[str, Any], imported: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1710,54 +1772,138 @@ class ArtefactPublisher:
         except Exception as exc:  # noqa: BLE001
             warnings.append(f'rescan failed ({exc})')
 
+    def _scope_writers(self, path: artefacts.ArtefactPath) -> List[Tuple[str, int, str, Dict[str, Any]]]:
+        """``(artefact_id, version, state, manifest)`` of every live or purging de_table version in the scope
+        (every artefact of the dataset), from the local head records and manifests."""
+        root = self.store_root / path.group / artefacts.ARTEFACTS_PARTS[0] / artefacts.ARTEFACTS_PARTS[1] / \
+            path.scope / 'de_table'
+        out = []
+        if not root.is_dir():
+            return out
+        for head_path in sorted(root.glob('*/artefact.md')):
+            try:
+                other = artefacts.ArtefactPath(path.group, path.scope, 'de_table', head_path.parent.name)
+                head = artefacts.parse_head_record(head_path.read_text(encoding='utf-8'))
+            except Exception:  # noqa: BLE001 - an unreadable record names no writer
+                continue
+            for version in head.get('versions') or []:
+                if version.get('state') not in ('live', 'purging'):
+                    continue
+                try:
+                    manifest = json.loads((self.store_root / str(other.manifest_rel(version['version'])))
+                                          .read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    continue
+                out.append((other.artefact_id, int(version['version']), version['state'], manifest))
+        return out
+
+    def _version_file(self, path: artefacts.ArtefactPath, version: int, name: str, sha256: str, work: Path) -> Path:
+        """A file of a published version: its local copy when it matches, else read from the catalog."""
+        local = self.store_root / str(path.file_rel(version, name))
+        if local.is_file() and sha256_file(local) == sha256:
+            return local
+        target = work / f'v{version}' / name
+        ensure_inside(target, work)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        key = artefacts.s3_key(self.catalog_prefix, path.file_rel(version, name))
+        try:
+            body = self.s3.get_object(Bucket=self.bucket, Key=key)['Body']
+        except Exception as exc:  # noqa: BLE001
+            raise TransientError(f'reading {key} failed ({_code(exc)})') from exc
+        digest = hashlib.sha256()
+        with open(target, 'wb') as handle:
+            for chunk in iter(lambda: body.read(SCAN_CHUNK), b''):
+                digest.update(chunk)
+                handle.write(chunk)
+        if digest.hexdigest() != sha256:
+            raise Stop('needs_decision', f'{key} does not match its manifest any more')
+        return target
+
     def _de_remove_for_purge(self, row: Dict[str, Any], path: artefacts.ArtefactPath, number: int,
                              head: Dict[str, Any], manifest: Dict[str, Any], scope_md: Optional[Path]) -> Optional[str]:
-        """Before a de_table version's files go: remove its studies from the dataset (a patch version with a
-        changelog line and a caveat), unless a newer live version of the artefact imported the same study
-        (it owns it now) or the study is gone already. Returns a reason to stop, or None."""
-        from ingest_md_fill import curation_caveat, today_iso  # noqa: PLC0415
-        from ingest_pipeline import DeImportFailed, import_de_all_or_nothing  # noqa: PLC0415
+        """Before a de_table version's files go, settle its studies in the dataset (review N2). Per study:
 
-        studies = list(((manifest.get('de') or {}).get('imported') or {}).get('study_ids') or [])
-        if not studies:
+        * the dataset serves rows this version did not write (a fingerprint differs): left alone when another
+          de_table version in the scope wrote them, else an admin decides (a stop);
+        * this version wrote them and another live version of the same artefact lists the study: that version's
+          table is imported again (the purged rows are archived);
+        * this version wrote them and nothing else lists the study: removed.
+
+        All of that in one all-or-nothing import, a patch version with a changelog line and a caveat. Returns a
+        reason to stop, or None."""
+        from ingest_md_fill import curation_caveat, today_iso  # noqa: PLC0415
+        from ingest_pipeline import DeImportFailed, import_de_all_or_nothing, parse_sidecar_text  # noqa: PLC0415
+
+        imported = (manifest.get('de') or {}).get('imported') or {}
+        studies = list(imported.get('study_ids') or [])
+        if not studies or scope_md is None:
             return None
-        if scope_md is None:
-            return 'the dataset of this de_table is not served here; its study cannot be removed (nothing deleted)'
+        mine = imported.get('fingerprints') or {}
         duckdb_path = scope_md.with_suffix('.duckdb')
         try:
-            existing = self._list_studies(duckdb_path)
+            current = study_fingerprints(duckdb_path, studies)
         except Exception as exc:  # noqa: BLE001
             raise TransientError(f'cannot read the DE studies ({exc})') from exc
-        kept_by_newer = self._own_studies(path, head, exclude=number)
-        remove = [study for study in studies if study in existing and study not in kept_by_newer]
-        if not remove:
+        writers = [item for item in self._scope_writers(path)
+                   if not (item[0] == path.artefact_id and item[1] == number)]
+        remove: List[str] = []
+        reimport: List[Tuple[int, Dict[str, Any], str]] = []
+        undecided: List[str] = []
+        for study in studies:
+            if study not in current:
+                continue                                   # gone already
+            if mine.get(study) != current[study]:
+                theirs = any(((other.get('de') or {}).get('imported') or {}).get('fingerprints', {}).get(study)
+                             == current[study] for _artefact, _version, _state, other in writers)
+                if not theirs:
+                    undecided.append(study)
+                continue
+            siblings = sorted(((version, other) for artefact_id, version, state, other in writers
+                               if artefact_id == path.artefact_id and state == 'live'
+                               and study in (((other.get('de') or {}).get('imported') or {}).get('study_ids') or [])),
+                              key=lambda pair: -pair[0])
+            if siblings:
+                version, other = siblings[0]
+                if ((other.get('de') or {}).get('imported') or {}).get('fingerprints', {}).get(study) != current[study]:
+                    reimport.append((version, other, study))
+            else:
+                remove.append(study)
+        if undecided:
+            return (f'the dataset serves rows of DE study {", ".join(undecided)} that no de_table version recorded '
+                    f'(imported by hand or by another route since, or this version predates fingerprints); nothing '
+                    f'deleted: an admin removes or keeps the study and purges again')
+        if not remove and not reimport:
             return None
         ref = f'{row["ref"]}@v{number}'
         reason = row.get('reason') or ''
-        message = f'DE study {", ".join(remove)} removed: purged artefact {ref}' + (f' ({reason})' if reason else '')
+        base = ref.split('@')[0]
+        parts = []
+        if remove:
+            parts.append(f'DE study {", ".join(remove)} removed')
+        if reimport:
+            parts.append('DE study ' + ', '.join(f'{study} restored from {base}@v{version}'
+                                                  for version, _other, study in reimport))
+        message = '; '.join(parts) + f': purged artefact {ref}' + (f' ({reason})' if reason else '')
         caveat = curation_caveat(message, 'de_study_removed', today_iso(), detected_by='ant-ingest-watch')
-
-        class _Api:
-            def __init__(self, api: Any) -> None:
-                self.api = api
-
-            def release(self, db_id: str) -> None:
-                if self.api is not None:
-                    self.api.post_with_retry(f'/admin/release/{db_id}')
-
-            def restore(self, db_id: str) -> None:
-                if self.api is not None:
-                    self.api.post_with_retry(f'/admin/restore/{db_id}')
-        db_id = manifest.get('db_id') or ''
         work = self.work_root / f'purge_{hashlib.sha1(ref.encode()).hexdigest()[:12]}'
         shutil.rmtree(work, ignore_errors=True)
         try:
+            tables = []
+            for version, other, study in reimport:
+                table = next(item for item in (other.get('de') or {}).get('tables') or [] if item['study_id'] == study)
+                files = {item['name']: item['sha256'] for item in other.get('files') or []}
+                data = self._version_file(path, version, table['file'], files[table['file']], work)
+                sidecar = self._version_file(path, version, table['sidecar'], files[table['sidecar']], work)
+                tables.append((data, parse_sidecar_text(sidecar.read_text(encoding='utf-8', errors='replace')), study))
             with writer_lock(duckdb_path, timeout=600):
-                import_de_all_or_nothing(store_root=self.store_root, md=scope_md, db_id=db_id, work=work, tables=[],
-                                         replace=[], remove=remove, runner=self.de_runner, api=_Api(self.api),
-                                         today=today_iso(), change=lambda _archived: message + '.', caveat=caveat)
+                import_de_all_or_nothing(store_root=self.store_root, md=scope_md, db_id=manifest.get('db_id') or '',
+                                         work=work / 'import', tables=tables,
+                                         replace=[study for _version, _other, study in reimport], remove=remove,
+                                         runner=self.de_runner, api=DeApi(self.api), today=today_iso(),
+                                         change=lambda _archived: message + '.', caveat=caveat,
+                                         archive=self._archive_study)
         except DeImportFailed as exc:
-            return f'the DE study could not be removed ({exc.output}); nothing deleted'
+            return f'the DE study could not be settled ({exc.output}); nothing deleted'
         finally:
             shutil.rmtree(work, ignore_errors=True)
         return None
@@ -1780,13 +1926,24 @@ class ArtefactPublisher:
         return head
 
     def _abandon_version(self, path: artefacts.ArtefactPath, number: int, marker: Dict[str, Any],
-                         record: Dict[str, Any], reason: str) -> None:
-        """A version that will not be published: delete its copies (keys of this version that this deposit
-        placed, by sha256 and deposit mark), mark the head record entry failed, drop the marker."""
+                         record: Dict[str, Any], reason: str, scope_md: Optional[Path] = None,
+                         scope_db_id: Optional[str] = None) -> str:
+        """A version that will not be published: roll back its DE import when it happened (review N3), delete
+        its copies (keys of this version that this deposit placed, by sha256 and deposit mark), mark the head
+        record entry failed, drop the marker. Returns ``reason`` with what the rollback did."""
+        if path.kind == 'de_table' and scope_md is not None and 'rolled_back' not in marker.get('steps', []):
+            token = f'artefact {marker.get("ref")}@v{number} (deposit {record["id"]})'
+            imported = 'imported' in marker.get('steps', []) or (
+                scope_md.is_file() and token in scope_md.read_text(encoding='utf-8'))
+            if imported:
+                note = self._rollback_de_import(path, number, marker, record, reason, scope_md, scope_db_id, token)
+                reason = f'{reason}; {note}'
+                marker.setdefault('steps', []).append('rolled_back')
+                self.save_marker(record['id'], marker)
         self._remove_version_copies(path, number, marker)
         head = self._read_head_quiet(path)
         if head is None:
-            return
+            return reason
         changed = False
         for entry in head['versions']:
             if entry['version'] == number and entry['state'] == 'reserved':
@@ -1798,6 +1955,89 @@ class ArtefactPublisher:
                 self._write_head(path, head)
             except (Stop, TransientError) as exc:
                 self.log(f'artefacts: the failed version v{number} of {path.rel} could not be recorded ({exc})')
+        return reason
+
+    def _rollback_de_import(self, path: artefacts.ArtefactPath, number: int, marker: Dict[str, Any],
+                            record: Dict[str, Any], reason: str, scope_md: Path, scope_db_id: Optional[str],
+                            token: str) -> str:
+        """Undo the DE import of an abandoned version, all or nothing: the studies it added are removed, the
+        ones it replaced are restored from their archives; a patch version with a changelog line and a caveat
+        says so. Returns a note for the failure text."""
+        from ingest_md_fill import curation_caveat, today_iso  # noqa: PLC0415
+        from ingest_pipeline import DeImportFailed, import_de_all_or_nothing  # noqa: PLC0415
+        plan = marker.get('de_plan') or {}
+        imported = ((marker.get('de') or {}).get('imported') or {})
+        added = list(plan.get('added') or [])
+        replaced = list(plan.get('replaced') or [])
+        if not plan:            # imported before the plan was recorded: every study of the version was added
+            added = [table['study_id'] for table in marker.get('de_tables') or []]
+        restore = []
+        missing = []
+        archive_root = scope_md.parent / '_versions' / scope_md.stem / 'de'
+        archived = {Path(item).parent.name: self.store_root / item for item in imported.get('archived') or []}
+        for study in replaced:
+            source = archived.get(study)
+            if source is None or not source.is_file():
+                candidates = sorted((archive_root / study).glob('*.de.parquet')) if (archive_root / study).is_dir() \
+                    else []
+                candidates = [item for item in candidates
+                              if item.stat().st_mtime >= float(plan.get('started') or 0) - 5]
+                source = candidates[-1] if candidates else None
+            if source is None:
+                missing.append(study)
+            else:
+                restore.append((source, study))
+        existing = self._list_studies(scope_md.with_suffix('.duckdb'))
+        remove = [study for study in added if study in existing]
+        if not remove and not restore:
+            return 'the DE import left nothing to roll back' + (
+                f' (no archive of {", ".join(missing)}: an admin restores it)' if missing else '')
+        message = (f'DE from {token} rolled back: the version was not published ({reason[:200]})'
+                   + (f'; removed {", ".join(remove)}' if remove else '')
+                   + (f'; restored {", ".join(study for _source, study in restore)}' if restore else ''))
+        caveat = curation_caveat(message, 'de_import_rolled_back', today_iso(), detected_by='ant-ingest-watch')
+        work = self.work_root / f'artefact_{record["id"]}_rollback'
+        shutil.rmtree(work, ignore_errors=True)
+        try:
+            with writer_lock(scope_md.with_suffix('.duckdb'), timeout=600):
+                import_de_all_or_nothing(store_root=self.store_root, md=scope_md, db_id=scope_db_id or '', work=work,
+                                         tables=[], replace=[], remove=remove, restore=restore,
+                                         runner=self.de_runner, api=DeApi(self.api), today=today_iso(),
+                                         change=lambda _archived: message + '.', caveat=caveat)
+        except DeImportFailed as exc:
+            self.log(f'artefacts: the DE import of {marker.get("ref")}@v{number} could not be rolled back: '
+                     f'{exc.output}')
+            return f'the DE import could NOT be rolled back ({exc.output[:200]}): an admin removes it'
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        warnings: List[str] = []
+        self._push_de_sidecar(scope_md, warnings)
+        self._full_rescan(warnings)
+        self._commit([PurePosixPath(scope_md.relative_to(self.store_root))], message + '\n', record, warnings)
+        return 'the DE import was rolled back' + (f' (no archive of {", ".join(missing)}: an admin restores it)'
+                                                  if missing else '')
+
+    def abandon_after_error(self, record: Dict[str, Any], reason: str) -> str:
+        """Review S3 residue: a deposit that ends in failed through a give-up after transient errors or an
+        unexpected exception abandons its reserved version like a Stop does (rollback, copies, failed entry)."""
+        marker = self.load_marker(record['id'])
+        if marker is None or record.get('deposit_kind') != 'artefact':
+            return reason
+        try:
+            block = json.loads(record.get('artefact') or '{}')
+            path = artefacts.ArtefactPath(record['data_project'], block.get('scope'), block.get('kind'),
+                                          block.get('artefact_id'))
+            scope_md, scope_db_id = None, None
+            if path.scope != artefacts.GROUP_SCOPE:
+                _collections, mds, folders = self._catalog()
+                scope_db_id = f'{block.get("group_id")}/{path.scope}'
+                scope_md = mds.get(scope_db_id) if folders.get(scope_db_id) == path.group else None
+            with writer_lock(self._scope_lock_path(path, scope_md), timeout=600):
+                return self._abandon_version(path, int(marker['version']), marker, record, reason,
+                                             scope_md=scope_md, scope_db_id=scope_db_id)
+        except Exception as exc:  # noqa: BLE001 - the marker stays; an admin purges the reserved version
+            self.log(f'artefacts: {record["id"]}: the version could not be abandoned ({type(exc).__name__}: {exc})')
+            return f'{reason}; the reserved version could not be abandoned ({type(exc).__name__}): an admin purges it'
 
     def _read_head_quiet(self, path: artefacts.ArtefactPath) -> Optional[Dict[str, Any]]:
         try:

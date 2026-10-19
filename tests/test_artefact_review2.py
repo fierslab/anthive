@@ -123,3 +123,153 @@ def test_a_client_cannot_relax_provenance_with_alias_of(tmp_path, clock):
         deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL, alias_of='de_only',
                 declared={'author': {'name': 'Ana'}, 'created': '2026-10-12'})
     assert caught.value.status == 422 and 'provenance' in str(caught.value.body)
+
+
+# ── N2: a purge settles a study by who wrote the rows the dataset serves now ───────────────────────────────
+
+def test_purging_the_replacing_version_restores_the_older_versions_table(tmp_path, clock):
+    service, s3, publisher, _db, _api = _setup(tmp_path, clock)
+    deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    deposit(service, s3, ANALYST, de_files(table=deseq2_table(GENES[:15], scale=9)), artefact_id='tvc',
+            new_version_of=1, change_note='wrong v2', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    assert _studies(tmp_path) == {'treated_vs_control': 15}
+    _purge(service, ANALYST, 'tvc', 2)
+    publisher.poll(listing(s3))
+    assert service.purges(ADMIN)[0]['state'] == 'done'
+    assert _studies(tmp_path) == {'treated_vs_control': len(GENES)}           # v1's rows are served again
+    md = (tmp_path / 'store' / MD).read_text()
+    assert 'restored from PU1/int/tvc@v1' in md and 'de_study_removed' in md
+
+
+def test_purging_an_artefact_leaves_a_study_another_artefact_replaced(tmp_path, clock):
+    service, s3, publisher, _db, _api = _setup(tmp_path, clock)
+    deposit(service, s3, ANALYST, de_files(), artefact_id='first', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    deposit(service, s3, ADMIN, de_files(table=deseq2_table(GENES[:12])), artefact_id='third', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    assert _studies(tmp_path) == {'treated_vs_control': 12}
+    _purge(service, ANALYST, 'first', 1)
+    publisher.poll(listing(s3))
+    assert service.purges(ADMIN)[0]['state'] == 'done'
+    assert _studies(tmp_path) == {'treated_vs_control': 12}                   # 'third' keeps its study
+
+
+def test_purging_an_older_version_keeps_the_newer_versions_rows(tmp_path, clock):
+    service, s3, publisher, _db, _api = _setup(tmp_path, clock)
+    deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    deposit(service, s3, ANALYST, de_files(table=deseq2_table(GENES[:15])), artefact_id='tvc', new_version_of=1,
+            change_note='v2', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    _purge(service, ANALYST, 'tvc', 1)
+    publisher.poll(listing(s3))
+    assert service.purges(ADMIN)[0]['state'] == 'done'
+    assert _studies(tmp_path) == {'treated_vs_control': 15}
+
+
+def test_rows_nobody_recorded_stop_the_purge_for_an_admin(tmp_path, clock):
+    service, s3, publisher, _db, _api = _setup(tmp_path, clock)
+    deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    connection = duckdb.connect(str(tmp_path / 'store' / 'Public2021' / 'int.duckdb'))
+    connection.execute("UPDATE __de SET log2fc = log2fc + 1 WHERE study_id = 'treated_vs_control'")  # a hand edit
+    connection.close()
+    _purge(service, ANALYST, 'tvc', 1)
+    publisher.poll(listing(s3))
+    purge = service.purges(ADMIN)[0]
+    assert purge['state'] == 'needs_decision' and 'no de_table version recorded' in purge['detail']
+    assert _studies(tmp_path) == {'treated_vs_control': len(GENES)}
+
+
+def test_a_de_table_of_an_inactive_dataset_is_purged_and_the_removal_deferred(tmp_path, clock):
+    service, s3, publisher, _db, _api = _setup(tmp_path, clock)
+    deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    (tmp_path / 'store' / 'Public2021' / 'int.inactive').write_text('retired for the test\n')
+    _purge(service, ANALYST, 'tvc', 1)
+    publisher.poll(listing(s3))
+    purge = service.purges(ADMIN)[0]
+    assert purge['state'] == 'done' and 'deferred' in purge['detail']
+    version = [entry for entry in _head(tmp_path, 'tvc')['versions'] if entry['version'] == 1][0]
+    assert version['state'] == 'purged' and version['de_removal_deferred'] == ['treated_vs_control']
+    assert not [key for key in s3.keys(CATALOG) if '/tvc/v1/files/' in key]
+
+
+# ── N3: a version abandoned after its DE import rolls the import back ───────────────────────────────────
+
+def test_a_stop_after_the_import_rolls_it_back_and_the_redeposit_goes_live(tmp_path, clock, monkeypatch):
+    service, s3, publisher, db, _api = _setup(tmp_path, clock)
+
+    def broken(*args, **kwargs):
+        raise Stop('failed', 'simulated failure after the import')
+    monkeypatch.setattr(publisher, '_manifest', broken)
+    answer = deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    row = watch_row(db, answer['deposit_id'])
+    assert row['state'] == 'failed' and 'rolled back' in row['error']
+    assert _studies(tmp_path) == {}
+    md = (tmp_path / 'store' / MD).read_text()
+    assert 'rolled back' in md and 'de_import_rolled_back' in md
+    assert [entry['state'] for entry in _head(tmp_path, 'tvc')['versions']] == ['failed']
+    monkeypatch.undo()
+    retry = deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    assert watch_row(db, retry['deposit_id'])['state'] == 'live'
+    assert _studies(tmp_path) == {'treated_vs_control': len(GENES)}
+
+
+def test_a_rollback_restores_the_study_an_admin_replaced(tmp_path, clock, monkeypatch):
+    service, s3, publisher, db, _api = _setup(tmp_path, clock)
+    deposit(service, s3, ANALYST, de_files(), artefact_id='first', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+
+    def broken(*args, **kwargs):
+        raise Stop('failed', 'simulated failure after the import')
+    monkeypatch.setattr(publisher, '_manifest', broken)
+    answer = deposit(service, s3, ADMIN, de_files(table=deseq2_table(GENES[:12])), artefact_id='second',
+                     **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    assert watch_row(db, answer['deposit_id'])['state'] == 'failed'
+    assert _studies(tmp_path) == {'treated_vs_control': len(GENES)}            # 'first' serves its rows again
+
+
+# ── S3 residue: give-up after transient errors and unexpected exceptions abandon the version ───────────────
+
+def _figure_head(tmp_path):
+    return artefacts.parse_head_record((tmp_path / 'store' / 'Public2021' / 'static' / 'artefacts' / 'int' /
+                                        'figure' / 'volcano' / 'artefact.md').read_text())
+
+
+def test_a_give_up_after_transient_errors_abandons_the_reserved_version(tmp_path, clock, monkeypatch):
+    service, s3 = make_service(tmp_path, clock)
+    publisher, db, _commits, _api = make_publisher(tmp_path, s3, clock)
+    internal = {'scope': 'int', 'made_from': [{'db_id': 'PU1/int', 'dataset_version': '1.0.0'}]}
+
+    def flaky(*args, **kwargs):
+        raise TransientError('simulated S3 outage after the copies')
+    monkeypatch.setattr(publisher, '_local_copies', flaky)
+    first = deposit(service, s3, ANALYST, {'volcano.png': PNG}, **internal)
+    for _ in range(14):
+        clock[0] += 4000
+        publisher.poll(listing(s3))
+    assert watch_row(db, first['deposit_id'])['state'] == 'failed'
+    assert [entry['state'] for entry in _figure_head(tmp_path)['versions']] == ['failed']
+    assert not [key for key in s3.keys(CATALOG) if '/files/' in key]
+    assert publisher.load_marker(first['deposit_id']) is None
+
+
+def test_an_unexpected_exception_abandons_the_reserved_version(tmp_path, clock, monkeypatch):
+    service, s3 = make_service(tmp_path, clock)
+    publisher, db, _commits, _api = make_publisher(tmp_path, s3, clock)
+    internal = {'scope': 'int', 'made_from': [{'db_id': 'PU1/int', 'dataset_version': '1.0.0'}]}
+
+    def bug(*args, **kwargs):
+        raise KeyError('a bug after the copies')
+    monkeypatch.setattr(publisher, '_local_copies', bug)
+    first = deposit(service, s3, ANALYST, {'volcano.png': PNG}, **internal)
+    poll_until_final(publisher, s3, clock)
+    assert watch_row(db, first['deposit_id'])['state'] == 'failed'
+    assert [entry['state'] for entry in _figure_head(tmp_path)['versions']] == ['failed']
+    assert publisher.load_marker(first['deposit_id']) is None
