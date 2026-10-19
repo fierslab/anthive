@@ -4,4 +4,5 @@ python_files = ["test_*.py"]
 markers = [
     "security: marks tests for security-critical code (analytics sandboxing)",
     "slow: runs a real tool through uv (first run builds its environment)",
+    "live: talks to a deployed site (tests/live, make test-live-site)",
 ]

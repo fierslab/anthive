@@ -1992,11 +1992,11 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.46.2"
+API_VERSION = "2.46.3"
 # Release date (YYYY-MM-DD) of API_VERSION; None while it is unreleased. Set it
 # in the release commit together with the changelog heading
 # (tests/test_version_sync.py keeps the two in step).
-API_VERSION_RELEASED: Optional[str] = "2026-10-19"
+API_VERSION_RELEASED: Optional[str] = None
 # Oldest pyvark (codeberg.org/mfiers/pyvark, `from vark import AnthiveClient`)
 # that works with this API.
 API_COMPATIBLE_PYVARK = ">=0.9.0"
@@ -10169,11 +10169,12 @@ def _auth_cell(base_url: str) -> str:
         "#   pyvark: https://codeberg.org/mfiers/pyvark\n"
         "#   vark:   https://codeberg.org/mfiers/vark\n"
         "\n"
-        "# JupyterLite/Pyodide auto-installs plotting deps + pyvark from PyPI on first use:\n"
+        "# In JupyterLite (Pyodide) the client `vark` ships with the site; install its\n"
+        "# HTTP layer and the plotting deps from the Pyodide distribution:\n"
         "import sys\n"
         "if \"pyodide\" in sys.modules:\n"
         "    import micropip\n"
-        "    await micropip.install([\"pyvark\", \"seaborn\"])\n"
+        "    await micropip.install([\"requests\", \"seaborn\"])\n"
         "from vark import AnthiveClient\n"
         "\n"
         f"BASE_URL = {base_url!r}\n"

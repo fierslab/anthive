@@ -29,6 +29,35 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.46.3 (unreleased)
+
+Patch release. No endpoint, parameter or response field changes. Clients do not need to update.
+
+JupyterLite (`/jupyter/`):
+
+- The bundled Python client is pyvark 0.11.0 (API 2.46: deposit read methods, retry on 503 `warming_up`). It was
+  0.9.0 in the 2.46.x images. The copy is now made with `make vendor-pyvark`, which records version, commit and
+  file hashes in `frontend/jupyter/vendored_pyvark.json`; `make test` fails when the files and the record differ.
+- `Getting_Started.ipynb` failed at its first cell with `ModuleNotFoundError: No module named 'requests'`: vark
+  needs `requests`, and Pyodide does not preinstall it. The notebook now installs it, uses JupyterLite's `python`
+  kernel name and has cell ids (valid nbformat 4.5).
+- The notebooks behind the "notebook" buttons (`/notebook/{b64}/{filename}.ipynb`, `/plot/{geom}/notebook`)
+  install `requests` and `seaborn` in Pyodide instead of `pyvark` and `seaborn` from PyPI. PyPI has pyvark 0.7.0,
+  far behind this API; the bundled client was imported anyway (it comes first on `sys.path`), so the PyPI
+  download only cost time and made the first cell depend on PyPI being reachable.
+
+Tests:
+
+- `make test` checks the vendored client against its record and the server's `API_COMPATIBLE_PYVARK`, validates
+  the shipped notebooks with nbformat, and compares the JupyterLite build pins of the Makefile and
+  `docker/Dockerfile` (`tests/test_jupyterlite_static.py`).
+- `make test-jupyter` builds JupyterLite and runs it in headless Chromium against a running ant-serve
+  (`tests/test_jupyterlite_e2e.py`): kernel start, vendored vark, same-origin client calls, the shipped
+  notebooks, the dataset and plot notebooks opened through `?fromURL=`, and the `warming_up` retry inside
+  Pyodide.
+- `make test-live-site URL=...` runs the same checks against a deployed site through its real login, and compares
+  the served JupyterLite files with the checkout (`tests/live/test_site_jupyterlite.py`).
+
 ## 2.46.2 (2026-10-19)
 
 Security patch. No endpoint, parameter or response field changes. Clients do not need to update.

@@ -4,9 +4,12 @@ Targets the anthive REST API contract. See
 `https://codeberg.org/mfiers/pyvark` for sources and
 `https://codeberg.org/mfiers/vark` for the Go CLI that ships the same surface.
 
-API surface verified against **REST API 2.44.0** (facet tests with
-facet scopes, replication with an effect gate, donor groups,
-exclude_secondary, replicate fields). Older servers still work for every
+API surface verified against **REST API 2.46.0** (read-only dataset
+deposit status for depositors and admins, facet tests with
+facet scopes, replication with an effect gate and forest rows, module
+replication, per-donor values and plots, donor variability, gene set
+ranks, gene detection, donor groups, exclude_secondary, replicate
+fields). Older servers still work for every
 endpoint they expose; new params degrade to "server ignores it" rather
 than client-side errors.
 
@@ -21,9 +24,12 @@ Requirements:
 from __future__ import annotations
 
 import json as _json
+import logging
 import os
 import re
 import sys
+import time
+import warnings
 from pathlib import Path
 from typing import (Any, BinaryIO, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Tuple, Union)
@@ -35,10 +41,13 @@ from ._credentials import (
     find_vark_credentials_for,
     find_vark_server_by_name,
 )
-from .exceptions import raise_for_upload_status
+from .exceptions import (AnthiveWarmingUpError, ServerWarmingUpWarning,
+                         raise_for_deposit_status, raise_for_upload_status)
+
+_LOG = logging.getLogger('vark')
 
 
-__version__ = "0.9.0"
+__version__ = "0.11.0"
 __all__ = ["AnthiveClient", "VarkConfigError"]
 
 
@@ -229,6 +238,41 @@ class AnthiveClient:
             When discovery finds a server with ``insecure: true``, the
             client's ``verify`` is demoted to ``False`` (unless the
             caller passed an explicit ``verify=`` already).
+        warmup_max_wait: Seconds to keep retrying while the server answers
+            503 ``{"status": "warming_up", "retry_after": N}`` (REST API
+            2.46.1+, facet routes right after a restart). The client
+            sleeps ``retry_after`` (else the ``Retry-After`` header)
+            between tries, logs a warning on the ``vark`` logger and
+            emits a :class:`ServerWarmingUpWarning` once per wait, and
+            raises :class:`AnthiveWarmingUpError` when the server is
+            still warming up after this many seconds. Default 180; ``0``
+            raises at once. Other 503 answers are not retried. Also an
+            attribute you can change later.
+
+    Access (REST API 2.45.0+): datasets that are not ``access: public``
+    are hidden from callers without an identity. They are missing from
+    every listing, and every route that names one answers
+    ``404 {"detail": "Database '<id>' not found"}``, the same answer as
+    for a dataset the site does not have. Sign in (``auth=`` or the
+    credential sources above) to see them. The server ignores
+    ``X-Remote-User`` / ``X-Remote-Groups`` request headers; only the
+    proxy's ``Remote-User`` counts, so setting identity headers in
+    :attr:`headers` does not sign you in. A call on loopback without a
+    proxy (a local maintenance tool) counts as identified.
+
+    Dataset deposits (REST API 2.46.0+): upload with the Go CLI,
+    ``vark datasets upload``; pyvark only reads deposit state
+    (:meth:`list_deposits`, :meth:`get_deposit`,
+    :meth:`get_deposit_report`, :meth:`get_deposit_vocab`,
+    :meth:`get_deposit_group`), for members of the site's
+    ``datasets_upload_groups``.
+
+    Admin-only methods (403 for other signed-in users, 2.45.0+):
+    :meth:`rescan_databases`, :meth:`rescan_genesets`,
+    :meth:`rescan_module_variability`, :meth:`rescan_catalogs`,
+    :meth:`get_plot_cache_stats`, :meth:`clear_plot_cache`,
+    :meth:`admin_release` and :meth:`admin_restore`. They need an admin
+    account, a host-local call or the internal secret.
 
     Example::
 
@@ -248,7 +292,7 @@ class AnthiveClient:
     """
 
     #: Anthive REST API version this client release was last verified against.
-    API_TARGET = "2.44.0"
+    API_TARGET = "2.46.0"
 
     #: Server-side plot geoms the client knows about. Validation prevents a
     #: round-trip on typos. Update with every new server geom.
@@ -276,7 +320,9 @@ class AnthiveClient:
         auth: Optional[Any] = None,
         verify: Union[bool, str] = True,
         vark_config: Union[str, Path, bool, None] = None,
+        warmup_max_wait: float = 180.0,
     ):
+        self.warmup_max_wait = float(warmup_max_wait)
         if base_url is None:
             base_url = os.environ.get('ANTHIVE_API_URL')
             if base_url is None:
@@ -336,10 +382,71 @@ class AnthiveClient:
 
     # ── HTTP primitives ──────────────────────────────────────────────────
 
+    @staticmethod
+    def _warming_up(response: 'requests.Response'
+                    ) -> Optional[Tuple[float, Dict[str, Any]]]:
+        """``(retry_after, body)`` when ``response`` is a 503
+        ``warming_up`` answer (REST API 2.46.1+), else ``None``."""
+        if response.status_code != 503:
+            return None
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        if not isinstance(body, dict) or body.get('status') != 'warming_up':
+            return None
+        retry_after: Any = body.get('retry_after')
+        if retry_after is None:
+            retry_after = response.headers.get('Retry-After')
+        try:
+            seconds = float(retry_after)
+        except (TypeError, ValueError):
+            seconds = 5.0
+        return max(seconds, 1.0), body
+
+    def _send(self, method: str, url: str, **kwargs: Any
+              ) -> 'requests.Response':
+        """Send one request; while the server answers 503 ``warming_up``,
+        sleep and retry for up to :attr:`warmup_max_wait` seconds, then
+        raise :class:`AnthiveWarmingUpError`. Every other answer is
+        returned unchecked."""
+        sender = {'GET': requests.get, 'POST': requests.post}.get(method)
+        waited = 0.0
+        warned = False
+        while True:
+            if sender is not None:
+                response = sender(url, **kwargs)
+            else:
+                response = requests.request(method, url, **kwargs)
+            warming = self._warming_up(response)
+            if warming is None:
+                return response
+            retry_after, body = warming
+            remaining = self.warmup_max_wait - waited
+            if remaining <= 0:
+                raise AnthiveWarmingUpError(
+                    f"{url}: the server is still warming up after "
+                    f"{waited:.0f} s (warmup_max_wait="
+                    f"{self.warmup_max_wait:g}); retry later or raise "
+                    f"warmup_max_wait", retry_after=retry_after,
+                    waited=waited, body=body, response=response)
+            pause = min(retry_after, remaining)
+            _LOG.warning('anthive server is warming up (%s); retrying in '
+                         '%.0f s (waited %.0f of %g s)', url, pause, waited,
+                         self.warmup_max_wait)
+            if not warned:
+                warnings.warn(
+                    f"anthive server is warming up; waiting up to "
+                    f"{self.warmup_max_wait:g} s", ServerWarmingUpWarning,
+                    stacklevel=3)
+                warned = True
+            time.sleep(pause)
+            waited += pause
+
     def _get(self, path: str, params: Optional[Dict] = None) -> Any:
         url = f"{self.base_url}{path}"
-        response = requests.get(
-            url, params=params, headers=self.headers,
+        response = self._send(
+            'GET', url, params=params, headers=self.headers,
             timeout=self.timeout, auth=self.auth, verify=self.verify,
         )
         response.raise_for_status()
@@ -350,8 +457,8 @@ class AnthiveClient:
         """GET returning the raw response (for non-JSON bytes — plots,
         changelog)."""
         url = f"{self.base_url}{path}"
-        response = requests.get(
-            url, params=params, headers=self.headers,
+        response = self._send(
+            'GET', url, params=params, headers=self.headers,
             timeout=self.timeout, auth=self.auth, verify=self.verify,
         )
         response.raise_for_status()
@@ -359,8 +466,8 @@ class AnthiveClient:
 
     def _post(self, path: str, json: Optional[Dict] = None) -> Any:
         url = f"{self.base_url}{path}"
-        response = requests.post(
-            url, json=json, headers=self.headers,
+        response = self._send(
+            'POST', url, json=json, headers=self.headers,
             timeout=self.timeout, auth=self.auth, verify=self.verify,
         )
         response.raise_for_status()
@@ -370,13 +477,15 @@ class AnthiveClient:
                  timeout: Optional[float] = None,
                  **kwargs: Any) -> 'requests.Response':
         """Send one request and return the raw response WITHOUT checking
-        its status (callers decide how to map errors)."""
+        its status (callers decide how to map errors). Only GET waits
+        for a warming-up server; a POST with a file body is sent once."""
         url = f"{self.base_url}{path}"
-        return requests.request(
-            method, url, headers=self.headers,
-            timeout=self.timeout if timeout is None else timeout,
-            auth=self.auth, verify=self.verify, **kwargs,
-        )
+        common = dict(headers=self.headers,
+                      timeout=self.timeout if timeout is None else timeout,
+                      auth=self.auth, verify=self.verify, **kwargs)
+        if method.upper() == 'GET':
+            return self._send('GET', url, **common)
+        return requests.request(method, url, **common)
 
     # ── Info endpoints ───────────────────────────────────────────────────
 
@@ -390,6 +499,12 @@ class AnthiveClient:
         Includes ``mean_response_ms`` / ``p50_response_ms`` / ``n_samples``
         (server-side wall-clock over the last 1024 non-probe requests).
         Use :meth:`pick_fastest` to choose between replicas.
+
+        A running server with an empty catalogue answers 200 with
+        ``databases: 0`` and ``note: "empty catalog"`` (REST API 2.46.0+;
+        2.45.1 and older answered 503 "No databases available"). A 503
+        (``HTTPError``) now means a real failure: the catalogue is not
+        loaded yet or the registry is unreadable.
         """
         return self._get('/health')
 
@@ -404,6 +519,12 @@ class AnthiveClient:
         Returns a dict with ``version``, ``released``, ``plot_geoms``,
         ``plot_output_formats``, ``deprecated_endpoints``, etc. Falls back to
         a synthesised shape on pre-2.3 servers.
+
+        REST API 2.45.0+ adds ``compatible_pyvark`` (for example
+        ``'>=0.9.0'``), the oldest pyvark release that works with the
+        server; ``compatible_antclient`` carries the same pin, is
+        deprecated and goes away in 2.46. ``released`` is ``None`` until
+        a release is cut.
         """
         try:
             return self._get('/version')
@@ -413,6 +534,7 @@ class AnthiveClient:
                 'version': health.get('api_version'),
                 'released': None,
                 'compatible_antclient': None,
+                'compatible_pyvark': None,
                 'openapi_url': '/openapi.json',
                 'swagger_ui_url': '/docs',
                 'redoc_url': '/redoc',
@@ -834,8 +956,8 @@ class AnthiveClient:
                 return _to_dataframe(result, fill_na_genes=fill_na)
             return result
         url = f"{self.base_url}/databases/{db_id}/cells"
-        response = requests.get(
-            url, params=params, headers=self.headers,
+        response = self._send(
+            'GET', url, params=params, headers=self.headers,
             timeout=self.timeout, auth=self.auth, verify=self.verify,
         )
         response.raise_for_status()
@@ -1066,6 +1188,45 @@ class AnthiveClient:
         ``(term, n_contrasts)`` list."""
         return self._get(f'/databases/{db_id}/de/{study_id}')
 
+    def get_de_study_summary(self, db_id: str, study_id: str,
+                             padj_max: Optional[float] = None,
+                             format: str = 'json') -> Union[Dict, Any]:
+        """``GET /databases/{db_id}/de/{study_id}/summary``. Significant
+        gene counts of every contrast of one DE study in one query
+        (REST API 2.45.0+).
+
+        Returns the study metadata of :meth:`get_de_study` plus
+        ``subset_filter``, ``cluster_obs_column`` (``None`` on schema v1
+        duckdbs), ``padj_max`` and ``contrasts``: a list of ``{term,
+        contrast, n_genes, n_sig, n_up, n_down, efftype}``. ``n_sig``
+        counts genes at ``padj < padj_max``, split into ``n_up`` /
+        ``n_down`` by the sign of ``effsize``. These are the counts the
+        study authors' own test produced; padj is adjusted within each
+        contrast, so counts of different contrasts are separate
+        families.
+
+        Args:
+            db_id: Dataset id.
+            study_id: DE study id (see :meth:`list_de_studies`).
+            padj_max: Significance threshold (server default 0.05). Sent
+                only when given.
+            format: ``'json'`` (the dict) or ``'dataframe'`` (the
+                ``contrasts`` rows, needs pandas).
+
+        Raises:
+            requests.HTTPError: 404 for an unknown dataset (was 500
+                before 2.45.0) or study.
+        """
+        params: Dict[str, Any] = {}
+        if padj_max is not None:
+            params['padj_max'] = padj_max
+        result = self._get(f'/databases/{db_id}/de/{study_id}/summary',
+                           params=params or None)
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(result.get('contrasts', []))
+        return result
+
     def list_de_contrasts(self, db_id: str, study_id: str,
                           term: str) -> List[Dict]:
         """``GET /databases/{db_id}/de/{study_id}/terms/{term}``."""
@@ -1122,7 +1283,35 @@ class AnthiveClient:
 
     def analytics_schema(self, db_id: str) -> Dict:
         """``GET /databases/{db_id}/analytics/schema``. Tables + columns +
-        3-row samples visible to the analytics sandbox."""
+        3-row samples visible to the analytics sandbox.
+
+        Returns ``{db_id, tables, score_sidecar}``. ``score_sidecar``
+        (REST API 2.45.0+) describes the view of the same name that
+        exposes the dataset's sidecar module scores to SQL:
+        ``{available, view, columns, n_scores, n_scores_by_source,
+        note, example_sql}``, or ``{available: False, reason}``. The
+        view has one row per cell and score: ``cell_id, cell_name,
+        source`` (``geneset`` | ``ucell``), ``catalog``, ``module``,
+        ``column_name, score``. It is described without being scanned.
+
+        Querying it with :meth:`analytics_query`: always filter on
+        ``source``, ``catalog`` and ``module`` (only matching row groups
+        are read) and join other tables on ``cell_name``. For several
+        scores side by side, aggregate per cell, for example::
+
+            SELECT cell_name,
+                   MAX(score) FILTER (WHERE module = 'bellenguez') AS a,
+                   MAX(score) FILTER (WHERE module = 'royalblue') AS b
+            FROM score_sidecar
+            WHERE source = 'geneset'
+              AND module IN ('bellenguez', 'royalblue')
+            GROUP BY cell_name
+
+        A wide view with one column per score is not offered (it would
+        aggregate the whole sidecar on every query). The ``query_sql``
+        of each :meth:`list_module_scores` row is a ready query for one
+        score.
+        """
         return self._get(f'/databases/{db_id}/analytics/schema')
 
     def analytics_query(self,
@@ -1256,21 +1445,43 @@ class AnthiveClient:
     @_cache_short(ttl=60)
     def list_module_scores(_self, db_id: str) -> Dict:
         """``GET /databases/{db_id}/module_scores``. Pre-computed
-        module-score columns already on the dataset (``obsnum``).
+        gene set (module) scores of a dataset, wherever they are stored.
+
+        Scores live either as ``obsnum`` columns of the duckdb or, on
+        most current datasets, only in the dataset's scores sidecar
+        (``<dataset>.scores.parquet``). REST API 2.45.0+ lists both in
+        the same row shape (older servers listed the ``obsnum`` columns
+        only, so they answered ``count: 0`` for sidecar-only datasets).
+        A duckdb column wins over a sidecar row of the same set.
+        S3-backed datasets list duckdb columns only.
 
         Returns the full discovery dict::
 
             {
                 "db_id": "...",
                 "count": <N>,
+                "count_by_storage": {"duckdb": <n>, "scores_sidecar": <n>},
                 "column_naming": {"separator": "::", "template": "..."},
+                "query_tables": {"duckdb": "obsnum",
+                                 "scores_sidecar": "score_sidecar"},
+                "sidecar_error": "...",   # only when unreadable
                 "scored_genesets": [
-                    {"study": ..., "experiment": ..., "name": ...,
-                     "column": ..., "n_genes": ...}, ...
+                    {"geneset_id": ..., "column_name": ...,
+                     "storage": "duckdb" | "scores_sidecar",
+                     "query_table": "obsnum" | "score_sidecar",
+                     "query_sql": "SELECT cell_name, score AS ... ",
+                     "n_genes": ..., "stats": {n, min, max, mean, std,
+                                               median},
+                     "ucell_column_name": ..., "ucell_stats": ...}, ...
                 ]
             }
 
-        Use ``response["scored_genesets"]`` for the list itself.
+        ``query_sql`` is a ready SELECT returning ``cell_name`` and the
+        score, for :meth:`analytics_query`; ``column_name`` is the name
+        the plot routes take. ``ucell_column_name`` / ``ucell_stats``
+        appear when the sidecar also holds the set's UCell score.
+        ``stats`` are over cells (descriptive, not donor-level). Use
+        ``response["scored_genesets"]`` for the list itself.
         """
         return _self._get(f'/databases/{db_id}/module_scores')
 
@@ -1310,7 +1521,12 @@ class AnthiveClient:
         return _self._get(f'/genesets/{study}/{experiment}/{name}')
 
     def rescan_genesets(self) -> Dict:
-        """``POST /genesets/rescan``. Re-scan geneset store + rebuild."""
+        """``POST /genesets/rescan``. Re-scan geneset store + rebuild.
+
+        Admin only (REST API 2.45.0+): needs an admin account, a
+        host-local call or the internal secret; other signed-in users
+        get HTTP 403.
+        """
         return self._post('/genesets/rescan')
 
     @_cache_long(ttl=3600)
@@ -1322,6 +1538,72 @@ class AnthiveClient:
         """``GET /genesets/by-gene/{gene}``. Every geneset containing
         ``gene``."""
         return self._get(f'/genesets/by-gene/{gene}')
+
+    def get_geneset_rank(self, study: str, experiment: str, name: str,
+                         db_id: Optional[str] = None) -> Dict:
+        """``GET /genesets/{study}/{experiment}/{name}/rank``. Where the
+        mean score of one gene set ranks among all gene sets scored in
+        the same dataset (REST API 2.45.0+).
+
+        A mean module score is not comparable between datasets; a rank
+        within one dataset is. Never compare ranks or means between
+        datasets.
+
+        Returns ``{geneset_id, primary_source: 'geneset',
+        secondary_source: 'ucell', min_cells, min_peers, datasets,
+        not_available, help_topics}``. Each ``datasets`` entry is
+        ``{db_id, geneset: R, ucell: R}`` with ``R = {available, reason,
+        rank, n_modules_compared, n_cells, mean, std, cell_types}``;
+        ``cell_types`` holds the same fields per cell type group.
+        ``rank`` runs from 0 (lowest mean) to 1 (highest): the fraction
+        of the other modules of the same source with a lower mean (ties
+        count half), taken per cell type group and averaged weighted by
+        cells for the dataset value. At least ``min_peers`` (10) peers
+        and ``min_cells`` (20) cells per module and stratum are needed,
+        else ``rank`` is ``None`` with a ``reason``. ``std`` is the
+        standard deviation of the score over cells (spread between
+        cells, not donors). ``geneset`` (scanpy ``score_genes``) is the
+        primary ranking; ``ucell`` depends on gene set size and is
+        secondary. ``not_available`` lists ``{db_id, reason}``.
+
+        The first request for a dataset reads its whole scores sidecar
+        on the server (seconds to about a minute); later requests are
+        cached.
+
+        Args:
+            study, experiment, name: Gene set id parts.
+            db_id: One dataset from the gene set's ``scored_in``.
+                Default: every dataset that scored it.
+        """
+        params = {'db_id': db_id} if db_id is not None else None
+        return self._get(f'/genesets/{study}/{experiment}/{name}/rank',
+                         params=params)
+
+    def get_module_ranks(self, db_id: str,
+                         format: str = 'json') -> Union[Dict, Any]:
+        """``GET /databases/{db_id}/module-ranks``. The rank of every
+        gene set scored in one dataset (REST API 2.45.0+; the dataset
+        view of :meth:`get_geneset_rank`).
+
+        Returns ``{db_id, available, reason, min_cells, min_peers,
+        modules, help_topics}``; one ``modules`` row per gene set
+        (``geneset`` source): ``{geneset_id, study, experiment, name,
+        display_name, column_name, available, reason, rank,
+        n_modules_compared, n_cells, mean, std}``. ``available`` is
+        ``False`` with a ``reason`` for a dataset without per-cell
+        scores. Same rules as :meth:`get_geneset_rank`: within one
+        dataset only, ``std`` is over cells, not donors.
+
+        Args:
+            db_id: Dataset id.
+            format: ``'json'`` (the dict) or ``'dataframe'`` (the
+                ``modules`` rows, needs pandas).
+        """
+        result = self._get(f'/databases/{db_id}/module-ranks')
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(result.get('modules', []))
+        return result
 
     def get_module_variability(self,
                                db_id: Optional[str] = None,
@@ -1407,7 +1689,12 @@ class AnthiveClient:
         return result
 
     def rescan_module_variability(self) -> Dict:
-        """``POST /module-variability/rescan``. Reload the parquet."""
+        """``POST /module-variability/rescan``. Reload the parquet.
+
+        Admin only (REST API 2.45.0+): needs an admin account, a
+        host-local call or the internal secret; other signed-in users
+        get HTTP 403.
+        """
         return self._post('/module-variability/rescan')
 
     # ── Catalogs (REST API 2.30+) ───────────────────────────────────────
@@ -1529,6 +1816,10 @@ class AnthiveClient:
 
         Returns ``{"count": N, "catalogs": [...]}`` — the same shape
         as :meth:`list_catalogs` for the freshly reloaded registry.
+
+        Admin only (REST API 2.45.0+): needs an admin account, a
+        host-local call or the internal secret; other signed-in users
+        get HTTP 403.
         """
         return self._post('/catalogs/rescan')
 
@@ -1790,9 +2081,13 @@ class AnthiveClient:
     #: pathology term in the model) are variants of ``apoe4_carrier``,
     #: ``braak`` and ``age``. ``app_nlgf`` (App-NL-G-F knock-in versus
     #: control) exists in the xenograft scope only.
-    TESTED_FACETS = ('sex', 'disease', 'apoe4_carrier', 'apoe4_dose',
-                     'braak', 'braak_threshold', 'age', 'age_adjusted',
-                     'app_nlgf')
+    #: ``graft_sex`` (REST API 2.45.0+) is the sex of the donor line of
+    #: the grafted human cells in xenografts (column ``ant_sex``) and
+    #: ``host_sex`` the sex of the mouse host (``ant_host_sex``); ``sex``
+    #: is human post-mortem only.
+    TESTED_FACETS = ('sex', 'graft_sex', 'host_sex', 'disease',
+                     'apoe4_carrier', 'apoe4_dose', 'braak',
+                     'braak_threshold', 'age', 'age_adjusted', 'app_nlgf')
 
     #: Facet scopes. Facets are tested, counted and replicated inside one
     #: scope; human and mouse (xenograft host) results never mix. In
@@ -1807,10 +2102,31 @@ class AnthiveClient:
     #: ``xenograft_human_in_mouse``).
     DEFAULT_FACET_SCOPE = 'human_postmortem'
 
-    #: Deprecated aliases the server still accepts for one release and
-    #: answers with the new name.
-    DEPRECATED_FACET_ALIASES = {'apoe_carrier': 'apoe4_carrier',
-                                'ant_apoe_carrier': 'ant_apoe4_carrier'}
+    #: Deprecated aliases the server still accepts and answers with the
+    #: new name. Empty since REST API 2.45.0 (see
+    #: :attr:`REMOVED_FACET_ALIASES`).
+    DEPRECATED_FACET_ALIASES: Dict[str, str] = {}
+
+    #: Aliases the server no longer accepts (REST API 2.45.0 removed
+    #: ``apoe_carrier``): an old name is an unknown facet (404 or 400).
+    #: Map old code with this table.
+    REMOVED_FACET_ALIASES = {'apoe_carrier': 'apoe4_carrier',
+                             'ant_apoe_carrier': 'ant_apoe4_carrier'}
+
+    #: Values of the ``forest`` argument (REST API 2.45.0+): ``full``
+    #: (every unit, folded units in ``more_units``), ``anchors`` (one
+    #: row per cohort, folded units left out but counted in
+    #: ``n_more_units``) or ``none``.
+    FOREST_DETAIL = ('full', 'anchors', 'none')
+
+    #: Image formats of :meth:`get_facet_donor_plot`.
+    DONOR_PLOT_FORMATS = ('png', 'svg', 'pdf')
+
+    #: Donor variability design rungs (REST API 2.45.0+): ``raw`` (all
+    #: replicate differences), ``D0`` technical block, ``D1`` + sex,
+    #: age, PMI, batch, ``D2`` + disease (host genotype for xenografts),
+    #: ``D3`` + APOE e4, ``D4`` + Braak, ``F`` + 3 to 5 latent factors.
+    DONOR_VARIABILITY_RUNGS = ('raw', 'D0', 'D1', 'D2', 'D3', 'D4', 'F')
 
     #: Facets that are deprecated registry entries (not accepted as a new
     #: name for anything), mapped to the facets that take over. An empty
@@ -1864,6 +2180,36 @@ class AnthiveClient:
         "are too small; treat it as unmodelled structure, not signal. "
         "Absence of a hit is not evidence of no effect."
     )
+
+    def _check_forest(self, forest: str) -> str:
+        """Validate a ``forest`` argument against :attr:`FOREST_DETAIL`."""
+        if forest not in self.FOREST_DETAIL:
+            raise ValueError(
+                f"forest must be one of {self.FOREST_DETAIL}, got {forest!r}")
+        return forest
+
+    def _paged_get(self, path: str, params: Dict[str, Any],
+                   fetch_all: bool) -> Dict:
+        """GET a ranked list that pages with ``n`` / ``offset`` /
+        ``has_more`` (REST API 2.45.0+). With ``fetch_all`` the pages are
+        joined into one response: ``rows`` holds every row from the
+        first ``offset``, ``n_returned`` counts them and ``has_more`` is
+        ``False``. The other fields are those of the first page."""
+        result = self._get(path, params=params)
+        if not fetch_all or not isinstance(result, dict):
+            return result
+        rows = list(result.get('rows', []))
+        offset = int(params.get('offset', 0))
+        page = result
+        while page.get('has_more') and page.get('rows'):
+            offset += len(page['rows'])
+            page = self._get(path, params={**params, 'offset': offset})
+            rows.extend(page.get('rows', []))
+        merged = dict(result)
+        merged['rows'] = rows
+        merged['n_returned'] = len(rows)
+        merged['has_more'] = False
+        return merged
 
     def _facet_rows(self, path: str, params: Dict[str, Any],
                     format: str) -> Union[Dict, str, Any]:
@@ -1928,7 +2274,15 @@ class AnthiveClient:
         ``composition_flag``, ``composition_p``, ``batch_used``,
         ``batch_confounded``), ``genes`` (``n_tested``, ``n_q05``),
         ``modules`` (per method and source: ``n_modules``,
-        ``n_q05_param``, ``n_q05_perm``) and ``model``. Newer servers
+        ``n_q05_param``, ``n_q05_perm``) and ``model``. REST API 2.45.0+
+        adds ``n_up`` and ``n_down`` to ``genes`` (genes at q < 0.05
+        with a positive or negative logFC, that is up or down in the
+        test level or with the trend) and ``n_q05``, ``n_up``,
+        ``n_down`` to every ``modules`` entry (gene sets significant by
+        the rule module replication uses: ``q_param`` when the residual
+        df is at least 30, else ``q_perm``, below 0.05, split by the
+        sign of ``std_effect``). All are ``None`` when only the run
+        manifest has the counts. Newer servers
         add ``analysis_level`` (``'replicate'`` or ``'cell'``),
         ``analysis_level_label`` (``"cell-level, descriptive only"`` for
         cell level), ``analysis_level_reason`` and ``tau_log2``.
@@ -2183,6 +2537,7 @@ class AnthiveClient:
                                exclude_secondary: bool = True,
                                format: str = 'json',
                                scope: Optional[str] = None,
+                               forest: Optional[str] = None,
                                ) -> Union[Dict, Any]:
         """``GET /facets/{facet}/effects?gene=``. Result card of one
         gene for one facet: every tested (dataset, cell type) unit.
@@ -2286,6 +2641,30 @@ class AnthiveClient:
           * ``cohorts_up`` / ``cohorts_down`` and ``cohorts_sig_same_sign``
             are the old counts, kept for compatibility.
 
+          REST API 2.45.0 adds, per entry: ``call`` (``replicated`` |
+          ``not_replicated`` | ``not_tested``) with ``nt_label``
+          (``'1 cohort'`` or ``'not tested'``), ``gate`` (at least
+          10 percent in 2 cohorts), ``strict`` (also the strict
+          minimum-effect test), ``k_over_m`` (``'1/4'``),
+          ``cohorts_label`` (``'3/4 cohorts, 1 small'``),
+          ``small_cohorts``, ``detection`` (``{pct_median, n_datasets,
+          low_detection}`` or ``None``) and ``low_detection`` (median
+          share of cells expressing the gene below 5 percent: a hit is
+          then carried by few cells), ``gene_flags`` with the context
+          flag ``foreign_lineage_marker``, ``links`` (relative URLs of
+          the per-donor plot and values, see
+          :meth:`get_facet_donor_values`) and ``forest``: one row per
+          cohort, ``{cohort, cohort_label, cohort_display, counted,
+          in_m, small, anchor, more_units, n_more_units}``, where
+          ``anchor`` carries ``logFC``, ``ci_low`` / ``ci_high`` (limma
+          95 percent interval), ``p_value``, ``q_value``, ``lambda_gc``,
+          ``inflated``, ``small_sample``, ``modality`` (nuclei or cells)
+          and ``not_counted_reason``. Counted cohorts come first; the
+          counted rows are the cohorts behind ``m``. The word "small" is
+          not a call. Unit cards add ``anchor_counted``,
+          ``cohort_display``, ``modality``, ``modality_note`` and
+          ``small_sample``.
+
         How to read it: ``counted`` means the unit counts towards
         replication (counted cohort, not descriptive only, not a
         secondary dataset, the anchor unit of its cohort for the group);
@@ -2320,6 +2699,9 @@ class AnthiveClient:
                 ``human_postmortem`` (``xenograft_human_in_mouse`` for
                 ``app_nlgf``). Unknown names give HTTP 400. Sent only
                 when given.
+            forest: Detail of the ``forest`` rows, one of
+                :attr:`FOREST_DETAIL` (REST API 2.45.0+). Server
+                default here: ``'full'``. Sent only when given.
         """
         params: Dict[str, Any] = {'gene': gene}
         if cell_type is not None:
@@ -2328,6 +2710,8 @@ class AnthiveClient:
             params['exclude_secondary'] = 'false'
         if scope is not None:
             params['scope'] = scope
+        if forest is not None:
+            params['forest'] = self._check_forest(forest)
         result = self._get(f'/facets/{facet}/effects', params=params)
         if format == 'dataframe':
             import pandas as pd
@@ -2340,6 +2724,11 @@ class AnthiveClient:
                                   exclude_secondary: bool = True,
                                   format: str = 'json',
                                   scope: Optional[str] = None,
+                                  *,
+                                  offset: int = 0,
+                                  effect_gate: bool = False,
+                                  strict: bool = False,
+                                  fetch_all: bool = False,
                                   ) -> Union[Dict, Any]:
         """``GET /facets/{facet}/effects/top``. Genes that change with a
         facet in the most independent cohorts, within one cell type
@@ -2352,13 +2741,17 @@ class AnthiveClient:
         Responses carry ``help_topics`` (REST API 2.44.0+): topic ids for
         :meth:`get_help_topic` that explain how to read the numbers.
 
-        Only genes that pass the effect gate and are replicated are
-        listed (partial-conjunction ``r_value < 0.05``, effect present
-        in at least 2 independent cohorts, same direction, and at least
-        2 cohorts with a log2 fold change of at least
-        ``effect_gate_tau``; REST API 2.44.0+). Ranking (``ranking`` in the response):
+        Only replicated genes are listed (partial-conjunction
+        ``r_value < 0.05``: effect present in at least 2 independent
+        cohorts, same direction; REST API 2.44.0+). ``effect_gate=True``
+        keeps those that also pass the effect gate (at least 2 cohorts
+        with a log2 fold change of at least ``effect_gate_tau``),
+        ``strict=True`` those that also pass the strict minimum-effect
+        test (``replicated_effect``); ``n_matching`` counts the rows
+        the filters keep. Ranking (``ranking`` in the response):
         ``r_value`` ascending, then k (cohorts individually at
-        q_treat < 0.05 in the replicated direction), ``agreement``
+        q_value < 0.05 in the replicated direction; 2.44.0+),
+        ``agreement``
         (fraction of the m tested cohorts with that sign) and
         ``median_abs_logFC``. k of m is descriptive, not the
         replication call.
@@ -2376,7 +2769,18 @@ class AnthiveClient:
         minimum effect (``r_treat``), ``n_replicated_strong`` those at
         the 25 percent tier (``r_strong``; null where a run has no
         strong p values), ``n_genes_in_family`` the genes
-        tested in at least 2 cohorts, and ``rows`` is capped at ``n``. Rows:
+        tested in at least 2 cohorts, and ``rows`` holds at most ``n``
+        rows from ``offset``. REST API 2.45.0+ adds ``headline``
+        (``n_replicated``, ``n_effect_gate``, ``n_strict``,
+        ``strict_genes``, ``n_genes_in_family``, ``cohorts``,
+        ``effect_gate_unit``), ``offset``, ``n_matching`` (rows the
+        filters keep), ``n_returned``, ``has_more``, ``n_cohorts_tested``
+        and ``not_tested`` (why a cell type group has no family); rows
+        add ``n_small``, ``small_cohorts``, ``detection``,
+        ``low_detection``, ``min_logFC`` / ``max_logFC`` (smallest and
+        largest per-cohort effect) and context ``gene_flags``; every
+        ``cell_types`` entry adds ``n_genes_in_family``,
+        ``n_replicated``, ``n_effect_gate`` and ``n_strict``. Rows:
         ``gene, r_value, p_pc, k, k_treat, m, replicated, direction,
         agreement, median_abs_logFC, median_logFC,
         effect_gate_passed, effect_gate_tau, effect_gate_cohorts,
@@ -2400,15 +2804,16 @@ class AnthiveClient:
                 :attr:`TESTED_FACETS`.
             cell_type: A cell type group (``'microglia'``) or a raw
                 label; default: the group with most counted cohorts.
-            n: Rows returned (1 to 500).
+            n: Rows returned (1 to 100000 on REST API 2.45.0+; servers
+                before 2.45.0 accept at most 500).
             exclude_secondary: ``False`` lets secondary datasets count.
                 Sent only when ``False``.
             format: ``'json'`` or ``'dataframe'`` (the rows, needs
                 pandas; the family counts ``n_replicated``,
                 ``n_genes_in_family``, ``n_r_significant``,
-                ``n_effect_gate``, ``n_replicated_effect`` and
-                ``n_replicated_strong`` go to
-                ``df.attrs``).
+                ``n_effect_gate``, ``n_replicated_effect``,
+                ``n_replicated_strong`` and, on 2.45.0+, ``n_matching``,
+                ``has_more`` and ``headline`` go to ``df.attrs``).
             scope: Facet scope, one of :attr:`FACET_SCOPES`
                 (``'human_postmortem'``, ``'xenograft_human_in_mouse'``,
                 ``'in_vitro'``). Facets are tested, counted and
@@ -2417,6 +2822,18 @@ class AnthiveClient:
                 ``human_postmortem`` (``xenograft_human_in_mouse`` for
                 ``app_nlgf``). Unknown names give HTTP 400. Sent only
                 when given.
+            offset: Ranked rows to skip (REST API 2.45.0+). Sent only
+                when above 0.
+            effect_gate: Only genes whose effect gate passed (REST API
+                2.45.0+). Sent only when ``True``.
+            strict: Only genes that also pass the strict minimum-effect
+                test (REST API 2.45.0+). Sent only when ``True``.
+            fetch_all: Page through every matching row from ``offset``
+                (pages of ``n`` rows, following ``has_more``) and return
+                them as one response with ``has_more`` ``False``.
+
+        :meth:`get_facet_top_genes` is the same method under the name
+        the MCP tool uses.
         """
         params: Dict[str, Any] = {'n': n}
         if cell_type is not None:
@@ -2425,13 +2842,21 @@ class AnthiveClient:
             params['exclude_secondary'] = 'false'
         if scope is not None:
             params['scope'] = scope
-        result = self._get(f'/facets/{facet}/effects/top', params=params)
+        if offset:
+            params['offset'] = offset
+        if effect_gate:
+            params['effect_gate'] = 'true'
+        if strict:
+            params['strict'] = 'true'
+        result = self._paged_get(f'/facets/{facet}/effects/top', params,
+                                 fetch_all)
         if format == 'dataframe':
             import pandas as pd
             frame = pd.DataFrame(result.get('rows', []))
             for key in ('n_replicated', 'n_genes_in_family', 'n_r_significant',
                         'n_effect_gate', 'n_replicated_effect',
-                        'n_replicated_strong'):
+                        'n_replicated_strong', 'n_matching', 'has_more',
+                        'headline'):
                 if key in result:
                     frame.attrs[key] = result[key]
             return frame
@@ -2441,7 +2866,8 @@ class AnthiveClient:
                                exclude_secondary: bool = True,
                                scope: Optional[str] = None,
                                facet: Union[str, Sequence[str], None] = None,
-                               include_units: bool = True) -> Dict:
+                               include_units: bool = True,
+                               forest: Optional[str] = None) -> Dict:
         """``GET /genes/{gene}/facet-effects``. Result cards of one gene
         for every tested facet (:attr:`TESTED_FACETS`).
 
@@ -2488,6 +2914,10 @@ class AnthiveClient:
                 ``strongest_facet`` is chosen among those asked for.
             include_units: ``False`` empties ``units`` in every card
                 (see above). Sent only when ``False``.
+            forest: Detail of the replication ``forest`` rows, one of
+                :attr:`FOREST_DETAIL` (REST API 2.45.0+). Server default
+                here: ``'anchors'`` (folded units left out, counted in
+                ``n_more_units``). Sent only when given.
         """
         params: Dict[str, Any] = {}
         if not exclude_secondary:
@@ -2495,12 +2925,702 @@ class AnthiveClient:
         if scope is not None:
             params['scope'] = scope
         if facet is not None:
-            params['facet'] = (facet if isinstance(facet, str)
-                               else ','.join(facet))
+            params['facet'] = _csv_param(facet)
         if not include_units:
             params['include_units'] = 'false'
+        if forest is not None:
+            params['forest'] = self._check_forest(forest)
         return self._get(f'/genes/{gene}/facet-effects',
                          params=params or None)
+
+    #: Same as :meth:`get_facet_recurring_genes`, under the name the MCP
+    #: tool ``facet_top_genes`` uses.
+    get_facet_top_genes = get_facet_recurring_genes
+
+    # ── Facets: modules, overview, donor values (REST API 2.45.0+) ──────
+
+    def get_facet_top_modules(self, facet: str,
+                              cell_type: Optional[str] = None,
+                              n: int = 50,
+                              *,
+                              offset: int = 0,
+                              effect_gate: bool = False,
+                              include_not_replicated: bool = False,
+                              catalog: Optional[str] = None,
+                              exclude_secondary: bool = True,
+                              scope: Optional[str] = None,
+                              format: str = 'json',
+                              fetch_all: bool = False,
+                              ) -> Union[Dict, Any]:
+        """``GET /facets/{facet}/modules/top``. Gene sets (modules) that
+        replicate for one facet within one cell type group (REST API
+        2.45.0+).
+
+        Exploratory, donor-level. Module replication uses the same
+        partial conjunction as genes (Simes, u = 2) on the cohort p
+        values of the donor-level module scores (parametric p when the
+        unit has at least 30 residual df, else the permutation p), BH
+        over the modules of one (scope, facet, cell type group, method,
+        source) family. The effect gate is a signed standardised effect
+        of at least ``effect_gate_tau`` (0.2 SD per contrast, 0.2/3 per
+        Braak stage, 0.2 per decade, 0.1 per e4 allele) in 2 cohorts,
+        read on the lower 95 percent confidence bound. There is no
+        strict tier for modules: rows have no ``strict``, ``r_strong``,
+        ``replicated_strong``, ``r_treat`` or ``replicated_effect`` keys
+        (servers before the 2.45.0 release sent them as ``None``).
+        Directionless sets (GWAS, MAGMA, bidirectional)
+        are left out. Ranked by r-value, then k, agreement and the
+        standardised effect.
+
+        Returns ``{facet, scope, scopes, cell_type, celltype_group,
+        labels, cohorts_in_cell_type, n_cohorts_tested, not_tested,
+        n_modules_in_family, n_replicated, n_effect_gate, offset,
+        n_matching, n_returned, has_more, cell_types, rows,
+        effect_gate_rule, exclude_secondary, help_topics}``.
+        ``effect_gate_rule`` is ``{std_effect, wording}`` (named
+        ``effect_gate`` on servers before the 2.45.0 release). A row is
+        ``{geneset_id, catalog, module, method, source, variant_label,
+        r_value, p_pc, k, m, r_direction, replicated, call, nt_label,
+        gate, effect_gate_passed, effect_gate_tau, effect_gate_unit,
+        effect_gate_cohorts, n_cohorts_ge_gate, median_std_effect,
+        median_estimate, min_effect, max_effect, agreement, r_cohorts,
+        n_small, small_cohorts, k_over_m, cohorts_label,
+        n_cohorts_tested, p_check_cohorts, p_check_flag,
+        per_region_only_cohorts, module_scope_note, other_variants, ab,
+        quality_sensitive, directionless, n_genes}``. ``ab.disagree``
+        flags opposite directions of the count pseudobulk (B) and the
+        per-cell score mean (A) variants.
+
+        Args:
+            facet: One of :attr:`TESTED_FACETS` (or the ``ant_`` column).
+            cell_type: Cell type group or raw label; default: the group
+                with most counted cohorts.
+            n: Rows returned (server default 50).
+            offset: Ranked rows to skip. Sent only when above 0.
+            effect_gate: Only modules whose effect gate passed. Sent only
+                when ``True``.
+            include_not_replicated: Also list modules that do not
+                replicate. Sent only when ``True``.
+            catalog: Restrict to one gene set catalog, for example
+                ``'Sierksma2025/WGCNA'``.
+            exclude_secondary: ``False`` lets secondary datasets count.
+                Sent only when ``False``.
+            scope: Facet scope, one of :attr:`FACET_SCOPES`. Default:
+                the server's single-answer scope. Sent only when given.
+            format: ``'json'`` or ``'dataframe'`` (the rows, needs
+                pandas; ``n_replicated``, ``n_effect_gate``,
+                ``n_modules_in_family``, ``n_matching``, ``has_more`` and
+                ``effect_gate_rule`` go to ``df.attrs``).
+            fetch_all: Page through every matching row (see
+                :meth:`get_facet_recurring_genes`).
+        """
+        params: Dict[str, Any] = {'n': n}
+        if cell_type is not None:
+            params['cell_type'] = cell_type
+        if offset:
+            params['offset'] = offset
+        if effect_gate:
+            params['effect_gate'] = 'true'
+        if include_not_replicated:
+            params['include_not_replicated'] = 'true'
+        if catalog is not None:
+            params['catalog'] = catalog
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
+        if scope is not None:
+            params['scope'] = scope
+        result = self._paged_get(f'/facets/{facet}/modules/top', params,
+                                 fetch_all)
+        if format == 'dataframe':
+            import pandas as pd
+            frame = pd.DataFrame(result.get('rows', []))
+            for key in ('n_replicated', 'n_effect_gate', 'n_modules_in_family',
+                        'n_matching', 'has_more', 'effect_gate_rule'):
+                if key in result:
+                    frame.attrs[key] = result[key]
+            return frame
+        return result
+
+    def get_facet_effects_overview(self, facet: str, n: int = 10,
+                                   scope: Optional[str] = None,
+                                   exclude_secondary: bool = True) -> Dict:
+        """``GET /facets/{facet}/effects/overview``. The simplified facet
+        view in one call: replicated genes per cell type group (REST API
+        2.45.0+). Exploratory, donor-level.
+
+        Returns ``{facet, scope, scopes, headline, cell_types,
+        quiet_groups, n_genes_unique}``. ``headline`` is
+        ``{celltype_group, cohorts, n_genes_in_family, n_replicated,
+        n_effect_gate, n_strict, strict_genes, effect_gate_unit}``.
+        Each ``cell_types`` entry is ``{celltype_group, cl_id,
+        n_cohorts, n_genes_in_family, n_replicated, n_effect_gate,
+        n_strict, n_assigned, genes}`` with gene rows ``{gene, r_value,
+        direction, median_logFC, k, m, effect_gate_passed, strict,
+        also_in, detection, low_detection}``. A gene replicated in
+        several groups is listed once, in the group where it is
+        strongest (``also_in`` names the others). ``quiet_groups`` lists
+        groups without replicated genes with their counts and
+        ``low_power``; no replicated gene there is not evidence of no
+        effect.
+
+        Args:
+            facet: One of :attr:`TESTED_FACETS`.
+            n: Genes listed per cell type group (server default 10).
+            scope: Facet scope, one of :attr:`FACET_SCOPES`. Sent only
+                when given.
+            exclude_secondary: ``False`` lets secondary datasets count.
+                Sent only when ``False``.
+        """
+        params: Dict[str, Any] = {'n': n}
+        if scope is not None:
+            params['scope'] = scope
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
+        return self._get(f'/facets/{facet}/effects/overview', params=params)
+
+    def get_geneset_facet_effects(self, study: str, experiment: str,
+                                  name: str,
+                                  facet: Union[str, Sequence[str], None] = None,
+                                  scope: Optional[str] = None,
+                                  cell_type: Optional[str] = None,
+                                  exclude_secondary: bool = True,
+                                  include_units: bool = False,
+                                  forest: Optional[str] = None) -> Dict:
+        """``GET /genesets/{study}/{experiment}/{name}/facet-effects``.
+        Result card of one gene set: its module replication per facet
+        next to the member genes that replicate for the same facet
+        (REST API 2.45.0+). Exploratory, donor-level.
+
+        Returns ``{geneset_id, catalog, module, display_name,
+        description, organism, n_genes, celltypes, role, direction,
+        quality, directionless, directionless_reason,
+        directionless_note, member_match, scored_in, scope, facets,
+        by_scope, effect_gate_rule, help_topics}``. ``facets`` maps each
+        facet to ``{facet, scope, module, members}``; ``by_scope`` is
+        present only without ``scope``. ``effect_gate_rule`` is
+        ``{std_effect: 0.2, per_facet: {facet: tau}}`` (named
+        ``effect_gate`` before the 2.45.0 release).
+
+        ``module`` is ``{catalog, module, module_key, facet, scope,
+        cell_type, directionless, effect_gate_rule: {std_effect,
+        wording}, replication, n_units, units}``; each ``replication``
+        entry has ``celltype_group``, ``cl_id``, ``labels``, ``primary``
+        (the view variant: the count pseudobulk B where the module has
+        one, else the per-cell score mean A, UCell then score_genes),
+        ``variants`` (one per method and source, with the module top
+        row fields plus ``label``, ``basis``, ``forest``,
+        ``family_rank`` / ``family_size`` and ``links``) and ``ab``
+        (``{disagree, reason}``: True only for opposite directions with
+        one variant replicated or both effects at least 0.2). A module
+        forest row carries ``estimate``, ``ci_low``, ``ci_high``,
+        ``std_effect``, ``p_param``, ``q_param``, ``p_perm``,
+        ``q_perm``, ``df_resid``, ``p_used``, ``p_basis``
+        (``parametric`` | ``permutation``) and ``has_counts``.
+        Directionless sets have ``call`` ``not_tested`` with
+        ``nt_label`` ``'no expected direction'``: never read them as
+        "not replicated".
+
+        ``members`` is ``{facet, scope, scopes, n_members,
+        n_sex_chromosome_excluded, groups}``, never truncated; per cell
+        type group ``{n_members, n_in_data, n_tested, n_replicated,
+        n_up, n_down, n_effect_gate, n_strict, genes_up, genes_down,
+        genes_gate, genes}``. For ``sex`` the member counts leave out
+        chrX and chrY genes. ``members`` is ``None`` when the gene set
+        store has no such set.
+
+        Args:
+            study, experiment, name: Gene set id parts.
+            facet: One facet or a list from :attr:`TESTED_FACETS` (sent
+                as a comma separated list). Default: all.
+            scope: Facet scope, one of :attr:`FACET_SCOPES`. Default:
+                every scope, in ``by_scope``. Sent only when given.
+            cell_type: Restrict to one cell type group or raw label.
+            exclude_secondary: ``False`` lets secondary datasets count.
+                Sent only when ``False``.
+            include_units: ``True`` adds the flat unit list (server
+                default ``False``). Sent only when ``True``.
+            forest: Forest row detail, one of :attr:`FOREST_DETAIL`
+                (server default here ``'anchors'``). Sent only when
+                given.
+        """
+        params: Dict[str, Any] = {}
+        if facet is not None:
+            params['facet'] = _csv_param(facet)
+        if scope is not None:
+            params['scope'] = scope
+        if cell_type is not None:
+            params['cell_type'] = cell_type
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
+        if include_units:
+            params['include_units'] = 'true'
+        if forest is not None:
+            params['forest'] = self._check_forest(forest)
+        return self._get(
+            f'/genesets/{study}/{experiment}/{name}/facet-effects',
+            params=params or None)
+
+    def get_gene_detection(self, gene: str,
+                           format: str = 'json') -> Union[Dict, Any]:
+        """``GET /genes/{gene}/detection``. How many cells express a gene
+        per dataset and per (scope, cell type group) (REST API 2.45.0+).
+
+        The source of the low-detection pill on facet results: a gene
+        detected in under ``low_detection_pct`` (5) percent of cells
+        (median over the datasets of a group) gives replication results
+        carried by few cells. Read from precomputed gene statistics,
+        never a live scan.
+
+        Returns ``{gene, low_detection_pct, min_cells, n_candidates,
+        n_missing, partial, summary, datasets}``. ``summary`` rows:
+        ``{scope, celltype_group, n_datasets, pct_median, pct_min,
+        pct_max, n_cells, low_detection}``; ``datasets`` rows:
+        ``{db_id, title, scope, celltype_group, cell_type, n_cells, pct,
+        modality, modality_note, technology, mean, median_nonzero,
+        q10_nonzero, q90_nonzero, rank_mean}``. Strata below
+        ``min_cells`` (50) cells are left out. ``partial`` is True when
+        some datasets had no statistics (``n_missing``).
+
+        Args:
+            gene: Gene symbol.
+            format: ``'json'`` or ``'dataframe'`` (the ``datasets``
+                rows, needs pandas; ``summary`` goes to
+                ``df.attrs['summary']``).
+        """
+        result = self._get(f'/genes/{gene}/detection')
+        if format == 'dataframe':
+            import pandas as pd
+            frame = pd.DataFrame(result.get('datasets', []))
+            frame.attrs['summary'] = result.get('summary', [])
+            return frame
+        return result
+
+    def _donor_value_params(self, cell_type: str, gene: Optional[str],
+                            module: Union[str, Sequence[str], None],
+                            method: Optional[str], source: Optional[str],
+                            scope: Optional[str], adjusted: bool,
+                            include_uncounted: bool,
+                            exclude_secondary: bool,
+                            db_id: Optional[str]) -> Dict[str, Any]:
+        """Shared query of the donor-values and donor-plot routes."""
+        if (gene is None) == (module is None):
+            raise ValueError('give exactly one of gene or module')
+        params: Dict[str, Any] = {'cell_type': cell_type}
+        if gene is not None:
+            params['gene'] = gene
+        else:
+            params['module'] = (module if isinstance(module, str)
+                                else '/'.join(module))
+        for key, value in (('method', method), ('source', source),
+                           ('scope', scope), ('db_id', db_id)):
+            if value is not None:
+                params[key] = value
+        if adjusted:
+            params['adjusted'] = 'true'
+        if include_uncounted:
+            params['include_uncounted'] = 'true'
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
+        return params
+
+    def get_facet_donor_values(self, facet: str, cell_type: str,
+                               gene: Optional[str] = None,
+                               module: Union[str, Sequence[str], None] = None,
+                               *,
+                               method: Optional[str] = None,
+                               source: Optional[str] = None,
+                               scope: Optional[str] = None,
+                               adjusted: bool = False,
+                               include_uncounted: bool = False,
+                               exclude_secondary: bool = True,
+                               db_id: Optional[str] = None,
+                               format: str = 'json') -> Union[Dict, Any]:
+        """``GET /facets/{facet}/donor-values``. The replicate-level
+        (donor or animal) values behind one facet result: one number per
+        donor per counted cohort, with the model's estimate (REST API
+        2.45.0+). Check these before trusting an estimate: a few donors
+        can carry an effect.
+
+        Returns ``{facet, scope, subject, cell_type, facet_kind
+        (two_group | numeric), levels (two-group: [reference, tested]),
+        x_label, scale, adjusted, n_units, n_counted, note,
+        anonymisation, units, help_topics}``. A unit is ``{db_id, title,
+        cohort, cohort_label, cohort_display, cell_type,
+        celltype_source, counted, not_counted_reason, pooled,
+        descriptive_only, replicate_unit, available, reason, covariates,
+        n_donors, scale, facet_kind, model: {estimate, ci_low, ci_high,
+        p_value, q_value, unit}, line, donors}``; a donor is ``{label,
+        facet_value, group, value, n_cells}``. ``label`` is a
+        sequential ``D01``, ``D02``, ... per unit; no donor id or
+        per-donor covariate is ever returned. A gene ``value`` is the
+        pseudobulk on the scale the test fits (log2 CPM with TMM
+        library sizes, the voom input); a module ``value`` is the
+        replicate score the module test fitted. ``adjusted=True``
+        removes the covariate part by ordinary least squares; the test
+        also uses voom precision weights, so a drawn trend can differ a
+        little from ``model.estimate``. A unit run before per-replicate
+        values were stored answers ``available: False`` with a
+        ``reason``.
+
+        Args:
+            facet: One of :attr:`TESTED_FACETS`.
+            cell_type: Cell type group (``'microglia'``) or stratum
+                label. Required.
+            gene: A gene symbol. Give exactly one of ``gene`` and
+                ``module``.
+            module: A gene set as ``'Study/Experiment/name'`` (or a
+                3-item sequence).
+            method, source: The module variant (``'pseudobulk'`` or
+                ``'cell_mean'``; ``'geneset'``, ``'ucell'`` or
+                ``'gene_list'``).
+            scope: Facet scope, one of :attr:`FACET_SCOPES`.
+            adjusted: Remove the covariate part. Sent only when ``True``.
+            include_uncounted: Add the units that do not carry a
+                cohort's vote, with the reason. Sent only when ``True``.
+            exclude_secondary: ``False`` lets secondary datasets count.
+                Sent only when ``False``.
+            db_id: Only the units of that dataset, counted or not, and
+                the exact ``cell_type`` stratum when one matches (404
+                when the dataset has no unit).
+            format: ``'json'`` or ``'dataframe'`` (one row per donor
+                with the unit's ``db_id``, ``cohort``, ``cell_type`` and
+                ``counted``; needs pandas).
+
+        Raises:
+            ValueError: Neither or both of ``gene`` and ``module``.
+            requests.HTTPError: 400 for a bad ``scope`` or a malformed
+                ``module``, 404 when the result was not tested.
+        """
+        params = self._donor_value_params(
+            cell_type, gene, module, method, source, scope, adjusted,
+            include_uncounted, exclude_secondary, db_id)
+        result = self._get(f'/facets/{facet}/donor-values', params=params)
+        if format == 'dataframe':
+            import pandas as pd
+            rows = []
+            for unit in result.get('units', []):
+                for donor in unit.get('donors') or []:
+                    rows.append({'db_id': unit.get('db_id'),
+                                 'cohort': unit.get('cohort'),
+                                 'cell_type': unit.get('cell_type'),
+                                 'counted': unit.get('counted'),
+                                 **donor})
+            frame = pd.DataFrame(rows)
+            for key in ('scale', 'facet_kind', 'levels', 'adjusted'):
+                if key in result:
+                    frame.attrs[key] = result[key]
+            return frame
+        return result
+
+    def get_facet_donor_plot(self, facet: str, cell_type: str,
+                             gene: Optional[str] = None,
+                             module: Union[str, Sequence[str], None] = None,
+                             *,
+                             fmt: str = 'png',
+                             method: Optional[str] = None,
+                             source: Optional[str] = None,
+                             scope: Optional[str] = None,
+                             adjusted: bool = False,
+                             include_uncounted: bool = False,
+                             exclude_secondary: bool = True,
+                             db_id: Optional[str] = None,
+                             width: Optional[float] = None,
+                             height: Optional[float] = None,
+                             dpi: Optional[int] = None,
+                             dest: Union[str, Path, None] = None) -> Dict:
+        """``GET /facets/{facet}/donor-plot.{fmt}``. Small multiples of
+        the values of :meth:`get_facet_donor_values`, one panel per
+        counted cohort on a shared y axis (REST API 2.45.0+).
+
+        The image is clean for reuse: panel titles are only the cohort
+        and ``n``. The effect, interval and q of every cohort, the scale
+        and the model covariates are in the ``caption`` (the
+        ``X-Plot-Caption`` header), never drawn.
+
+        Args:
+            facet, cell_type, gene, module, method, source, scope,
+                adjusted, include_uncounted, exclude_secondary, db_id:
+                As in :meth:`get_facet_donor_values`.
+            fmt: One of :attr:`DONOR_PLOT_FORMATS`.
+            width, height: Inches per panel (server defaults 2.6, 3.0).
+            dpi: Raster resolution (server default 150).
+            dest: A path to write the image to (also returned as
+                ``path``).
+
+        Returns:
+            ``{bytes, format, caption, mime, path}``; ``path`` is
+            ``None`` without ``dest``.
+
+        Raises:
+            ValueError: Bad ``fmt``, or neither or both of ``gene`` and
+                ``module``.
+            requests.HTTPError: 404 with the reasons when no unit has
+                stored values.
+        """
+        if fmt not in self.DONOR_PLOT_FORMATS:
+            raise ValueError(f"fmt must be one of {self.DONOR_PLOT_FORMATS}, "
+                             f"got {fmt!r}")
+        params = self._donor_value_params(
+            cell_type, gene, module, method, source, scope, adjusted,
+            include_uncounted, exclude_secondary, db_id)
+        for key, value in (('width', width), ('height', height),
+                           ('dpi', dpi)):
+            if value is not None:
+                params[key] = value
+        response = self._get_raw(f'/facets/{facet}/donor-plot.{fmt}',
+                                 params=params)
+        target: Optional[Path] = None
+        if dest is not None:
+            target = Path(dest)
+            target.write_bytes(response.content)
+        return {
+            'bytes': response.content,
+            'format': response.headers.get('X-Plot-Format', fmt),
+            'caption': response.headers.get('X-Plot-Caption', ''),
+            'mime': response.headers.get('Content-Type', ''),
+            'path': target,
+        }
+
+    # ── Donor variability (REST API 2.45.0+) ────────────────────────────
+    #
+    # How much a gene or gene set varies between replicates (donors;
+    # animals in xenografts) after each rung of a design
+    # (:attr:`DONOR_VARIABILITY_RUNGS`). Relative and exploratory: the
+    # excess ranking is a rank, not a test.
+
+    def get_database_donor_variability(self, db_id: str,
+                                       feature_type: Optional[str] = None,
+                                       cell_type: Optional[str] = None,
+                                       *,
+                                       celltype_source: Optional[str] = None,
+                                       feature: Optional[str] = None,
+                                       method: Optional[str] = None,
+                                       sort: Optional[str] = None,
+                                       rung: Optional[str] = None,
+                                       min_reliability: Optional[float] = None,
+                                       limit: Optional[int] = None,
+                                       format: str = 'json',
+                                       ) -> Union[Dict, Any]:
+        """``GET /databases/{db_id}/donor-variability``. Donor
+        (replicate) variability of one dataset, per cell type stratum
+        with at least 12 replicates of at least 40 cells (REST API
+        2.45.0+). A replicate is the dataset's ``replicate_unit``
+        (donor; animal in xenografts, where it is host-to-host
+        variability). Exploratory.
+
+        Without ``feature_type``: the summary ``{db_id, status
+        (analysed | not_analysed | not_run), reason, facet_scope,
+        replicate_unit, replicate_column, files, run, parameters, units,
+        help_topics}``; each unit lists ``cell_type``,
+        ``celltype_group``, ``n_replicates``, ``rung_deepest``,
+        ``rungs`` (``{name, terms, n, p, residual_df, computed,
+        reason}``), ``median_reliability``, ``median_sd_donor``,
+        ``n_genes``, ``n_modules`` and ``counted_in_cross_cohort``.
+
+        With ``feature_type`` and ``cell_type`` it adds ``{unit, rung,
+        n_matching, n_returned, rows}``. A gene row is ``{gene,
+        n_replicates, reliability, reliability_ci, r_half, v_donor,
+        v_donor_ci, sd_donor (log2 units), fold_range_donor, var_half,
+        rungs, deepest_rung, share_design, share_design_ci,
+        share_blocks, lmg, lmg_rung, r_composition_pc1, ave_expr,
+        half_count_q70}``; ``rungs`` maps each rung to ``{n, p, terms,
+        v, sd, fold_range, share_design, excess_z, p_excess}`` or
+        ``None`` (a rung the cohort cannot support). ``v`` / ``sd`` are
+        what the rung's design leaves unexplained; ``excess_z`` /
+        ``p_excess`` rank the unexplained variance against the
+        mean-variance trend within the unit (a rank, not a test;
+        ``None`` below 20 replicates or reliability 0.3). Module rows
+        add ``module``, ``method`` (``pseudobulk`` primary,
+        ``cell_mean`` secondary), ``source`` and ``n_genes_found`` and
+        have no ``excess_z``.
+
+        Args:
+            db_id: Dataset id.
+            feature_type: ``'gene'`` or ``'module'``; needs
+                ``cell_type``.
+            cell_type: Stratum label or its cell type group
+                (``'microglia'``; the exact label wins, else the unit of
+                that group with the most replicates).
+            celltype_source: Stratifier, when a label occurs under
+                several.
+            feature: One gene or module.
+            method: Module method (``'pseudobulk'`` or ``'cell_mean'``).
+            sort: ``'excess'`` (server default), ``'sd'``,
+                ``'reliability'`` or ``'feature'``.
+            rung: One of :attr:`DONOR_VARIABILITY_RUNGS` (server default
+                ``'D1'``).
+            min_reliability: Lower bound on reliability (server default
+                0).
+            limit: Rows returned (server default 100, at most 2000).
+            format: ``'json'`` or ``'dataframe'`` (the ``rows``, or the
+                ``units`` of the summary; needs pandas).
+
+        All optional arguments are sent only when given.
+
+        Raises:
+            requests.HTTPError: 400 for a bad ``rung``, ``sort`` or
+                ``feature_type`` or ``feature_type`` without
+                ``cell_type``; 404 for an unknown dataset or unit.
+        """
+        params: Dict[str, Any] = {}
+        for key, value in (('feature_type', feature_type),
+                           ('cell_type', cell_type),
+                           ('celltype_source', celltype_source),
+                           ('feature', feature), ('method', method),
+                           ('sort', sort), ('rung', rung),
+                           ('min_reliability', min_reliability),
+                           ('limit', limit)):
+            if value is not None:
+                params[key] = value
+        result = self._get(f'/databases/{db_id}/donor-variability',
+                           params=params or None)
+        if format == 'dataframe':
+            import pandas as pd
+            key = 'rows' if 'rows' in result else 'units'
+            return pd.DataFrame(result.get(key, []))
+        return result
+
+    def get_gene_donor_variability(self, gene: str,
+                                   scope: Optional[str] = None,
+                                   cell_type: Optional[str] = None,
+                                   rung: Optional[str] = None,
+                                   exclude_secondary: bool = True) -> Dict:
+        """``GET /genes/{gene}/donor-variability``. One gene's donor
+        variability in every analysed unit, with a cross-cohort ranking
+        (REST API 2.45.0+). Relative and exploratory, not a test.
+
+        Returns ``{feature, feature_type, scope, rung, rung_label,
+        units, by_group, help_topics}``. A unit is ``{db_id, title,
+        cohort, cohort_label, cell_type, celltype_source,
+        celltype_group, n_replicates, replicate_unit, rung_deepest,
+        counted, not_counted_reason, values}`` with ``values`` the gene
+        row of :meth:`get_database_donor_variability`. A unit is
+        ``counted`` when it is the anchor of a counted cohort for the
+        group with at least 30 replicates. ``by_group`` rows are
+        ``{celltype_group, m, k, m_with_gene, p_rank_product, r_value,
+        rung}``: ``m`` counted cohorts reaching the rung, ``k`` cohorts
+        with the gene in the top 5 percent of the excess ranking,
+        ``p_rank_product`` Fisher's combination of the cohorts'
+        ``p_excess`` (at least 2 cohorts) and ``r_value`` its BH
+        adjustment over the genes of the (scope, group, rung) family.
+        The null is that a gene's ranks in different cohorts are
+        independent, so the pair measures whether the excess
+        reproduces, not whether the gene is variable in absolute terms.
+
+        Args:
+            gene: Gene symbol.
+            scope: Facet scope, one of :attr:`FACET_SCOPES` (server
+                default ``human_postmortem``; scopes are never mixed).
+            cell_type: Cell type group or stratum label.
+            rung: One of :attr:`DONOR_VARIABILITY_RUNGS` (server default
+                ``'D1'``).
+            exclude_secondary: ``False`` lets secondary datasets count.
+                Sent only when ``False``.
+
+        Raises:
+            requests.HTTPError: 404 when no analysed unit has the gene
+                in the scope.
+        """
+        params: Dict[str, Any] = {}
+        for key, value in (('scope', scope), ('cell_type', cell_type),
+                           ('rung', rung)):
+            if value is not None:
+                params[key] = value
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
+        return self._get(f'/genes/{gene}/donor-variability',
+                         params=params or None)
+
+    def get_geneset_donor_variability(self, study: str, experiment: str,
+                                      name: str,
+                                      scope: Optional[str] = None,
+                                      cell_type: Optional[str] = None,
+                                      rung: Optional[str] = None,
+                                      method: Optional[str] = None,
+                                      source: Optional[str] = None,
+                                      exclude_secondary: bool = True,
+                                      ) -> Dict:
+        """``GET /genesets/{study}/{experiment}/{name}/donor-variability``.
+        The card of :meth:`get_gene_donor_variability` for a gene set
+        (REST API 2.45.0+). The ``pseudobulk`` variant unless ``method``
+        is given. ``k``, ``p_rank_product`` and ``r_value`` are ``None``:
+        there is no ranking test for modules. Exploratory.
+
+        Args:
+            study, experiment, name: Gene set id parts.
+            scope, cell_type, rung, exclude_secondary: As in
+                :meth:`get_gene_donor_variability`.
+            method: ``'pseudobulk'`` or ``'cell_mean'``.
+            source: ``'gene_list'``, ``'geneset'`` or ``'ucell'``.
+        """
+        params: Dict[str, Any] = {}
+        for key, value in (('scope', scope), ('cell_type', cell_type),
+                           ('rung', rung), ('method', method),
+                           ('source', source)):
+            if value is not None:
+                params[key] = value
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
+        return self._get(
+            f'/genesets/{study}/{experiment}/{name}/donor-variability',
+            params=params or None)
+
+    def get_donor_variability_top(self, cell_type: Optional[str] = None,
+                                  scope: Optional[str] = None,
+                                  feature_type: Optional[str] = None,
+                                  rung: Optional[str] = None,
+                                  limit: Optional[int] = None,
+                                  min_cohorts: Optional[int] = None,
+                                  exclude_secondary: bool = True,
+                                  format: str = 'json',
+                                  ) -> Union[Dict, Any]:
+        """``GET /donor-variability/top``. Genes or gene sets that vary
+        between replicates in several cohorts at one rung (REST API
+        2.45.0+). Relative and exploratory, not a test.
+
+        Returns ``{scope, celltype_group, feature_type, rung,
+        rung_label, cohorts, m_cohorts, concordance,
+        min_replicates_per_cohort, high_tail, not_enough_cohorts, rows,
+        note, help_topics}``. ``celltype_group`` was ``cell_type_group``
+        before the 2.45.0 release. ``concordance`` is the mean Spearman
+        correlation of ``excess_z`` between the cohort anchors
+        (``{mean_spearman, n_pairs, pairs}``) or ``None``. Gene rows:
+        ``{gene, m, k, p_rank_product, r_value, median_excess_z,
+        median_reliability, median_sd, fold_range}``, sorted by
+        ``r_value`` then ``median_excess_z``; module rows: ``{module,
+        method, source, m, k (cohorts with reliability >= 0.3),
+        median_reliability, median_sd, median_share_design,
+        fold_range}``, sorted by ``median_sd``. With fewer counted
+        cohorts (30 or more replicates, rung reached) than
+        ``min_cohorts``, ``not_enough_cohorts`` is True and ``rows`` is
+        empty.
+
+        Args:
+            cell_type: Cell type group (server default ``'microglia'``).
+            scope: Facet scope, one of :attr:`FACET_SCOPES`.
+            feature_type: ``'gene'`` (server default) or ``'module'``.
+            rung: One of :attr:`DONOR_VARIABILITY_RUNGS` (server default
+                ``'D1'``).
+            limit: Rows returned (server default 50).
+            min_cohorts: Cohorts needed (server default 2).
+            exclude_secondary: ``False`` lets secondary datasets count.
+                Sent only when ``False``.
+            format: ``'json'`` or ``'dataframe'`` (the rows, needs
+                pandas).
+        """
+        params: Dict[str, Any] = {}
+        for key, value in (('cell_type', cell_type), ('scope', scope),
+                           ('feature_type', feature_type), ('rung', rung),
+                           ('limit', limit), ('min_cohorts', min_cohorts)):
+            if value is not None:
+                params[key] = value
+        if not exclude_secondary:
+            params['exclude_secondary'] = 'false'
+        result = self._get('/donor-variability/top', params=params or None)
+        if format == 'dataframe':
+            import pandas as pd
+            return pd.DataFrame(result.get('rows', []))
+        return result
 
     def get_facet_cohorts(self, format: str = 'json') -> Union[Dict, Any]:
         """``GET /facets/cohorts``. The DRAFT cohort selection table used
@@ -3163,14 +4283,151 @@ class AnthiveClient:
         finally:
             response.close()
 
+    # ── Dataset deposits, read-only (REST API 2.46.0+) ──────────────────
+    #
+    # Datasets are deposited with the Go CLI: ``vark datasets upload``
+    # (presigned S3 uploads, complete, withdraw). pyvark only reads the
+    # state of deposits. Every route answers 403 ``forbidden`` to callers
+    # who are not signed-in members of the site's
+    # ``datasets_upload_groups`` (default ``admins``, ``curators``), and
+    # 503 ``disabled`` where deposits are switched off. Errors raise
+    # :class:`DatasetDepositError` (``status`` holds the status word).
+
+    def _deposit_get(self, path: str,
+                     params: Optional[Dict[str, Any]] = None) -> Dict:
+        """GET a deposit route; non-2xx raises DatasetDepositError."""
+        response = self._request('GET', path, params=params)
+        raise_for_deposit_status(response)
+        return response.json()
+
+    def list_deposits(self, all: bool = False) -> Dict:
+        """``GET /datasets/deposit``. Your dataset deposits (REST API
+        2.46.0+). Uploading is done with ``vark datasets upload``, not
+        pyvark.
+
+        Returns ``{deposits, all}``; each deposit is the summary of
+        :meth:`get_deposit` (``deposit_id``, ``data_project``,
+        ``basename``, ``state``, ``deposit_kind``, ``db_id``,
+        ``version``, ``kind``, ``held_reasons``, ``update_of``,
+        ``continues``, ``total_bytes``, ``created``, ``updated``,
+        ``completed``, ``expires``; admins also ``user``).
+
+        Args:
+            all: ``True`` lists every user's deposits (admins only;
+                :meth:`get_deposit_vocab` says ``caller.may_list_all_deposits``).
+                Sent only when ``True``.
+
+        Raises:
+            DatasetDepositError: 403 ``forbidden`` for callers outside
+                ``datasets_upload_groups`` (or ``all=True`` for a
+                non-admin), 503 ``disabled``.
+        """
+        return self._deposit_get('/datasets/deposit',
+                                 {'all': 'true'} if all else None)
+
+    def get_deposit(self, deposit_id: str) -> Dict:
+        """``GET /datasets/deposit/{deposit_id}``. Status of one deposit
+        (REST API 2.46.0+).
+
+        The summary of :meth:`list_deposits` plus ``error``,
+        ``warnings``, ``files`` (``{name, kind, key, size, sha256,
+        method, state}``; ``method`` ``reuse`` for published files a
+        metadata update reuses), ``watch`` (``{state, served,
+        catalog_verified, incoming_deleted}`` or ``None``), ``report``
+        (``{result, publish, held_reasons, counts, problems: [{id,
+        status, summary, fix}]}`` or ``None``), ``report_available``,
+        ``events`` (``{time, action, actor, detail}``), ``approval``
+        and, while ``completing``, ``progress``; a failed background
+        complete shows ``complete_error``.
+
+        ``state`` is ``uploading``, ``completing``, ``uploaded``
+        (complete, not yet seen by the watcher), ``seen``, ``stable``,
+        ``checking``, ``importing`` (DE tables), ``live``, ``held``,
+        ``failed``, ``needs_decision``, ``rejected``, ``withdrawn``,
+        ``expired`` or ``superseded``. ``deposit_kind`` is ``dataset``,
+        ``de_only`` or ``metadata_update``; ``kind`` is what the watcher
+        made of it (``new``, ``update_patch``, ...).
+
+        Raises:
+            DatasetDepositError: 404 ``not_found`` (also for another
+                user's deposit), 403 ``forbidden``.
+        """
+        return self._deposit_get(f'/datasets/deposit/{deposit_id}')
+
+    def get_deposit_report(self, deposit_id: str) -> Dict:
+        """``GET /datasets/deposit/{deposit_id}/report``. The redacted
+        ingest check report of a deposit (schema
+        ``anthive.ingest_check/1``, curator audience, no server paths;
+        REST API 2.46.0+).
+
+        Raises:
+            DatasetDepositError: 404 ``no_report`` before the check ran
+                (the body then carries ``state`` and ``reason``), 404
+                ``not_found``, 403 ``forbidden``.
+        """
+        return self._deposit_get(f'/datasets/deposit/{deposit_id}/report')
+
+    def get_deposit_vocab(self) -> Dict:
+        """``GET /datasets/deposit/vocab``. Everything a depositor needs
+        to prepare a deposit (REST API 2.46.0+): ``uploads_enabled``,
+        ``limits``, ``naming``, ``file_kinds``, ``prefix``, ``mus``
+        (required and recommended sidecar fields, the vocabulary,
+        ``field_info``), ``sidecar_keys``, ``seed_md`` and ``index_md``
+        (with templates and ``required_spec``), ``facets``,
+        ``de_presets``, ``de_sidecar_keys``, ``held_reasons``,
+        ``update_policy``, ``states`` and ``caller`` (``{user,
+        is_admin, may_replace_de_study, may_list_all_deposits,
+        may_update_any_dataset}``).
+
+        Raises:
+            DatasetDepositError: 403 ``forbidden`` for callers outside
+                ``datasets_upload_groups``.
+        """
+        return self._deposit_get('/datasets/deposit/vocab')
+
+    def get_deposit_group(self, data_project: str,
+                          basename: Optional[str] = None) -> Dict:
+        """``GET /datasets/deposit/groups/{data_project}``. Whether you
+        may deposit into a group, and update a dataset in it (REST API
+        2.46.0+).
+
+        Returns ``{data_project, exists, group_id?, may_create?,
+        reason?, dataset_exists?, may_update?, db_id?, inactive?}``.
+        ``db_id`` is given only when you may deposit a new version;
+        ``may_create`` / ``reason`` for a group that does not exist yet.
+        A retired dataset is never offered to non-admins.
+
+        Args:
+            data_project: Group (collection folder) name.
+            basename: A dataset basename in that group. Sent only when
+                given.
+
+        Raises:
+            DatasetDepositError: 429 ``rate_limited`` (per user), 403
+                ``forbidden``.
+        """
+        return self._deposit_get(
+            f'/datasets/deposit/groups/{data_project}',
+            {'basename': basename} if basename is not None else None)
+
     # ── Plot cache admin ────────────────────────────────────────────────
 
     def get_plot_cache_stats(self) -> Dict:
-        """``GET /admin/plot-cache/stats``."""
+        """``GET /admin/plot-cache/stats``.
+
+        Admin only (REST API 2.45.0+): needs an admin account, a
+        host-local call or the internal secret; other signed-in users
+        get HTTP 403.
+        """
         return self._get('/admin/plot-cache/stats')
 
     def clear_plot_cache(self) -> Dict:
-        """``POST /admin/plot-cache/clear``."""
+        """``POST /admin/plot-cache/clear``.
+
+        Admin only (REST API 2.45.0+): needs an admin account, a
+        host-local call or the internal secret; other signed-in users
+        get HTTP 403.
+        """
         return self._post('/admin/plot-cache/clear')
 
     # ── Skill (MCP collaborator install path) ───────────────────────────
@@ -3182,7 +4439,12 @@ class AnthiveClient:
     # ── Admin ───────────────────────────────────────────────────────────
 
     def rescan_databases(self) -> Dict:
-        """``POST /admin/rescan``. Re-scan data folder + reload caches."""
+        """``POST /admin/rescan``. Re-scan data folder + reload caches.
+
+        Admin only (REST API 2.45.0+): needs an admin account, a
+        host-local call or the internal secret; other signed-in users
+        get HTTP 403.
+        """
         return self._post('/admin/rescan')
 
     def admin_release(self, db_id: str,
@@ -3190,7 +4452,12 @@ class AnthiveClient:
                       drain_timeout_seconds: Optional[float] = None) -> Dict:
         """``POST /admin/release/{db_id}``. Drop ant-serve's r/o handle so
         a writer can open the duckdb r/w (server defaults: 300 s hold,
-        30 s drain)."""
+        30 s drain).
+
+        Admin only (REST API 2.45.0+): needs an admin account, a
+        host-local call or the internal secret; other signed-in users
+        get HTTP 403.
+        """
         params = {key: value for key, value in
                   (('duration_seconds', duration_seconds),
                    ('drain_timeout_seconds', drain_timeout_seconds))
@@ -3201,7 +4468,12 @@ class AnthiveClient:
         return response.json()
 
     def admin_restore(self, db_id: str) -> Dict:
-        """``POST /admin/restore/{db_id}``. Inverse of admin_release."""
+        """``POST /admin/restore/{db_id}``. Inverse of admin_release.
+
+        Admin only (REST API 2.45.0+): needs an admin account, a
+        host-local call or the internal secret; other signed-in users
+        get HTTP 403.
+        """
         return self._post(f'/admin/restore/{db_id}')
 
     # ── Convenience ─────────────────────────────────────────────────────

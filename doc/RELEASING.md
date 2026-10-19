@@ -42,6 +42,10 @@ Tick every box before step 1 of "Cutting a release".
 - [ ] pyvark (`codeberg.org/mfiers/pyvark`) and vark cover the new and
       changed endpoints, or the gap is written down.
 - [ ] MCP tools in `bin/api/ant-mcp` match the REST changes.
+- [ ] JupyterLite bundles the current pyvark (`make vendor-pyvark` after the
+      pyvark release commit) and `make test-jupyter` passes against a running
+      ant-serve of this release (headless Chromium, needs network for
+      Pyodide; `doc/JUPYTERLITE_BUILD.md`).
 - [ ] The agent skills (`data/skills`) are current, including the help sync
       (`make help-sync ANTHIVE=<this checkout>` in `data/skills`, review the
       diff, rebuild).
@@ -137,7 +141,11 @@ built with the same model. Changing the model means a full index rebuild
       a setting afterwards (for example `auth.internal_requires_auth`) and
       check with `ant-stack up` that it takes effect. Release 2.37.2 found
       four real problems that way, 2.45.0 found that `up` ignored config-only
-      changes.
+      changes. After `up`, run the live checks from this checkout against the
+      scratch site with a seeded account:
+      `ANTHIVE_LIVE_USER=admin ANTHIVE_LIVE_PASSWORD=... make test-live-site URL=<public_url>`
+      (JupyterLite loads after the login, serves this release's vark and
+      notebooks, its kernel reaches the API; see `doc/JUPYTERLITE_BUILD.md`).
 - [ ] **pyvark on PyPI.** The maintainer publishes the matching pyvark
       release to PyPI.
 - [ ] **vark.** The maintainer runs `make ship` in the vark repo.
