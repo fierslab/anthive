@@ -1020,6 +1020,13 @@ class ArtefactService:
             ref += f'@{str(version)[:20]}'
         return ArtefactError(404, 'not_found', f'no artefact {ref}', ref=ref)
 
+    @staticmethod
+    def file_not_found(entry: 'ArtefactEntry', version: 'VersionEntry', name: str) -> ArtefactError:
+        """404 ``file_not_found`` naming the file (the artefact and version exist and are visible)."""
+        ref = f'{entry.ref}@v{version.number}'
+        shown = str(name)[:200]
+        return ArtefactError(404, 'file_not_found', f'{ref} has no file {shown!r}', ref=ref, file=shown)
+
     def resolve(self, index: ArtefactIndex, policy: AccessPolicy, viewer: Viewer, group_id: str, scope: str,
                 artefact_id: str) -> ArtefactEntry:
         """The artefact if the viewer may see it; else the same 404 as for one that does not exist."""
@@ -1209,7 +1216,7 @@ class ArtefactService:
         ``not_on_this_site``. The caller already checked access (``resolve``) and the version."""
         item = self.manifest_file(version, name)
         if item is None:
-            raise self.not_found(entry.group_id, entry.path.scope, entry.path.artefact_id, f'v{version.number}')
+            raise self.file_not_found(entry, version, name)
         self.limiter.check(caller_key)
         rel = entry.path.file_rel(version.number, item['name'])
         filename = PurePosixPath(item['name']).name

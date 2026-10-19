@@ -61,7 +61,7 @@ _SERVE_WANTED = {
     '_internal_secret_value', '_internal_secret', '_has_valid_internal_secret', '_InternalSecretGuard',
     '_is_local_tool_request', '_require_admin', '_caller_is_admin', '_require_admin_or_local',
     '_ACCESS_SETTINGS', '_access_settings', '_caller_sees_internal', '_request_path', '_DatasetAccessGuard',
-    'get_group_info', 'get_database_info', 'rescan_databases',
+    'get_group_info', 'get_database_info', 'rescan_databases', 'list_collections',
     '_artefact_service_instance', '_artefact_service_lock', '_artefact_s3_client', '_artefact_service',
     '_artefact_viewer', '_artefact_policy', '_artefact_error', '_artefact_resolve', '_artefact_count',
     *(name for path, name in ARTEFACT_ROUTES.items() if path not in WRITE_ROUTES),
@@ -562,3 +562,47 @@ def test_caddy_access_log_drops_the_signature_of_a_redirect(tmp_path):
     assert '/api/artefacts/G/x/y/v1/files/a.png' in log and '"status": 307' in log
     assert 'SIGNATURE123' not in log and 'X-Amz-Signature' not in log and 'AKIDREAD' not in log
     assert 'files/a.png?REDACTED' in log
+
+
+# ── pyvark findings on the branch (2.47.0) ──────────────────────────────────────
+
+def test_collections_listing_applies_the_visibility_rules(client):
+    def listed(headers):
+        response = client.get('/collections', headers=headers)
+        assert response.status_code == 200, response.text
+        return {row['group_id']: row for row in response.json()['collections']}
+    anonymous, member, admin = listed(ANON), listed(USER), listed(ADMIN)
+    assert 'AT6' in anonymous and 'NO6' not in anonymous and 'IN2' not in anonymous
+    assert anonymous['AT6']['collection_kind'] == 'analysis' and anonymous['AT6']['n_datasets'] == 0
+    assert anonymous['AT6']['access'] == 'public' and anonymous['AT6']['title'] == 'Atlas2026 analyses'
+    assert anonymous['MX0']['n_datasets'] == 1                    # only the public dataset counts
+    assert member['MX0']['n_datasets'] == 2 and member['MX0']['access'] == 'internal'
+    assert member['NO6']['access'] == 'internal' and 'IN2' in member
+    assert 'BA6' not in admin                                     # an incomplete index.md stays out
+    datasets_only = client.get('/collections', params={'kind': 'datasets'}).json()['collections']
+    assert {row['group_id'] for row in datasets_only} == {gid for gid, row in anonymous.items()
+                                                          if row['collection_kind'] == 'datasets'}
+    only_analysis = client.get('/collections', headers=USER, params={'kind': 'analysis'}).json()['collections']
+    assert {row['group_id'] for row in only_analysis} == {'AT6', 'NO6'}
+    bad = client.get('/collections', params={'kind': 'both'})
+    assert bad.status_code == 422 and bad.json()['status'] == 'invalid_kind'
+
+
+def test_the_listing_limit_answers_the_documented_error(client):
+    for value in (0, 201, -1):
+        response = client.get('/artefacts', params={'limit': value})
+        assert response.status_code == 422 and response.json()['status'] == 'invalid_limit', value
+
+
+@pytest.mark.parametrize('value', ['!!', 'PU', 'PU1X', 'PU1\n', ''])
+def test_the_listing_group_id_is_validated(client, value):
+    response = client.get('/artefacts', params={'group_id': value})
+    assert response.status_code == 422 and response.json()['status'] == 'invalid_group_id'
+
+
+def test_a_missing_file_is_a_named_file_not_found(client):
+    response = client.get('/artefacts/PU1/pub/fig-public/v2/files/nothere.png')
+    assert response.status_code == 404
+    body = response.json()
+    assert body['status'] == 'file_not_found' and body['file'] == 'nothere.png'
+    assert 'nothere.png' in body['message'] and body['ref'] == 'PU1/pub/fig-public@v2'

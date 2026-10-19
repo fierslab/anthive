@@ -538,3 +538,15 @@ def test_every_validation_regex_is_used_with_fullmatch():
         source = inspect.getsource(module)
         assert not re.search(r'_RE\.match\(', source), module.__name__
         assert not re.search(r'_RE\.search\(', source), module.__name__
+
+
+@pytest.mark.parametrize('name', ['manifest.json', 'Manifest.JSON'])
+def test_manifest_json_is_a_reserved_top_level_name(tmp_path, clock, name):
+    service, _s3 = make_service(tmp_path, clock)
+    body = _refused(service, artefact_body({name: b'{}'}, kind='other', artefact_id='notes'), 422, 'invalid_name')
+    assert 'reserved' in body['message']
+    # pyvark's fallback name is refused by the name rule already (no leading underscore)
+    _refused(service, artefact_body({'_manifest.json': b'{}'}, kind='other', artefact_id='notes'), 422,
+             'invalid_name')
+    # in a subfolder the name is fine (clients write the manifest at the top level only)
+    _create(service, artefact_body({'meta/manifest.json': b'{}'}, kind='other', artefact_id='notes'), ANALYST, None)

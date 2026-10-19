@@ -244,6 +244,23 @@ Collection deposits create `<Group>/index.md`; a public one is held.
   the dataset); one that fails after transient errors or an internal error leaves its version `failed`, not
   `reserved`.
 
+### Collections listing and fixes found by the clients
+
+- New `GET /collections` (`?kind=datasets|analysis`): every collection the caller may see, ordered by group id,
+  as `{n_collections, collections: [{group_id, group, title, collection_kind, access, n_datasets,
+  artefacts_count, authors, year}]}`. A dataset collection is listed when the caller sees at least one of its
+  datasets (`n_datasets` counts those; `access` is `public` when all of them are); an analysis collection by its
+  index.md `access`, so internal ones need a sign-in. An unknown `kind` is 422 `invalid_kind`.
+- `GET /artefacts`: `limit` outside 1 to 200 now answers the documented 422 `invalid_limit` (it was FastAPI's
+  generic validation error), and a `group_id` that is not a 3-character id is 422 `invalid_group_id` (it was an
+  empty 200).
+- A download of a file the version does not have is 404 `file_not_found` with `ref` (`...@vN`) and `file`; it was
+  `not_found` naming only the artefact.
+- `manifest.json` is a reserved top-level file name in artefact deposits (422 `invalid_name`): vark and pyvark
+  write the version's manifest beside downloaded files under that name. `_manifest.json` (pyvark's fallback) was
+  already refused by the name rule. Inside a subfolder the name is allowed.
+- `API_VERSION` is `2.47.0` (unreleased).
+
 ### Deployment and sync (phase A4)
 
 - `site.yaml` gains an `artefacts:` block (`enabled`, `upload_groups`, `collections_create_groups`, size and

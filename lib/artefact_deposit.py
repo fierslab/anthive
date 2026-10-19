@@ -45,6 +45,9 @@ INCOMING_DIR = 'artefacts'
 DEFERRED_KINDS: Tuple[str, ...] = ()
 #: ``deposit_kind: "de_only"`` (2.46) is accepted as an alias of a ``de_table`` artefact until this release
 DE_ONLY_ALIAS_UNTIL = '2.48.0'
+#: top-level file names a deposit may not use: vark and pyvark write the version's manifest beside the
+#: downloaded files as manifest.json (pyvark falls back to _manifest.json)
+RESERVED_FILE_NAMES = ('manifest.json', '_manifest.json')
 
 #: allowed file endings per kind (design 2.1); ``other`` takes any of them plus plain data formats
 KIND_EXTENSIONS: Dict[str, Tuple[str, ...]] = {
@@ -763,6 +766,10 @@ class ArtefactDepositService(DepositService):
             problem = artefacts.file_name_problem(name)
             if problem:
                 raise DepositError(422, 'invalid_name', problem)
+            if str(name).lower() in RESERVED_FILE_NAMES:
+                raise DepositError(422, 'invalid_name', f'{name} is reserved: clients write the manifest next to '
+                                                        f'downloaded files under that name; rename the file or put '
+                                                        f'it in a subfolder')
             if entry.get('kind') not in (None, 'artefact_file'):
                 raise DepositError(422, 'invalid', f'{name}: file kind is artefact_file')
             problem = extension_problem(kind, name)

@@ -2032,11 +2032,11 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.46.3"
+API_VERSION = "2.47.0"
 # Release date (YYYY-MM-DD) of API_VERSION; None while it is unreleased. Set it
 # in the release commit together with the changelog heading
 # (tests/test_version_sync.py keeps the two in step).
-API_VERSION_RELEASED: Optional[str] = "2026-10-19"
+API_VERSION_RELEASED: Optional[str] = None
 # Oldest pyvark (codeberg.org/mfiers/pyvark, `from vark import AnthiveClient`)
 # that works with this API.
 API_COMPATIBLE_PYVARK = ">=0.9.0"
@@ -3030,6 +3030,58 @@ def _resolve_collection_dir(group_id: str) -> Tuple[Optional[Path], Optional[str
         if str(meta.get('group_id') or '').strip() == group_id:
             return index_path.parent, str(meta.get('group') or index_path.parent.name)
     return None, None
+
+
+@app.get("/collections", tags=["collections"])
+def list_collections(request: Request,
+                     kind: Optional[str] = Query(None, description="datasets or analysis")):
+    """Every collection the caller may see: ``{collections: [{group_id, group, title, collection_kind, access,
+    n_datasets, artefacts_count, authors, year}], n_collections}``, ordered by group id (REST 2.47).
+
+    A dataset collection is listed when the caller sees at least one of its datasets (``n_datasets`` counts
+    those); an analysis collection (``collection_kind: analysis``, no datasets of its own) by its index.md
+    ``access``, so internal ones need a sign-in. ``access`` of a dataset collection is ``public`` when every
+    visible dataset is public, else ``internal``."""
+    if kind is not None and kind not in ('datasets', 'analysis'):
+        return JSONResponse({'status': 'invalid_kind', 'message': 'kind is datasets or analysis'}, status_code=422)
+    visible: Dict[str, List[Dict[str, Any]]] = {}
+    for db in registry.list_databases():
+        gid = db.get('group_id') or (db.get('id') or '').split('/')[0]
+        if gid:
+            visible.setdefault(gid, []).append(db)
+    collections = registry.collection_registry()
+    policy, viewer = _artefact_policy(), _artefact_viewer(request)
+    rows = []
+    for gid in sorted(set(visible) | set(collections)):
+        collection = collections.get(gid)
+        datasets = visible.get(gid, [])
+        collection_kind = collection.kind if collection is not None else 'datasets'
+        if datasets:
+            access = 'public' if all(str(d.get('access') or '').lower() == 'public' for d in datasets) else 'internal'
+        elif collection is not None and collection.kind == 'analysis':
+            try:
+                if not policy.collection_visible(gid, viewer):
+                    continue
+            except Exception as exc:  # noqa: BLE001 - fail closed
+                log.warning("collection access check failed for %s: %s", gid, exc)
+                continue
+            access = collection.access or 'internal'
+        else:
+            continue                                  # a dataset collection the caller sees nothing of
+        if kind is not None and collection_kind != kind:
+            continue
+        meta = collection.meta if collection is not None else {}
+        first = (datasets[0].get('collection') or {}) if datasets else {}
+        rows.append({
+            'group_id': gid,
+            'group': (collection.folder if collection is not None else None) or first.get('group'),
+            'title': (collection.title if collection is not None else None) or first.get('title'),
+            'collection_kind': collection_kind, 'access': access, 'n_datasets': len(datasets),
+            'artefacts_count': _artefact_count(request, group_id=gid),
+            'authors': meta.get('authors') if isinstance(meta.get('authors'), list) else None,
+            'year': meta.get('year'),
+        })
+    return {'n_collections': len(rows), 'collections': rows}
 
 
 @app.get("/collections/{group_id}/source", tags=["collections"])
@@ -16759,7 +16811,7 @@ def list_artefacts(request: Request,
                    q: Optional[str] = Query(None, max_length=200, description="text in the id, title, description"),
                    owner: Optional[str] = Query(None, max_length=200),
                    include_purged: bool = Query(False, description="also artefacts whose every version is purged"),
-                   limit: int = Query(50, ge=1, le=200),
+                   limit: int = Query(50, description="1 to 200 (422 invalid_limit otherwise)"),
                    cursor: Optional[str] = Query(None, max_length=1000),
                    all: bool = Query(False, description="admins: also artefacts of inactive or removed datasets")):
     """Artefacts the caller may see, ordered by reference: ``{artefacts: [summary], next_cursor}``.
@@ -16768,6 +16820,9 @@ def list_artefacts(request: Request,
     updated, size_bytes, main_file, preview, access, path}`` (``preview`` and ``path`` are relative to
     the API root)."""
     import artefacts as artefacts_lib  # noqa: PLC0415
+    if group_id is not None and not artefacts_lib.GROUP_ID_RE.fullmatch(group_id):
+        return JSONResponse({'status': 'invalid_group_id', 'message': 'group_id is a 3-character collection id '
+                                                                      'such as S26'}, status_code=422)
     service = _artefact_service()
     viewer = _artefact_viewer(request)
     try:
