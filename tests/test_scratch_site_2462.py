@@ -200,7 +200,8 @@ def _watch_namespace(logged: list, exits: list) -> dict:
         def _exit(code):
             exits.append(code)
     from typing import Optional
-    namespace = {'log': logged.append, 'signal': signal, 'os': FakeOs, 'Optional': Optional, '_stop': False}
+    namespace = {'log': logged.append, 'signal': signal, 'os': FakeOs, 'Optional': Optional, '_stop': False,
+                 '_terminate_children': lambda: logged.append('children terminated')}
     return _lift(REPO / 'bin/ingest/ant-ingest-watch',
                  {'_handle_stop', '_log_s3_retry', 's3_client', 'LIST_RETRIES', 'LIST_TIMEOUTS', 'TRANSFER_RETRIES',
                   'TRANSFER_TIMEOUTS'}, namespace)
@@ -214,6 +215,30 @@ def test_second_sigterm_exits_at_once():
     assert 'send it again to exit now' in logged[-1]
     namespace['_handle_stop'](signal.SIGTERM, None)
     assert exits == [128 + signal.SIGTERM] and 'second SIGTERM: exiting now' in logged[1]
+    assert 'children terminated' in logged
+
+
+def test_terminate_children_reaches_grandchildren():
+    import os
+    import subprocess
+    import time
+    from pathlib import Path
+    if not Path('/proc').is_dir():
+        pytest.skip('needs /proc')
+    namespace = _lift(REPO / 'bin/ingest/ant-ingest-watch', {'_child_pids', '_terminate_children'},
+                      {'os': os, 'signal': signal, 'Path': Path})
+    shell = subprocess.Popen(['sh', '-c', 'sleep 60 & wait'])
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline and len(namespace['_child_pids'](os.getpid())) < 2:
+            time.sleep(0.05)
+        pids = namespace['_child_pids'](os.getpid())
+        assert shell.pid in pids and len(pids) >= 2
+        namespace['_terminate_children']()
+        assert shell.wait(timeout=5) is not None
+    finally:
+        if shell.poll() is None:
+            shell.kill()
 
 
 def test_listing_client_retries_little_and_logs_each_attempt():

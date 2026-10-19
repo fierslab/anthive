@@ -65,6 +65,38 @@ from ingest_pipeline import ApiClient, Pipeline, PipelineConfig, SubprocessRunne
 _stop = False
 
 
+def _child_pids(parent: int) -> list:
+    """Direct and indirect child pids of `parent` (Linux /proc; empty elsewhere)."""
+    children: dict = {}
+    proc = Path('/proc')
+    if not proc.is_dir():
+        return []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        children.setdefault(int(fields[1]), []).append(int(entry.name))
+    found, todo = [], [parent]
+    while todo:
+        for pid in children.get(todo.pop(), []):
+            found.append(pid)
+            todo.append(pid)
+    return found
+
+
+def _terminate_children() -> None:
+    """SIGTERM every child (ant-convert, ant-ingest-check, ...) before an immediate exit, so none keeps
+    writing the work directory while the next watcher starts. os._exit does not do this by itself."""
+    for pid in reversed(_child_pids(os.getpid())):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+
 def _handle_stop(signum, frame) -> None:  # noqa: ANN001
     """First SIGTERM/SIGINT: stop after the current step. Second: exit at once.
 
@@ -73,6 +105,7 @@ def _handle_stop(signum, frame) -> None:  # noqa: ANN001
     global _stop
     if _stop:
         log(f'second {signal.Signals(signum).name}: exiting now')
+        _terminate_children()
         os._exit(128 + signum)
     _stop = True
     log(f'{signal.Signals(signum).name}: stopping after the current step (send it again to exit now)')
