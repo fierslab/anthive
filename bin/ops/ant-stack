@@ -17,7 +17,9 @@ Commands:
                          anthive.yaml, Caddy snippets, Authelia config
     up / down / ps / logs [service] / restart [service...]
                          docker compose wrappers; only `up` applies a new
-                         render, the others stage it (stack/staging/)
+                         render, the others stage it (stack/staging/);
+                         ingest, publish-library and watch apply their own
+                         config only
     pull [--no-ingest]   stage a render, then pull every image site.yaml names
                          (app, ingest, caddy, authelia) and report what
                          changed; run `up` right after it
@@ -1141,11 +1143,26 @@ def promote(site: dict, only: list[str] | None = None) -> list[str]:
         return changed
 
 
+def apply_role_config(site: dict, role: str) -> None:
+    """Render, then put only ``role``'s config in place (ingest, watcher).
+
+    Those configs are read by on-demand runs (`ingest`, `publish-library`,
+    `watch`), never by a running service, so applying them changes nothing
+    that runs. Before this, S3 keys written after `init` stayed staged and the
+    first `ant-stack ingest -- ant sync pull` of a new site failed with
+    "s3.access_key_id is not set"."""
+    render(site, quiet=True, apply=False)
+    name = CONFIG_ROLES[role]
+    if name in _config_roles(site).values():
+        promote(site, only=[name])
+
+
 def render(site: dict, quiet: bool = False, apply: bool = True) -> Path:
     """Render site.yaml into stack/staging/, validate it, and (``apply``) put it in place.
 
-    ``apply=False`` (pull, check, ingest, logs, restart, publish-library; `up`
-    and `passwd` promote themselves after their checks) only stages: the
+    ``apply=False`` (pull, check, logs, restart; `up` and `passwd` promote
+    themselves after their checks, ingest, publish-library and watch apply only
+    their own config through ``apply_role_config``) only stages: the
     running stack keeps the config that matches its images until `ant-stack
     up` applies the new one. Before staging existed, `pull` wrote the new
     release's keys into the live config, and an old api that restarted before
@@ -2279,7 +2296,7 @@ def cmd_publish_library(args: argparse.Namespace) -> int:
         elif not site['s3'].get('enabled'):
             _say("PDFs: skipped (s3.enabled is false)")
         else:
-            render(site, quiet=True, apply=False)
+            apply_role_config(site, 'ingest')
             sync = ['ant', 'sync', 'library', '--no-git'] + (['--dry-run'] if args.dry_run else [])
             _say("PDFs: " + ' '.join(sync) + " (ingest container)")
             if run_compose(site, '--profile', 'ingest', 'run', '--rm', '--no-deps', '-T', 'ingest',
@@ -2378,7 +2395,7 @@ def cmd_passwd(args: argparse.Namespace) -> int:
 
 def cmd_ingest(args: argparse.Namespace) -> int:
     site = load_site(site_path(args))
-    render(site, quiet=True, apply=False)
+    apply_role_config(site, 'ingest')
     command = list(args.cmd)
     if command and command[0] == '--':
         command = command[1:]
@@ -2395,7 +2412,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     site = load_site(site_path(args))
     if not _watcher_enabled(site):
         raise SiteError("services.dataset_deposit and artefacts.enabled are off: there is no deposit watcher to run")
-    render(site, quiet=True, apply=False)
+    apply_role_config(site, 'watcher')
     extra = list(args.cmd or [])
     if extra and extra[0] == '--':
         extra = extra[1:]

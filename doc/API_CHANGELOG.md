@@ -273,6 +273,18 @@ Collection deposits create `<Group>/index.md`; a public one is held.
   versions; `--no-artefacts` skips it. Head records and manifests come with the h5adstore checkout. `ant sync
   push` never uploads `static/artefacts/`.
 
+## 2.46.4 (2026-10-19)
+
+Patch release. No endpoint, parameter or response field changes. Clients do not need to update.
+
+- `ant-stack ingest` and `publish-library` now apply the ingest config, and `ant-stack watch` the watcher config,
+  before they run. These configs are read only by on-demand runs, never by a running service. Since 2.46.1 they
+  stayed staged until `up`, so S3 keys written after `init` (the order `doc/DEPLOY_CONTAINERS.md` gives) never
+  reached the ingest container and the first `ant-stack ingest -- ant sync pull` of a new site failed with
+  `s3.access_key_id is not set in anthive.yaml`. Found by the 2.46.3 scratch-site check.
+- `doc/RELEASING.md`: the scratch-site check removes the release images first and says how to see the effect of
+  `auth.internal_requires_auth` on an authelia site.
+
 ## 2.46.3 (2026-10-19)
 
 Patch release. No endpoint, parameter or response field changes. Clients do not need to update.
