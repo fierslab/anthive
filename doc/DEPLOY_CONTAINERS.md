@@ -4,7 +4,7 @@ This is the one supported way to run anthive: a docker compose stack,
 described by one file (`site.yaml`) and driven by one tool
 (`bin/ops/ant-stack`). Follow the steps in order.
 
-Every command below was run end to end on a fresh checkout for release 2.46.1.
+Every command below was run end to end on a fresh checkout for release 2.46.2.
 
 Plan about an hour, plus the time it takes to download the data.
 
@@ -183,7 +183,7 @@ sudo mkdir -p /srv/anthive && sudo chown $USER /srv/anthive
 cd /srv/anthive
 git clone https://gitlab.kuleuven.be/bdslab/anthive/anthive4.git
 cd anthive4
-git checkout v2.46.1
+git checkout v2.46.2
 ```
 
 Always check out a release tag, and use the same number as the image tag in
@@ -271,7 +271,7 @@ ports:
 
 images:
   registry: registry.gitlab.kuleuven.be/bdslab/anthive/anthive4
-  tag: 2.46.1                                 # same number as the git tag (step 2)
+  tag: 2.46.2                                 # same number as the git tag (step 2)
 
 s3:                                           # skip if you have no S3 keys
   enabled: true
