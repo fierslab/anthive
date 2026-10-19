@@ -737,6 +737,8 @@ class ArtefactPublisher:
             text_problems.append('description shorter than 50 characters')
         add('meta.text', 'fail' if text_problems else 'pass', '; '.join(text_problems) or 'title and description')
         missing = rules.provenance_missing(block.get('declared'))
+        if block.get('alias_of') == 'de_only':
+            missing = [item for item in missing if not item.startswith('declared.software')]
         if missing:
             strict = kind in rules.PROVENANCE_STRICT_KINDS and block.get('alias_of') != 'de_only'
             add('meta.provenance', 'fail' if strict else 'warn',

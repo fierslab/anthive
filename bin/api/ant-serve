@@ -17306,8 +17306,52 @@ def dataset_deposit_vocab(request: Request):
     """What a deposit must contain: file kinds and names, limits, the mus
     vocabulary (required fields, controlled values), the sidecar keys the
     route reads, the seed .md and index.md rules with templates, held
-    reasons, and whether deposits are switched on here."""
-    return _deposit_call(request, lambda service, identity: service.vocab(identity))
+    reasons, and whether deposits are switched on here. ``caller`` (and ``artefacts``) carry
+    ``may_deposit_datasets``, ``may_deposit_artefacts`` and ``may_create_collections`` for this caller."""
+    def run(service, identity):
+        answer = service.vocab(identity)
+        rights = _deposit_rights(request, service)
+        if isinstance(answer.get('caller'), dict):
+            answer['caller'].update(rights)
+        if isinstance(answer.get('artefacts'), dict):
+            answer['artefacts'].update({key: rights[key] for key in ('may_deposit_artefacts',
+                                                                     'may_create_collections')})
+        return answer
+    return _deposit_call(request, run)
+
+
+def _deposit_rights(request: Request, service) -> Dict[str, bool]:
+    """What the signed-in caller may deposit here (the upload groups and the site switches)."""
+    def allowed(kind: str) -> bool:
+        return _require_dataset_uploader(request, kinds=(kind,))[0] is not None
+    artefacts_on = bool(getattr(service, 'artefacts_active', False))
+    return {'may_deposit_datasets': bool(service.settings.active) and allowed('dataset'),
+            'may_deposit_artefacts': artefacts_on and allowed('artefact'),
+            'may_create_collections': artefacts_on and allowed('collection')}
+
+
+def _signed_in_identity(request: Request):
+    """(Identity, None) for any signed-in caller (no upload group needed), else (None, 403). Used where the
+    service decides by ownership: purges of one's own versions, one's own purge requests."""
+    from dataset_deposit import Identity  # noqa: PLC0415
+    user = (request.headers.get('Remote-User') or '').strip()
+    if get_auth_settings()['mode'] != 'none' and user:
+        return Identity(user=user, name=(request.headers.get('Remote-Name') or '').strip(),
+                        email=(request.headers.get('Remote-Email') or '').strip(),
+                        is_admin=_caller_is_admin(request)), None
+    return None, JSONResponse({'status': 'forbidden', 'message': 'sign in first'}, status_code=403)
+
+
+def _owner_call(request: Request, action, status_code: int = 200):
+    """``action(service, identity)`` for any signed-in caller; DepositError becomes its JSON answer."""
+    from dataset_deposit import DepositError  # noqa: PLC0415
+    identity, forbidden = _signed_in_identity(request)
+    if forbidden is not None:
+        return forbidden
+    try:
+        return JSONResponse(action(_deposit_service(), identity), status_code=status_code)
+    except DepositError as exc:
+        return JSONResponse(exc.body, status_code=exc.status, headers=exc.headers or None)
 
 
 @app.get("/datasets/deposit", tags=["datasets-deposit"], include_in_schema=False)
@@ -17364,10 +17408,22 @@ def purge_artefact_version(request: Request, group_id: str, scope: str, artefact
                            body: Any = Body(None)):
     """Purge one version ``{reason, confirm: "<ref>@v<N>"}``: the uploader of that version, the artefact's
     owner or an admin. 202 ``{ref, version, state: "purge_requested"}``; the watcher deletes the files and the
-    version becomes a tombstone. An artefact the caller cannot see is a 404."""
-    return _deposit_call(request, lambda service, identity: service.request_purge(
-        identity, _artefact_context(request), group_id, scope, artefact_id, version, body), status_code=202,
-        kinds=('artefact',))
+    version becomes a tombstone. An artefact the caller cannot see is a 404. Any signed-in caller may ask; the
+    service admits only the version's uploader, the artefact's owner and admins (also an uploader who has left
+    the upload groups, for their own versions)."""
+    return _owner_call(request, lambda service, identity: service.request_purge(
+        identity, _artefact_context(request), group_id, scope, artefact_id, version, body), status_code=202)
+
+
+@app.get("/artefacts/purges", tags=["artefacts"], include_in_schema=False)
+def artefact_purges(request: Request, state: Optional[str] = Query(None, description="requested, purging, done, "
+                                                                                      "needs_decision, failed")):
+    """Purge requests: your own (admins: everyone's), newest first, ``{purges: [{ref, version, state, reason,
+    requested, updated, requested_by, detail}]}``; ``detail`` says why one needs a decision."""
+    if state is not None and state not in ('requested', 'purging', 'done', 'needs_decision', 'failed'):
+        return JSONResponse({'status': 'invalid_state', 'message': 'state is requested, purging, done, '
+                                                                   'needs_decision or failed'}, status_code=422)
+    return _owner_call(request, lambda service, identity: {'purges': service.purges(identity, state=state)})
 
 
 @app.get("/datasets/deposit/groups/{data_project}", tags=["datasets-deposit"], include_in_schema=False)

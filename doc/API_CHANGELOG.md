@@ -260,6 +260,19 @@ Collection deposits create `<Group>/index.md`; a public one is held.
   write the version's manifest beside downloaded files under that name. `_manifest.json` (pyvark's fallback) was
   already refused by the name rule. Inside a subfolder the name is allowed.
 - `API_VERSION` is `2.47.0` (unreleased).
+- New `GET /artefacts/purges` (`?state=requested|purging|done|needs_decision|failed`): the caller's own purge
+  requests, admins everyone's, newest first, as `{purges: [{ref, version, state, reason, requested, updated,
+  requested_by, detail}]}`; `detail` says why a request needs a decision. Any signed-in caller; 403 without a
+  sign-in, 422 `invalid_state`.
+- `POST /artefacts/.../v{N}/purge` is decided by the uploader / owner / admin rule alone: an uploader who has
+  left the upload groups may still purge their own versions (any other signed-in caller still gets 403).
+- `GET /datasets/deposit/vocab`: `caller` carries `may_deposit_datasets`, `may_deposit_artefacts` and
+  `may_create_collections`; the `artefacts` block repeats the last two.
+- A de_table (or de_only alias) deposit by someone who may not update the dataset is 403 `not_owner` (was
+  `forbidden`), as at publication and on the 2.46 route.
+- A collection create answers `next` as an object of routes (`{status}`) like the other creates; the sentence
+  moved to `message`.
+- The de_only alias no longer warns about a missing `declared.software` (a 2.46 request cannot carry one).
 
 ### Deployment and sync (phase A4)
 

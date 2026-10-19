@@ -73,7 +73,8 @@ def test_a_de_table_of_someone_elses_dataset_is_refused_at_create(tmp_path, cloc
     service, _s3, _publisher, _db, _api = _setup(tmp_path, clock)
     with pytest.raises(dd.DepositError) as caught:
         deposit(service, _s3, OTHER, de_files(), artefact_id='tvc', **DE_INTERNAL)
-    assert caught.value.status == 403 and 'owner' in str(caught.value.body)
+    assert caught.value.status == 403 and caught.value.body['status'] == 'not_owner'
+    assert 'owner or an admin' in caught.value.body['message']
     with pytest.raises(dd.DepositError) as caught:                     # the de_only alias too
         service.create(OTHER, _legacy_body(de_files()), context(service.store_root))
     assert caught.value.status == 403
@@ -109,6 +110,8 @@ def test_the_alias_on_a_fully_purged_artefact_follows_the_purged_version(tmp_pat
     files = de_files()
     answer = service.create(ANALYST, _legacy_body(files), context(service.store_root))
     assert answer['artefact']['new_version_of'] == 1
+    # a 2.46 client cannot declare software: no provenance warning it could never fix
+    assert not any('declared.software' in warning for warning in answer['warnings'])
     upload(s3, answer, files)
     assert service.complete(ANALYST, answer['deposit_id'])['state'] == 'uploaded'
     poll_until_final(publisher, s3, clock)

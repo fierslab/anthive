@@ -51,9 +51,12 @@ ARTEFACT_ROUTES = {
     '/artefacts/{group_id}/{scope}/{artefact_id}/{version}/files/{name:path}': 'download_artefact_file',
     '/artefacts/{group_id}/{scope}/{artefact_id}/{version}/preview/{name:path}': 'get_artefact_preview',
     '/artefacts/{group_id}/{scope}/{artefact_id}/{version}/purge': 'purge_artefact_version',
+    '/artefacts/purges': 'artefact_purges',
 }
 #: routes not lifted into the read-route harness (tested in tests/test_artefact_deposit_api.py)
 WRITE_ROUTES = {'/artefacts/{group_id}/{scope}/{artefact_id}/{version}/purge'}
+#: routes about the caller's own purge requests (no artefact is resolved; the service filters by requester)
+OWN_ROUTES = {'/artefacts/purges'}
 
 _SERVE_WANTED = {
     'UnknownDatabaseError', 'unknown_database_detail', '_HIDDEN_DB_IDS', '_hidden_db_ids', '_visible_db_ids',
@@ -64,7 +67,7 @@ _SERVE_WANTED = {
     'get_group_info', 'get_database_info', 'rescan_databases', 'list_collections',
     '_artefact_service_instance', '_artefact_service_lock', '_artefact_s3_client', '_artefact_service',
     '_artefact_viewer', '_artefact_policy', '_artefact_error', '_artefact_resolve', '_artefact_count',
-    *(name for path, name in ARTEFACT_ROUTES.items() if path not in WRITE_ROUTES),
+    *(name for path, name in ARTEFACT_ROUTES.items() if path not in WRITE_ROUTES | OWN_ROUTES),
 }
 
 USER = {'Remote-User': 'alice', 'Remote-Groups': 'users'}
@@ -225,13 +228,15 @@ def test_every_artefact_route_is_known_and_checks_access():
             assert '_artefact_policy()' in source and '_artefact_viewer(request)' in source
         elif path in WRITE_ROUTES:          # the service resolves the artefact with the caller's view
             assert 'request_purge(' in source and '_artefact_context(request)' in source
+        elif path in OWN_ROUTES:            # a signed-in caller, the requester's own rows (admins: all)
+            assert '_owner_call(' in source and 'service.purges(identity' in source
         else:
             assert '_artefact_resolve(request, group_id, scope, artefact_id)' in source, path
 
 
 def test_live_routes_match_the_inventory(client):
     live = {route.path for route in client.app.routes if getattr(route, 'path', '').startswith('/artefacts')}
-    assert live == set(ARTEFACT_ROUTES) - WRITE_ROUTES
+    assert live == set(ARTEFACT_ROUTES) - WRITE_ROUTES - OWN_ROUTES
 
 
 # ── the access matrix ─────────────────────────────────────────────────────────

@@ -29,7 +29,7 @@ SERVE_PATH = REPO_ROOT / 'bin' / 'api' / 'ant-serve'
 _SERVE_WANTED = {'_require_dataset_uploader', '_deposit_call', '_caller_is_admin',
                  '_require_admin', 'dataset_deposit_vocab', 'dataset_deposit_create', 'dataset_deposit_status',
                  'dataset_deposit_complete', 'dataset_deposit_withdraw', 'dataset_deposit_list',
-                 'purge_artefact_version'}
+                 'purge_artefact_version', '_deposit_rights', '_signed_in_identity', '_owner_call', 'artefact_purges'}
 
 ANALYST = {'Remote-User': 'ana', 'Remote-Groups': 'users,analysts', 'Remote-Email': 'ana@example.org'}
 ANALYST2 = {'Remote-User': 'otto', 'Remote-Groups': 'analysts'}
@@ -179,3 +179,54 @@ def test_new_routes_are_hidden_from_the_schema():
     source = SERVE_PATH.read_text()
     assert ('@app.post("/artefacts/{group_id}/{scope}/{artefact_id}/{version}/purge", tags=["artefacts"],\n'
             '          include_in_schema=False)') in source
+
+
+# ── vark findings on the branch (2.47.0) ────────────────────────────────────────
+
+def test_a_former_uploader_may_purge_their_own_version(tmp_path, monkeypatch):
+    from tests.artefact_helpers import write_artefact
+    client, service, _s3 = serve(tmp_path, monkeypatch)
+    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'figure', 'volcano', [{'files': {'v.png': PNG}}],
+                   owner='ana')
+    body = {'reason': 'wrong contrast', 'confirm': 'PU1/int/volcano@v1'}
+    former = {'Remote-User': 'ana', 'Remote-Groups': 'users'}            # left the analysts group
+    assert client.post('/artefacts/PU1/int/volcano/v1/purge', headers=USER, json=body).status_code == 403
+    response = client.post('/artefacts/PU1/int/volcano/v1/purge', headers=former, json=body)
+    assert response.status_code == 202, response.text
+
+
+def test_purge_requests_are_listed_for_the_requester_and_admins(tmp_path, monkeypatch):
+    from tests.artefact_helpers import write_artefact
+    client, service, _s3 = serve(tmp_path, monkeypatch)
+    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'figure', 'volcano', [{'files': {'v.png': PNG}}],
+                   owner='ana')
+    client.post('/artefacts/PU1/int/volcano/v1/purge', headers=ANALYST,
+                json={'reason': 'wrong contrast', 'confirm': 'PU1/int/volcano@v1'})
+    with service.store._lock:
+        service.store.conn.execute("UPDATE artefact_purges SET state = 'needs_decision', detail = 'kept: sha differs'")
+    mine = client.get('/artefacts/purges', headers=ANALYST).json()['purges']
+    assert [(row['ref'], row['version'], row['state'], row['detail'], row['reason']) for row in mine] == \
+        [('PU1/int/volcano', 1, 'needs_decision', 'kept: sha differs', 'wrong contrast')]
+    assert client.get('/artefacts/purges', headers=ANALYST2).json()['purges'] == []
+    assert len(client.get('/artefacts/purges', headers=ADMIN).json()['purges']) == 1
+    assert client.get('/artefacts/purges?state=done', headers=ADMIN).json()['purges'] == []
+    assert client.get('/artefacts/purges?state=bogus', headers=ADMIN).status_code == 422
+    assert client.get('/artefacts/purges').status_code == 403
+
+
+def test_the_vocabulary_says_what_the_caller_may_deposit(tmp_path, monkeypatch):
+    client, _service, _s3 = serve(tmp_path, monkeypatch)
+    analyst = client.get('/datasets/deposit/vocab', headers=ANALYST).json()
+    assert analyst['caller']['may_deposit_artefacts'] is True and analyst['caller']['may_create_collections'] is True
+    assert analyst['caller']['may_deposit_datasets'] is False
+    assert analyst['artefacts']['may_deposit_artefacts'] is True
+    curator = client.get('/datasets/deposit/vocab', headers=CURATOR).json()
+    assert curator['caller']['may_deposit_artefacts'] is True and curator['caller']['may_create_collections'] is False
+
+
+def test_collection_create_answers_next_as_an_object_of_routes(tmp_path, monkeypatch):
+    client, _service, _s3 = serve(tmp_path, monkeypatch)
+    answer = _collection(client, ANALYST).json()
+    assert answer['next'] == {'status': f'/datasets/deposit/{answer["deposit_id"]}'} and answer['message']
+    artefact = _artefact(client, ANALYST).json()
+    assert set(artefact['next']) == {'urls', 'complete', 'status'}

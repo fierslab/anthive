@@ -549,7 +549,7 @@ def test_unknown_names_never_reach_s3_or_disk(tmp_path):
                  'artefact.md', '../manifest.json', 'v.pdf\x00', '%2e%2e/v.pdf'):
         with pytest.raises(artefacts.ArtefactError) as caught:
             service.deliver(entry, entry.versions[2], name, 'k')
-        assert caught.value.status == 404 and caught.value.body['status'] == 'not_found'
+        assert caught.value.status == 404 and caught.value.body['status'] == 'file_not_found'
     assert s3.calls == []
 
 

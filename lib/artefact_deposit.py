@@ -741,6 +741,9 @@ class ArtefactDepositService(DepositService):
             raise DepositError(422, 'made_from_unknown', f'made_from must include the scope dataset {scope_db_id}')
         declared = block.get('declared')
         missing = provenance_missing(declared)
+        if not strict:
+            # the de_only alias: a 2.46 request carries no software list and its client cannot add one
+            missing = [item for item in missing if not item.startswith('declared.software')]
         if missing and kind in PROVENANCE_STRICT_KINDS and strict:
             raise DepositError(422, 'provenance_incomplete', 'provenance is incomplete: ' + ', '.join(missing),
                                missing=missing)
@@ -818,7 +821,7 @@ class ArtefactDepositService(DepositService):
         """Review N1: DE tables change the dataset (a patch version and new DE studies), so a de_table (and
         the de_only alias) needs the right to update the dataset, as the 2.46 DE-only route did."""
         if not self.may_update_dataset(identity, db_id):
-            raise DepositError(403, 'forbidden', f'DE tables are added to {db_id} by its owner or an admin '
+            raise DepositError(403, 'not_owner', f'DE tables are added to {db_id} by its owner or an admin '
                                                  f'(datasets_deposit_update_policy: own); ask an admin to record '
                                                  f'you as its owner, or deposit the table as kind table')
 
@@ -970,7 +973,8 @@ class ArtefactDepositService(DepositService):
                 'data_project': data_project, 'group_id': group_id, 'index_md': text,
                 'held': ['public_access'] if block['access'] == 'public' and self.artefact_settings.get(
                     'artefacts_hold_public', True) else [],
-                'next': f'the watcher places it within a few minutes; follow it with GET /datasets/deposit/{deposit_id}'}
+                'next': {'status': f'/datasets/deposit/{deposit_id}'},
+                'message': 'the watcher places the collection within a few minutes; follow it with the status route'}
 
     def _collection_conflict(self, data_project: str, group_id: str, exclude: str) -> Callable[[sqlite3.Connection], None]:
         def check(conn: sqlite3.Connection) -> None:
