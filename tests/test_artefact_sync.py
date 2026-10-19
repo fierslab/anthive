@@ -217,3 +217,36 @@ def test_checked_path_refuses_links_and_escapes(tmp_path):
         artefact_sync.checked_path(tmp_path, 'G/static/artefacts/int/figure/x/v1/files/a.png')
     with pytest.raises(artefact_sync.UnsafePath):
         artefact_sync.checked_path(tmp_path, 'G/static/artefacts/../x')
+
+
+# ── review round 3, nit 9: previews are checked against the manifest ──────────────────────────────────
+
+def test_previews_are_recorded_in_the_manifest_and_checked_against_it(tmp_path, clock):
+    import hashlib
+    _service, s3, _publisher = _primary(tmp_path, clock)
+    manifest_path = tmp_path / 'store' / 'Public2021/static/artefacts/int/table/big/v1/manifest.json'
+    import json
+    previews = json.loads(manifest_path.read_text())['previews']
+    assert [entry['name'] for entry in previews] == ['big.tsv.txt']
+    second = _checkout(tmp_path)
+    key = f'{CATALOG}Public2021/static/artefacts/int/table/big/v1/preview/big.tsv.txt'
+    forged = b'<script>forged preview</script>'
+    s3.objects[key]['body'] = forged
+    s3.objects[key]['metadata'] = {'sha256': hashlib.sha256(forged).hexdigest()}     # the object vouches for itself
+    actions = [action for action in artefact_sync.plan(second, s3, BUCKET, CATALOG, INLINE_MAX)
+               if action.reason == 'preview' and 'big.tsv.txt' in action.rel]
+    assert len(actions) == 1 and actions[0].sha256 == previews[0]['sha256']
+    counts = artefact_sync.apply(actions, second, s3, BUCKET, log=lambda message: None)
+    assert counts['failed'] == 1 and not (second / actions[0].rel).exists()
+
+
+def test_a_manifest_without_previews_pulls_none(tmp_path, clock):
+    import json
+    _service, s3, _publisher = _primary(tmp_path, clock)
+    second = _checkout(tmp_path)
+    for manifest_path in second.rglob('manifest.json'):
+        manifest = json.loads(manifest_path.read_text())
+        manifest.pop('previews', None)
+        manifest_path.write_text(json.dumps(manifest))        # the head record's sha no longer matches: noted
+    actions = artefact_sync.plan(second, s3, BUCKET, CATALOG, INLINE_MAX)
+    assert not [action for action in actions if action.reason == 'preview']

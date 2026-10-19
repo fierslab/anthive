@@ -1192,6 +1192,9 @@ class ArtefactPublisher:
                     suffix, data = preview
                     rel = path.preview_rel(number, f'{name}{suffix}')
                     self._write_local_once(rel, data, path.group)
+                    # recorded in the manifest, so a pull checks the preview against it (review round 3)
+                    marker.setdefault('previews', {})[name] = {'name': f'{name}{suffix}', 'size': len(data),
+                                                               'sha256': hashlib.sha256(data).hexdigest()}
                     key = artefacts.s3_key(self.catalog_prefix, rel)
                     if self._head_or_none(key) is None:
                         self.s3.put_object(Bucket=self.bucket, Key=key, Body=data,
@@ -1244,6 +1247,7 @@ class ArtefactPublisher:
                          'checks': {entry['id']: entry['status'] for entry in (marker.get('report') or {}).get('checks') or []},
                          **({'approval': marker['approval']} if marker.get('approval') else {})},
             'de': marker.get('de') if path.kind == 'de_table' else None,
+            'previews': [{'file': file_name, **info} for file_name, info in sorted((marker.get('previews') or {}).items())],
         }
         problems = artefacts.validate_manifest(manifest, path, group_id, number)
         if problems:

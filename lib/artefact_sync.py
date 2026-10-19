@@ -7,8 +7,8 @@ h5adstore checkout; writing them here would make the next ``git pull`` refuse to
 What a pull does, driven by the local head records and manifests:
 
 * inline files of live versions (``figure`` artefacts, and any file of at most ``artefacts_inline_max_mb``)
-  and their previews are downloaded when missing or different, and verified against the manifest's sha256
-  (previews against the object's sha256 metadata);
+  and the previews the manifest lists are downloaded when missing or different, and verified against the
+  sha256 the manifest records;
 * other files only when ``--artefacts PATTERN`` selects their artefact (``fnmatch`` against
   ``<group_id>/<scope>/<artefact_id>`` and ``...@v<N>``), with the same check;
 * the local files and previews of purged versions are deleted;
@@ -118,13 +118,6 @@ def selected(pattern: Optional[str], ref: str, version: int) -> bool:
                for candidate in (ref, f'{ref}@v{version}'))
 
 
-def _list(s3: Any, bucket: str, prefix: str) -> List[Dict[str, Any]]:
-    objects: List[Dict[str, Any]] = []
-    for page in s3.get_paginator('list_objects_v2').paginate(Bucket=bucket, Prefix=prefix):
-        objects.extend(page.get('Contents', []) or [])
-    return objects
-
-
 def plan(store_root: Path, s3: Any, bucket: str, catalog_prefix: str, inline_max_bytes: int,
          pattern: Optional[str] = None) -> List[Action]:
     """What a pull would do (reads the checkout, lists preview prefixes and HEADs previews; writes nothing)."""
@@ -180,22 +173,21 @@ def plan(store_root: Path, s3: Any, bucket: str, catalog_prefix: str, inline_max
                     continue
                 actions.append(Action('download', str(rel), artefacts.s3_key(catalog_prefix, rel), int(item['size']),
                                       item['sha256'], 'inline' if inline else 'selected'))
-            preview_prefix = artefacts.s3_key(catalog_prefix, path.version_rel(number) / artefacts.PREVIEW_DIR) + '/'
-            for obj in _list(s3, bucket, preview_prefix):
-                name = obj['Key'][len(preview_prefix):]
+            # previews are checked against the sha256 the manifest records (review round 3), never against the
+            # object's own metadata; a preview the manifest does not list is not pulled
+            for preview in manifest.get('previews') or []:
                 try:
-                    rel = path.preview_rel(number, name)
-                except ValueError:
-                    continue
-                head_object = s3.head_object(Bucket=bucket, Key=obj['Key'])
-                sha = (head_object.get('Metadata') or {}).get('sha256')
-                if not sha:
-                    actions.append(Action('note', str(rel), reason='preview without sha256 metadata; not pulled'))
+                    rel = path.preview_rel(number, str(preview['name']))
+                    sha, size = str(preview['sha256']), int(preview.get('size') or 0)
+                except (KeyError, TypeError, ValueError):
+                    actions.append(Action('note', str(path.version_rel(number)), reason='a preview entry of the '
+                                                                                        'manifest is not valid'))
                     continue
                 local = store_root / str(rel)
                 if local.is_file() and _sha256(local) == sha:
                     continue
-                actions.append(Action('download', str(rel), obj['Key'], int(obj.get('Size') or 0), sha, 'preview'))
+                actions.append(Action('download', str(rel), artefacts.s3_key(catalog_prefix, rel), size, sha,
+                                      'preview'))
     return actions
 
 
