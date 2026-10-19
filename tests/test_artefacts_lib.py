@@ -752,7 +752,10 @@ def test_listing_filters_and_cursor(tmp_path):
     assert [a['artefact_id'] for a in page2['artefacts'] + page3['artefacts']] == ['item-2', 'item-3', 'item-4']
     assert page3['next_cursor'] is None
     assert len(service.listing(index, policy, ANON, kind='figure')['artefacts']) == 2
-    assert len(service.listing(index, policy, ANON, owner='bob')['artefacts']) == 2
+    assert len(service.listing(index, policy, USER, owner='bob')['artefacts']) == 2
+    with pytest.raises(artefacts.ArtefactError):                  # anonymous callers never probe logins
+        service.listing(index, policy, ANON, owner='bob')
+    assert {row['owner'] for row in service.listing(index, policy, ANON)['artefacts']} == {'a member'}
     assert len(service.listing(index, policy, ANON, query='ITEM-3')['artefacts']) == 1
     assert len(service.listing(index, policy, ANON, db_id=f'{GID}/pub')['artefacts']) == 5
     assert service.listing(index, policy, ANON, group_id='XX0')['artefacts'] == []

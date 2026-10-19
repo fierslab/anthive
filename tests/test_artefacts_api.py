@@ -348,7 +348,9 @@ def test_purged_versions_are_tombstones(client):
     assert client.get('/artefacts/PU1/pub/gone-fig/v1/files/a.png').status_code == 410
     versions = client.get('/artefacts/PU1/pub/gone-fig/versions').json()['versions']
     assert versions == [{'version': 1, 'state': 'purged', 'published': '2026-10-16', 'purged': '2026-10-17',
-                         'purged_by': 'an admin', 'purge_reason': 'wrong contrast'}]
+                         'purged_by': 'an admin', 'purge_reason': None}]      # anonymous: no reason
+    signed = client.get('/artefacts/PU1/pub/gone-fig/versions', headers=USER).json()['versions']
+    assert signed[0]['purge_reason'] == 'wrong contrast' and signed[0]['purged_by'] == 'an admin'
     assert 'PU1/pub/gone-fig' not in _listed(client, ANON)
     assert 'PU1/pub/gone-fig' in _listed(client, ANON, include_purged='true')
 

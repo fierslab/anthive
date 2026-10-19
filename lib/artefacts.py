@@ -89,7 +89,9 @@ DESCRIPTION_MAX_BYTES = 20 * 1024
 CHANGE_NOTE_MAX_CHARS = 2000
 MAX_VERSION = 999999
 ACCESS_VALUES = ('inherit', 'internal')
-VERSION_STATES = ('live', 'purging', 'purged')
+#: ``reserved``: a number taken by a publication in progress; ``failed``: a publication that stopped (never
+#: reused, review S3); both are never served
+VERSION_STATES = ('live', 'purging', 'purged', 'reserved', 'failed')
 FILE_ROLES = ('main', 'supporting', 'sidecar')
 COLLECTION_KINDS = ('datasets', 'analysis')
 COLLECTION_ACCESS_VALUES = ('internal', 'public')
@@ -349,8 +351,11 @@ def validate_head_record(head: Mapping[str, Any], expected: ArtefactPath) -> Lis
         state = entry.get('state')
         if state not in VERSION_STATES:
             problems.append(f'v{number}: invalid state {state!r}')
-        if not (isinstance(entry.get('manifest_sha256'), str) and SHA256_RE.fullmatch(entry['manifest_sha256'])):
+        sha = entry.get('manifest_sha256')
+        if (state in ('live', 'purging') or sha is not None) and not (isinstance(sha, str) and SHA256_RE.fullmatch(sha)):
             problems.append(f'v{number}: manifest_sha256 missing or malformed')
+        if entry.get('access') is not None and entry['access'] not in ACCESS_VALUES:
+            problems.append(f'v{number}: access {entry["access"]!r} is not inherit or internal')
         if not _nonempty_str(entry.get('published'), 40):
             problems.append(f'v{number}: published missing')
         if state == 'purged' and not _nonempty_str(entry.get('purged'), 40):
@@ -596,6 +601,7 @@ class VersionEntry:
     purged_by: Optional[str] = None
     purged_by_admin: bool = False
     purge_reason: Optional[str] = None
+    access: Optional[str] = None                 # recorded in the head record (kept on tombstones, review C5)
     manifest: Optional[Dict[str, Any]] = None
     problems: List[str] = field(default_factory=list)
 
@@ -637,8 +643,11 @@ class ArtefactEntry:
 
     @property
     def access_internal(self) -> bool:
-        """True when any version's manifest narrows access to internal (the most restrictive wins)."""
-        return any((version.manifest or {}).get('access') == 'internal' for version in self.versions.values())
+        """True when any version, purged ones included, narrowed access to internal: the most restrictive wins
+        and stays (review C5: purging the internal version never widens the artefact). Read from the manifests
+        and from the ``access`` the head record keeps per version."""
+        return any((version.manifest or {}).get('access') == 'internal' or version.access == 'internal'
+                   for version in self.versions.values())
 
     @property
     def owner(self) -> Optional[str]:
@@ -758,7 +767,8 @@ class ArtefactIndex:
         for item in head['versions']:
             number = item['version']
             version = VersionEntry(
-                number=number, state=item['state'], manifest_sha256=item['manifest_sha256'],
+                number=number, state=item['state'], manifest_sha256=item.get('manifest_sha256') or '',
+                access=item.get('access'),
                 published=item.get('published'), purged=item.get('purged'),
                 purged_by=item.get('purged_by') if isinstance(item.get('purged_by'), str) else None,
                 purged_by_admin=item.get('purged_by_admin') is True,
@@ -1047,7 +1057,7 @@ class ArtefactService:
         return version
 
     # payloads --------------------------------------------------------------
-    def summary(self, entry: ArtefactEntry) -> Dict[str, Any]:
+    def summary(self, entry: ArtefactEntry, viewer: Optional[Viewer] = None) -> Dict[str, Any]:
         latest = entry.latest
         manifest = entry.versions[latest].manifest if latest is not None else None
         files = (manifest or {}).get('files') or []
@@ -1063,7 +1073,8 @@ class ArtefactService:
             'ref': entry.ref, 'artefact_id': entry.path.artefact_id, 'kind': entry.path.kind,
             'group_id': entry.group_id, 'scope': entry.path.scope, 'db_id': entry.db_id,
             'title': (manifest or {}).get('title') or entry.head.get('title'),
-            'latest': latest, 'versions_live': len(entry.live_versions), 'owner': entry.owner,
+            'latest': latest, 'versions_live': len(entry.live_versions),
+            'owner': entry.owner if signed_in(viewer) else 'a member',
             'updated': max(published + purged) if (published or purged) else None,
             'size_bytes': sum(int(f.get('size') or 0) for f in files) if manifest else None,
             'main_file': main, 'preview': preview,
@@ -1084,13 +1095,14 @@ class ArtefactService:
             })
         return out
 
-    def detail(self, entry: ArtefactEntry, viewer: Viewer) -> Dict[str, Any]:
+    def detail(self, entry: ArtefactEntry, viewer: Viewer, policy: Optional['AccessPolicy'] = None) -> Dict[str, Any]:
         latest = entry.latest
-        payload = self.summary(entry)
+        payload = self.summary(entry, viewer)
         payload.update({
             'created': entry.head.get('created'),
             'versions': [version_summary(v) for _, v in sorted(entry.versions.items())],
-            'manifest': entry.versions[latest].manifest if latest is not None else None,
+            'manifest': (redact_manifest(entry.versions[latest].manifest, viewer, policy)
+                         if latest is not None else None),
             'files': self.files_payload(entry, latest) if latest is not None else [],
         })
         return payload
@@ -1104,10 +1116,12 @@ class ArtefactService:
                 out.append(version_summary(version))
         return {'ref': entry.ref, 'latest': entry.latest, 'versions': out}
 
-    def version_payload(self, entry: ArtefactEntry, version: VersionEntry) -> Dict[str, Any]:
+    def version_payload(self, entry: ArtefactEntry, version: VersionEntry, viewer: Optional[Viewer] = None,
+                        policy: Optional['AccessPolicy'] = None) -> Dict[str, Any]:
         return {'ref': format_ref(entry.group_id, entry.path.scope, entry.path.artefact_id, version.number),
                 'version': version.number, 'state': version.state, 'latest': entry.latest,
-                'manifest': version.manifest, 'files': self.files_payload(entry, version.number)}
+                'manifest': redact_manifest(version.manifest, viewer, policy),
+                'files': self.files_payload(entry, version.number)}
 
     def listing(self, index: ArtefactIndex, policy: AccessPolicy, viewer: Viewer, *,
                 group_id: Optional[str] = None, db_id: Optional[str] = None, kind: Optional[str] = None,
@@ -1120,6 +1134,8 @@ class ArtefactService:
             raise ArtefactError(422, 'invalid_db_id', 'db_id must look like G25/ABC')
         if not 1 <= int(limit) <= 200:
             raise ArtefactError(422, 'invalid_limit', 'limit must be between 1 and 200')
+        if owner is not None and not signed_in(viewer):
+            raise ArtefactError(422, 'invalid', 'the owner filter needs a sign-in')
         after = decode_cursor(cursor) if cursor else None
         needle = query.casefold().strip() if query else None
         include_orphans = include_orphans and viewer.is_admin
@@ -1151,7 +1167,7 @@ class ArtefactService:
             if len(rows) > limit:
                 break
         next_cursor = encode_cursor(rows[limit - 1].key) if len(rows) > limit else None
-        return {'artefacts': [self.summary(entry) for entry in rows[:limit]], 'next_cursor': next_cursor}
+        return {'artefacts': [self.summary(entry, viewer) for entry in rows[:limit]], 'next_cursor': next_cursor}
 
     def count(self, index: ArtefactIndex, policy: AccessPolicy, viewer: Viewer, *, group_id: Optional[str] = None,
               db_id: Optional[str] = None) -> int:
@@ -1306,13 +1322,50 @@ def version_summary(version: VersionEntry) -> Dict[str, Any]:
     return out
 
 
+def signed_in(viewer: Optional[Viewer]) -> bool:
+    """A caller with an identity (Remote-User through the proxy) or an admin. ``None``: an internal call."""
+    return viewer is None or bool(viewer.user) or viewer.is_admin
+
+
 def tombstone(version: VersionEntry, viewer: Viewer) -> Dict[str, Any]:
-    """A purged version as anyone may see it; who purged is "an admin" for non-admins when an admin did."""
+    """A purged version as anyone may see it. Who purged is "an admin" for non-admins when an admin did, and
+    "a member" / "an admin" for callers without a sign-in, who also never see the reason."""
     purged_by = version.purged_by
     if version.purged_by_admin and not viewer.is_admin:
         purged_by = 'an admin'
+    elif not signed_in(viewer):
+        purged_by = 'a member'
     return {'version': version.number, 'state': 'purged', 'published': version.published,
-            'purged': version.purged, 'purged_by': purged_by, 'purge_reason': version.purge_reason}
+            'purged': version.purged, 'purged_by': purged_by,
+            'purge_reason': version.purge_reason if signed_in(viewer) else None}
+
+
+HIDDEN_DATASET = {'db_id': None, 'dataset_version': None, 'h5ad_sha256': None,
+                  'hidden': 'made from a dataset you cannot see'}
+
+
+def redact_manifest(manifest: Optional[Dict[str, Any]], viewer: Optional[Viewer],
+                    policy: Optional['AccessPolicy']) -> Optional[Dict[str, Any]]:
+    """The manifest as ``viewer`` may see it (a copy): ``made_from`` entries of datasets the viewer cannot see
+    are replaced by a placeholder (review S1: an internal dataset id never reaches an anonymous caller through a
+    public artefact), and logins are "a member" / "an admin" for callers without a sign-in. ``viewer`` None:
+    the full manifest (internal calls)."""
+    if manifest is None or viewer is None:
+        return manifest
+    out = json.loads(json.dumps(manifest))
+    if policy is not None:
+        out['made_from'] = [entry if isinstance(entry, dict) and policy.dataset_visible(str(entry.get('db_id')), viewer)
+                            else dict(HIDDEN_DATASET) for entry in out.get('made_from') or []]
+    elif not viewer.sees_internal:
+        out['made_from'] = [dict(HIDDEN_DATASET) for _entry in out.get('made_from') or []]
+    if not signed_in(viewer):
+        recorded = out.get('recorded') or {}
+        for key in ('uploaded_by', 'uploaded_by_name'):
+            if recorded.get(key):
+                recorded[key] = 'a member'
+        if isinstance(recorded.get('approval'), dict):
+            recorded['approval']['by'] = 'an admin'
+    return out
 
 
 def encode_cursor(key: Tuple[str, str, str]) -> str:
