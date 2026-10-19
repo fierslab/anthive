@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
 # dependencies = [
-#   "fastapi>=0.110.0",
+#   "fastapi>=0.141.1",
 #   "uvicorn>=0.27.0",
 #   "duckdb>=1.3,<1.6",
 #   "pandas>=2.0.0",
@@ -2743,6 +2743,73 @@ class _InternalSecretGuard:
 
 
 app.add_middleware(_InternalSecretGuard)
+
+
+# ── cross-site requests (security review round 3) ──────────────────────────────
+#
+# Browsers reach the API same-origin through Caddy and carry the site's session (cookie or basic auth), so a
+# state-changing request from another site must never be accepted on that session. Non-browser clients (vark,
+# pyvark, ant-mcp, tools) send neither Origin nor Sec-Fetch-Site and are unaffected.
+_UNSAFE_METHODS = frozenset({'POST', 'PUT', 'PATCH', 'DELETE'})
+_BODY_TYPES = ('application/json', 'multipart/form-data')
+
+
+def _same_origin(origin: str, headers: Dict[str, str]) -> bool:
+    """Does ``origin`` (scheme://host[:port]) name the host the request was sent to (Host, or the first
+    X-Forwarded-Host Caddy set) or the configured public URL?"""
+    from urllib.parse import urlsplit  # noqa: PLC0415
+    try:
+        netloc = urlsplit(origin).netloc.lower()
+    except ValueError:
+        return False
+    if not netloc or origin.strip().lower() == 'null':
+        return False
+    hosts = {headers.get('host', '').lower(), headers.get('x-forwarded-host', '').split(',')[0].strip().lower()}
+    try:
+        cfg = get_config()
+        for value in ((cfg.get('mcp') or {}).get('public_base_url'), (cfg.get('mcp') or {}).get('public_url')):
+            if value:
+                hosts.add(urlsplit(str(value)).netloc.lower())
+    except Exception:  # noqa: BLE001 - no config: the request's own host only
+        pass
+    hosts.discard('')
+    return netloc in hosts
+
+
+class _CrossSiteGuard:
+    """Pure-ASGI: on POST, PUT, PATCH and DELETE, refuse a request a browser marks as coming from another site
+    (``Sec-Fetch-Site`` other than same-origin or none, or an ``Origin`` that is not this site) with 403
+    ``cross_site``, and a request body that is not JSON or a multipart upload with 415 ``unsupported_media_type``
+    (a body without a Content-Type, text/plain or a urlencoded form is what a cross-site page can send without a
+    CORS preflight)."""
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope['type'] == 'http' and scope.get('method', '').upper() in _UNSAFE_METHODS:
+            headers = {key.decode('latin-1').lower(): value.decode('latin-1') for key, value in scope.get('headers', [])}
+            fetch_site = headers.get('sec-fetch-site', '').strip().lower()
+            origin = headers.get('origin')
+            if (fetch_site and fetch_site not in ('same-origin', 'none')) or \
+                    (origin is not None and not _same_origin(origin, headers)):
+                response = JSONResponse({'status': 'cross_site', 'message': 'requests from another site are not '
+                                                                            'accepted'}, status_code=403)
+                await response(scope, receive, send)
+                return
+            has_body = headers.get('transfer-encoding') or (headers.get('content-length') or '0').strip() not in ('', '0')
+            media = headers.get('content-type', '').split(';')[0].strip().lower()
+            if has_body and media not in _BODY_TYPES and not (media.startswith('application/')
+                                                               and media.endswith('+json')):
+                response = JSONResponse({'status': 'unsupported_media_type',
+                                         'message': 'send the body as application/json (multipart/form-data for '
+                                                    'uploads)'}, status_code=415)
+                await response(scope, receive, send)
+                return
+        await self._app(scope, receive, send)
+
+
+app.add_middleware(_CrossSiteGuard)
 
 
 def _is_local_tool_request(request: Request) -> bool:
