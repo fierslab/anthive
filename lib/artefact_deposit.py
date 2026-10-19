@@ -88,6 +88,8 @@ HELD_REASONS = {
     'public_access': 'the scope or the artefact is public: an admin publishes it',
     'possible_secret': 'a text file looks like it holds a key, token or password',
     'donor_identifiers': 'a table holds values of the donor crosswalk (internal donor ids)',
+    'made_from_internal': 'a public artefact made from an internal dataset: an admin decides',
+    'not_scanned': 'a text or table file is larger than the content check limit and was not scanned',
 }
 COLLECTION_TITLE_MAX = artefacts.TITLE_MAX_CHARS
 MAX_AUTHORS = 100
@@ -411,8 +413,30 @@ class ArtefactDepositService(DepositService):
             return self.create_de_only_alias(identity, body, context)
         if not self.settings.active:
             super()._require_active()
+        self._check_dataset_against_collections(identity, body)
         body = {key: value for key, value in body.items() if key != 'deposit_kind'}
         return super().create(identity, body)
+
+    def _check_dataset_against_collections(self, identity: Identity, body: Any) -> None:
+        """Review C10: a dataset deposit that would create a new group while a collection of that name is being
+        created waits (409 collection_pending); a dataset deposit into an analysis collection is accepted only
+        from its creator or an admin (design default: analysis collections hold artefacts)."""
+        data_project = body.get('data_project') if isinstance(body, dict) else None
+        if not isinstance(data_project, str) or not artefacts.valid_segment(data_project):
+            return                                   # the base class refuses it with its own message
+        folder = self.store_root / data_project
+        index = folder / 'index.md'
+        if not index.is_file():
+            if self._pending_collection(data_project):
+                raise DepositError(409, 'collection_pending', f'a collection named {data_project} is being created; '
+                                                              f'deposit the dataset once it is live (or choose '
+                                                              f'another name)')
+            return
+        meta = read_md_meta(index)
+        if str(meta.get('collection_kind') or '').strip().lower() == 'analysis' and not identity.is_admin \
+                and meta.get('created_by') != identity.user:
+            raise DepositError(403, 'forbidden', f'{data_project} is an analysis collection: datasets are added to it '
+                                                 f'by its creator or an admin')
 
     def refresh_urls(self, identity: Identity, deposit_id: str, body: Any) -> Dict[str, Any]:
         record = self._get_own(identity, deposit_id)
@@ -558,7 +582,10 @@ class ArtefactDepositService(DepositService):
         if not artefacts.valid_artefact_id(artefact_id):
             raise DepositError(422, 'invalid_artefact_id', 'artefact_id: 2 to 64 lower-case letters, digits and '
                                                            'dashes, starting with a letter or digit')
-        clean = self._clean_block(block, kind, scope_db_id, context, strict=not relaxed_provenance)
+        public_scope = (context.policy.dataset_public(scope_db_id) if scope_db_id is not None
+                        else context.policy.collection_public(group_id))
+        clean = self._clean_block(block, kind, scope_db_id, context, strict=not relaxed_provenance,
+                                  public_scope=public_scope)
         if kind == 'de_table':
             clean['dataset_basename'] = Path(context.dataset_md[scope_db_id]).stem
         ref = artefacts.format_ref(group_id, scope, artefact_id)
@@ -568,6 +595,9 @@ class ArtefactDepositService(DepositService):
                                                                         include_orphans=identity.is_admin):
             # an artefact the caller cannot see answers like one that does not exist, and its id stays taken
             raise DepositError(404, 'not_found', f'no artefact {ref}')
+        if existing is not None and not any(v.state in ('live', 'purging', 'purged')
+                                            for v in existing.versions.values()):
+            existing = None                 # only failed or reserved numbers: no version was ever published
         if existing is None:
             if new_version_of is not None:
                 raise DepositError(409, 'version_conflict', f'{ref} does not exist; leave new_version_of out',
@@ -594,7 +624,7 @@ class ArtefactDepositService(DepositService):
         if total > self._limit('artefacts_max_deposit_gb', 200) * 1024 ** 3:
             raise DepositError(413, 'too_large', f'{total / 1024 ** 3:.1f} GB is over the '
                                                  f'{self._limit("artefacts_max_deposit_gb", 200):g} GB of one deposit')
-        stored = self._stored_bytes(context.index, identity.user)
+        stored = self._stored_bytes(context.index, identity.user) + self._pending_artefact_bytes(identity.user)
         if stored + total > self._limit('artefacts_max_stored_gb_per_user', 1000) * 1024 ** 3:
             raise DepositError(413, 'quota_exceeded', f'{(stored + total) / 1024 ** 3:.1f} GB of artefacts would '
                                                       f'be stored for you (limit '
@@ -654,7 +684,7 @@ class ArtefactDepositService(DepositService):
                          'status': f'/datasets/deposit/{deposit_id}'}}
 
     def _clean_block(self, block: Mapping[str, Any], kind: str, scope_db_id: Optional[str],
-                     context: ArtefactContext, strict: bool = True) -> Dict[str, Any]:
+                     context: ArtefactContext, strict: bool = True, public_scope: bool = False) -> Dict[str, Any]:
         """The checked fields of the artefact block (``recorded`` keys of the request are dropped)."""
         warnings: List[str] = []
         title = block.get('title')
@@ -693,6 +723,11 @@ class ArtefactDepositService(DepositService):
             if str(meta.get('version')) != version:
                 warnings.append(f'made from {db_id} {version}; the dataset is now {meta.get("version")}')
             clean_made_from.append({'db_id': db_id, 'dataset_version': version})
+        hidden = [entry['db_id'] for entry in clean_made_from if not context.policy.dataset_public(entry['db_id'])]
+        if access != 'internal' and public_scope and hidden:
+            warnings.append(f'the artefact will be public but is made from internal dataset(s) {", ".join(hidden)}: '
+                            f'it will be held for an admin (made_from_internal); deposit it with access internal '
+                            f'to avoid that')
         if scope_db_id is not None and scope_db_id not in {entry['db_id'] for entry in clean_made_from}:
             raise DepositError(422, 'made_from_unknown', f'made_from must include the scope dataset {scope_db_id}')
         declared = block.get('declared')
@@ -759,6 +794,22 @@ class ArtefactDepositService(DepositService):
                 if version.state == 'live' and (manifest.get('recorded') or {}).get('uploaded_by') == user:
                     total += sum(int(item.get('size') or 0) for item in manifest.get('files') or [])
         return total
+
+    def _pending_new_group(self, data_project: str) -> bool:
+        """A dataset deposit that is creating a group of this name (open or waiting for the watcher)."""
+        rows = self.store._rows("SELECT id FROM deposits WHERE COALESCE(deposit_kind, 'dataset') IN ('dataset', "
+                                "'metadata_update', 'de_only') AND UPPER(data_project) = UPPER(?) AND (state IN "
+                                "('uploading', 'completing') OR (state = 'uploaded' AND COALESCE(watch_state, '') NOT "
+                                "IN ('live', 'rejected', 'failed')))", (data_project,))
+        return bool(rows)
+
+    def _pending_artefact_bytes(self, user: str) -> int:
+        """Bytes of this user's artefact deposits that are open or wait for the watcher."""
+        rows = self.store._rows("SELECT COALESCE(SUM(total_bytes), 0) AS total FROM deposits WHERE user = ? AND "
+                                "deposit_kind = 'artefact' AND (state IN ('uploading', 'completing') OR (state = "
+                                "'uploaded' AND COALESCE(watch_state, '') NOT IN ('live', 'rejected', 'failed')))",
+                                (user,))
+        return int(rows[0]['total'] or 0) if rows else 0
 
     def _pending_collection(self, data_project: str) -> bool:
         rows = self.store._rows("SELECT id FROM deposits WHERE deposit_kind = 'collection' AND "
@@ -840,7 +891,7 @@ class ArtefactDepositService(DepositService):
         block = self._collection_block(body)
         existing = [entry.name for entry in (self.store_root.iterdir() if self.store_root.is_dir() else [])
                     if entry.name.lower() == data_project.lower()]
-        if existing or self._pending_collection(data_project):
+        if existing or self._pending_collection(data_project) or self._pending_new_group(data_project):
             shown = f' ({existing[0]})' if existing and identity.is_admin else ''
             raise DepositError(409, 'collection_exists', f'a collection with this name exists or is being '
                                                          f'created{shown}')
@@ -927,6 +978,10 @@ class ArtefactDepositService(DepositService):
         ref = f'{entry.ref}@v{number}'
         if version.state == 'purged':
             raise DepositError(409, 'purged', f'{ref} is already purged')
+        if version.state == 'reserved':
+            raise DepositError(409, 'busy', f'{ref} is being published right now')
+        if version.state == 'failed' and not identity.is_admin:
+            raise DepositError(403, 'forbidden', f'{ref} is a failed publication: an admin cleans it up')
         uploader = ((version.manifest or {}).get('recorded') or {}).get('uploaded_by')
         if not (identity.is_admin or identity.user in (uploader, entry.owner)):
             raise DepositError(403, 'forbidden', f'only the uploader of {ref}, the owner of the artefact or an admin '

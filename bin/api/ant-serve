@@ -16784,7 +16784,7 @@ def get_artefact(request: Request, group_id: str, scope: str, artefact_id: str):
     import artefacts as artefacts_lib  # noqa: PLC0415
     try:
         service, viewer, entry = _artefact_resolve(request, group_id, scope, artefact_id)
-        return service.detail(entry, viewer)
+        return service.detail(entry, viewer, _artefact_policy())
     except artefacts_lib.ArtefactError as exc:
         return _artefact_error(exc)
 
@@ -16808,7 +16808,8 @@ def get_artefact_version(request: Request, group_id: str, scope: str, artefact_i
     import artefacts as artefacts_lib  # noqa: PLC0415
     try:
         service, viewer, entry = _artefact_resolve(request, group_id, scope, artefact_id)
-        return service.version_payload(entry, service.version_of(entry, version, viewer))
+        return service.version_payload(entry, service.version_of(entry, version, viewer), viewer,
+                                       _artefact_policy())
     except artefacts_lib.ArtefactError as exc:
         return _artefact_error(exc)
 
@@ -17216,7 +17217,7 @@ def _deposit_service():
                 _deposit_service_instance = artefact_deposit.ArtefactDepositService(
                     settings, dd.DepositStore(state_dir / dd.DB_FILE), s3, store_root, state_dir, roots=roots,
                     artefact_settings=get_artefact_settings(cfg))
-                if settings.active:
+                if settings.active or _deposit_service_instance.artefacts_active:   # review C11
                     try:        # completes a previous process left running continue in the background
                         resumed = _deposit_service_instance.resume_interrupted()
                         if resumed:
