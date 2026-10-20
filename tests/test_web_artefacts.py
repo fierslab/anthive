@@ -213,3 +213,14 @@ def test_the_collection_deposit_escapes_markup_in_index_md():
     text = artefact_deposit.render_analysis_index_md('Atlas2026', 'A26', block, 'ana', '2026-10-19')
     _meta, body = artefacts_lib.split_front_matter(text)
     assert '<img' not in body and '<script' not in body and '&lt;img' in body
+
+
+def test_plot_thumbnail_alt_text_is_escaped_once(make_client, monkeypatch):
+    import copy
+    from tests import test_web_browser
+    info = copy.deepcopy(test_web_browser._INFO)
+    info['GroupA/ds1']['markdown'] = '# Dataset One\n\n![UMAP & "clusters"](plot:scatter?x=X_umap)'
+    monkeypatch.setattr(test_web_browser, '_INFO', info)
+    html = make_client().get('/browse/GroupA/ds1').text
+    assert 'alt="UMAP &amp; &quot;clusters&quot;"' in html and '&amp;amp;' not in html
+

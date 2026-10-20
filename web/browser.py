@@ -627,7 +627,7 @@ def _expand_plot_thumbnails(html_text: Optional[str], default_db: Optional[str] 
         tag = match.group(0)
         raw = html_lib.unescape(match.group(1))          # 'GEOM?QUERY' (&amp; → &)
         alt_match = _PLOT_ALT_RE.search(tag)
-        alt = alt_match.group(1) if alt_match else ''
+        alt = html_lib.unescape(alt_match.group(1)) if alt_match else ''      # escaped once below, not twice
         geom, _, query_string = raw.partition('?')
         geom = geom.strip()
         if not geom:

@@ -35,7 +35,7 @@ def _tags(out):
 def test_no_payload_gets_through(payload):
     out = safe_markdown.render(payload)
     assert _tags(out) <= safe_markdown.ALLOWED_TAGS
-    assert not re.search(r'<[a-z0-9]+\s+(?!href=)[a-z-]+=', out), out          # no attribute but href / rel
+    assert not re.search(r'<[a-z0-9]+\s+(?!href=|style="text-align:(?:left|center|right)")[a-z-]+=', out), out          # no attribute but href / rel
     for href in re.findall(r'href="([^"]*)"', out):
         decoded = html.unescape(href).strip().lower()
         assert not decoded.startswith(('javascript:', 'data:', 'vbscript:', '//')) and '\\' not in decoded, href
@@ -77,3 +77,20 @@ def test_headings_images_and_plot_thumbnails():
 def test_empty_and_plain():
     assert safe_markdown.render(None) == '' and safe_markdown.render('') == ''
     assert safe_markdown.plain('**Volcano** `plot`\n of  #DE') == 'Volcano plot of DE'
+
+
+def test_table_alignment_is_kept_and_no_other_style():
+    out = safe_markdown.render('| a | b | c |\n|:-|:-:|-:|\n| 1 | 2 | 3 |')
+    assert '<th style="text-align:left">a</th>' in out and '<td style="text-align:center">2</td>' in out
+    assert '<td style="text-align:right">3</td>' in out
+    assert '<p style' not in safe_markdown.render('<p style="text-align:center">x</p>')     # raw HTML stays text
+
+
+def test_the_payload_check_allows_only_alignment_styles():
+    for payload in PAYLOADS:
+        out = safe_markdown.render(payload)
+        for attribute in re.findall(r'<[a-z0-9]+\s+([a-z-]+)=', out):
+            assert attribute in ('href', 'style'), (payload, out)
+        assert all(style in ('text-align:left', 'text-align:center', 'text-align:right')
+                   for style in re.findall(r'style="([^"]*)"', out))
+

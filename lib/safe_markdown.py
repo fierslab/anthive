@@ -28,6 +28,7 @@ ALLOWED_TAGS = {'p', 'br', 'em', 'strong', 'code', 'pre', 'ul', 'ol', 'li', 'blo
 VOID_TAGS = {'br', 'hr', 'img'}
 DEMOTED = {'h1': 'h4', 'h2': 'h4', 'h3': 'h5', 'h4': 'h5', 'h5': 'h6', 'h6': 'h6'}
 SCHEME_RE = re.compile(r'([A-Za-z][A-Za-z0-9+.-]*):')
+ALIGN_RE = re.compile(r'text-align:\s*(left|center|right);?')     # table column alignment, the only style kept
 PLOT_SRC_RE = re.compile(r'plot:[a-z0-9_]+(?:\?[^\s"<>\\]*)?')
 MAX_SOURCE_CHARS = 200000
 
@@ -84,7 +85,8 @@ class _Allowlist(HTMLParser):
             self.out.append(f'<a href="{html.escape(href, quote=True)}" rel="nofollow noopener noreferrer">')
             self.stack.append('a')
             return
-        self.out.append(f'<{tag}>')
+        align = ALIGN_RE.fullmatch((values.get('style') or '').strip()) if tag in ('th', 'td') else None
+        self.out.append(f'<{tag} style="text-align:{align.group(1)}">' if align else f'<{tag}>')
         if tag not in VOID_TAGS:
             self.stack.append(tag)
 
