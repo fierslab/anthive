@@ -4,6 +4,8 @@ import json
 import pytest
 
 from ingest_check import FAIL, PASS, SKIP, WARN, HELD_CONTROLLED, HELD_DATA_USE, HELD_LICENCE, HELD_PUBLIC
+from ingest_check import run_checks
+from ingest_check.report import build_report
 from ingest_check import checks_access, checks_design, checks_files, checks_meta
 from ingest_check.context import Settings
 from tests.ingest_helpers import GOOD_MUS, Submission, good_api, write_index_md, write_md
@@ -272,23 +274,67 @@ def test_access_level(submission):
 
 
 def test_access_controlled(submission):
+    # 2.47.0: data use agreements apply to the whole server (D7 revised 2026-10-20): warn, never hold
     assert run(submission, checks_access.access_controlled).status == PASS
     controlled = run(submission, checks_access.access_controlled, mus=GOOD_MUS.replace('data_use=open', 'data_use=controlled'))
-    assert controlled.status == WARN and controlled.held == [HELD_CONTROLLED]
+    assert controlled.status == WARN and controlled.held == []
+    assert 'everyone with access to this server can see this dataset' in controlled.summary
+    assert 'data use agreement' in controlled.summary
     unknown = run(submission, checks_access.access_controlled, mus=GOOD_MUS.replace('data_use=open\n', ''))
-    assert unknown.status == WARN and unknown.held == [HELD_DATA_USE]
+    assert unknown.status == WARN and unknown.held == []
     invalid = run(submission, checks_access.access_controlled, mus=GOOD_MUS.replace('data_use=open', 'data_use=maybe'))
     assert invalid.status == FAIL
 
 
-def test_controlled_cohort_in_the_join_holds_open_data(submission):
+def _controlled_cohort(submission):
     api = good_api()
     api['obs_derive']['ant_donor_uid'] = {'source': 'donor', 'join': 'donor_crosswalk.tsv', 'cohort': 'secretco'}
     (submission.store / 'donor_crosswalk.tsv').write_text(
         'cohort\talias_type\talias\tcanonical_uid\tsource\tn_datasets\tcontrolled\nsecretco\tdonor_id\tA1\tsecretco:A1\tx\t1\ttrue\n')
-    outcome = run(submission, checks_access.access_controlled, md={'api': api})
-    assert outcome.status == WARN and outcome.held == [HELD_CONTROLLED]
+    return api
+
+
+def test_controlled_cohort_in_the_join_warns_without_holding(submission):
+    outcome = run(submission, checks_access.access_controlled, md={'api': _controlled_cohort(submission)})
+    assert outcome.status == WARN and outcome.held == []
     assert outcome.admin_detail == {'cohort': 'secretco'} and 'secretco' not in json.dumps(outcome.details) + outcome.summary
+
+
+def test_controlled_data_with_a_controlled_cohort_keeps_the_admin_detail(submission):
+    outcome = run(submission, checks_access.access_controlled, md={'api': _controlled_cohort(submission)},
+                  mus=GOOD_MUS.replace('data_use=open', 'data_use=controlled'))
+    assert outcome.status == WARN and outcome.held == [] and outcome.admin_detail == {'cohort': 'secretco'}
+
+
+def _access_report(sub, md=None, mus=GOOD_MUS):
+    sub.build(md=md, mus=mus)
+    with sub.context() as ctx:
+        return build_report(ctx, run_checks(ctx, only=['access']), 'admin', 'test')
+
+
+@pytest.mark.parametrize('case', ['controlled', 'cohort', 'missing'])
+def test_data_use_goes_live_with_a_warning_in_the_report(submission, case):
+    md, mus = None, GOOD_MUS
+    if case == 'controlled':
+        mus = GOOD_MUS.replace('data_use=open', 'data_use=controlled')
+    elif case == 'cohort':
+        md = {'api': _controlled_cohort(submission)}
+    else:
+        mus = GOOD_MUS.replace('data_use=open\n', '')
+    report = _access_report(submission, md=md, mus=mus)
+    assert (report['result'], report['publish'], report['held_reasons']) == ('pass', 'auto', [])
+    entry = next(check for check in report['checks'] if check['id'] == 'access.controlled')
+    assert entry['status'] == WARN and report['counts']['warning'] >= 1
+    for legacy in (HELD_CONTROLLED, HELD_DATA_USE):
+        assert legacy not in json.dumps(report['held_reasons'])
+
+
+def test_public_access_still_holds_in_the_report(submission):
+    report = _access_report(submission, mus=GOOD_MUS.replace('access=internal', 'access=public'))
+    assert report['publish'] == 'held' and report['held_reasons'] == [HELD_PUBLIC]
+    controlled = _access_report(Submission(submission.root / 'second'),
+                                mus=GOOD_MUS.replace('access=internal', 'access=public').replace('data_use=open', 'data_use=controlled'))
+    assert controlled['held_reasons'] == [HELD_PUBLIC]
 
 
 @pytest.mark.parametrize('licence,status,held', [('CC-BY-4.0', PASS, []), ('in-house', PASS, []), ('', WARN, [HELD_LICENCE]),

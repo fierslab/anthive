@@ -27,12 +27,15 @@ SKIP = 'skip'
 STATUSES = (PASS, WARN, FAIL, SKIP)
 
 #: Reasons that hold a passing submission for an admin (report ``held_reasons``).
-HELD_CONTROLLED = 'controlled_access'
 HELD_LICENCE = 'licence_unknown'
 HELD_PUBLIC = 'public_access'
 HELD_DONOR_OVERLAP = 'donor_overlap'
+HELD_REASONS = (HELD_LICENCE, HELD_PUBLIC, HELD_DONOR_OVERLAP)
+#: Former held reasons (before 2.47.0: data use applies to a whole server, decision D7 revised 2026-10-20).
+#: No check adds them any more; items held for them earlier keep them and are approved as before.
+HELD_CONTROLLED = 'controlled_access'
 HELD_DATA_USE = 'data_use_unknown'
-HELD_REASONS = (HELD_CONTROLLED, HELD_LICENCE, HELD_PUBLIC, HELD_DONOR_OVERLAP, HELD_DATA_USE)
+LEGACY_HELD_REASONS = (HELD_CONTROLLED, HELD_DATA_USE)
 
 
 @dataclass

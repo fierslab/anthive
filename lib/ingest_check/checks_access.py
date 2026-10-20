@@ -1,9 +1,15 @@
-"""Access checks: level, controlled data and licence. These decide whether a pass can publish by itself."""
+"""Access checks: level, data use and licence. Level and licence decide whether a pass can publish by itself.
+
+Data use agreements and the internal/external split apply to a whole server
+(decision D7, revised 2026-10-20): everybody on a server may see all its data,
+so ``data_use`` (controlled, missing, or a controlled cohort in the donor join)
+only warns the depositor and never holds a deposit.
+"""
 from __future__ import annotations
 
 import re
 
-from . import (HELD_CONTROLLED, HELD_DATA_USE, HELD_LICENCE, HELD_PUBLIC, Outcome, check, fail, ok, warn)
+from . import HELD_LICENCE, HELD_PUBLIC, Outcome, check, fail, ok, warn
 from . import thresholds
 
 _SPDX_LIKE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.+-]*$')
@@ -33,9 +39,14 @@ def access_level(ctx) -> Outcome:
     return ok(f'access {access}', access=access)
 
 
+DATA_USE_FIX = ('Nothing to fix if the users of this server are covered. Data use agreements apply to a whole '
+                'server: every user with access to it can see every dataset.')
+
+
 @check('access.controlled')
 def access_controlled(ctx) -> Outcome:
-    """``data_use`` is open or controlled; controlled data, or a controlled cohort in the donor join, waits for an admin."""
+    """``data_use`` is open or controlled. Controlled data, a controlled cohort in the donor join or a missing
+    ``data_use`` warn (everyone on the server sees every dataset); they never hold a deposit."""
     from obs_derive_forms import FORM_JOIN, derive_form  # noqa: PLC0415
 
     data_use = _first(ctx.annotation.get('data_use') or ctx.md.get('data_use')).lower()
@@ -46,22 +57,24 @@ def access_controlled(ctx) -> Outcome:
         return fail(f'data_use is {data_use!r}; it must be open or controlled',
                     'Set data_use=open or data_use=controlled in the .h5ad.mus.')
     if data_use == 'controlled':
-        outcome = warn('data_use is controlled: an admin approves before publication',
-                       'Nothing to fix; controlled-access data is never published automatically.', data_use=data_use)
-        outcome.held.append(HELD_CONTROLLED)
+        outcome = warn('data_use is controlled: everyone with access to this server can see this dataset; make '
+                       "sure the server's users are covered by the data use agreement", DATA_USE_FIX,
+                       data_use=data_use)
+        if flagged_cohort:
+            outcome.admin_detail = {'cohort': cohort}
         return outcome
     if flagged_cohort:
-        outcome = warn('the donor ids join a cohort that the site marks as controlled-access while data_use is '
-                       f'{data_use or "not set"}: an admin decides',
-                       'Say data_use=controlled if the data carry a data use agreement.', data_use=data_use or None)
-        outcome.held.append(HELD_CONTROLLED)
+        outcome = warn('the donor ids join a cohort that this server marks as controlled-access while data_use is '
+                       f'{data_use or "not set"}: everyone with access to this server can see this dataset; make '
+                       "sure the server's users are covered by the cohort's data use agreement",
+                       'Say data_use=controlled if the data carry a data use agreement. ' + DATA_USE_FIX,
+                       data_use=data_use or None)
         outcome.admin_detail = {'cohort': cohort}
         return outcome
     if not data_use:
-        outcome = warn('data_use is not set; an admin confirms the consent status before publication',
-                       'Add data_use=open (no data use agreement) or data_use=controlled to the .h5ad.mus.')
-        outcome.held.append(HELD_DATA_USE)
-        return outcome
+        return warn('data_use is not set: say whether the data carry a data use agreement (everyone with access to '
+                    'this server can see this dataset)',
+                    'Add data_use=open (no data use agreement) or data_use=controlled to the .h5ad.mus.')
     return ok('data_use is open', data_use=data_use)
 
 
