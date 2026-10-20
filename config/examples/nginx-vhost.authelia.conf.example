@@ -58,9 +58,9 @@ server {
     location ^~ /authelia/ {
         auth_request off;
         proxy_pass         http://127.0.0.1:<CADDY_PORT>;
-        proxy_set_header   Host              $host;
+        proxy_set_header   Host              $http_host;
         proxy_set_header   X-Forwarded-Proto $scheme;
-        proxy_set_header   X-Forwarded-Host  $host;
+        proxy_set_header   X-Forwarded-Host  $http_host;
         proxy_set_header   X-Forwarded-Uri   $request_uri;
     }
 
@@ -71,8 +71,8 @@ server {
         proxy_pass                http://127.0.0.1:<AUTHELIA_PORT>/authelia/api/authz/auth-request;
         proxy_pass_request_body   off;
         proxy_set_header          Content-Length     "";
-        proxy_set_header          Host               $host;
-        proxy_set_header          X-Original-URL     $scheme://$host$request_uri;
+        proxy_set_header          Host               $http_host;
+        proxy_set_header          X-Original-URL     $scheme://$http_host$request_uri;
         proxy_set_header          X-Original-Method  $request_method;
         proxy_set_header          X-Forwarded-Proto  $scheme;
     }
@@ -83,15 +83,15 @@ server {
         proxy_pass                http://127.0.0.1:<AUTHELIA_PORT>/authelia/api/authz/auth-request-api;
         proxy_pass_request_body   off;
         proxy_set_header          Content-Length     "";
-        proxy_set_header          Host               $host;
+        proxy_set_header          Host               $http_host;
         proxy_set_header          Authorization      $http_authorization;   # REQUIRED for basic
-        proxy_set_header          X-Original-URL     $scheme://$host$request_uri;
+        proxy_set_header          X-Original-URL     $scheme://$http_host$request_uri;
         proxy_set_header          X-Original-Method  $request_method;
         proxy_set_header          X-Forwarded-Proto  $scheme;
     }
 
     location @authelia_redirect {
-        return 302 https://$host/authelia/?rd=$scheme://$host$request_uri;
+        return 302 https://$http_host/authelia/?rd=$scheme://$http_host$request_uri;
     }
 
     # Personal MCP links (/mcp/u/amcp_..., or Authorization: Bearer amcp_...
@@ -101,10 +101,10 @@ server {
         auth_request off;
         proxy_pass http://127.0.0.1:<CADDY_PORT>;
         proxy_http_version 1.1;
-        proxy_set_header Host              $host;
+        proxy_set_header Host              $http_host;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Forwarded-Host  $http_host;
         proxy_set_header Remote-User       "";
         proxy_set_header Remote-Groups     "";
         proxy_set_header Remote-Email      "";
@@ -127,7 +127,7 @@ server {
         auth_request /internal/authelia-verify-api;
         proxy_pass http://127.0.0.1:<CADDY_PORT>;
         proxy_http_version 1.1;
-        proxy_set_header Host              $host;
+        proxy_set_header Host              $http_host;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Remote-User       $auth_user;
@@ -149,7 +149,7 @@ server {
     location / {
         proxy_pass http://127.0.0.1:<CADDY_PORT>;
         proxy_http_version 1.1;
-        proxy_set_header Host              $host;
+        proxy_set_header Host              $http_host;
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header Remote-User       $auth_user;

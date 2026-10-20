@@ -976,7 +976,11 @@ A second review checked the section 20 fixes and A3 (probes kept as `tests/test_
   deletes and downloads.
 - **MCP.** Depositor text is a labelled JSON string on one line, after the server facts.
 - **CSRF.** `_CrossSiteGuard` in ant-serve (see the changelog); ant-browse has no state-changing routes. The
-  FastAPI floor of ant-serve and ant-browse is 0.141.1 (the pinned version).
+  FastAPI floor of ant-serve and ant-browse is 0.141.1 (the pinned version). Round 4: `Origin` is compared with
+  `Host` (port included) or the configured public URL; `X-Forwarded-Host` is not believed (a client can send it,
+  and Caddy passes `Host` on unchanged). nginx in front must forward `Host $http_host` (the dev shim and the
+  vhost examples do); a refusal logs `Origin`, `Host`, `X-Forwarded-Host` and the public URL at warning. ant-mcp
+  posts paper uploads as multipart also without a PDF (a urlencoded form is a 415).
 - **Content types, the system owner, previews.** Active types are `application/octet-stream` in manifests and
   downloads; `migration` is reserved (ant-adduser, ant-stack, ant-serve, ownership checks); previews are recorded
   in the manifest and checked against it by `ant sync pull`.

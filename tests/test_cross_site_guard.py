@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 SERVE_PATH = Path(__file__).resolve().parent.parent / 'bin' / 'api' / 'ant-serve'
-WANTED = {'_UNSAFE_METHODS', '_BODY_TYPES', '_same_origin', '_CrossSiteGuard'}
+WANTED = {'_UNSAFE_METHODS', '_BODY_TYPES', '_configured_public_hosts', '_same_origin', '_CrossSiteGuard'}
 
 
 def _guard_namespace(cfg: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -27,7 +27,10 @@ def _guard_namespace(cfg: Dict[str, Any] = None) -> Dict[str, Any]:
             name = next((t.id for t in node.targets if isinstance(t, ast.Name)), None)
         if name in WANTED:
             body.append(node)
-    namespace: Dict[str, Any] = {'Dict': Dict, 'JSONResponse': JSONResponse, 'get_config': lambda: cfg or {}}
+    import logging  # noqa: PLC0415
+    from typing import List  # noqa: PLC0415
+    namespace: Dict[str, Any] = {'Dict': Dict, 'List': List, 'JSONResponse': JSONResponse,
+                                 'get_config': lambda: cfg or {}, 'log': logging.getLogger('anthive.test.guard')}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec'), namespace)
     assert WANTED <= set(namespace)
     return namespace
@@ -62,8 +65,8 @@ def test_non_browser_clients_are_unaffected(client):
 def test_same_origin_browser_requests_pass(client):
     headers = {'Origin': 'https://anthive.example.org', 'Sec-Fetch-Site': 'same-origin'}
     assert client.post('/thing', json={'a': 1}, headers=headers).status_code == 200
-    proxied = {'Origin': 'https://public.example', 'Host': 'api:8080', 'X-Forwarded-Host': 'public.example'}
-    assert client.post('/thing', json={'a': 1}, headers=proxied).status_code == 200
+    behind_caddy = {'Origin': 'https://devbox.example.org:8501', 'Host': 'devbox.example.org:8501'}
+    assert client.post('/thing', json={'a': 1}, headers=behind_caddy).status_code == 200
 
 
 @pytest.mark.parametrize('headers', [
@@ -103,3 +106,44 @@ def test_the_review_probe_purge_without_content_type_is_refused(tmp_path, monkey
     assert client.post(path, headers={**ANALYST, 'Content-Type': 'text/plain'}, content=raw).status_code == 415
     ok = client.post(path, headers={**ANALYST, 'Content-Type': 'application/json'}, content=raw)
     assert ok.status_code == 202
+
+
+# ── review round 4 ──────────────────────────────────────────────────────────────────────────────────────────
+
+def test_a_proxy_that_drops_the_port_is_refused_and_logged(client, caplog):
+    """The old dev nginx shim (proxy_set_header Host $host) dropped :8501; the guard stays strict about ports and
+    says why in the log. The shim now forwards $http_host."""
+    headers = {'Host': 'devbox.example.org', 'X-Forwarded-Host': 'devbox.example.org',
+               'Origin': 'http://devbox.example.org:8501', 'Sec-Fetch-Site': 'same-origin'}
+    with caplog.at_level('WARNING', logger='anthive.test.guard'):
+        assert client.post('/thing', json={'a': 1}, headers=headers).status_code == 403
+    message = caplog.text
+    assert "Origin='http://devbox.example.org:8501'" in message and "Host='devbox.example.org'" in message
+    assert 'anthive.example.org' in message and '$http_host' in message
+
+
+def test_the_configured_public_url_with_its_port_is_accepted():
+    app = FastAPI()
+
+    @app.post('/thing')
+    def thing(body: Any = Body(None)):
+        return {'ok': True}
+    app.add_middleware(_guard_namespace({'mcp': {'public_base_url': 'http://devbox.example.org:8501'}})['_CrossSiteGuard'])
+    client = TestClient(app, base_url='http://devbox.example.org')
+    headers = {'Host': 'devbox.example.org', 'Origin': 'http://devbox.example.org:8501', 'Sec-Fetch-Site': 'same-origin'}
+    assert client.post('/thing', json={'a': 1}, headers=headers).status_code == 200
+
+
+def test_x_forwarded_host_is_not_believed(client):
+    headers = {'Origin': 'http://evil.example', 'X-Forwarded-Host': 'evil.example'}
+    assert client.post('/thing', json={}, headers=headers).status_code == 403
+
+
+def test_the_nginx_configs_forward_the_host_with_its_port():
+    import re
+    repo = Path(__file__).resolve().parent.parent
+    for name in ('config/nginx.conf', 'config/examples/nginx-vhost.authelia.conf.example',
+                 'config/examples/nginx-vhost.public.conf.example'):
+        text = (repo / name).read_text()
+        assert not re.search(r'proxy_set_header\s+(Host|X-Forwarded-Host)\s+\$host\b', text), name
+        assert re.search(r'proxy_set_header\s+Host\s+\$http_host;', text), name

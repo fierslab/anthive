@@ -2754,9 +2754,27 @@ _UNSAFE_METHODS = frozenset({'POST', 'PUT', 'PATCH', 'DELETE'})
 _BODY_TYPES = ('application/json', 'multipart/form-data')
 
 
+def _configured_public_hosts() -> List[str]:
+    """host[:port] of the configured public URL(s) (mcp.public_base_url, mcp.public_url)."""
+    from urllib.parse import urlsplit  # noqa: PLC0415
+    hosts: List[str] = []
+    try:
+        cfg = get_config()
+        for value in ((cfg.get('mcp') or {}).get('public_base_url'), (cfg.get('mcp') or {}).get('public_url')):
+            if value:
+                netloc = urlsplit(str(value)).netloc.lower()
+                if netloc and netloc not in hosts:
+                    hosts.append(netloc)
+    except Exception:  # noqa: BLE001 - no config: the request's own Host only
+        pass
+    return hosts
+
+
 def _same_origin(origin: str, headers: Dict[str, str]) -> bool:
-    """Does ``origin`` (scheme://host[:port]) name the host the request was sent to (Host, or the first
-    X-Forwarded-Host Caddy set) or the configured public URL?"""
+    """Does ``origin`` (scheme://host[:port]) name the Host the request was sent to, or the configured public
+    URL? Host is compared with its port: Caddy passes the browser's Host on unchanged, nginx in front must do the
+    same (``proxy_set_header Host $http_host``). X-Forwarded-Host is not believed (a client can send it; review
+    round 4)."""
     from urllib.parse import urlsplit  # noqa: PLC0415
     try:
         netloc = urlsplit(origin).netloc.lower()
@@ -2764,14 +2782,7 @@ def _same_origin(origin: str, headers: Dict[str, str]) -> bool:
         return False
     if not netloc or origin.strip().lower() == 'null':
         return False
-    hosts = {headers.get('host', '').lower(), headers.get('x-forwarded-host', '').split(',')[0].strip().lower()}
-    try:
-        cfg = get_config()
-        for value in ((cfg.get('mcp') or {}).get('public_base_url'), (cfg.get('mcp') or {}).get('public_url')):
-            if value:
-                hosts.add(urlsplit(str(value)).netloc.lower())
-    except Exception:  # noqa: BLE001 - no config: the request's own host only
-        pass
+    hosts = {headers.get('host', '').strip().lower(), *_configured_public_hosts()}
     hosts.discard('')
     return netloc in hosts
 
@@ -2793,6 +2804,13 @@ class _CrossSiteGuard:
             origin = headers.get('origin')
             if (fetch_site and fetch_site not in ('same-origin', 'none')) or \
                     (origin is not None and not _same_origin(origin, headers)):
+                # what an operator needs to tell a proxy that drops the port from Host from a real cross-site
+                # request (no secrets: these are the request's own headers and the configured URL)
+                log.warning('cross-site request refused: %s %s Origin=%r Sec-Fetch-Site=%r Host=%r '
+                            'X-Forwarded-Host=%r public URL=%r (behind nginx use proxy_set_header Host '
+                            '$http_host, or set mcp.public_base_url)', scope.get('method'), scope.get('path'),
+                            origin, fetch_site, headers.get('host'), headers.get('x-forwarded-host'),
+                            ', '.join(_configured_public_hosts()) or None)
                 response = JSONResponse({'status': 'cross_site', 'message': 'requests from another site are not '
                                                                             'accepted'}, status_code=403)
                 await response(scope, receive, send)

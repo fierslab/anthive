@@ -32,6 +32,22 @@ Sister docs:
 
 ---
 
+## Upgrading a host install to 2.47
+
+The API refuses state-changing browser requests from another site (403 `cross_site`). It compares the
+browser's `Origin`, port included, with the `Host` header it receives, or with `mcp.public_base_url`. Caddy
+passes `Host` on unchanged, but nginx's `proxy_set_header Host $host;` drops the port, so on a vhost that does
+not listen on 443 (or the dev shim on 8501) every save, purge or link change from the web UI would fail.
+
+- In every nginx `location` that proxies to Caddy, use `proxy_set_header Host $http_host;` (and
+  `X-Forwarded-Host $http_host;`), as the updated `config/nginx.conf` and `config/examples/nginx-vhost.*` do,
+  then `nginx -t && systemctl reload nginx`.
+- Or set `mcp.public_base_url` to the address users type, port included (for example
+  `https://anthive.example.org:8443`).
+- The api log says `cross-site request refused: ... Origin=... Host=...` when a request is refused; an `Origin`
+  with a port and a `Host` without one is this case.
+- Request bodies must be JSON (or multipart uploads); scripts that post forms or text get 415.
+
 ## Upgrading a host install to 2.45
 
 2.45.0 changed who may see what, and every part of a host install takes
