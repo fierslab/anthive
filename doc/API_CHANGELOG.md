@@ -305,6 +305,16 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### Reanalyses visible in listings
+
+- MCP `search_datasets`: `exclude_secondary` defaults to false. Reanalyses (`is_secondary: true`) are listed
+  with "(reanalysis of <db_id>)" after the db_id; `exclude_secondary=true` still gives primary datasets only.
+  A catalog entry without `n_cells` / `n_genes` no longer breaks the listing (`?`).
+- Unchanged: the statistics keep `exclude_secondary=true` by default (facet tests, replication counts, donor
+  variability, `/gene_stats_all`, `/module-variability` and the MCP counting tools), because a reanalysis
+  reuses the same cells and would count them twice. The REST `/databases` listing and the web UI dataset lists
+  already showed every dataset, reanalyses marked `(2)`.
+
 ### data_use warns, never holds (decision D7 revised 2026-10-20)
 
 Data use agreements and the internal/external split apply to a whole server: everybody on a server may see

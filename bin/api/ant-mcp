@@ -593,6 +593,19 @@ DE_RULES = (
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
+def _count_text(value: Any) -> str:
+    """A count with thousands separators, or '?' when unknown (``'?'`` cannot take the ``,`` format)."""
+    return f'{value:,}' if isinstance(value, int) and not isinstance(value, bool) else '?'
+
+
+def _reanalysis_mark(dataset: dict) -> str:
+    """`` (reanalysis of <db_id>)`` for a secondary dataset in a listing, else ''."""
+    if dataset.get('is_secondary') is not True:
+        return ''
+    sources = [str(source) for source in (dataset.get('reanalysis_of') or [])]
+    return f" (reanalysis of {', '.join(sources)})" if sources else ' (reanalysis)'
+
+
 def _lineage_line(dataset: dict) -> str:
     """One line on a dataset's lineage for the tool replies."""
     designation = dataset.get('designation') or ('reanalysis' if dataset.get('is_secondary') else 'primary')
@@ -1027,7 +1040,7 @@ def main() -> None:
         disease: Optional[str] = None,
         technology: Optional[str] = None,
         search: Optional[str] = None,
-        exclude_secondary: bool = True,
+        exclude_secondary: bool = False,
     ) -> str:
         """Search and filter available single-cell datasets.
 
@@ -1038,7 +1051,13 @@ def main() -> None:
         cells are also served by the datasets in reanalysis_of) or
         unresolved. Datasets with the same donor_group hold cells of the same
         donor pool, so never count them as independent donors or cohorts.
-        Reanalyses are left out unless exclude_secondary is false.
+
+        Reanalyses are listed by default, each marked "(reanalysis of
+        <db_id>)": listing and discovery show every dataset. Pass
+        exclude_secondary=true for primary datasets only. Statistics are
+        different: the facet tests, replication counts, donor variability and
+        the other counting tools keep exclude_secondary=true by default,
+        because a reanalysis reuses the same cells and would count them twice.
 
         Args:
             organism:   Filter by species, e.g. 'human', 'mouse'.
@@ -1047,7 +1066,7 @@ def main() -> None:
             disease:    Filter by condition, e.g. 'alzheimer', 'healthy'.
             technology: Filter by sequencing method, e.g. '10x', 'visium'.
             search:     Free-text search across all metadata fields.
-            exclude_secondary: Leave out reanalyses (default true).
+            exclude_secondary: Leave out reanalyses (default false: listed and marked).
         """
         all_databases = (await _get('/databases')).get('databases', [])
         n_secondary_left_out = 0
@@ -1091,10 +1110,10 @@ def main() -> None:
         for db in matching_databases:
             collection_meta = db.get('collection') or {}
             result_lines.append(
-                f"  db_id:      {db['id']}\n"
+                f"  db_id:      {db['id']}{_reanalysis_mark(db)}\n"
                 f"  title:      {db.get('title', '—')}\n"
                 f"  group:      {collection_meta.get('group', '—')} / {collection_meta.get('experiment', '—')}\n"
-                f"  cells:      {db.get('n_cells') or '?':,}    genes: {db.get('n_genes') or '?':,}\n"
+                f"  cells:      {_count_text(db.get('n_cells'))}    genes: {_count_text(db.get('n_genes'))}\n"
                 f"  organism:   {db.get('organism') or '—'}\n"
                 f"  celltype:   {db.get('celltype') or '—'}\n"
                 f"  tissue:     {db.get('tissue') or '—'}\n"
