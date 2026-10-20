@@ -472,3 +472,74 @@ def test_held_update_leaves_the_published_version_alone(tmp_path):
     assert not (env.store / 'WatchTest2026' / '_versions').exists()
     assert env.s3.deleted == deleted_before and keys['h5ad'] in env.s3.objects
     assert env.row(keys['h5ad'])['version'] is None
+
+
+def test_convert_gets_the_group_id_for_a_new_dataset_in_an_existing_group(tmp_path):
+    # Francken2026, 2026-10-20: the work folder of a deposit into an existing group has no index.md, so the
+    # convert did not know {group_id} and ant_donor_uid was not published
+    env = Env(tmp_path)
+    _live_v1(env)
+    group_id = yaml.safe_load((env.store / 'WatchTest2026' / 'index.md').read_text().split('---\n')[1])['group_id']
+    env.deposit(basename='second', seed=3, with_seeds=False)
+    env.clock_value += 10
+    assert env.poll_twice() == {'live': 1}
+    converts = [cmd for cmd in env.runner.commands if Path(cmd[0]).name == 'ant-convert']
+    assert converts[-1][1].endswith('second.h5ad') and converts[-1][-2:] == ['--group-id', group_id]
+    assert converts[0][-2:] == ['--group-id', group_id]          # a new group: the staged index.md's id
+
+
+# ── console: one line per state change and per step ─────────────────────────
+
+def _watch_cli():
+    import importlib.machinery
+    import importlib.util
+    path = Path(__file__).resolve().parent.parent / 'bin' / 'ingest' / 'ant-ingest-watch'
+    loader = importlib.machinery.SourceFileLoader('ant_ingest_watch_under_test', str(path))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+def test_pipeline_reports_each_step_with_timings(tmp_path):
+    env = Env(tmp_path)
+    lines, changes = [], []
+    env.pipeline.progress = lines.append
+    env.db.on_transition = lambda key, state, detail, fields: changes.append((state, fields.get('db_id')))
+    env.deposit()
+    assert env.poll_twice() == {'live': 1}
+    text = '\n'.join(lines)
+    for expected in ('pulled 0.00 GB in', 'sha256 computed in', 'convert started', 'convert finished in',
+                     'check started', 'check: pass, publish auto (0 warnings) in', 'placed in the store in',
+                     'post step score ok in', 'post step facet_test ok in'):
+        assert expected in text, expected
+    states = [state for state, _ in changes]
+    assert states[:2] == ['seen', 'stable'] and 'pulled' in states and states[-1] == 'live'
+    assert changes[-1][1]                                        # live carries the db id
+
+
+def test_check_verdict_names_failed_checks_and_held_reasons(tmp_path):
+    report = {'result': 'fail', 'publish': 'held', 'held_reasons': ['licence_unknown'],
+              'checks': [{'id': 'facets.mapping_data', 'status': 'fail'}, {'id': 'access.controlled', 'status': 'warn'}]}
+    env = Env(tmp_path, report=report)
+    lines = []
+    env.pipeline.progress = lines.append
+    env.deposit()
+    assert env.poll_twice() == {'failed': 1}
+    verdict = next(line for line in lines if line.startswith('check: '))
+    assert 'check: fail, publish held (1 warnings); failed: facets.mapping_data; held: licence_unknown' in verdict
+
+
+def test_cli_console_is_concise_without_a_terminal_and_complete_in_the_log_file(tmp_path, capsys):
+    cli = _watch_cli()
+    cli.LOG_FILE = tmp_path / 'watch.log'
+    cli.VERBOSE = False
+    cli.progress('convert finished in 12.0 s')
+    cli.on_transition('__incoming/G/x.h5ad', 'live', 'new 1.0.0', {'db_id': 'G01/X', 'version': '1.0.0'})
+    cli.log('poll done: {"live": 1}')
+    printed = capsys.readouterr().out
+    assert 'convert finished' not in printed and 'poll done' in printed
+    logged = cli.LOG_FILE.read_text()
+    assert 'convert finished in 12.0 s' in logged and 'G/x.h5ad: live as G01/X 1.0.0 (new 1.0.0)' in logged
+    cli.VERBOSE = True
+    cli.on_transition('__incoming/G/x.h5ad', 'failed', 'ant-ingest-check found errors', {})
+    assert 'G/x.h5ad: failed (ant-ingest-check found errors)' in capsys.readouterr().out

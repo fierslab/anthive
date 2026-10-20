@@ -161,8 +161,48 @@ def lower_priority() -> None:
         subprocess.run(['ionice', '-c', '3', '-p', str(os.getpid())], check=False, capture_output=True)
 
 
+#: the day's log file (set by build()); every console line is also written there with the tools' output
+LOG_FILE: Optional[Path] = None
+#: one line per state change and per step (a terminal, or --verbose); under systemd only the concise lines print
+VERBOSE = False
+#: seconds between two "polling..." lines when nothing happens (verbose only)
+HEARTBEAT_SECONDS = 300
+
+
+def _to_log_file(line: str) -> None:
+    if LOG_FILE is None:
+        return
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, 'a') as handle:
+            handle.write(line + '\n')
+    except OSError:
+        pass
+
+
 def log(message: str) -> None:
-    print(f'{time.strftime("%Y-%m-%d %H:%M:%S")} {message}', flush=True)
+    line = f'{time.strftime("%Y-%m-%d %H:%M:%S")} {message}'
+    print(line, flush=True)
+    _to_log_file(line)
+
+
+def progress(message: str) -> None:
+    """A step line (with its timing): printed when VERBOSE, always written to the log file."""
+    line = f'{time.strftime("%Y-%m-%d %H:%M:%S")}   {message}'
+    if VERBOSE:
+        print(line, flush=True)
+    _to_log_file(line)
+
+
+def on_transition(key: str, state: str, detail: str, fields: dict) -> None:
+    """A state change of an incoming item, as one line (``live`` with db id and version)."""
+    name = key.rsplit('/', 2)
+    shown = '/'.join(name[-2:]) if len(name) >= 2 else key
+    if state == 'live' and fields.get('db_id'):
+        message = f'{shown}: live as {fields["db_id"]} {fields.get("version") or ""} ({detail})'.replace('  ', ' ')
+    else:
+        message = f'{shown}: {state}' + (f' ({detail[:200]})' if detail else '')
+    progress(message)
 
 
 def build(args: argparse.Namespace):
@@ -199,7 +239,9 @@ def build(args: argparse.Namespace):
         sys.exit('ERROR: no s3.bucket in anthive.yaml')
     api_url = args.api_url or settings.get('api_url') or config.get_api_url(cfg)
     client = s3_client(s3_cfg)
-    runner = SubprocessRunner(log_path=state_dir / 'logs' / f'ingest_watch_{time.strftime("%Y%m%d")}.log')
+    global LOG_FILE
+    LOG_FILE = state_dir / 'logs' / f'ingest_watch_{time.strftime("%Y%m%d")}.log'
+    runner = SubprocessRunner(log_path=LOG_FILE)
     pipeline = Pipeline(
         PipelineConfig(store_root=store_root, work_root=work_root, reports_root=state_dir / 'reports',
                        bucket=s3_cfg['bucket'], catalog_prefix=settings['catalog_prefix'],
@@ -212,7 +254,9 @@ def build(args: argparse.Namespace):
                        require_update_marker=settings['require_update_marker']),
         client, runner, ApiClient(api_url, config.internal_auth_headers()), log=log,
         stop_requested=lambda: _stop)
+    pipeline.progress = progress
     db = ingest_watch.StateDB(state_dir / ingest_watch.DB_FILE)
+    db.on_transition = on_transition
     watcher = ingest_watch.Watcher(settings, db, client, s3_cfg['bucket'], pipeline, state_dir, log=log,
                                    max_items=args.max_items, stop_requested=lambda: _stop,
                                    deposit_settings=deposit_settings(cfg, settings),
@@ -380,6 +424,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         f'settle {settings["settle_seconds"]} s, delete after ingest: {settings["delete_incoming_after_ingest"]})')
     backoff = 0
     exit_code = 0
+    last_heartbeat = 0.0
     while True:
         started = time.time()
         try:
@@ -389,6 +434,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                                                           'last_counts': counts, 'prefix': settings['prefix']})
             if counts:
                 log(f'poll done: {counts}')
+            elif VERBOSE and time.time() - last_heartbeat >= HEARTBEAT_SECONDS:
+                progress(f'polling... {watcher.last_listed} item(s) in incoming, nothing new')
+                last_heartbeat = time.time()
             backoff = 0
             if args.once and any(state in counts for state in ('failed', 'held', 'needs_decision')):
                 exit_code = 1
@@ -433,7 +481,13 @@ def main() -> int:
     parser.add_argument('--max-items', type=int, help='process at most this many items per poll')
     parser.add_argument('--no-delete', action='store_true', help='keep the incoming objects after ingest')
     parser.add_argument('--no-git', action='store_true', help='no store git commit')
+    parser.add_argument('--verbose', action='store_true',
+                        help='one line per state change and per step with timings, and a polling line every '
+                             f'{HEARTBEAT_SECONDS // 60} minutes (the default in a terminal; under systemd the '
+                             'console stays concise and the log file has everything)')
     args = parser.parse_args()
+    global VERBOSE
+    VERBOSE = bool(args.verbose or sys.stdout.isatty())
     if args.command == 'status':
         return cmd_status(args)
     if args.command in ('approve', 'reject', 'retry'):

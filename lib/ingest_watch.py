@@ -118,6 +118,8 @@ class StateDB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.executescript(SCHEMA)
+        #: called with ``(key, state, detail, fields)`` after every state change (ant-ingest-watch's console)
+        self.on_transition: Optional[Callable[[str, str, str, Dict[str, Any]], None]] = None
         columns = {row[1] for row in self.conn.execute('PRAGMA table_info(items)')}
         for column in ('sha256', 'approval', 'shared_keys', 'post_failed'):
             if column not in columns:                  # state files written before 2026-10-14
@@ -151,6 +153,11 @@ class StateDB:
             raise ValueError(f'unknown state {state!r}')
         self.upsert(key, state=state, **fields)
         self.event(key, state, detail)
+        if self.on_transition is not None:
+            try:
+                self.on_transition(key, state, detail, fields)
+            except Exception:  # noqa: BLE001 - the console must never break the state machine
+                pass
 
     def event(self, key: str, state: str, detail: str = '') -> None:
         self.conn.execute('INSERT INTO events (key, ts, state, detail) VALUES (?, ?, ?, ?)',
@@ -493,6 +500,8 @@ class Watcher:
         self.max_items = max_items
         self.stop_requested = stop_requested
         self.if_match: Optional[bool] = None
+        #: dataset items found in the last listing (the console's polling line)
+        self.last_listed = 0
         #: ``dataset_deposit.DepositSettings`` for expiry and the staging sweep (None: no deposit housekeeping)
         self.deposit_settings = deposit_settings
         self._deposit_marks: Dict[Tuple[str, str], str] = {}
@@ -545,6 +554,7 @@ class Watcher:
         for message in malformed:
             self.log(f'malformed: {message}')
         items = self.link_deposits(items)
+        self.last_listed = len(items)
         ready = observe(self.db, items, self.clock(), float(self.settings['settle_seconds']))
         self.retry_unverified(items)
         for index, item in enumerate(ready):

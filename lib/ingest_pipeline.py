@@ -555,6 +555,18 @@ class SubprocessRunner:
         return code, '\n'.join(output.strip().splitlines()[-30:])
 
 
+def _verdict_line(report: Dict[str, Any], checks: Sequence[Dict[str, Any]]) -> str:
+    """``check: pass, publish auto (3 warnings)`` or with the failed checks and held reasons."""
+    failed = [entry.get('id', '?') for entry in checks if entry.get('status') == 'fail']
+    n_warnings = sum(1 for entry in checks if entry.get('status') == 'warn')
+    line = f'check: {report.get("result", "?")}, publish {report.get("publish", "?")} ({n_warnings} warnings)'
+    if failed:
+        line += f'; failed: {", ".join(failed)}'
+    if report.get('held_reasons'):
+        line += f'; held: {", ".join(report["held_reasons"])}'
+    return line
+
+
 def transient_exit(code: int) -> bool:
     """A child that was killed, timed out or not found: retry, do not blame the dataset."""
     return code < 0 or code in TRANSIENT_EXIT_CODES
@@ -875,14 +887,18 @@ class Pipeline:
         self.api = api
         self.log = log
         self.stop_requested = stop_requested
+        #: one line per step with its timing (ant-ingest-watch prints them in a terminal or with --verbose and
+        #: writes them to the day's log file); a no-op by default
+        self.progress: Callable[[str], None] = lambda message: None
 
     # helpers --------------------------------------------------------------
 
     def _tool(self, domain: str, name: str) -> Path:
         return BIN / domain / name
 
-    def _timed(self, outcome: Outcome, label: str, started: float) -> None:
+    def _timed(self, outcome: Outcome, label: str, started: float, message: str = '') -> None:
         outcome.timings[label] = round(time.time() - started, 1)
+        self.progress(f'{message or label} in {outcome.timings[label]:.1f} s')
 
     def _checkpoint(self, step: str) -> None:
         if self.stop_requested():
@@ -1056,7 +1072,7 @@ class Pipeline:
         static_files: Dict[str, Tuple[ObjInfo, Path]] = {}
         for obj in item.static_for_item():
             static_files[obj.name] = (obj, self._pull_cached(obj, work, manifest))
-        self._timed(outcome, 'pull', started)
+        self._timed(outcome, 'pull', started, f'pulled {item.h5ad.size / 1e9:.2f} GB')
 
         # 2. sha256 and update markers against the sidecar
         started = time.time()
@@ -1065,7 +1081,7 @@ class Pipeline:
         declared = sidecar.get('sha256', '')
         actual = sha256_file(staged_h5ad)
         outcome.sha256 = actual
-        self._timed(outcome, 'sha256', started)
+        self._timed(outcome, 'sha256', started, 'sha256 computed')
         if not declared:
             raise Blocked('failed', 'the sidecar has no sha256= line; integrity cannot be verified')
         if declared != actual:
@@ -1309,8 +1325,13 @@ class Pipeline:
         if outcome.kind != 'update_patch':
             self._checkpoint('the convert')
             started = time.time()
-            code, tail = self.runner.run('ant-convert', [self._tool('ingest', 'ant-convert'), staged_h5ad], cwd=work)
-            self._timed(outcome, 'convert', started)
+            convert_args = [self._tool('ingest', 'ant-convert'), staged_h5ad]
+            convert_group_id = (outcome.db_id or '').partition('/')[0]
+            if convert_group_id:        # an existing group's work folder has no index.md (Francken2026, 2026-10-20)
+                convert_args += ['--group-id', convert_group_id]
+            self.progress(f'convert started ({item.h5ad.size / 1e9:.2f} GB h5ad)')
+            code, tail = self.runner.run('ant-convert', convert_args, cwd=work)
+            self._timed(outcome, 'convert', started, 'convert finished' if code == 0 else f'convert failed (exit {code})')
             if transient_exit(code) or self.stop_requested() or (code != 0 and transient_output(tail)):
                 raise TransientError(f'ant-convert did not run through (exit {code}): {tail[-300:]}')
             if code != 0 or not staged_duckdb.exists():
@@ -1326,8 +1347,9 @@ class Pipeline:
                '--mode', 'existing' if is_update else 'new']
         if outcome.kind == 'update_patch':
             cmd += ['--duckdb', store_dir / f'{item.basename}.duckdb']
+        self.progress('check started')
         code, tail = self.runner.run('ant-ingest-check', cmd, cwd=work)
-        self._timed(outcome, 'ingest_check', started)
+        outcome.timings['ingest_check'] = round(time.time() - started, 1)
         outcome.report_path = str(report_json)
         if transient_exit(code) or (not report_json.exists() and (self.stop_requested() or transient_output(tail))):
             raise TransientError(f'ant-ingest-check did not run through (exit {code}): {tail[-300:]}')
@@ -1335,6 +1357,7 @@ class Pipeline:
             raise Blocked('failed', f'ant-ingest-check could not run (exit {code}): {tail[-1500:]}', str(report_json))
         report = json.loads(report_json.read_text())
         checks = [entry for entry in report.get('checks', []) if isinstance(entry, dict)]
+        self.progress(_verdict_line(report, checks) + f' in {outcome.timings["ingest_check"]:.1f} s')
         if report.get('result') == 'fail':
             names = ', '.join(entry.get('id', '?') for entry in checks if entry.get('status') == 'fail')
             raise Blocked('failed', f'ant-ingest-check found errors: {names or "see report"}', str(report_json))
@@ -1362,7 +1385,7 @@ class Pipeline:
         else:
             placed_static = self._swap_new(item, outcome, group_dir, store_dir, store_group, plain_static,
                                            place_index=index_placed)
-        self._timed(outcome, 'publish', started)
+        self._timed(outcome, 'publish', started, 'placed in the store')
         outcome.state = 'live'
         outcome.detail = f'{outcome.kind} {outcome.version}'
         self.log(f'placed in {store_dir} ({outcome.kind} {outcome.version})')
@@ -1388,7 +1411,7 @@ class Pipeline:
         if cfg.push_catalog:
             started = time.time()
             self._push_catalog(item, outcome, store_dir, include_h5ad=outcome.kind != 'update_patch')
-            self._timed(outcome, 'push', started)
+            self._timed(outcome, 'push', started, 'catalog push')
             self._update_resume(item, pushed=True)
             self.log(f'catalog push: {len(outcome.catalog_keys)} object(s), verified {outcome.catalog_verified}')
 
@@ -1828,7 +1851,8 @@ class Pipeline:
                     outcome.warnings.append(f'post step {step} failed (exit {code}): '
                                             f'{tail.splitlines()[-1] if tail else ""}')
                     outcome.post_failed.append(step)
-                self._timed(outcome, f'post:{step}', started)
+                self._timed(outcome, f'post:{step}', started,
+                            f'post step {step} ' + ('ok' if code == 0 else f'failed (exit {code})'))
             done.add(step)
             self._update_resume(item, done_steps=sorted(done), post_failed=sorted(
                 set(marker.get('post_failed') or []) | set(outcome.post_failed)))
