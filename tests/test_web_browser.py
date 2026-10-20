@@ -8531,9 +8531,9 @@ def test_categorical_value_policy_marks_donor_columns():
     policy = browser._categorical_value_policy(
         {"replicate_column": "mouse", "replicate_unit": "animal"},
         ["cell_type", "ant_donor", "ant_donor_uid", "mouse", "SEAAD_Donor.ID", "ROSMAP_projid", "sample", "Batch",
-         "ant_author_cluster", "SEACell"])
+         "ant_author_cluster", "SEACell", "SEAAD_Fresh.Brain.Weight", "brain_id", "case"])
     assert policy["donor_columns"] == {"ant_donor": "donors", "ant_donor_uid": "donors", "mouse": "animals"}
-    assert policy["donor_like_columns"] == ["batch", "rosmap_projid", "sample", "seaad_donor.id"]
+    assert policy["donor_like_columns"] == ["batch", "brain_id", "case", "rosmap_projid", "sample", "seaad_donor.id"]
     assert policy["top_n"] == browser.CATEGORICAL_TOP_LIST_N and policy["plot_max_distinct"] == browser.CATEGORICAL_PLOT_MAX_DISTINCT
     assert browser._categorical_value_policy({}, ["cell_type"])["donor_columns"] == {}
 

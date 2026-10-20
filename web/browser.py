@@ -453,7 +453,8 @@ OBS_SUMMARY_EXACT_UNIQUE_LIMIT = 5000
 # worse than a sample or batch column without its list. The page also hides any column whose listed values contain
 # a value of a donor column (Mac_anno_batch 'NPH_899' in F26/ACC).
 _DONOR_LIKE_COLUMN = re.compile(
-    r'donor|patient|individual|subject|participant|projid|proj_id|case|brain|specimen|pup|mouse|animal|'
+    r'donor|patient|individual|subject|participant|projid|proj_id|^case$|case[_.]?id|brain[_.]?(?:id|code|bank)|'
+    r'specimen|pup|mouse|animal|'
     r'sample|batch|orig\.?ident|hto|hashtag', re.I)
 _REPLICATE_NOUNS = {'donor': 'donors', 'animal': 'animals', 'sample': 'samples'}
 
