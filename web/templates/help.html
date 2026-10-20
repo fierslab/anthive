@@ -5,7 +5,10 @@
 {% block content %}
 {% set _docs = docs_base_url() %}
 {% set _skills_repo = 'https://gitlab.kuleuven.be/bdslab/anthive/skills' %}
-{% set _skills_install = "DISABLE_TELEMETRY=1 npx skills add " ~ _skills_repo ~ ".git -g -y --agent claude-code codex" %}
+{% set _skills_install = "DISABLE_TELEMETRY=1 npx skills add " ~ _skills_repo ~ ".git -g -y --agent claude-code codex opencode pi" %}
+{% set _harness_links -%}
+<a href="https://claude.com/claude-code" target="_blank" rel="noopener noreferrer">Claude Code</a>, <a href="https://github.com/openai/codex" target="_blank" rel="noopener noreferrer">Codex</a>, <a href="https://opencode.ai" target="_blank" rel="noopener noreferrer">OpenCode</a>, <a href="https://github.com/badlogic/pi-mono" target="_blank" rel="noopener noreferrer">Pi</a>
+{%- endset %}
 {% set _skills_install_guide = _skills_repo ~ '/-/blob/main/INSTALL.md' %}
 {% set _skills_update = 'DISABLE_TELEMETRY=1 npx skills update -g' %}
 {% set _skills = [
@@ -89,9 +92,9 @@
       </li>
       <li><strong>Install the skills.</strong> Skills are short written instructions your assistant reads when a task fits: which tool to use first, how to cite, which statistics not to trust.
         <ul>
-          <li>In Claude Code, Codex, OpenCode, Cursor, Gemini CLI and most other agents that read skill folders, run this once in a terminal. It needs <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a>, the free program that provides <code>npx</code>.
+          <li>In {{ _harness_links }}, Cursor, Gemini CLI and most other agents that read skill folders, run this once in a terminal. It needs <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a>, the free program that provides <code>npx</code>.
             <div class="cmd"><pre id="quickstart-skills-cmd">{{ _skills_install }}</pre><button type="button" data-copy-help>Copy</button></div>
-            <p>Replace <code>claude-code codex</code> with the apps you use, separated by spaces: <code>claude-code</code> (Claude Code), <code>codex</code> (Codex), <code>gemini-cli</code> (Gemini CLI), <code>opencode</code> (OpenCode), <code>cursor</code> (Cursor), <code>github-copilot</code> (GitHub Copilot). Other names, and every step in detail, are in the <a href="{{ _skills_install_guide }}" target="_blank" rel="noopener">skills install guide</a>. Check the install with <code>ls ~/.claude/skills</code> (Claude Code only) or <code>ls ~/.agents/skills</code> (the other apps).</p>
+            <p>Replace <code>claude-code codex opencode pi</code> with the apps you use, separated by spaces: <code>claude-code</code> (Claude Code), <code>codex</code> (Codex), <code>gemini-cli</code> (Gemini CLI), <code>opencode</code> (OpenCode), <code>pi</code> (Pi), <code>cursor</code> (Cursor), <code>github-copilot</code> (GitHub Copilot). Other names, and every step in detail, are in the <a href="{{ _skills_install_guide }}" target="_blank" rel="noopener">skills install guide</a>. Check the install with <code>ls ~/.claude/skills</code> (Claude Code only) or <code>ls ~/.agents/skills</code> (the other apps).</p>
           </li>
           <li>In Claude Desktop and claude.ai, download the zips and upload each one under Customize &gt; Skills, with code execution switched on (<a href="#skills-claude-apps">step by step</a>). Then add your MCP link under Customize &gt; Connectors.
             <ul class="zips">
@@ -291,9 +294,9 @@
     </div>
     <p>The list grows; the repository always has the current set.</p>
 
-    <p><strong>Install in Claude Code, Codex, OpenCode, Cursor, Gemini CLI and other agents.</strong> Use the skills command-line tool (needs <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a>). This installs every skill for the apps you name after <code>--agent</code>:</p>
+    <p><strong>Install in {{ _harness_links }}, Cursor, Gemini CLI and other agents.</strong> Use the skills command-line tool (needs <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a>). This installs every skill for the apps you name after <code>--agent</code>:</p>
     <div class="cmd"><pre>{{ _skills_install }}</pre><button type="button" data-copy-help>Copy</button></div>
-    <p>Replace <code>claude-code codex</code> with the apps you use, separated by spaces: <code>claude-code</code> (Claude Code), <code>codex</code> (Codex), <code>gemini-cli</code> (Gemini CLI), <code>opencode</code> (OpenCode), <code>cursor</code> (Cursor), <code>github-copilot</code> (GitHub Copilot). Other names, and every step in detail, are in the <a href="{{ _skills_install_guide }}" target="_blank" rel="noopener">skills install guide</a>. Check the install with <code>ls ~/.claude/skills</code> (Claude Code only) or <code>ls ~/.agents/skills</code> (the other apps).</p>
+    <p>Replace <code>claude-code codex opencode pi</code> with the apps you use, separated by spaces: <code>claude-code</code> (Claude Code), <code>codex</code> (Codex), <code>gemini-cli</code> (Gemini CLI), <code>opencode</code> (OpenCode), <code>pi</code> (Pi), <code>cursor</code> (Cursor), <code>github-copilot</code> (GitHub Copilot). Other names, and every step in detail, are in the <a href="{{ _skills_install_guide }}" target="_blank" rel="noopener">skills install guide</a>. Check the install with <code>ls ~/.claude/skills</code> (Claude Code only) or <code>ls ~/.agents/skills</code> (the other apps).</p>
     <p><code>--agent '*'</code> (all apps) also works, but it creates settings folders for about fifty apps you probably do not have and prints lines such as "Eve does not support global skill installation"; those lines are harmless.</p>
     <p>An agent that can run commands can also do this for you: the setup prompt on <a href="/account/mcp">your MCP page</a> connects anthive and installs the skills in one paste.</p>
     <p>Update them now and then:</p>
