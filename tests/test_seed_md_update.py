@@ -125,3 +125,41 @@ def test_access_and_licence_changes_still_need_a_decision(tmp_path, key, value):
     clock[0] = env.clock_value = env.clock_value + 10
     assert env.poll_twice() == {'needs_decision': 1}
     assert _meta(env.store / GROUP / 'micro.md')['version'] == '1.0.0'
+
+
+# ── GET /datasets/deposit/md/{db_id}: the store's editable keys for a client's diff ───────────
+
+def test_editable_md_for_the_owner_and_admins_only(tmp_path):
+    from tests.deposit_helpers import ADMIN
+
+    env, service, clock = published_by_alice(tmp_path)
+    _seed_update(env, service, clock, API_SEED)
+    md_path = env.store / GROUP / 'micro.md'
+    answer = service.editable_md(ALICE, 'WT6/MIC', md_path)
+    assert answer['db_id'] == 'WT6/MIC' and answer['version'] == '1.0.1'
+    assert answer['keys']['api'] == {'obs_rename': {'donor': 'ant_donor'}}
+    assert set(answer['keys']) <= set(md_fill.DEPOSITOR_EDITABLE_KEYS)
+    assert 'caveats' not in answer['keys'] and 'changelog' not in answer['keys'] and 'id' not in answer['keys']
+    assert answer['editable_keys'] == list(md_fill.DEPOSITOR_EDITABLE_KEYS)
+    assert service.editable_md(ADMIN, 'WT6/MIC', md_path)['keys'] == answer['keys']
+    with pytest.raises(dd.DepositError) as exc:
+        service.editable_md(BOB, 'WT6/MIC', md_path)
+    assert exc.value.status == 403
+    with pytest.raises(dd.DepositError) as exc:                     # not owned: the same 403, nothing revealed
+        service.editable_md(BOB, 'WT6/NOPE', None)
+    assert exc.value.status == 403
+    with pytest.raises(dd.DepositError) as exc:
+        service.editable_md(ADMIN, 'WT6/NOPE', None)
+    assert exc.value.status == 404
+    with pytest.raises(dd.DepositError) as exc:
+        service.editable_md(ADMIN, '../etc', None)
+    assert exc.value.status == 422
+    service.settings.update_policy = 'any'
+    assert service.editable_md(BOB, 'WT6/MIC', md_path)['keys'] == answer['keys']
+
+
+def test_editable_md_route_is_registered_before_the_deposit_id_route():
+    source = (Path(__file__).resolve().parent.parent / 'bin' / 'api' / 'ant-serve').read_text()
+    route = source.index('@app.get("/datasets/deposit/md/{db_id:path}"')
+    assert route < source.index('@app.get("/datasets/deposit/{deposit_id}"')
+    assert 'service.editable_md(identity, db_id, md_path)' in source[route:route + 900]

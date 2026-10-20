@@ -1307,6 +1307,32 @@ class DepositService:
                     answer['db_id'] = existing
         return answer
 
+    def editable_md(self, identity: Identity, db_id: str, md_path: Optional[Path]) -> Dict[str, Any]:
+        """The depositor-editable keys of a published dataset's ``.md`` (``GET /datasets/deposit/md/{db_id}``).
+
+        For a client that diffs its local ``.md`` against the store before an update. Allowed under the update
+        rule (owner, admin, or ``update_policy: any``); others get 403 whether the dataset exists or not, and an
+        unknown dataset is 404 only for those who may update any dataset. Only
+        ``ingest_md_fill.DEPOSITOR_EDITABLE_KEYS`` are returned (``keys``: the ones the ``.md`` sets), plus
+        ``version`` (also on ``/info``); no curated or managed key, no caveats.
+        """
+        from ingest_md_fill import DEPOSITOR_EDITABLE_KEYS  # noqa: PLC0415
+        from metadata import parse_md_file  # noqa: PLC0415
+
+        if not isinstance(db_id, str) or not DB_ID_RE.fullmatch(db_id):
+            raise DepositError(422, 'invalid', 'db_id is a dataset id like ABC/xyz')
+        self.lookup_limiter.check(identity.user)
+        may = identity.is_admin or self.settings.update_policy == 'any' \
+            or self.store.owner_of_dataset(db_id) == identity.user
+        if not may:
+            raise DepositError(403, 'forbidden', f'only the owner of {db_id} or an admin may read its editable keys')
+        if md_path is None or not Path(md_path).is_file():
+            raise DepositError(404, 'unknown_dataset', f'{db_id} is not a published dataset')
+        meta = parse_md_file(Path(md_path))[0] or {}
+        return {'db_id': db_id, 'version': meta.get('version'),
+                'keys': {key: meta[key] for key in DEPOSITOR_EDITABLE_KEYS if key in meta},
+                'editable_keys': list(DEPOSITOR_EDITABLE_KEYS)}
+
     def set_owner(self, identity: Identity, db_id: str, user: str, note: str = '') -> Dict[str, Any]:
         """Admin: who may deposit new versions of a dataset (for datasets published before deposits existed)."""
         self._require_admin(identity, 'assign dataset owners')

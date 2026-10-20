@@ -480,3 +480,20 @@ def test_deprecated_alias_header_survives_the_plot_cache(ant_sex_store, serve_cl
     assert second.headers.get('X-Plot-Cache') == 'HIT'
     for response in (first, second):
         assert 'ant_sex' in response.headers.get('X-Anthive-Deprecated-Alias', '')
+
+
+def test_raw_sql_answers_nulls_and_infinities_as_json_null(serve_client):
+    # vark sql on GF4/MIC answered 500 for GROUP BY and larger results (2026-10-20): NaN left in float and string
+    # columns by df.where(notna, None) broke the JSON encoder
+    serve_client, db_id = serve_client
+    query = ("SELECT * FROM (VALUES ('a', 1.0), (NULL, CAST('NaN' AS DOUBLE)), ('c', CAST('inf' AS DOUBLE)), "
+             "(NULL, NULL)) AS t(label, value)")
+    response = serve_client.post(f'/databases/{db_id}/query/sql', json={'query': query})
+    assert response.status_code == 200, response.text
+    rows = response.json()['data']
+    assert rows == [{'label': 'a', 'value': 1.0}, {'label': None, 'value': None},
+                    {'label': 'c', 'value': None}, {'label': None, 'value': None}]
+    grouped = serve_client.post(f'/databases/{db_id}/query/sql',
+                                json={'query': f'SELECT label, count(*) AS n FROM ({query}) GROUP BY 1 ORDER BY 2'})
+    assert grouped.status_code == 200, grouped.text
+    assert {row['label']: row['n'] for row in grouped.json()['data']} == {'a': 1, 'c': 1, None: 2}

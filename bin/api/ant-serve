@@ -5878,17 +5878,20 @@ def execute_sql_query(db_id: str, request: QueryRequest):
                 scores_parquet_lib.install_score_views(db._conn, registry.get_database_path(db_id))
             df = db.execute_sql(request.query, limit=effective_limit)
 
-        # Convert to JSON-safe format
-        df = df.where(pd.notna(df), None)
+        # JSON-safe: missing values and infinities become null. ``df.where(notna, None)`` alone kept NaN in
+        # float and pandas string columns, and the response then failed with "Out of range float values are
+        # not JSON compliant" (HTTP 500 for vark sql on GF4/MIC and M23/IMM, 2026-10-20).
+        dtypes = {col: str(dtype) for col, dtype in df.dtypes.items()}
+        records = df.astype(object).where(pd.notna(df), None).to_dict(orient='records')
 
-        return {
+        return _json_safe({
             "query": request.query,
             "n_rows": len(df),
             "n_columns": len(df.columns),
             "columns": df.columns.tolist(),
-            "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()},
-            "data": df.to_dict(orient='records')
-        }
+            "dtypes": dtypes,
+            "data": records,
+        })
 
     except HTTPException:
         raise
@@ -17525,6 +17528,16 @@ def dataset_deposit_group(request: Request, data_project: str,
     """Lookup for depositors: ``{data_project, exists, group_id?, may_create?, reason?, dataset_exists?,
     may_update?, db_id?}`` (``db_id`` only when the caller may deposit a new version)."""
     return _deposit_call(request, lambda service, identity: service.group_info(identity, data_project, basename))
+
+
+@app.get("/datasets/deposit/md/{db_id:path}", tags=["datasets-deposit"], include_in_schema=False)
+def dataset_deposit_editable_md(request: Request, db_id: str):
+    """The depositor-editable keys of a published dataset's .md, for a client that diffs before an update:
+    ``{db_id, version, keys: {key: value}, editable_keys: [...]}``. Owner, admins, or anyone under
+    ``update_policy: any`` (the rule of the update itself); 403 otherwise."""
+    md_path = registry._db_md_bases.get(db_id) if db_id in registry.databases else None
+    return _deposit_call(request, lambda service, identity: service.editable_md(identity, db_id, md_path),
+                         kinds=('dataset',))
 
 
 @app.get("/datasets/deposit/{deposit_id}", tags=["datasets-deposit"], include_in_schema=False)
