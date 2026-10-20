@@ -491,21 +491,77 @@ def merge_sidecar_store_wins(store_text: str, incoming_text: str) -> SidecarMerg
     return result
 
 
-def seed_md_delta(seed_meta: Dict[str, Any], store_meta: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """What a deposited ``<basename>.md`` seed adds to a dataset that is already published.
+#: Keys of a dataset ``.md`` the route manages itself; a deposited seed never sets them on an update.
+SEED_MANAGED_KEYS = frozenset({'version', 'changelog', 'sha256', 'n_obs', 'n_vars', 'layer_stats', 'ingest',
+                               'updated', 'date', 'caveats'})
+#: Keys of a dataset ``.md`` the depositor owns: an update by the dataset owner or an admin applies them (2.47.0).
+#: Every other key is curated (a person edits it); access, license and data_use live in the sidecar.
+DEPOSITOR_EDITABLE_KEYS = ('api', 'obscat_include', 'obsnum_include', 'obs_exclude', 'disease_basis',
+                           'disease_derivation', 'description', 'title', 'replicate_unit', 'replicate_column',
+                           'is_secondary', 'reanalysis_of', 'donor_group', 'facet_donor_exclusions',
+                           'counts_unavailable', 'normalisation', 'year')
+#: Editable keys that change what ant-convert builds: a change rebuilds the views.
+VIEW_KEYS = frozenset({'api', 'obscat_include', 'obsnum_include', 'obs_exclude'})
 
-    Returns ``(new caveats, conflicting keys)``: caveats whose message is not in
-    the store yet (applied non-destructively), and other keys whose value
-    differs from the store (not applied: a person edits them).
+
+@dataclass
+class SeedDelta:
+    """What a deposited ``<basename>.md`` seed changes in a published dataset (:func:`seed_md_changes`)."""
+    new_caveats: List[Dict[str, Any]] = field(default_factory=list)
+    editable: Dict[str, Tuple[Any, Any]] = field(default_factory=dict)      # key -> (store value, seed value)
+    conflicts: List[str] = field(default_factory=list)                     # curated keys that differ
+
+    @property
+    def rebuild_views(self) -> bool:
+        return bool(VIEW_KEYS & set(self.editable))
+
+
+def seed_md_changes(seed_meta: Dict[str, Any], store_meta: Dict[str, Any]) -> SeedDelta:
+    """Split a deposited seed against the store ``.md``: new caveats, depositor-editable changes, curated conflicts.
+
+    Caveats count as new when their message is not in the store yet. A key the
+    seed leaves out is not a change (the store keeps it).
     """
-    managed = {'version', 'changelog', 'sha256', 'n_obs', 'n_vars', 'layer_stats', 'ingest', 'updated', 'date',
-               'caveats'}
     known = {str(caveat.get('message')) for caveat in (store_meta.get('caveats') or []) if isinstance(caveat, dict)}
-    new_caveats = [caveat for caveat in (seed_meta.get('caveats') or [])
-                   if isinstance(caveat, dict) and caveat.get('message') and str(caveat['message']) not in known]
-    conflicts = sorted(key for key, value in seed_meta.items()
-                       if key not in managed and store_meta.get(key) != value)
-    return new_caveats, conflicts
+    delta = SeedDelta()
+    delta.new_caveats = [caveat for caveat in (seed_meta.get('caveats') or [])
+                         if isinstance(caveat, dict) and caveat.get('message') and str(caveat['message']) not in known]
+    for key in sorted(seed_meta):
+        value = seed_meta[key]
+        if key in SEED_MANAGED_KEYS or store_meta.get(key) == value:
+            continue
+        if key in DEPOSITOR_EDITABLE_KEYS:
+            delta.editable[key] = (store_meta.get(key), value)
+        else:
+            delta.conflicts.append(key)
+    return delta
+
+
+def seed_md_delta(seed_meta: Dict[str, Any], store_meta: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """``(new caveats, keys that differ)``: the pre-2.47 view of :func:`seed_md_changes` (editable and curated)."""
+    delta = seed_md_changes(seed_meta, store_meta)
+    return delta.new_caveats, sorted(set(delta.conflicts) | set(delta.editable))
+
+
+def describe_change(key: str, old: Any, new: Any) -> str:
+    """One changelog line for a changed ``.md`` key, short enough to read (mappings name their changed parts)."""
+    def short(value: Any) -> str:
+        text = repr(value)
+        return text if len(text) <= 80 else text[:77] + '...'
+
+    if isinstance(old, dict) and isinstance(new, dict):
+        changed = sorted(str(part) for part in set(old) | set(new) if old.get(part) != new.get(part))
+        return f'.md {key}: changed {", ".join(changed[:12])}' + (f' and {len(changed) - 12} more' if len(changed) > 12 else '') \
+            + ' (deposited .md).'
+    if isinstance(old, list) and isinstance(new, list):
+        added = [item for item in new if item not in old]
+        removed = [item for item in old if item not in new]
+        return (f'.md {key}: ' + ', '.join(part for part in (f'added {short(added)}' if added else '',
+                                                              f'removed {short(removed)}' if removed else '') if part)
+                + ' (deposited .md).') if (added or removed) else f'.md {key}: reordered (deposited .md).'
+    if old is None:
+        return f'.md {key} set to {short(new)} (deposited .md).'
+    return f'.md {key}: {short(old)} -> {short(new)} (deposited .md).'
 
 
 # ── updates of an existing dataset ───────────────────────────────────────────
@@ -567,13 +623,15 @@ def plan_update(old_meta: Dict[str, Any], old_profile: Optional[H5adProfile], ne
 def update_md_text(old_text: str, plan: UpdatePlan, new_sha: str, new_profile: Optional[H5adProfile],
                    today: str, caveat: Optional[Dict[str, Any]] = None,
                    ingest: Optional[Dict[str, Any]] = None,
-                   extra_caveats: Sequence[Dict[str, Any]] = ()) -> str:
+                   extra_caveats: Sequence[Dict[str, Any]] = (),
+                   set_keys: Optional[Dict[str, Any]] = None) -> str:
     """Apply an :class:`UpdatePlan` to the store's ``.md`` text with verified minimal edits.
 
     Only ``sha256``, ``n_obs``, ``n_vars``, ``layer_stats`` (when the old
     file had them), ``version``, ``updated``, ``changelog``, the ``ingest``
-    block and one appended caveat change; everything else (caveats, curation
-    fields, the ``api:`` facet mapping, the body) stays byte for byte.
+    block, the appended caveats and the ``set_keys`` (depositor-editable keys
+    of a deposited seed, :data:`DEPOSITOR_EDITABLE_KEYS`) change; everything
+    else (curation fields, the body) stays byte for byte.
     """
     if plan.part is None:
         return old_text
@@ -592,6 +650,10 @@ def update_md_text(old_text: str, plan: UpdatePlan, new_sha: str, new_profile: O
             operations.append(md_edit.set_top('layer_stats', new_profile.layer_stats))
     if ingest is not None:
         operations.append(md_edit.set_top('ingest', ingest))
+    for key, value in (set_keys or {}).items():
+        if key not in DEPOSITOR_EDITABLE_KEYS:
+            raise ValueError(f'{key} is not a depositor-editable key')
+        operations.append(md_edit.set_top(key, value))
     for item in list(extra_caveats) + ([caveat] if caveat is not None else []):
         operations.append(md_edit.append_top('caveats', item))
     if not old_meta.get('version'):

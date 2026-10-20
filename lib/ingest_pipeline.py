@@ -856,6 +856,7 @@ class Outcome:
     resumed: bool = False
     post_failed: List[str] = field(default_factory=list)          # post steps that ended with an error
     finished_pending: Optional['Outcome'] = None                  # an earlier publication finished first
+    rebuilt: bool = False                                         # a patch whose seed changed the views: converted
 
     @property
     def deletable(self) -> bool:
@@ -1263,17 +1264,34 @@ class Pipeline:
                 extra_changes.append(f'Sidecar {key}: {store_value!r} -> {deposit_value!r} (declared by the '
                                      f'depositor).')
                 extra_caveats.append(md_fill.curation_caveat(message, key, today))
+            seed_keys: Dict[str, Any] = {}
             if md_seed:
+                # 2.47.0: the update itself is the explicit act. API deposits of an existing dataset were checked
+                # against the owner rule when they were created (DepositService: owner, admin or update_policy
+                # any); direct S3 uploads come from holders of the bucket keys. Depositor-editable keys are
+                # applied, curated keys are not (the seed then stays in incoming), new caveats always are.
                 seed_meta = parse_md_file(md_seed[1])[0]
-                new_caveats, seed_conflicts = md_fill.seed_md_delta(seed_meta, old_meta)
-                if seed_conflicts:                  # nothing of it is applied, as the warning says
-                    outcome.warnings.append(f'{item.md_seed_name} in the deposit differs from the store in '
-                                            f'{", ".join(seed_conflicts)}: not applied (its caveats neither), '
-                                            f'left in incoming')
+                delta = md_fill.seed_md_changes(seed_meta, old_meta)
+                extra_caveats.extend(delta.new_caveats)
+                extra_changes.extend(f'Caveat from the deposited {item.md_seed_name}: {caveat["message"]}'
+                                     for caveat in delta.new_caveats)
+                for key, (store_value, seed_value) in delta.editable.items():
+                    seed_keys[key] = seed_value
+                    line = md_fill.describe_change(key, store_value, seed_value)
+                    extra_changes.append(line)
+                    outcome.warnings.append(f'applied from {item.md_seed_name}: {line}')
+                if delta.editable:
+                    extra_caveats.append(md_fill.curation_caveat(
+                        f'The deposit on {today} changed {", ".join(delta.editable)} of the dataset description '
+                        f'(keys the depositor may edit; see the changelog of this version).', 'seed_md_update',
+                        today))
+                outcome.rebuilt = delta.rebuild_views
+                if delta.conflicts:
+                    outcome.warnings.append(f'{item.md_seed_name} in the deposit differs from the store in the '
+                                            f'curated {", ".join(delta.conflicts)}: not applied, left in incoming'
+                                            + (' (its new caveats and the keys the depositor may edit were applied)'
+                                               if delta.new_caveats or delta.editable else ''))
                 else:
-                    extra_caveats.extend(new_caveats)
-                    extra_changes.extend(f'Caveat from the deposited {item.md_seed_name}: {caveat["message"]}'
-                                         for caveat in new_caveats)
                     seed_md_applied = True
             data_changed = old_sha != actual
             old_profile = md_fill.profile_h5ad(store_h5ad, with_layer_stats=False) if data_changed else None
@@ -1307,11 +1325,12 @@ class Pipeline:
                 extra_caveats.append(approval_caveat)
             try:
                 new_text = md_fill.update_md_text(old_text, plan, actual, new_profile, today, caveat=caveat,
-                                                  ingest=ingest, extra_caveats=extra_caveats)
+                                                  ingest=ingest, extra_caveats=extra_caveats, set_keys=seed_keys)
             except Exception as exc:  # noqa: BLE001 - md_edit refuses an edit it cannot verify
                 raise Blocked('needs_decision', f'the store .md cannot be edited safely ({exc}); update it by hand')
             staged_md.write_text(new_text)
             outcome.kind = 'update_minor' if data_changed else 'update_patch'
+            outcome.rebuilt = outcome.rebuilt and not data_changed      # a minor update converts anyway
             outcome.version = str(parse_md_file(staged_md)[0].get('version'))
             de_sidecar = store_dir / f'{item.basename}.de.parquet'
             if de_sidecar.exists() and data_changed:
@@ -1322,7 +1341,7 @@ class Pipeline:
 
         # 5. convert in the work dir (not for a metadata-only update)
         staged_duckdb = group_dir / f'{item.basename}.duckdb'
-        if outcome.kind != 'update_patch':
+        if outcome.kind != 'update_patch' or outcome.rebuilt:   # a seed that changed the api rebuilds the views
             self._checkpoint('the convert')
             started = time.time()
             convert_args = [self._tool('ingest', 'ant-convert'), staged_h5ad]
@@ -1345,7 +1364,7 @@ class Pipeline:
         cmd = [self._tool('ingest', 'ant-ingest-check'), group_dir, '--dataset', item.basename,
                '--store', cfg.store_root, '--json', report_json, '--md-summary', report_md, '--sha256', actual,
                '--mode', 'existing' if is_update else 'new']
-        if outcome.kind == 'update_patch':
+        if outcome.kind == 'update_patch' and not outcome.rebuilt:
             cmd += ['--duckdb', store_dir / f'{item.basename}.duckdb']
         self.progress('check started')
         code, tail = self.runner.run('ant-ingest-check', cmd, cwd=work)
@@ -1381,7 +1400,8 @@ class Pipeline:
         started = time.time()
         if is_update:
             placed_static = self._swap_update(item, outcome, group_dir, store_dir, plain_static, store_group,
-                                              data_changed=outcome.kind == 'update_minor')
+                                              data_changed=outcome.kind == 'update_minor',
+                                              views_changed=outcome.rebuilt)
         else:
             placed_static = self._swap_new(item, outcome, group_dir, store_dir, store_group, plain_static,
                                            place_index=index_placed)
@@ -1432,7 +1452,7 @@ class Pipeline:
 
     def _journal_meta(self, item: Item, outcome: Outcome, version_from: Optional[str]) -> Dict[str, Any]:
         """What recovery needs to finish an interrupted publication (post steps are still pending then)."""
-        return {'item': item.key, 'kind': outcome.kind, 'from': version_from, 'to': outcome.version,
+        return {'item': item.key, 'kind': outcome.kind, 'rebuilt': outcome.rebuilt, 'from': version_from, 'to': outcome.version,
                 'sha256': outcome.sha256, 'previous_sha256': outcome.previous_sha256, 'db_id': outcome.db_id,
                 'post_pending': True, 'written': {}, 'released': None, 'archived_local': []}
 
@@ -1494,8 +1514,12 @@ class Pipeline:
 
     def _swap_update(self, item: Item, outcome: Outcome, group_dir: Path, store_dir: Path,
                      plain_static: Dict[str, Tuple[ObjInfo, Path]], store_group: Path,
-                     data_changed: bool) -> List[str]:
-        """S3 copy of the old version, stage everything, then release, commit, restore (in that order)."""
+                     data_changed: bool, views_changed: bool = False) -> List[str]:
+        """S3 copy of the old version, stage everything, then release, commit, restore (in that order).
+
+        ``views_changed``: a patch whose seed rebuilt the ``.duckdb`` (same cells, new views): the served file
+        is replaced too, so the dataset is released for the renames and stale layer sidecars go.
+        """
         cfg = self.config
         db_id = outcome.db_id
         version = outcome.previous_version or '0.0.0'
@@ -1527,7 +1551,7 @@ class Pipeline:
                 placed = self._stage_static(journal, plain_static, store_group, outcome)
                 for path in remove_after:
                     journal.remove_after(path)
-                if data_changed:
+                if data_changed or views_changed:
                     for stale in store_dir.glob(f'{item.basename}.layer.*.parquet'):
                         if stale.name not in new_names:
                             journal.remove_after(stale)
@@ -1542,7 +1566,7 @@ class Pipeline:
                 outcome.written.clear()
                 raise TransientError('stop requested before the swap; rolled back')
             try:
-                if data_changed and db_id:          # released only for the seconds of the renames
+                if (data_changed or views_changed) and db_id:   # released only for the seconds of the renames
                     try:
                         self.api.release(db_id)
                     except TransientError:
@@ -1640,7 +1664,7 @@ class Pipeline:
                           version=str(marker.get('to')), previous_version=marker.get('from'),
                           sha256=marker.get('sha256'), previous_sha256=marker.get('previous_sha256'),
                           archived_local=list(marker.get('archived_local') or []),
-                          written=dict(marker.get('written') or {}), resumed=True,
+                          written=dict(marker.get('written') or {}), resumed=True, rebuilt=bool(marker.get('rebuilt')),
                           store_h5ad=str(store_dir / f'{item.basename}{H5AD_SUFFIX}'))
         work = self.config.work_root / f'{slug(item.key)}_finish'
         work.mkdir(parents=True, exist_ok=True)
@@ -1797,7 +1821,7 @@ class Pipeline:
         cfg = self.config
         store = cfg.store_root
         db_id = outcome.db_id
-        steps: List[str] = ['manifest'] if outcome.kind == 'update_patch' else \
+        steps: List[str] = ['manifest'] if outcome.kind == 'update_patch' and not outcome.rebuilt else \
             [step for step in cfg.post_steps if step in POST_STEPS]
         if not db_id:
             outcome.warnings.append('no db id: post steps skipped')

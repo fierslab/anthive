@@ -335,15 +335,18 @@ def test_nit_hidden_check_matches_the_exact_basename(tmp_path):
     assert env.poll_twice() == {'live': 1}
 
 
-def test_nit_a_conflicting_seed_applies_nothing(tmp_path):
+def test_nit_a_conflicting_seed_applies_its_caveats_but_not_the_curated_key(tmp_path):
+    # 2.47.0: a curated key in conflict is not applied and the seed stays in incoming, but its new caveats are
+    # applied (before, a conflict applied nothing at all)
     env = Env(tmp_path)
     _live_v1(env)
     keys = env.deposit(seed=1, with_seeds=False)
     seed = f'{PREFIX}WatchTest2026/static/micro.md'
-    env.s3.put(seed, b'---\ntitle: Another title\ncaveats:\n- message: SEED CAVEAT\n---\nbody\n', env.clock_value)
+    env.s3.put(seed, b'---\nid: XYZ\ncaveats:\n- message: SEED CAVEAT\n---\nbody\n', env.clock_value)
     env.clock_value += 10
     assert env.poll_twice() == {'live': 1}
-    assert 'SEED CAVEAT' not in (env.store / 'WatchTest2026' / 'micro.md').read_text()
+    text = (env.store / 'WatchTest2026' / 'micro.md').read_text()
+    assert 'SEED CAVEAT' in text and 'id: XYZ' not in text
     assert seed in env.s3.objects
 
 

@@ -215,7 +215,21 @@ def test_s1_unchanged_reupload_places_new_static_and_applies_seed_caveats(tmp_pa
     assert figure not in env.s3.objects and seed not in env.s3.objects
 
 
-def test_s1_a_seed_with_other_keys_is_left_in_incoming(tmp_path):
+def test_s1_a_seed_with_curated_keys_is_left_in_incoming(tmp_path):
+    env = Env(tmp_path)
+    _live_v1(env)
+    keys = env.deposit(seed=0, with_seeds=False)
+    env.s3.put(keys['mus'], env.s3.objects[keys['mus']]['body'] + b'\n', env.clock_value)
+    seed = f'{PREFIX}WatchTest2026/static/micro.md'
+    env.s3.put(seed, b'---\nid: XYZ\n---\nbody\n', env.clock_value)
+    env.clock_value += 10
+    assert env.poll_twice() == {'live': 1}
+    assert seed in env.s3.objects
+    assert any('not applied' in warning for warning in json.loads(env.row(keys['h5ad'])['warnings']))
+
+
+def test_s1_a_seed_with_a_new_title_is_applied(tmp_path):
+    # 2.47.0: title is a depositor-editable key: applied with a changelog line, the seed is consumed
     env = Env(tmp_path)
     _live_v1(env)
     keys = env.deposit(seed=0, with_seeds=False)
@@ -224,8 +238,10 @@ def test_s1_a_seed_with_other_keys_is_left_in_incoming(tmp_path):
     env.s3.put(seed, b'---\ntitle: A new title\n---\nbody\n', env.clock_value)
     env.clock_value += 10
     assert env.poll_twice() == {'live': 1}
-    assert seed in env.s3.objects
-    assert any('not applied' in warning for warning in json.loads(env.row(keys['h5ad'])['warnings']))
+    meta = _meta(env.store / 'WatchTest2026' / 'micro.md')
+    assert meta['title'] == 'A new title' and meta['version'] == '1.0.1'
+    assert any(line.startswith('.md title:') for line in meta['changelog'][-1]['changes'])
+    assert seed not in env.s3.objects
 
 
 def test_s1_a_differing_static_file_needs_a_decision_and_stays(tmp_path):

@@ -305,6 +305,20 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### Updates change the dataset .md
+
+- A deposited `<basename>.md` on an update (owner, admin, or `update_policy: any`) applies the
+  depositor-editable keys `api`, `obscat_include`, `obsnum_include`, `obs_exclude`, `disease_basis`,
+  `disease_derivation`, `description`, `title`, `replicate_unit`, `replicate_column`, `is_secondary`,
+  `reanalysis_of`, `donor_group`, `facet_donor_exclusions`, `counts_unavailable`, `normalisation`, `year`: merged
+  into the store `.md`, one changelog line per key, a caveat (topic `seed_md_update`), patch version without new
+  data (minor with a new h5ad). A change of `api` or the include lists rebuilds the views (ant-convert) and the
+  checks run on the merged `.md` and the rebuilt database. The deposit's warnings list every applied change
+  ("applied from static/<basename>.md: ...").
+- Other keys are curated: not applied, the seed stays in incoming with a warning, but its new caveats (and
+  editable keys) are applied; before, a single differing key applied nothing, caveats included.
+- `access` and `license` changes in the sidecar stay `needs_decision`; `data_use` is plain metadata (above).
+
 ### Client sync (audit 2026-10-20)
 
 - `API_COMPATIBLE_PYVARK` (and `compatible_pyvark` / `compatible_antclient` in `/version`) is `>=0.11.0`: older

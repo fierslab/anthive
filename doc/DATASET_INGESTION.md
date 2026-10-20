@@ -254,8 +254,16 @@ When they are clean:
 Curated values win: a sidecar key that the store already has with another value is kept, and the changelog
 says what the deposit wanted. To replace it, add `override_<key>=true` next to the key in the sidecar. Changes of
 `access` and `license` are never applied automatically. A `data_use` change is applied as plain metadata: a
-patch version with a changelog line and a caveat (topic `data_use`). From a deposited `<basename>.md` only new
-caveats are applied; if it differs in other keys it stays in `__incoming/` with a warning.
+patch version with a changelog line and a caveat (topic `data_use`). A deposited `<basename>.md` on an update
+(2.47.0) changes the dataset description: the keys the depositor owns (`api`, `obscat_include`, `obsnum_include`,
+`obs_exclude`, `disease_basis`, `disease_derivation`, `description`, `title`, `replicate_unit`,
+`replicate_column`, `is_secondary`, `reanalysis_of`, `donor_group`, `facet_donor_exclusions`, `counts_unavailable`,
+`normalisation`, `year`) are applied with one changelog line each and a caveat, and its new caveats are added.
+Without a new h5ad that is a patch version; a change of `api` or of the include lists rebuilds the views, and the
+facet and design checks run on the merged `.md` first (a failing mapping fails the deposit). Any other key is
+curated: it is not applied and the `.md` stays in `__incoming/` with a warning, but its new caveats and editable
+keys are applied. Only the dataset's owner, an admin, or anyone under `update_policy: any` can deposit an
+update.
 
 Caveats, curation fields and the facet mapping of the old `.md` stay as they are; the route appends one caveat
 saying which version was replaced. The served dataset is swapped under `/admin/release` and `/admin/restore`, through a journal: if the

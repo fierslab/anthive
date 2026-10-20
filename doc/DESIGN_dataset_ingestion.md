@@ -841,8 +841,11 @@ becomes a new version:
 The sidecar merge protects curated values: a key in both keeps the store value unless the deposit also says
 `override_<key>=true` (the conflict is recorded in the changelog); new keys are adopted; `access`
 and `license` changes stop the item for a person. A `data_use` change follows the deposit (patch version,
-changelog line, caveat with topic `data_use`; D7 revised 2026-10-20). A deposited `.md` seed adds its new caveats (by message) and
-is consumed only when its other keys equal the store's; otherwise it stays in incoming with a warning.
+changelog line, caveat with topic `data_use`; D7 revised 2026-10-20). A deposited `.md` seed adds its new caveats (by message). Since 2.47.0 (Mark, 2026-10-20: the update itself
+is the explicit act) the depositor-editable keys (`ingest_md_fill.DEPOSITOR_EDITABLE_KEYS`) are merged into the
+store `.md` with one changelog line each and a `seed_md_update` caveat; `api` / include-list changes rebuild the
+views (a patch that converts, `Outcome.rebuilt`). The seed is consumed only when no curated key differs;
+otherwise it stays in incoming with a warning.
 
 The `.md` edit is minimal and verified (`md_edit`); caveats, curation fields, the `api:` mapping and the body
 stay byte for byte. A `.md` without `version` is treated as 0.0.0 (archived as 0.0.0, bumped from there).
