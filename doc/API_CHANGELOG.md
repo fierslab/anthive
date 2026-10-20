@@ -305,6 +305,20 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### Ingest check: memory and dense matrices
+
+- `ant ingest-check` (and so the watcher) no longer opens the h5ad with `anndata.read_h5ad(backed='r')`, which
+  read layers, raw, obsm, obsp and uns into memory in full. obs and var are decoded with h5py and
+  `anndata.io.read_elem`; the rest is only listed. Sierksma2026 Single.Grafts (3.4 GB on disk, dense gzip,
+  33 GB of counts): 6 min 43 s and 35 GB RSS before, 26 s and 2.6 GB after.
+- The layer checks sample the same 2,000 cells as vark's local inspector. When those random cells would
+  decompress more than 1.5 GB of a compressed chunked matrix (X or the first counts candidate), 16 runs of 125
+  consecutive cells are read instead; the result says so (`sample_mode: sampled_runs`, also in the summary).
+  Verdict thresholds are unchanged. New detail key `sample_mode` (`sampled`, `sampled_runs`,
+  `matrix_exhausted`) on `layers.counts`, `layers.x_lognorm` and `layers.consistency`.
+- A file without X and layers now fails `h5ad.structure` with "Missing both .X and .layers" instead of
+  "cannot be read".
+
 ### Deployment and sync (phase A4)
 
 - `site.yaml` gains an `artefacts:` block (`enabled`, `upload_groups`, `collections_create_groups`, size and

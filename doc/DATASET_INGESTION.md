@@ -374,7 +374,7 @@ is a group in the store.
 | `meta.index_md` | group `index.md`: group equals the folder, 3-character unique `group_id`, doi or paper title, year, authors, default dataset | new group incomplete; existing group disagrees with the store | fix `index.md` |
 | `mus.vocab` | `.h5ad.mus` plus `.env` cascade against the mus vocabulary | required field missing or value outside the vocabulary; missing soft fields warn | `mus vocab` |
 | `version.initial` | new dataset: `1.0.0` and one changelog entry with date, h5ad sha256, changes | otherwise (skipped for existing datasets) | set version and changelog |
-| `layers.counts` | a layer other than X holds non-negative integers (2,000 cells, seed 0) | none, unless `counts_unavailable: <reason>` (then warn) | add `layers['counts']` |
+| `layers.counts` | a layer other than X holds non-negative integers (2,000 random cells, seed 0, the same cells vark checks locally; 16 runs of 125 consecutive cells when a compressed chunked matrix would otherwise be decompressed nearly whole, said in the result) | none, unless `counts_unavailable: <reason>` (then warn) | add `layers['counts']` |
 | `layers.x_lognorm` | X is not integers, not scaled, below 20, expm1 row sums constant | negative, integer or large values; warns when the normalisation cannot be confirmed (declare `normalisation:`) | put log1p(CP10k) in X |
 | `layers.consistency` | median r of X against log1p(CP10k(counts)) on 1,000 cells | below 0.95 (0.95 to 0.99 warns); skipped with a declared `normalisation:` | write both from the same cells |
 | `genes.ids` | symbols, unique, 90%+ known for the organism (needs the index) | duplicates, Ensembl ids, under 70% known | use symbols |

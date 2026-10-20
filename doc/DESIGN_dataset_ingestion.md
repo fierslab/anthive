@@ -286,7 +286,7 @@ No admin tools (approve, reviewed, send-back, retire, reject). Admin actions are
 - Usage: `ant ingest-check <GROUP_DIR | file.h5ad> [--store PATH] [--json OUT] [--md-summary OUT] [--profile-only] [--no-convert] [--duckdb PATH] [--audience curator|admin] [--checks id,id] [--skip id]`
 - Library: `lib/ingest_check/` with these modules:
   - `__init__.py`: registry of `Check(id, family, severity_default, fn)`
-  - `context.py`: `CheckContext` with paths, the md and mus dicts, a lazy h5ad handle (`anndata.read_h5ad(backed='r')`), a lazy duckdb reader, store root, group_id, crosswalk access and `redact()`
+  - `context.py`: `CheckContext` with paths, the md and mus dicts, a lazy h5ad summary (`h5ad_view.H5adSummary`: h5py, obs and var decoded with `anndata.io.read_elem`, X, layers, obsm, obsp, varm and uns only listed; never `anndata.read_h5ad`, whose backed mode reads layers, raw, obsm, obsp and uns into memory in full), a lazy duckdb reader, store root, group_id, crosswalk access and `redact()`
   - `report.py`: JSON schema, md renderer, redaction
   - `profile.py`
   - `checks_files.py`, `checks_meta.py`, `checks_layers.py`, `checks_facets.py`, `checks_donors.py`, `checks_cells.py`, `checks_design.py`, `checks_access.py`
@@ -321,7 +321,7 @@ No admin tools (approve, reviewed, send-back, retire, reject). Admin actions are
 | `meta.required_keys` | `.md` | key list from requirements (title, description of at least 200 characters, version, changelog, replicate_unit, disease_basis, access-related keys) | missing = error |
 | `meta.index_md` | `<Group>/index.md` | new group: `group:`, `group_id` (3 chars, unique in the store via `md_check.collect_db_ids`), doi or `paper_title`, year, authors, `default_dataset`; existing group: group matches | error |
 | `mus.vocab` | `.h5ad.mus` and cascade | `mus.resolve_annotation`, `mus.validate_annotation`, `mus.required_fields()` | a required field missing or not in the vocabulary = error; soft field missing = warn |
-| `layers.counts` | h5ad layers | sample 2,000 cells (seed 0); a layer is counts if all sampled values are non-negative integers (`layer_stats.calculate_layer_statistics`) | no counts layer = error unless `.md` has `counts_unavailable: <reason>` (then warn) |
+| `layers.counts` | h5ad layers | sample 2,000 cells (`default_rng(0).choice`, sorted; the same cells as vark's local inspector), read with h5py (`sampling.read_rows`); when those cells would decompress more than 1.5 GB of one compressed chunked matrix (X or the first counts candidate, e.g. dense gzip in chunks of ~1,000 cells), 16 runs of 125 consecutive cells instead (`sampling.choose_rows`, `sample_mode: sampled_runs` in the details and the summary, as in vark); a layer is counts if all sampled values are non-negative integers | no counts layer = error unless `.md` has `counts_unavailable: <reason>` (then warn) |
 | `layers.x_lognorm` | X | sampled: non-integer, max below 20, `expm1(X)` row sums with CV below 0.1, or a declared `normalisation:` | X looks raw or scaled (negative values, z-scores) = error |
 | `layers.consistency` | X vs counts | `log1p(counts/rowsum*1e4)` vs X on 1,000 cells: median r at least 0.99 (the method of the Aldinger changelog) | below 0.95 = error; 0.95 to 0.99 = warn |
 | `genes.ids` | var_names, var columns | share of var_names found in the gene universe of `gene_stats_index.parquet` for the organism; Ensembl-like names (`ENSG`, `ENSMUSG`) as the index = error (symbols required, Ensembl in `ensg_id`); duplicated var_names = error | below 70% known = error; 70% to 90% = warn |
