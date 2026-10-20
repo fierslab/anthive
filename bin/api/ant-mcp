@@ -3370,7 +3370,7 @@ def main() -> None:
     def _q(value: Any, limit: int) -> str:
         """A string written by a depositor or curator, JSON-quoted on one line and cut to ``limit`` characters."""
         text = '' if value is None else str(value)
-        return json.dumps(text[:limit] + ('...' if len(text) > limit else ''), ensure_ascii=False)
+        return json.dumps(text[:limit] + ('...' if len(text) > limit else ''), ensure_ascii=True)   # also escapes U+2028, U+2029, U+0085 (review round 4)
 
     @mcp.tool()
     async def list_collections(kind: Optional[str] = None) -> str:
