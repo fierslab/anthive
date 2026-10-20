@@ -275,6 +275,7 @@ def _manifest(store_root: Path, item: Item, files: Sequence[Tuple[str, bytes]], 
                                              if item.study_in_duckdb and item.fingerprint else {}),
                             'imported_at': None, 'dataset_version_after': None, 'replaced': [], 'archived': [],
                             'note': 'imported by the DE-only route before artefacts existed'}},
+        'previews': [],                  # a migration makes no previews (ant-sync expects the list)
     }
     problems = artefacts.validate_manifest(manifest, path, group_id, 1)
     if problems:

@@ -971,9 +971,13 @@ A second review checked the section 20 fixes and A3 (probes kept as `tests/test_
   allowlist re-serialisation; hrefs with a backslash or a control character are refused (`/\host` is another
   site to a browser); relative links are kept; plot thumbnails survive for store bodies. The 31 review payloads
   are tests.
-- **ant-sync and symbolic links.** `artefact_sync.checked_path` refuses any component below
-  `<group>/static/artefacts` that is a symbolic link and any path resolving outside that tree, for planning,
-  deletes and downloads.
+- **ant-sync and symbolic links.** `artefact_sync.checked_path` refuses `<group>/static`, `<group>/static/artefacts`
+  and any component below them when it is a symbolic link, and any path resolving outside that tree, for planning,
+  deletes and downloads. The group folder itself may be a link (a mirror site's store links whole groups); its
+  `static/` tree is then the target's own and is checked from there.
+- **Manifests without previews.** Manifests written before previews were recorded have no `previews` list;
+  `ant sync pull` notes that per version and pulls no preview for it (no backfill: the watcher only writes new
+  versions, and a preview is a convenience). The migration writes `previews: []`.
 - **MCP.** Depositor text is a labelled JSON string on one line, after the server facts.
 - **CSRF.** `_CrossSiteGuard` in ant-serve (see the changelog); ant-browse has no state-changing routes. The
   FastAPI floor of ant-serve and ant-browse is 0.141.1 (the pinned version). Round 4: `Origin` is compared with

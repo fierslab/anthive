@@ -250,3 +250,32 @@ def test_a_manifest_without_previews_pulls_none(tmp_path, clock):
         manifest_path.write_text(json.dumps(manifest))        # the head record's sha no longer matches: noted
     actions = artefact_sync.plan(second, s3, BUCKET, CATALOG, INLINE_MAX)
     assert not [action for action in actions if action.reason == 'preview']
+
+
+def test_an_older_manifest_without_previews_is_noted(tmp_path):
+    """Round-4 probe: an older manifest (no previews list) pulled no previews silently; now a note says so."""
+    from tests.artefact_helpers import write_artefact, write_index_md
+    store = tmp_path / 'store'
+    write_index_md(store, 'Public2021', group='Public2021', group_id='PU1')
+    write_artefact(store, 'Public2021', 'PU1', 'int', 'figure', 'volcano', [{'files': {'v.png': b'\x89PNG'}}])
+    actions = artefact_sync.plan(store, _ListingS3({}), 'b', '', 2 * 1024 * 1024)
+    notes = [action for action in actions if action.action == 'note']
+    assert len(notes) == 1 and 'records no previews' in notes[0].reason
+    assert not [action for action in actions if '/preview/' in action.rel]
+
+
+def test_a_symlinked_static_folder_is_refused_and_a_symlinked_group_allowed(tmp_path):
+    """Round-4 probe: <group>/static itself was not checked."""
+    import os
+    store = tmp_path / 'store'
+    elsewhere = tmp_path / 'elsewhere'
+    (elsewhere / 'artefacts').mkdir(parents=True)
+    (store / 'Public2021').mkdir(parents=True)
+    os.symlink(elsewhere, store / 'Public2021' / 'static')
+    with pytest.raises(artefact_sync.UnsafePath):
+        artefact_sync.checked_path(store, 'Public2021/static/artefacts/int/figure/x/v1/files/a.png')
+    mirror = tmp_path / 'mirror_group'
+    (mirror / 'static' / 'artefacts').mkdir(parents=True)
+    os.symlink(mirror, store / 'Mirror2026')
+    assert artefact_sync.checked_path(store, 'Mirror2026/static/artefacts/int/figure/x/v1/files/a.png')
+

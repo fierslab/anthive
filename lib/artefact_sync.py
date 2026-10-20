@@ -51,16 +51,18 @@ class UnsafePath(ValueError):
 
 
 def checked_path(store_root: Path, rel: str) -> Path:
-    """The local path of ``rel`` (``<group>/static/artefacts/...``) when no component below
-    ``<group>/static/artefacts`` is a symbolic link (lstat, also components that exist only in part) and the
+    """The local path of ``rel`` (``<group>/static/artefacts/...``) when neither ``<group>/static`` nor any
+    component below it is a symbolic link (lstat, also components that exist only in part) and the
     resolved path stays inside the resolved ``<group>/static/artefacts``; else :class:`UnsafePath` (security
     review round 3: a committed symlink must never make a pull delete or write outside the store)."""
     parts = PurePosixPath(rel).parts
     if len(parts) < 4 or tuple(parts[1:3]) != artefacts.ARTEFACTS_PARTS or '..' in parts or parts[0].startswith('.'):
         raise UnsafePath(f'{rel}: outside static/artefacts/')
-    base = Path(store_root) / parts[0] / artefacts.ARTEFACTS_PARTS[0] / artefacts.ARTEFACTS_PARTS[1]
-    if base.is_symlink():
-        raise UnsafePath(f'{rel}: static/artefacts is a symbolic link')
+    static = Path(store_root) / parts[0] / artefacts.ARTEFACTS_PARTS[0]
+    base = static / artefacts.ARTEFACTS_PARTS[1]
+    # the group folder itself may be a link (a mirror site's store); <group>/static and below may not
+    if static.is_symlink() or base.is_symlink():
+        raise UnsafePath(f'{rel}: {static.name} or static/artefacts is a symbolic link')
     current = base
     for part in parts[3:]:
         current = current / part
@@ -175,6 +177,10 @@ def plan(store_root: Path, s3: Any, bucket: str, catalog_prefix: str, inline_max
                                       item['sha256'], 'inline' if inline else 'selected'))
             # previews are checked against the sha256 the manifest records (review round 3), never against the
             # object's own metadata; a preview the manifest does not list is not pulled
+            if 'previews' not in manifest:
+                actions.append(Action('note', str(path.version_rel(number)),
+                                      reason=f'{ref}@v{number}: the manifest records no previews (written before '
+                                             f'previews were recorded); previews of this version are not pulled'))
             for preview in manifest.get('previews') or []:
                 try:
                     rel = path.preview_rel(number, str(preview['name']))
