@@ -20,8 +20,9 @@ jobs:
 
 :func:`merge_sidecar_store_wins` merges an updated ``.h5ad.mus``: curated
 store values win unless the deposit sets ``override_<key>=true``, new keys
-are adopted, conflicts are reported for the changelog, and a change of
-``access``, ``data_use`` or ``license`` is reported for a person to decide.
+are adopted, conflicts are reported for the changelog, a change of
+``access`` or ``license`` is reported for a person to decide, and a change
+of ``data_use`` is applied and reported for the changelog.
 
 Nothing here talks to S3 or the server; nothing writes outside the paths the
 caller names.
@@ -400,8 +401,12 @@ def depositor_note(sidecar: Dict[str, Any]) -> Optional[str]:
 
 # ── sidecar merge for updates ────────────────────────────────────────────────
 
-#: Keys whose change on an update always needs a person (consent and publication terms).
-GUARDED_SIDECAR_KEYS = ('access', 'data_use', 'license')
+#: Keys whose change on an update always needs a person (publication terms).
+GUARDED_SIDECAR_KEYS = ('access', 'license')
+#: Keys the depositor declares: a change on an update is applied as plain metadata (patch version, changelog
+#: line, caveat). ``data_use`` moved here from the guarded keys in 2.47.0: data use agreements apply to a whole
+#: server (decision D7 revised 2026-10-20), so a change neither holds nor stops an update.
+DECLARED_SIDECAR_KEYS = ('data_use',)
 OVERRIDE_PREFIX = 'override_'
 
 
@@ -412,7 +417,8 @@ class SidecarMerge:
     adopted: List[Tuple[str, str, str]] = field(default_factory=list)       # (key, '', new)
     overridden: List[Tuple[str, str, str]] = field(default_factory=list)    # (key, old, new)
     conflicts: List[Tuple[str, str, str]] = field(default_factory=list)     # (key, store, deposit): store kept
-    guarded: List[Tuple[str, str, str]] = field(default_factory=list)       # access / data_use / license changes
+    guarded: List[Tuple[str, str, str]] = field(default_factory=list)       # access / license changes
+    declared: List[Tuple[str, str, str]] = field(default_factory=list)      # data_use changes, applied
 
     @property
     def changes(self) -> List[Tuple[str, str, str]]:
@@ -430,8 +436,10 @@ def merge_sidecar_store_wins(store_text: str, incoming_text: str) -> SidecarMerg
     * a key in both with another value keeps the **store** value (a conflict,
       recorded) unless the deposit also sets ``override_<key>=true``;
     * machine keys (``s3_*``, ``sha256``, ...) follow the deposit;
-    * ``access``, ``data_use`` and ``license`` changes are reported in
+    * ``access`` and ``license`` changes are reported in
       ``guarded``: the caller stops the item for a person, override or not;
+    * a ``data_use`` change follows the deposit and is reported in
+      ``declared`` (the caller writes a changelog line and a caveat);
     * ``override_*`` lines are not written.
     """
     incoming = _pairs(incoming_text)
@@ -452,6 +460,9 @@ def merge_sidecar_store_wins(store_text: str, incoming_text: str) -> SidecarMerg
             old, new = raw.strip(), incoming[key].strip()
             if key in GUARDED_SIDECAR_KEYS:
                 result.guarded.append((key, old, new))
+            elif key in DECLARED_SIDECAR_KEYS:
+                value = incoming[key]
+                result.declared.append((key, old, new))
             elif key in S3_KEYS:
                 pass                                  # the deposit's stamps describe the incoming copy
             elif key in UNREPORTED_SIDECAR_KEYS:

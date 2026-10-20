@@ -277,7 +277,7 @@ def test_s2_index_seed_of_the_item_wins(tmp_path):
     assert items['a'].index_seed() is None                             # ambiguous: b has its own
 
 
-# ── S3: access, data_use, license and curated keys ──────────────────────────
+# ── S3: access, license, data_use and curated keys ──────────────────────────
 
 def test_s3_update_without_access_keeps_the_store_value(tmp_path):
     env = Env(tmp_path)
@@ -295,7 +295,27 @@ def test_s3_update_without_access_keeps_the_store_value(tmp_path):
     assert not any(caveat.get('topic') == 'access_default' for caveat in _meta(group / 'micro.md')['caveats'])
 
 
-@pytest.mark.parametrize('key, value', [('access', 'public'), ('data_use', 'controlled'), ('license', 'CC0-1.0')])
+@pytest.mark.parametrize('override', [False, True])
+def test_s3_data_use_change_is_plain_metadata(tmp_path, override):
+    # 2.47.0: data use applies to the whole server (D7 revised 2026-10-20); a change is applied as a patch
+    # version with a changelog line and a caveat, with or without override_data_use
+    env = Env(tmp_path)
+    _live_v1(env)
+    group = env.store / 'WatchTest2026'
+    extra = {'data_use': 'controlled', **({'override_data_use': 'true'} if override else {})}
+    keys = env.deposit(seed=0, with_seeds=False, sidecar_extra=extra)
+    env.clock_value += 10
+    assert env.poll_twice() == {'live': 1}
+    assert env.row(keys['h5ad'])['held_reasons'] in (None, '', '[]')
+    assert 'data_use=controlled' in (group / 'micro.h5ad.mus').read_text().splitlines()
+    meta = _meta(group / 'micro.md')
+    assert meta['version'] == '1.0.1'
+    assert any("Sidecar data_use: 'open' -> 'controlled'" in line for line in meta['changelog'][-1]['changes'])
+    caveat = next(caveat for caveat in meta['caveats'] if caveat.get('topic') == 'data_use')
+    assert 'everyone with access to it can see this dataset' in caveat['message']
+
+
+@pytest.mark.parametrize('key, value', [('access', 'public'), ('license', 'CC0-1.0')])
 def test_s3_guarded_key_changes_need_a_decision(tmp_path, key, value):
     env = Env(tmp_path)
     _live_v1(env)

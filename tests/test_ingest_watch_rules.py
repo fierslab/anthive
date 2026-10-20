@@ -161,6 +161,14 @@ def test_sidecar_merge_store_wins_override_and_guarded_keys():
     assert merge.guarded == [('access', 'internal', 'public')]
 
 
+def test_sidecar_merge_applies_a_data_use_change_and_guards_licence():
+    merge = md_fill.merge_sidecar_store_wins('data_use=open\nlicense=CC-BY-4.0\n',
+                                             'data_use=controlled\nlicense=CC0-1.0\noverride_license=true\n')
+    assert 'data_use=controlled' in merge.text and 'license=CC-BY-4.0' in merge.text
+    assert merge.declared == [('data_use', 'open', 'controlled')]
+    assert merge.guarded == [('license', 'CC-BY-4.0', 'CC0-1.0')] and not merge.conflicts
+
+
 def test_seed_md_delta():
     store = {'title': 'T', 'caveats': [{'message': 'old'}], 'version': '1.0.0'}
     caveats, conflicts = md_fill.seed_md_delta({'title': 'T', 'caveats': [{'message': 'old'}, {'message': 'new'}],

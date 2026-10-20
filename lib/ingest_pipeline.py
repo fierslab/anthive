@@ -1232,7 +1232,7 @@ class Pipeline:
                 store_mus.read_text(encoding='utf-8') if store_mus.exists() else '', staged_mus.read_text())
             if merge.guarded:
                 changed = ', '.join(f'{key}: {old or "-"} -> {new}' for key, old, new in merge.guarded)
-                raise Blocked('needs_decision', f'the update changes {changed}; access, data_use and license '
+                raise Blocked('needs_decision', f'the update changes {changed}; access and license '
                                                 f'are changed by hand')
             staged_mus.write_text(merge.text)
             for key, store_value, deposit_value in merge.conflicts:
@@ -1240,6 +1240,13 @@ class Pipeline:
                              f'(set override_{key}=true to replace it).')
             extra_changes: List[str] = []
             extra_caveats: List[Dict[str, Any]] = []
+            for key, store_value, deposit_value in merge.declared:     # data_use: plain metadata since 2.47.0
+                message = (f'{key} changed from {store_value or "not set"!r} to {deposit_value!r} by a deposit on '
+                           f'{today}. Data use agreements apply to the whole server: everyone with access to it '
+                           f'can see this dataset.')
+                extra_changes.append(f'Sidecar {key}: {store_value!r} -> {deposit_value!r} (declared by the '
+                                     f'depositor).')
+                extra_caveats.append(md_fill.curation_caveat(message, key, today))
             if md_seed:
                 seed_meta = parse_md_file(md_seed[1])[0]
                 new_caveats, seed_conflicts = md_fill.seed_md_delta(seed_meta, old_meta)
