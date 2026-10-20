@@ -33,6 +33,7 @@ from facet_aliases import canonical_facet  # noqa: E402
 import help_content  # noqa: E402
 import safe_markdown  # noqa: E402
 import celltype_groups  # noqa: E402
+from cell_level_scope import DONOR_COLUMNS  # noqa: E402
 
 from canonical_columns import is_canonical_column, strip_ant_prefix  # noqa: E402
 
@@ -440,6 +441,48 @@ _GENESETS_TTL_FALSE = 5.0
 # inline plot affordance and top-N cell go away above this threshold.
 CATEGORICAL_PLOT_MAX_DISTINCT = 50
 
+# Above that limit the Categorical tab lists the most common values instead (count and share), from the same
+# /obs_summary call (top_n is one GROUP BY per view server side, memoised; never every category).
+CATEGORICAL_TOP_LIST_N = 15
+# /obs_summary counts distinct values exactly up to this many and estimates above it (lib/anthive_db.py
+# _OBS_SUMMARY_EXACT_UNIQUE_LIMIT); the tab writes "about" above it.
+OBS_SUMMARY_EXACT_UNIQUE_LIMIT = 5000
+
+# Column names whose values may identify donors (or animals, samples, multiplexing hashtags). Their values are not
+# listed in the Categorical tab's top list; only the count is shown. Deliberately broad: a missed donor column is
+# worse than a sample or batch column without its list. The page also hides any column whose listed values contain
+# a value of a donor column (Mac_anno_batch 'NPH_899' in F26/ACC).
+_DONOR_LIKE_COLUMN = re.compile(
+    r'donor|patient|individual|subject|participant|projid|proj_id|^case$|case[_.]?id|brain[_.]?(?:id|code|bank)|'
+    r'specimen|pup|mouse|animal|'
+    r'sample|batch|orig\.?ident|hto|hashtag', re.I)
+_REPLICATE_NOUNS = {'donor': 'donors', 'animal': 'animals', 'sample': 'samples'}
+
+
+def _categorical_value_policy(info: Dict[str, Any], categorical_columns: List[str]) -> Dict[str, Any]:
+    """What the Categorical tab may list for a column with more values than CATEGORICAL_PLOT_MAX_DISTINCT.
+
+    ``donor_columns`` (lower case) are the donor identifier columns (ant_donor, ant_donor_uid and the replicate
+    column): only their count is shown, as "<n> donors" (or animals, samples for the replicate column).
+    ``donor_like_columns`` are other columns whose name suggests identifiers (``_DONOR_LIKE_COLUMN``): count only.
+    The values of the donor columns also go to the page's overlap check (in dataset.html)."""
+    present = {str(column).lower(): str(column) for column in categorical_columns}
+    replicate = str(info.get('replicate_column') or '').lower()
+    nouns: Dict[str, str] = {}
+    for column in DONOR_COLUMNS:
+        if column in present:
+            nouns[column] = 'donors'
+    if replicate and replicate in present:
+        nouns[replicate] = _REPLICATE_NOUNS.get(str(info.get('replicate_unit') or ''), 'donors')
+    donor_like = sorted(name for name in present if name not in nouns and _DONOR_LIKE_COLUMN.search(name))
+    return {
+        'plot_max_distinct': CATEGORICAL_PLOT_MAX_DISTINCT,
+        'top_n': CATEGORICAL_TOP_LIST_N,
+        'exact_unique_limit': OBS_SUMMARY_EXACT_UNIQUE_LIMIT,
+        'donor_columns': nouns,
+        'donor_like_columns': donor_like,
+    }
+
 
 def _probe_genesets_once(api_url: str) -> bool:
     """Probe /genesets on ant-serve; return True iff it responds 200.
@@ -613,6 +656,22 @@ def _store_markdown(text: Optional[str]) -> str:
     goes through safe_markdown: raw HTML off, the link allowlist, no images but plot thumbnails (security review
     round 3; the store's curated bodies use no raw HTML)."""
     return safe_markdown.render(text, demote_headings=False, allow_plot_images=True)
+
+
+def _comparable_text(value: Optional[str]) -> str:
+    """Lower-case plain text of a markdown or HTML snippet: tags, markdown markers, quotes and whitespace runs
+    removed, entities decoded. Only for telling whether two texts say the same thing."""
+    text = html_lib.unescape(re.sub(r'<[^>]*>', ' ', str(value or '')))
+    text = re.sub(r'[`*_#>\[\]"\'\u2018\u2019\u201c\u201d]', '', text)
+    return re.sub(r'\s+', ' ', text).strip().lower()
+
+
+def _description_repeats_body(description: Optional[str], body_html: Optional[str]) -> bool:
+    """True when the .md ``description`` key says nothing the rendered body does not: its text is part of the body.
+    Deposits accept the description as the key or the body and many write the same paragraph to both, so the
+    dataset page would show it twice (top of the page and Overview tab). The body wins; the top keeps the title."""
+    short = _comparable_text(description)
+    return bool(short) and short in _comparable_text(body_html)
 
 
 def _expand_plot_thumbnails(html_text: Optional[str], default_db: Optional[str] = None) -> Optional[str]:
@@ -3339,7 +3398,9 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "dataset_name": dataset_title,
         # One-line description from the .md frontmatter (edited via the admin
         # editor's Basics tab). Rendered near the title in dataset.html.
-        "dataset_description": (db.get('description') or '').strip() or None,
+        # the Overview tab shows the body; a description the body already holds is not repeated at the top
+        "dataset_description": (None if _description_repeats_body(db.get('description'), markdown_content)
+                                else (db.get('description') or '').strip() or None),
         "file_id": file_id,
         "db_id": db_id,
         # is_secondary marker (surfaced next to the title + h1 gets the
@@ -3360,6 +3421,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "n_cat_cols": n_cat,
         "n_num_cols": n_num,
         "categorical_plot_max_distinct": CATEGORICAL_PLOT_MAX_DISTINCT,
+        "categorical_value_policy": _categorical_value_policy(info, cat_cols_filtered),
         "module_scores": module_scores,
         "module_scores_by_catalog": module_scores_by_catalog,
         "n_module_scores": n_modules,

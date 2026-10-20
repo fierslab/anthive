@@ -574,9 +574,10 @@ and `index.md` files, so no body is trusted. Plot thumbnails survive as `<img sr
   explains; admin **`.id-edit`** ✎ at the right) → **`.ds-prov`** provenance row
   (access / source / license / contributor + doi/pubmed/accession/link badges) →
   **title-row** (`<h1>` title + greyed `.basename` when it differs + visualize ▾)
-  → **`.ds-desc`** description (the `.md` body minus its leading `# title`
-  heading; suppressed server-side when nothing remains, so a heading-only "no
-  description" body shows nothing) → context pills → stats row. **No-duplication:**
+  → **`.ds-desc-oneline`** the `.md` `description` key, left out when its text
+  is already part of the body (`_description_repeats_body`; deposits often write
+  one paragraph to both) → the body itself (minus its leading `# title` heading,
+  nothing when only the heading remains) renders once, in the Overview tab → context pills → stats row. **No-duplication:**
   headline biology lives ONLY in the context pills; the **Biology** section shows
   only condition/sex/age/strain; provenance + external links live ONLY in the top
   `.ds-prov` row. Each datum appears once; sections hide when empty.
@@ -1033,3 +1034,16 @@ These rules come from the site audit (Fable, 2026-10-13) with Mark's overrides. 
 - Help: topic `artefacts` (`lib/help_content/topics/artefacts.yaml`, section `#artefacts` of help.html); the (i)
   boxes `art-ds-help`, `art-coll-help`, `art-help`. Tests: `tests/test_web_artefacts.py`, `tests/test_safe_markdown.py`.
 
+
+## Categorical tab, high-cardinality columns (2026-10-20)
+
+A categorical column with more than `CATEGORICAL_PLOT_MAX_DISTINCT` (50) values loses its plot icons and lists its
+`CATEGORICAL_TOP_LIST_N` (15) most common values (value, cells, share of cells with a value) in a closed
+`details.cat-many`, under the line "<n> categories; show the 15 most common" ("about" above the exact-count limit
+of /obs_summary, 5,000). The list comes from the page's one `/obs_summary?top_n=15` call (a GROUP BY per view with a
+per-column LIMIT, memoised server side); no new route. The renderer is `antCatManyCell` in dataset.html (between
+marker comments, run in node by the tests). Donor handling: `_categorical_value_policy` marks ant_donor,
+ant_donor_uid and the replicate column ("1,499 donors; values not listed") and columns whose name matches
+`_DONOR_LIKE_COLUMN` (donor, patient, projid, sample, batch, hashtag, ...); the page also hides a column whose top
+values contain a value of a donor column. This hides values in the UI only: `/obs_summary` still returns the top
+values of every column, donor columns included, as it did before. Plottable columns are unchanged (top-3 chips).

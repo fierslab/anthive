@@ -297,6 +297,15 @@
   #obs-tbl-mod td, #obs-tbl-mod th { white-space: nowrap; }
   .obs-sub { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .4px; margin: 10px 0 2px; }
   .cat-top { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+  /* high-cardinality columns: the most common values in a closed list, or the count only for donor ids */
+  #obs-tbl-cat td.s-top-many { white-space: normal; font-family: var(--font); }
+  .cat-many summary { cursor: pointer; color: var(--text); font-size: 12px; }
+  .cat-many-tbl { margin: 4px 0 2px; font-size: 11px; border-collapse: collapse; }
+  .cat-many-tbl th, .cat-many-tbl td { padding: 1px 8px 1px 0; border-bottom: 1px solid #eef2f7; font-family: var(--font-mono); }
+  .cat-many-tbl th { font-family: var(--font); font-weight: 600; text-align: left; }
+  .cat-many-tbl td.num, .cat-many-tbl th:not(:first-child) { text-align: right; }
+  .cat-many-tbl td.cmv { max-width: 28em; overflow-wrap: anywhere; white-space: normal; }
+  .cat-many-hidden, .cat-many-line { color: var(--text-muted); font-size: 12px; }
   .cat-top .ct { background: #f1f5f9; border: 1px solid var(--border); border-radius: 9px; padding: 0 7px; font-family: var(--font); cursor: default; }
   /* Empty-state placeholder inside a tab */
   .tab-empty { font-size: 12px; color: var(--text-muted); font-style: italic; padding: 8px 0; }
@@ -1123,7 +1132,7 @@
 <section class="tab-panel" id="tab-cat" role="tabpanel">
   <h2 class="section-head">Categorical observation columns
     <span class="muted" style="font-size:12px;font-weight:normal">({{ _cat_cols|length }})</span>
-    <span class="info" title="Discrete per-cell labels (cluster, donor, condition, …). Click a column to plot its bar chart.">ⓘ</span>
+    <span class="info" title="Discrete per-cell labels (cluster, donor, condition, …). Click a column to plot its bar chart. A column with more than {{ categorical_plot_max_distinct }} values has no plots and lists its {{ categorical_value_policy.top_n }} most common values instead, or only the count when the values are donor identifiers.">ⓘ</span>
   </h2>
   <div class="tab-loading plot-loading" data-tab-loading="cat" style="min-height:60px;display:none">
     <span class="spinner-lg"></span>
@@ -1669,14 +1678,57 @@ document.addEventListener('DOMContentLoaded', function() {
         // Hydrate stats from /obs_summary (REST 2.22). Fields not returned by
         // the API stay blank, non-blocking.
         // Threshold: categorical columns with more distinct values than this
-        // get a terse "too many categories to plot" note instead of a top-N
-        // breakdown + plot links. Tunable via CATEGORICAL_PLOT_MAX_DISTINCT
-        // in web/browser.py.
+        // lose their plot links and list their most common values instead
+        // (antCatManyCell). Tunable via CATEGORICAL_PLOT_MAX_DISTINCT and
+        // CATEGORICAL_TOP_LIST_N in web/browser.py.
         var CAT_PLOT_MAX_DISTINCT = {{ categorical_plot_max_distinct | tojson }};
+        var CAT_POLICY = {{ categorical_value_policy | tojson }};
+        // ── antCatManyCell begin (tests run this block in node) ──
+        // HTML of the "top categories" cell of a column with more values than policy.plot_max_distinct, or null for
+        // a plottable column (the caller keeps its top-3 chips and plot links). Donor identifier columns and
+        // columns named or valued like them show their count only. ctx: {name, donorValues: [strings]}.
+        function antCatManyCell(stats, policy, ctx) {
+            if (!stats || stats.n_unique == null || stats.n_unique <= policy.plot_max_distinct) return null;
+            var escHtml = function (v) { return String(v == null ? '' : v).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+            var fmt = function (n) { return Number(n).toLocaleString('en-US'); };
+            var name = String(ctx.name || '').toLowerCase();
+            var count = (stats.n_unique > policy.exact_unique_limit ? 'about ' : '') + fmt(stats.n_unique);
+            var tops = (stats.top || stats.top_categories || []).slice(0, policy.top_n);
+            var hidden = function (text, tip) {
+                return '<span class="cat-many-hidden">' + escHtml(text) + '</span> <span class="info" title="' + escHtml(tip) + '">ⓘ</span>';
+            };
+            var noun = (policy.donor_columns || {})[name];
+            if (noun) {
+                return hidden(count + ' ' + noun + '; values not listed',
+                    'Donor identifiers are not listed on this page. Too many values for a bar plot.');
+            }
+            var donorValues = (ctx.donorValues || []).filter(function (v) { return v && String(v).length >= 4; });
+            var looksLikeDonor = (policy.donor_like_columns || []).indexOf(name) >= 0 || tops.some(function (t) {
+                var v = String(t.value != null ? t.value : t.name);
+                return donorValues.some(function (d) { return v.indexOf(d) >= 0; });
+            });
+            if (looksLikeDonor) {
+                return hidden(count + ' categories; values not listed',
+                    'The name or the values of this column suggest donor or sample identifiers, so its values are not listed here. Too many values for a bar plot.');
+            }
+            if (!tops.length) return '<span class="cat-many-line">' + count + ' categories</span>';
+            if (tops[0].count != null && tops[0].count <= 1) {
+                return '<span class="cat-many-line">' + count + ' categories, each on a single cell</span>';
+            }
+            var rows = tops.map(function (t) {
+                var v = (t.value != null ? t.value : t.name);
+                var pct = t.pct != null ? (Math.round(t.pct * 10) / 10) + '%' : '';
+                return '<tr><td class="cmv">' + escHtml(v) + '</td><td class="num">' + (t.count != null ? fmt(t.count) : '') + '</td><td class="num">' + pct + '</td></tr>';
+            }).join('');
+            return '<details class="cat-many"><summary>' + count + ' categories; show the ' + tops.length + ' most common</summary>'
+                + '<table class="cat-many-tbl"><thead><tr><th>value</th><th>cells</th><th>share <span class="info" title="Percent of the cells that have a value in this column.">ⓘ</span></th></tr></thead>'
+                + '<tbody>' + rows + '</tbody></table></details>';
+        }
+        // ── antCatManyCell end ──
         var allItems = Array.from(document.querySelectorAll('#tab-num .obs-item, #tab-cat .obs-item'));
         // First numeric column name (for categorical ECDF fallback x-axis).
         var _firstNumCol = null;
-        fetch(apiBase + '/obs_summary', { credentials: 'same-origin' })
+        fetch(apiBase + '/obs_summary?top_n=' + CAT_POLICY.top_n, { credentials: 'same-origin' })
             .then(function (r) { return r.ok ? r.json() : null; })
             .then(function (d) {
                 if (!d || !d.columns) return;
@@ -1702,6 +1754,18 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                 }
                 var _base = '/browse/' + {{ folder_browse_id | tojson }} + '/' + {{ file_id | tojson }};
+                // Values of the donor columns, for the check that keeps a donor id out of another column's top list
+                // (ant_donor_uid 'group:donor' also gives 'donor').
+                var _donorValues = [];
+                Object.keys(CAT_POLICY.donor_columns || {}).forEach(function (col) {
+                    var ds = OBS_STATS[col];
+                    ((ds && ds.top) || []).forEach(function (t) {
+                        var v = String(t.value != null ? t.value : '');
+                        if (!v) return;
+                        _donorValues.push(v);
+                        if (v.indexOf(':') > 0) _donorValues.push(v.slice(v.indexOf(':') + 1));
+                    });
+                });
 
                 allItems.forEach(function (el) {
                     var s = OBS_STATS[el.dataset.name]; if (!s) return;
@@ -1714,14 +1778,13 @@ document.addEventListener('DOMContentLoaded', function() {
                         var topCell = el.querySelector('.s-top');
                         var tops = (s.top || s.top_categories || []);
                         // High-cardinality categoricals (n_unique > CAT_PLOT_MAX_DISTINCT):
-                        // suppress the top-N breakdown and hide the plot icons.
-                        // A bar chart of hundreds of donors doesn't fit the page and
-                        // isn't informative. The column stays filterable through the
-                        // obs-filter search box above the table.
-                        var tooMany = (s.n_unique != null && s.n_unique > CAT_PLOT_MAX_DISTINCT);
-                        if (tooMany) {
+                        // no plot icons (a bar chart of hundreds of values does not fit),
+                        // the most common values with counts instead; donor ids count only.
+                        var manyHtml = antCatManyCell(s, CAT_POLICY, { name: el.dataset.name, donorValues: _donorValues });
+                        if (manyHtml !== null) {
                             if (topCell) {
-                                topCell.innerHTML = '<span class="muted" style="font-style:italic;font-size:11px">too many categories to plot</span>';
+                                topCell.innerHTML = manyHtml;
+                                topCell.classList.add('s-top-many');
                             }
                             var plotsCell = el.querySelector('.obs-plots');
                             if (plotsCell) plotsCell.innerHTML = '';
