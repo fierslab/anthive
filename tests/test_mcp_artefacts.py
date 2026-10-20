@@ -106,7 +106,7 @@ def test_list_collections_and_artefacts_render_lines():
     text = _run(namespace['list_collections']())
     assert 'AT6 (None): analysis, internal, 0 dataset(s), 3 artefact(s), title (curator\'s or depositor\'s text) "Atlas analyses"' in text
     text = _run(namespace['list_artefacts'](group_id='AT6'))
-    assert "AT6/_group/umap [figure] depositor's title \"UMAP\", v1, 99 bytes, internal" in text and 'more' in text
+    assert "AT6/_group/umap [figure] depositor's title \"UMAP\", v1, 99 bytes, internal" in text and 'cursor="x"' in text
 
 
 def test_bad_kinds_and_references_are_refused_before_any_call():

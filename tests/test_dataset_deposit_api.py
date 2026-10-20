@@ -167,7 +167,7 @@ def test_mcp_deposit_tools_only_for_depositors():
     from tests.test_library_upload import _anthive_mcp_class
 
     cls, namespace = _anthive_mcp_class({'datasets_upload_groups': ['admins', 'curators']})
-    cls.__mro__[1].tool_names = ('search_literature', 'my_deposits', 'deposit_status')
+    cls.__mro__[1].tool_names = ('search_literature', 'my_deposits', 'deposit_status', 'deposit_report')
     server = cls()
     server.require_identity = True
 
@@ -185,7 +185,7 @@ def test_mcp_deposit_tools_only_for_depositors():
         finally:
             namespace['_current_identity'].reset(token)
 
-    deposit_tools = {'my_deposits', 'deposit_status'}
+    deposit_tools = {'my_deposits', 'deposit_status', 'deposit_report'}
     assert namespace['DEPOSIT_TOOLS'] == deposit_tools
     assert deposit_tools <= asyncio.run(names({'user': 'a', 'groups': ['curators']}))
     assert not deposit_tools & asyncio.run(names({'user': 'u', 'groups': ['users']}))

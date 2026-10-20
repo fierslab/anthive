@@ -305,6 +305,22 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### Client sync (audit 2026-10-20)
+
+- `API_COMPATIBLE_PYVARK` (and `compatible_pyvark` / `compatible_antclient` in `/version`) is `>=0.11.0`: older
+  clients lack the warming_up retry and the deposit reads. JupyterLite vendors pyvark 0.12.0 (eb24aab).
+- `GET /facets` rows add `status` (registered or deprecated) and `facet_scopes` (the scopes the facet is tested
+  in); facet definitions (`/facets/{name}` `definition`) add `controlled_values`.
+- MCP:
+  - `deposit_report` (depositors; admins any deposit, as `GET /datasets/deposit/{id}/report`): every check
+    with status, summary and fix, passing ones included, and `sample_mode` of the layer checks, so a pass read
+    as `sampled_runs` is visible. `deposit_status` stays the short view.
+  - `list_facets`, `get_facet` (definition, controlled values, status, scopes, values), `get_collection`
+    (`GET /groups/{id}` with the datasets, artefact count and the library papers of its datasets),
+    `gene_detection` (`GET /genes/{g}/detection`). Curator and depositor text is JSON-quoted and labelled.
+  - `list_artefacts` takes `owner`, `include_purged` and `cursor` (paging with the returned cursor).
+  - `my_deposits` and `deposit_status` say they cover artefact and collection deposits.
+
 ### Ingest fixes from the first real deposit (Francken2026 PFC_Microglia_scvi_280926)
 
 - `ant-convert` stores every obs column the `api:` section reads (`obs_rename` keys, every `obs_derive`
