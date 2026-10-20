@@ -970,15 +970,17 @@ class DepositService:
                 'sha256': 'required: sha256 of the h5ad (hex)',
                 'data_project': 'optional; must equal the deposit data_project',
                 'access': 'internal (default, login only) or public (always held for an admin)',
-                'data_use': 'open or controlled; missing or controlled: held for an admin',
+                'data_use': ('open or controlled; missing or controlled: a warning, never held (data use agreements apply '
+                             'to the whole server: everyone with access to it sees every dataset)'),
                 'license': 'an SPDX id (CC-BY-4.0, CC0-1.0, ...) or in-house; missing: held',
                 'depositor': 'ignored for identity on this route: the Anthive login of the depositor is recorded',
                 'depositor_email': 'ignored for identity on this route (the login e-mail is used)',
                 'update_of': '<db_id> of the dataset this deposit replaces; required for an update (give it in the '
                              'deposit request too; the request value wins)',
                 'previous_sha256': 'optional: sha256 of the published h5ad this deposit replaces',
-                'override_<key>': 'true lets an update replace the curated value of <key> (access, data_use and '
-                                  'license are never replaced automatically)',
+                'override_<key>': 'true lets an update replace the curated value of <key> (access and license '
+                                  'are never replaced automatically; a data_use change is applied without it, '
+                                  'with a changelog line and a caveat)',
                 'doi, pmid, year, journal, paper_title, authors': 'used for index.md of a new group when no '
                                                                   'index.md is deposited',
                 'title, description': 'used when the seed .md does not set them',
@@ -1022,7 +1024,7 @@ class DepositService:
             'metadata_update': ('a deposit with update_of=<db_id> carrying only the sidecar and/or the seed .md (no '
                                 'h5ad) changes the metadata of a published dataset: the published h5ad (and '
                                 'sidecar, when none is deposited) is reused, the result is a patch version; '
-                                'access, data_use and license changes still wait for an admin'),
+                                'access and license changes still wait for an admin'),
             'de_sidecar_keys': {'de_format': 'required: deseq2 | edger | scanpy | long | seurat | glmmseq | glmmtmb',
                                 'de_dataset_id': 'the dataset: file id (SMI) or db id (ST6/SMI)',
                                 'de_dataset_h5ad': '<basename>.h5ad, when de_dataset_id is not given',
@@ -1036,9 +1038,12 @@ class DepositService:
             'held_reasons': {
                 'public_access': 'access=public: an admin publishes it',
                 'licence_unknown': 'no license= in the sidecar',
-                'data_use_unknown': 'no data_use= in the sidecar',
-                'controlled_access': 'data_use=controlled, or a donor cohort flagged controlled',
                 'donor_overlap': 'many donors match an existing cohort: an admin decides',
+            },
+            'held_reasons_retired': {   # before 2.47.0; older held records may still carry them
+                'data_use_unknown': 'no data_use= in the sidecar (no longer held since 2.47.0)',
+                'controlled_access': 'data_use=controlled, or a donor cohort flagged controlled (no longer held '
+                                     'since 2.47.0)',
             },
             'update_policy': settings.update_policy,
             'states': {'uploading': 'URLs handed out, not completed', 'completing': 'being completed (seconds)',
@@ -1806,9 +1811,14 @@ class DepositService:
             warnings.append(f'the sidecar says update_of={sidecar["update_of"]}; the deposit request '
                             f'({record["update_of"]}) is used')
         if not record.get('update_of'):
-            for key, reason in (('license', 'licence_unknown'), ('data_use', 'data_use_unknown')):
-                if not sidecar.get(key):
-                    warnings.append(f'no {key}= in the sidecar: the deposit will be held ({reason})')
+            if not sidecar.get('license'):
+                warnings.append('no license= in the sidecar: the deposit will be held (licence_unknown)')
+            if not sidecar.get('data_use'):
+                warnings.append('no data_use= in the sidecar: the check access.controlled will warn (say open or '
+                                'controlled; everyone with access to this server sees every dataset)')
+            elif sidecar['data_use'].strip().lower() == 'controlled':
+                warnings.append("data_use=controlled: everyone with access to this server can see this dataset; "
+                                "make sure the server's users are covered by the data use agreement")
             if (sidecar.get('access') or '').strip().lower() == 'public':
                 warnings.append('access=public: the deposit will be held for an admin (public_access)')
             annotation = {key: value for key, value in sidecar.items()}

@@ -200,8 +200,18 @@ def test_complete_warns_about_held_reasons_and_ignored_depositor(tmp_path, clock
                                                          'access': 'public'})
     upload(service.s3, response, payloads)
     warnings = ' '.join(service.complete(ALICE, response['deposit_id'])['warnings'])
-    assert 'licence_unknown' in warnings and 'data_use_unknown' in warnings and 'public_access' in warnings
+    assert 'licence_unknown' in warnings and 'public_access' in warnings
     assert 'ignored for identity' in warnings
+    # 2.47.0: data use applies to the whole server; a missing data_use warns but is no held reason
+    assert 'data_use_unknown' not in warnings and 'no data_use= in the sidecar' in warnings
+
+
+def test_complete_warns_that_controlled_data_is_seen_by_everyone(tmp_path, clock):
+    service = make_service(tmp_path, clock)
+    response, payloads = created(service, sidecar_extra={'data_use': 'controlled'})
+    upload(service.s3, response, payloads)
+    warnings = ' '.join(service.complete(ALICE, response['deposit_id'])['warnings'])
+    assert 'everyone with access to this server can see this dataset' in warnings and 'held' not in warnings
 
 
 # ── who may see and change what ─────────────────────────────────────────────
@@ -458,4 +468,7 @@ def test_vocab_is_the_servers_vocabulary(tmp_path, clock):
     for key in ('data_use', 'license', 'depositor', 'update_of', 'previous_sha256', 'override_<key>', 'sha256'):
         assert key in vocab['sidecar_keys']
     assert 'version' in vocab['seed_md']['leave_out'] and vocab['seed_md']['template'].startswith('---')
+    assert 'never held' in vocab['sidecar_keys']['data_use']
+    assert set(vocab['held_reasons']) == {'public_access', 'licence_unknown', 'donor_overlap'}
+    assert set(vocab['held_reasons_retired']) == {'data_use_unknown', 'controlled_access'}
     assert vocab['uploads_enabled'] is True and vocab['limits']['max_gb'] == 200.0
