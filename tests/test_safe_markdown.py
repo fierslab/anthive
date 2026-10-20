@@ -94,3 +94,33 @@ def test_the_payload_check_allows_only_alignment_styles():
         assert all(style in ('text-align:left', 'text-align:center', 'text-align:right')
                    for style in re.findall(r'style="([^"]*)"', out))
 
+
+ROUND4 = ['[x](javascript&colon;alert(1))', '[x](&#x6a;avascript:alert(1))', '[x](<javascript:alert(1)>)',
+          '[x](java\u0000script:alert(1))', '[x][a]\n\n[a]: <javascript:alert(1)>',
+          '![c](plot:umap?db=A/B"onerror="alert(1))', '![c" onerror="alert(1)](plot:umap?db=A/B)',
+          '[x](https:/\\evil.example)', '[x](https:evil.example)', '[x](HTTPS:///evil.example)',
+          '[x](%6Aavascript:alert(1))']
+
+
+@pytest.mark.parametrize('payload', ROUND4)
+def test_round4_payloads(payload):
+    out = safe_markdown.render(payload, demote_headings=False, allow_plot_images=True)
+    for value in re.findall(r'(?:href|src)="([^"]*)"', out):
+        decoded = html.unescape(value).strip().lower()
+        assert not decoded.startswith(('javascript:', 'data:', 'vbscript:', 'https:/e', 'https:e', 'https:///')), out
+    from html.parser import HTMLParser
+
+    class Attributes(HTMLParser):                                   # what a browser would see as attributes
+        names: set = set()
+
+        def handle_starttag(self, tag, attrs):
+            self.names |= {name for name, _value in attrs}
+    parser = Attributes()
+    parser.feed(out)
+    assert parser.names <= {'src', 'alt', 'href', 'rel', 'style'}, out
+
+
+@pytest.mark.parametrize('href', ['https:evil.example', 'https:/evil.example', 'HTTPS:///evil.example'])
+def test_single_slash_schemes_are_refused(href):
+    assert safe_markdown.safe_href(href) is None
+
