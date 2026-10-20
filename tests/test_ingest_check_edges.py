@@ -118,11 +118,32 @@ def test_empty_sample_is_not_counts():
     assert checks_layers._is_counts(np.zeros((3, 3))) is False
 
 
-def test_an_h5ad_that_cannot_be_inspected_fails_structure(submission):
+def test_an_h5ad_without_expression_fails_structure(submission):
+    # backed anndata used to raise on a file without X; read with h5py the file opens and the
+    # structure rule names what is missing
     import anndata
     submission.build()
     adata = anndata.AnnData(obs=pd.DataFrame(index=['a']), var=pd.DataFrame(index=['g']))
     adata.write_h5ad(submission.group_dir / 'dataset.h5ad')
+    with submission.context() as ctx:
+        outcome = checks_files.h5ad_structure(ctx)
+    assert outcome.status == FAIL and 'Missing both .X and .layers' in outcome.summary
+
+
+def test_an_h5ad_that_cannot_be_inspected_fails_structure(submission):
+    submission.build()
+    (submission.group_dir / 'dataset.h5ad').write_bytes(b'not an hdf5 file' * 64)
+    with submission.context() as ctx:
+        outcome = checks_files.h5ad_structure(ctx)
+    assert outcome.status == FAIL and 'cannot be read' in outcome.summary
+
+
+def test_an_h5ad_without_var_fails_structure(submission):
+    import h5py
+    submission.build()
+    target = submission.group_dir / 'dataset.h5ad'
+    with h5py.File(target, 'a') as handle:
+        del handle['var']
     with submission.context() as ctx:
         outcome = checks_files.h5ad_structure(ctx)
     assert outcome.status == FAIL and 'cannot be read' in outcome.summary

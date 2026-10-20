@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from . import Outcome, check, fail, note, ok, skip, warn
+from . import SKIP, Outcome, check, fail, note, ok, skip, warn
 from . import sampling, thresholds
 
 _ENSEMBL = re.compile(r'^ENS[A-Z]{0,6}[GTP]\d{6,}(\.\d+)?$')
@@ -33,9 +33,27 @@ def find_counts_layer(ctx) -> Tuple[Optional[str], List[str]]:
     return ctx._cache['counts_layer']  # noqa: SLF001
 
 
+def with_sample_note(ctx, outcome: Outcome, n_sample: int) -> Outcome:
+    """Say how the cells were chosen: ``sample_mode`` in the details, and the runs fallback in the summary.
+
+    Skipped outcomes read no matrix and are returned unchanged.
+    """
+    if outcome.status == SKIP:
+        return outcome
+    outcome.details.update(ctx.sample_details(n_sample, thresholds.SAMPLE_SEED))
+    outcome.summary += ctx.sample_note(n_sample, thresholds.SAMPLE_SEED)
+    return outcome
+
+
 @check('layers.counts', needs=('h5ad',))
 def layers_counts(ctx) -> Outcome:
     """A raw-counts layer exists (sampled: 2,000 cells, seed 0), or ``counts_unavailable`` gives the reason."""
+    _, names = find_counts_layer(ctx)
+    outcome = _layers_counts(ctx)
+    return with_sample_note(ctx, outcome, thresholds.SAMPLE_CELLS) if names else outcome
+
+
+def _layers_counts(ctx) -> Outcome:
     found, names = find_counts_layer(ctx)
     reason = str(ctx.md.get('counts_unavailable') or '').strip()
     if found:
@@ -51,6 +69,10 @@ def layers_counts(ctx) -> Outcome:
 @check('layers.x_lognorm', needs=('h5ad',))
 def layers_x_lognorm(ctx) -> Outcome:
     """X is log-normalised: not integers, not scaled (no negatives), not on a raw scale."""
+    return with_sample_note(ctx, _layers_x_lognorm(ctx), thresholds.SAMPLE_CELLS)
+
+
+def _layers_x_lognorm(ctx) -> Outcome:
     _, sample = ctx.sample_matrix('X', thresholds.SAMPLE_CELLS, thresholds.SAMPLE_SEED)
     if not np.any(sample):
         return fail('X sample is all zeros', 'Check the matrix that was written to X.')
@@ -90,6 +112,10 @@ def layers_x_lognorm(ctx) -> Outcome:
 @check('layers.consistency', needs=('h5ad',))
 def layers_consistency(ctx) -> Outcome:
     """X matches log1p(counts per 10,000) on 1,000 cells (median Pearson r)."""
+    return with_sample_note(ctx, _layers_consistency(ctx), thresholds.CONSISTENCY_CELLS)
+
+
+def _layers_consistency(ctx) -> Outcome:
     found, _ = find_counts_layer(ctx)
     if not found:
         return skip('no counts layer to compare with X')

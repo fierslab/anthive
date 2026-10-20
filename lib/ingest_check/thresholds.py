@@ -10,6 +10,13 @@ from facet_rules import MIN_DONORS_DATASET, MIN_DONORS_PER_LEVEL
 SAMPLE_CELLS = 2000
 SAMPLE_SEED = 0
 CONSISTENCY_CELLS = 1000
+# When the random cells would decompress more than this many bytes of one
+# compressed chunked matrix (X or the first counts candidate), SAMPLE_RUNS runs
+# of consecutive cells are read instead (sampling.choose_rows). Same numbers as
+# vark's local inspector, so local and server samples agree. Not a verdict
+# threshold: it only decides which cells are read.
+SAMPLE_INFLATE_BUDGET = 1_500_000_000
+SAMPLE_RUNS = 16
 
 # layers.x_lognorm
 LOGNORM_MAX_VALUE = 20.0            # a log1p scale value above this is not log-normalised

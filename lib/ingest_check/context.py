@@ -1,7 +1,7 @@
 """Shared, lazily built inputs of the checks.
 
 ``CheckContext`` knows the submission folder, the store and the settings,
-and builds the expensive things (sha256, backed h5ad, scratch ``.duckdb``,
+and builds the expensive things (sha256, h5ad obs/var, scratch ``.duckdb``,
 published views, crosswalk, overlap index) at most once and only when a
 check asks. It never writes into the submission folder or the store; its
 only writes go to the scratch dir (``scratch.py``).
@@ -203,25 +203,65 @@ class CheckContext:
 
     @property
     def adata(self) -> Any:
-        """The h5ad opened backed and read-only (obs and var in memory)."""
-        if 'adata' not in self._cache:
-            import anndata  # noqa: PLC0415
+        """obs, var and the element keys of the h5ad (``h5ad_view.H5adSummary``).
 
-            handle = anndata.read_h5ad(self.h5ad_path, backed='r')
-            self._cache['adata'] = handle
-            self._closers.append(lambda: handle.file.close())
+        Read with h5py: obs and var are decoded, everything else is only
+        listed. Never ``anndata.read_h5ad``: its backed mode reads layers,
+        raw, obsm, obsp and uns into memory in full.
+        """
+        if 'adata' not in self._cache:
+            from .h5ad_view import H5adSummary  # noqa: PLC0415
+
+            self._cache['adata'] = H5adSummary(self.h5ad_path)
         return self._cache['adata']
 
+    def sample_rows(self, n_sample: int, seed: int) -> Any:
+        """``(rows, mode, inflate_bytes, n_obs)`` every matrix is sampled at (``sampling.choose_rows``, cached)."""
+        from . import sampling, thresholds  # noqa: PLC0415
+
+        key = f'rows:{n_sample}:{seed}'
+        if key not in self._cache:
+            self._cache[key] = sampling.choose_rows(self.h5ad_path, n_sample, seed,
+                                                    thresholds.SAMPLE_INFLATE_BUDGET, thresholds.SAMPLE_RUNS)
+        return self._cache[key]
+
+    def sample_details(self, n_sample: int, seed: int) -> Dict[str, Any]:
+        """How the cells were chosen, for a check's details: ``sample_mode`` and, for runs, the reason."""
+        from . import sampling, thresholds  # noqa: PLC0415
+
+        rows, mode, cost, _ = self.sample_rows(n_sample, seed)
+        details: Dict[str, Any] = {'sample_mode': mode}
+        if mode == sampling.MODE_RUNS:
+            details.update(sample_runs=thresholds.SAMPLE_RUNS, sample_run_length=len(rows) // thresholds.SAMPLE_RUNS,
+                           random_sample_inflate_gb=round(cost / 1e9, 1))
+        return details
+
+    def sample_note(self, n_sample: int, seed: int) -> str:
+        """`` (sampled as runs ...)`` for a summary when the runs fallback was used, else ''."""
+        details = self.sample_details(n_sample, seed)
+        if 'sample_runs' not in details:
+            return ''
+        return (f' (read as {details["sample_runs"]} runs of {details["sample_run_length"]} consecutive cells: '
+                f'{n_sample:,} random cells would decompress {details["random_sample_inflate_gb"]} GB of '
+                f'compressed chunks)')
+
     def sample_matrix(self, name: str, n_sample: int, seed: int, rows: Optional[Any] = None) -> Any:
-        """``(row indices, dense sample)`` of a matrix by display name (cached)."""
+        """``(row indices, dense sample)`` of a matrix by display name (cached).
+
+        All matrices share the rows of ``sample_rows`` (random cells, or runs
+        of consecutive cells for compressed chunked matrices); a matrix with
+        another number of cells gets its own random cells.
+        """
         from . import sampling  # noqa: PLC0415
 
         key = f'sample:{name}:{n_sample}:{seed}'
         if key not in self._cache:
             hdf5_path = sampling.matrix_paths(self.h5ad_path)[name]
             n_obs, _ = sampling.matrix_shape(self.h5ad_path, hdf5_path)
-            indices = sampling.sample_indices(n_obs, n_sample, seed) if rows is None else rows
-            self._cache[key] = (indices, sampling.read_rows(self.h5ad_path, hdf5_path, indices))
+            if rows is None:
+                shared, _, _, shared_n_obs = self.sample_rows(n_sample, seed)
+                rows = shared if shared_n_obs == n_obs else sampling.sample_indices(n_obs, n_sample, seed)
+            self._cache[key] = (rows, sampling.read_rows(self.h5ad_path, hdf5_path, rows))
         return self._cache[key]
 
     def existing_duckdb_path(self) -> Optional[Path]:
