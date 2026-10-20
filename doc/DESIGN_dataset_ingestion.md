@@ -299,7 +299,7 @@ No admin tools (approve, reviewed, send-back, retire, reject). Admin actions are
 ```json
 {"schema":"anthive.ingest_check/1","tool_version":"<anthive __version__>","created":"...",
  "dataset":{"group":"...","basename":"...","sha256":"...","n_obs":0,"n_vars":0},
- "result":"pass|fail","publish":"auto|held","held_reasons":["controlled_access","licence_unknown"],
+ "result":"pass|fail","publish":"auto|held","held_reasons":["public_access","licence_unknown"],
  "counts":{"error":0,"warning":0,"info":0},
  "checks":[{"id":"facets.unmapped_values","status":"pass|fail|warn|skip","severity":"error",
             "summary":"...","details":{...},"fix":"... how to fix ...","docs":"skill reference anchor"}],
@@ -343,7 +343,7 @@ No admin tools (approve, reviewed, send-back, retire, reject). Admin actions are
 | `design.disease_basis` | `disease_basis` | present and in the vocabulary (set by the other agent's work) | missing = error |
 | `version.initial` | `version`, `changelog` | new dataset: `version == 1.0.0`, one changelog entry with `version`, `date`, `sha256 == h5ad sha256`, `changes` | error |
 | `access.level` | mus `access` | `internal` or `public` | missing = error; `public` = held unless `datasets_auto_publish_public: true` |
-| `access.controlled` | new mus/md field `data_use: open|controlled` (section 9), plus cohort hints from the crosswalk (worker) | | `controlled` = held; join-form cohort flagged controlled in the crosswalk while `data_use: open` = held |
+| `access.controlled` | new mus/md field `data_use: open|controlled` (section 9), plus cohort hints from the crosswalk (worker) | | invalid value = error; `controlled`, missing, or a join-form cohort flagged controlled in the crosswalk = warn, never held (D7 revised 2026-10-20) |
 | `access.licence` | mus `license` | SPDX-like id (CC-BY-4.0, CC0-1.0, ...) or `in-house` | missing or `unknown` = held |
 | `scores.modules_complete` | duckdb, scores sidecar, geneset store | facet-eligible datasets only (the metadata gate of `ant-facet-test`); `celltype_scope.applicable_experiments` lists the catalogs with at least one cell in the scope of one of their modules, and the sidecar must hold `geneset` (scanpy) and `ucell` rows for each | missing sidecar or score sets = warn (scoring is an automatic build step after the conversion, not a curator input; the fix is `ant-score-fleet run --only <db_id>`); not facet-eligible or no applicable catalog = skip |
 
@@ -641,6 +641,7 @@ Rule kept: nothing hard-codes repo paths for runtime writes. Every path comes fr
 - **D5 Post steps on ingest:** standard geneset scores, gene stats and facet tests. The `score` step is scanpy `score_genes` plus UCell, per cell type scope (decision 2026-10-08, replaces "ucell / aucell off"; AUCell is not part of the defaults). DE pseudobulk is **off** by default (`datasets_de_pseudobulk: false`).
 - **D6 Missing raw counts:** allowed with a stated reason (`counts_unavailable: <reason>` in the `.md`), shown on the dataset page. Without the reason it is an error (check `layers.counts`).
 - **D7 Controlled flag source:** both. A new mus field `data_use` (`open` or `controlled`) and the optional `controlled` column of `donor_crosswalk.tsv`.
+  **Revised 2026-10-20 (Mark, 2.47.0):** data use agreements and the internal/external split apply to a whole server, with no per-dataset access control by agreement, because everybody on a server may see all its data. So `data_use` (controlled, missing, or a controlled cohort in the crosswalk) only warns the depositor that everyone on the server sees the dataset; it never holds a deposit. The held reasons `controlled_access` and `data_use_unknown` are retired (older held records keep them and are approved as before), and a `data_use` change in an update is plain metadata: a patch version with a changelog line and a caveat. `public_access`, `licence_unknown`, `donor_overlap` and the artefact holds are unchanged.
 - **D8 Store git push:** the worker commits locally and Mark pushes (`datasets_store_git_push: false`).
 - **D9 Send-back of a live dataset:** the dataset is set inactive immediately.
 
@@ -700,7 +701,8 @@ What differs from sections 3 to 8:
   and at least 20% beyond chance; 20% beyond chance, or 15 donors, is a warning. On GF4/MIC against M23 (247 shared
   persons by id out of 449) the match is 62% with a chance level of 32%. It cannot replace the id based check.
 - **Held reasons.** Added `data_use_unknown`: a dataset without `data_use` is held, not passed (D7: an undeclared
-  consent status is exactly what an admin should look at).
+  consent status is exactly what an admin should look at). Retired 2026-10-20 with `controlled_access` (D7 revised):
+  both are warnings now.
 - **Description.** `meta.required_keys` accepts the `description` key or the markdown body of the `.md`, and only warns
   for datasets already in the store (none of them has a `description` key).
 - **`disease_basis`** is required only when `ant_disease` is published. **`layers.consistency`** is skipped when the
@@ -733,8 +735,8 @@ upload, checks it and publishes it. Decisions by Mark, 2026-10-14:
 - S3 `__incoming/` is the source. A watcher polls it every few minutes; complete uploads are pulled,
   ingested and pushed back to the catalog on S3.
 - Publication is automatic unless there are errors. Held results of `ant-ingest-check` (`donor_overlap`,
-  `data_use_unknown`, `licence_unknown`, `public_access`, `controlled_access`) block like errors and are
-  recorded for a person. Warnings do not block. The watch route holds `access=public` itself, whatever
+  `licence_unknown`, `public_access`; until 2.47.0 also `data_use_unknown` and `controlled_access`, see D7)
+  block like errors and are recorded for a person. Warnings do not block. The watch route holds `access=public` itself, whatever
   `datasets_auto_publish_public` says.
 - After a verified publication the watcher deletes the incoming objects that item consumed, and only those
   (21.6). `ant-ingest prune` stays for leftovers.
@@ -798,7 +800,7 @@ below 0, 124, 127, 137, 143, or no report after a signal), a stop request.
 `needs_decision` is for states the route cannot reconcile: an h5ad in the store without its `.md` or the other
 way round, `_versions/<basename>/` without a current `.md`, staged files without a journal, a catalog h5ad on S3
 for a dataset that does not exist locally, a static file that differs from the store copy, a change of
-`access`, `data_use` or `license` in an update, an update marker that does not match (21.5), and a store `.md`
+`access` or `license` in an update (a `data_use` change is applied since 2.47.0, D7), an update marker that does not match (21.5), and a store `.md`
 that `md_edit` cannot change with a verified minimal edit.
 
 ### 21.4 The pipeline of one item
@@ -837,8 +839,9 @@ becomes a new version:
 - nothing changed: `live` with kind `unchanged` (new static files are still placed).
 
 The sidecar merge protects curated values: a key in both keeps the store value unless the deposit also says
-`override_<key>=true` (the conflict is recorded in the changelog); new keys are adopted; `access`, `data_use`
-and `license` changes stop the item for a person. A deposited `.md` seed adds its new caveats (by message) and
+`override_<key>=true` (the conflict is recorded in the changelog); new keys are adopted; `access`
+and `license` changes stop the item for a person. A `data_use` change follows the deposit (patch version,
+changelog line, caveat with topic `data_use`; D7 revised 2026-10-20). A deposited `.md` seed adds its new caveats (by message) and
 is consumed only when its other keys equal the store's; otherwise it stays in incoming with a warning.
 
 The `.md` edit is minimal and verified (`md_edit`); caveats, curation fields, the `api:` mapping and the body
@@ -936,7 +939,7 @@ same time.
 | C1 the update moved the old files before the new ones were in place; a crash left no `.md` and the retry took the new-dataset path | swap journal with hard links, hidden staging, `.md` renamed last, recovery before each poll; `_versions` without a current `.md` is `needs_decision`; stop requests honoured between steps; systemd `TimeoutStopSec=600` |
 | C2 `..` in S3 keys escaped the group folder | key segment validation in `plan_items`; `ensure_inside` on every store write |
 | S1, S2 static files and seeds were deleted although unused, also while a sibling still needed them | consumption only of placed or applied files; shared files kept while a sibling is pending; a differing static file is `needs_decision` |
-| S3 updates injected `access=internal` and the deposit overwrote curated keys | `access` default only for new datasets; store-wins merge with `override_<key>=true`; access, data_use and license changes need a person |
+| S3 updates injected `access=internal` and the deposit overwrote curated keys | `access` default only for new datasets; store-wins merge with `override_<key>=true`; access and license changes need a person (data_use since 2.47.0: applied with a caveat) |
 | S4 a killed child marked the dataset failed | transient exit codes retry |
 | S5 `ant-ingest` could run beside the watcher | shared lock |
 | S6 "served" only checked the id | `/info` must show the new sha256 and version |

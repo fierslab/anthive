@@ -305,6 +305,25 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### data_use warns, never holds (decision D7 revised 2026-10-20)
+
+Data use agreements and the internal/external split apply to a whole server: everybody on a server may see
+all its data, so there is no per-dataset access control by agreement.
+
+- `access.controlled`: `data_use=controlled`, a missing `data_use` and a donor cohort flagged controlled in the
+  crosswalk are warnings with no held reason ("everyone with access to this server can see this dataset; make
+  sure the server's users are covered by the data use agreement"). An invalid value still fails. The cohort
+  name stays in the admin-only detail.
+- `GET /api/datasets/deposit/vocab`: `held_reasons` no longer lists `controlled_access` and `data_use_unknown`;
+  they move to the new `held_reasons_retired`. Records held for them earlier keep them and are approved as
+  before. `sidecar_keys.data_use` says "never held". The complete step warns about a missing or controlled
+  `data_use` without saying it will hold.
+- Updates: a `data_use` change is applied as plain metadata (patch version, changelog line, caveat with topic
+  `data_use`), with or without `override_data_use`; it is no longer `needs_decision`. `access` and `license`
+  changes still are.
+- Unchanged: `public_access` (the ROSMAP never-public rule relies on it), `licence_unknown`, `donor_overlap`
+  and the artefact holds (`made_from_internal`, donor identifiers, secrets). Artefacts never held on `data_use`.
+
 ### Ingest check: memory and dense matrices
 
 - `ant ingest-check` (and so the watcher) no longer opens the h5ad with `anndata.read_h5ad(backed='r')`, which

@@ -32,7 +32,8 @@ shapes are in `doc/API_CHANGELOG.md` (2.46.0).
    reaches the catalogue's incoming folder before you complete, and an old URL can never change a deposit
    afterwards.
 4. **Upload**, then `POST /api/datasets/deposit/<id>/complete`. The server checks every part and the sidecar
-   and says what will hold the deposit (no `license`, no `data_use`, `access=public`).
+   and says what will hold the deposit (no `license`, `access=public`) and what only warns (no `data_use`,
+   `data_use=controlled`).
 5. **Follow it**: `GET /api/datasets/deposit/<id>` shows the state, the dataset id and version once it is
    live, held reasons, and the failed checks with their fix; `.../report` has the full check report without
    other datasets' details or server paths. With SMTP configured you also get an e-mail when it goes live,
@@ -127,7 +128,10 @@ This writes `__incoming/<data_project>/microglia.h5ad`, the collapsed sidecar `m
   when the sidecar says nothing. `access=public` is always held for an admin, also for updates of public data.
   Data with ROSMAP-derived values stays internal.
 - **Licence and consent.** Set `license=` (an SPDX id such as `CC-BY-4.0`, or `in-house`) and `data_use=open`
-  or `data_use=controlled`. Without them the deposit is held (`licence_unknown`, `data_use_unknown`).
+  or `data_use=controlled`. Without a licence the deposit is held (`licence_unknown`). `data_use` never holds a
+  deposit: data use agreements apply to the whole server, and everyone with access to it sees every dataset, so a
+  missing or controlled `data_use` (or a donor cohort flagged controlled) is a warning. Make sure the server's users
+  are covered by the agreement.
 - **Who deposited.** Optional `depositor=` and `depositor_email=` in the sidecar become the author of the
   store commit (a plain name and a valid e-mail address; anything else is recorded in the changelog instead).
 - **DE tables** that come with the dataset (`mus s3 upload` of a `de/` folder whose sidecars name the dataset
@@ -181,7 +185,7 @@ needs_decision send a JSON message.
 | `stable` | complete, queued (or waiting for a retry after an S3 error) | wait |
 | `pulled`, `checked` | being processed | wait |
 | `live` | published | review the dataset page; `served` and `catalog_verified` in `--json` say whether the incoming objects could be deleted |
-| `held` | clean, but an admin must decide (`public_access`, `licence_unknown`, `data_use_unknown`, `controlled_access`, `donor_overlap`) | read the report; fix the sidecar and upload it again, or approve it (below) |
+| `held` | clean, but an admin must decide (`public_access`, `licence_unknown`, `donor_overlap`; records held before 2.47.0 may also show `data_use_unknown` or `controlled_access`) | read the report; fix the sidecar and upload it again, or approve it (below) |
 | `failed` | errors in the checks, a sha256 mismatch, a convert failure | read the report, fix, upload again |
 | `needs_decision` | the store, S3 or the update conflicts in a way the route does not resolve | see below |
 | `rejected` | an admin rejected it | final. A deposit made through the API loses its incoming objects at once (or at the next poll after a reject on the host); remove other uploads from S3 by hand |
@@ -219,7 +223,7 @@ a corrected sidecar is enough to retry a held or failed deposit.
 The route stops when the store has an h5ad without its `.md`, a `.md` without its h5ad (a dataset that only
 lives on S3, or a retired one), archived versions without a current `.md`, staged files without a journal, a
 catalog h5ad on S3 for a dataset that is not in the local store, a static file that differs from the store
-copy, an update that changes `access`, `data_use` or `license`, an update marker that does not match, or a
+copy, an update that changes `access` or `license`, an update marker that does not match, or a
 `.md` it cannot edit with a verified minimal change. Read the status note and decide by hand:
 
 - the store files are leftovers: move them to an underscore folder (`<Group>/_backup_<date>/`) and upload the
@@ -228,7 +232,7 @@ copy, an update that changes `access`, `data_use` or `license`, an update marker
 - the `.md` is unusual: make the change by hand (version bump, changelog entry, caveat) and run
   `ant-ingest` for that project;
 - a static file differs: replace one of the two copies, or rename the deposited file;
-- access, data_use or license change: edit the store `.h5ad.mus` by hand (with a caveat and a version bump),
+- access or license change: edit the store `.h5ad.mus` by hand (with a caveat and a version bump),
   then upload the sidecar again.
 
 ### Updating a dataset
@@ -249,7 +253,8 @@ When they are clean:
 
 Curated values win: a sidecar key that the store already has with another value is kept, and the changelog
 says what the deposit wanted. To replace it, add `override_<key>=true` next to the key in the sidecar. Changes of
-`access`, `data_use` and `license` are never applied automatically. From a deposited `<basename>.md` only new
+`access` and `license` are never applied automatically. A `data_use` change is applied as plain metadata: a
+patch version with a changelog line and a caveat (topic `data_use`). From a deposited `<basename>.md` only new
 caveats are applied; if it differs in other keys it stays in `__incoming/` with a warning.
 
 Caveats, curation fields and the facet mapping of the old `.md` stay as they are; the route appends one caveat
@@ -337,7 +342,8 @@ Options: `--audience curator|admin` (default admin), `--checks` and `--skip` (id
 
 JSON with schema `anthive.ingest_check/1`, plus a markdown summary. `result` is `fail` when any check
 failed. `publish` is `auto` only without errors and without held reasons, otherwise `held`.
-Held reasons: `controlled_access`, `data_use_unknown`, `licence_unknown`, `public_access`, `donor_overlap`.
+Held reasons: `licence_unknown`, `public_access`, `donor_overlap`. Retired in 2.47.0 (older records may carry them):
+`controlled_access`, `data_use_unknown`.
 
 Controlled-access data never appears in a report. The donor crosswalk is read only to count how many donor
 values resolve. Reports carry counts and 16-digit digests of donor keys, never identifiers, aliases or
@@ -394,7 +400,7 @@ is a group in the store.
 | `design.replicates_per_group` | units in total (6) and per facet level (3), the facet test thresholds | never fails; warns below, info for `none` | none |
 | `design.disease_basis` | `disease_basis` (and `disease_derivation` for `braak_cerad`) when `ant_disease` is published | missing or invalid | declare it |
 | `access.level` | `access` internal or public | missing or invalid; public is held (`public_access`) unless `datasets_auto_publish_public` | `access=internal` |
-| `access.controlled` | `data_use` open or controlled; a controlled cohort in the donor join | invalid value; controlled, unset or a controlled join cohort is held | state `data_use` |
+| `access.controlled` | `data_use` open or controlled; a controlled cohort in the donor join | invalid value; controlled, unset or a controlled join cohort warns (never held: everyone on the server sees every dataset) | state `data_use` |
 | `access.licence` | `license` is an SPDX style id or `in-house` | not SPDX style; missing or unknown is held (`licence_unknown`) | set `license=` |
 
 `data_use` is a new soft mus field (`open` or `controlled`), read from the `.h5ad.mus` or the `.md`
