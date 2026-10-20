@@ -8454,3 +8454,92 @@ def test_description_repeats_body_compares_plain_text():
     assert browser._description_repeats_body("more   TEXT", body)
     assert not browser._description_repeats_body("Another text.", body)
     assert not browser._description_repeats_body("", body) and not browser._description_repeats_body("x", None)
+
+
+# ── Categorical tab: most common values of high-cardinality columns ──────────
+
+def _run_cat_many_cell(client, monkeypatch, cases, info_extra=None):
+    """Run the page's antCatManyCell (extracted from the rendered dataset page) in node for each
+    (stats, ctx) case; return the list of results (HTML string or None)."""
+    import json as _json, subprocess
+    info = dict(_INFO["GroupA/ds1"], **(info_extra or {}))
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": info}))
+    html = client.get("/browse/GroupA/ds1").text
+    block = html.split("// ── antCatManyCell begin")[1].split("// ── antCatManyCell end")[0]
+    policy = html.split("var CAT_POLICY = ")[1].split(";\n")[0]
+    script = (block.split("\n", 1)[1] + "\nvar policy = " + policy + ";\nvar cases = " + _json.dumps(cases) + ";\n"
+              "console.log(JSON.stringify(cases.map(function (c) { return antCatManyCell(c[0], policy, c[1]); })));\n")
+    done = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr[:500]
+    return _json.loads(done.stdout)
+
+
+def _top(values):
+    return [{"value": value, "count": count, "pct": pct} for value, count, pct in values]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_categorical_high_cardinality_column_lists_most_common_values(client, monkeypatch):
+    tops = _top([(f"cluster_{i}", 1000 - i, 1.5) for i in range(15)])
+    many, = _run_cat_many_cell(client, monkeypatch, [[{"type": "cat", "n_unique": 1499, "top": tops}, {"name": "author_cluster"}]])
+    assert "1,499 categories; show the 15 most common" in many
+    assert many.count("<tr><td class=\"cmv\">") == 15 and "cluster_0" in many and "1,000" in many and "1.5%" in many
+    assert many.startswith('<details class="cat-many">') and " open" not in many.split(">")[0]     # closed by default
+    assert "—" not in many
+    # above the exact-count limit the number is an estimate
+    approx, single = _run_cat_many_cell(client, monkeypatch, [
+        [{"type": "cat", "n_unique": 91208, "top": tops}, {"name": "author_cluster"}],
+        [{"type": "cat", "n_unique": 91208, "top": _top([("AAAC-1", 1, 0.0)])}, {"name": "cell_barcode"}]])
+    assert "about 91,208 categories" in approx
+    assert single == '<span class="cat-many-line">about 91,208 categories, each on a single cell</span>'
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_categorical_donor_columns_show_only_the_count(client, monkeypatch):
+    donor_top = _top([("H21.33.015", 900, 0.3), ("R9581837", 800, 0.26)])
+    obs = {"categorical": ["cell_type", "ant_donor", "ant_donor_uid", "SEAAD_Donor.ID", "Mac_anno_batch", "projid_x"],
+           "numerical": ["n_genes"]}
+    results = _run_cat_many_cell(client, monkeypatch, [
+        [{"type": "cat", "n_unique": 1499, "top": donor_top}, {"name": "ant_donor"}],
+        [{"type": "cat", "n_unique": 1499, "top": donor_top}, {"name": "ant_donor_uid"}],
+        [{"type": "cat", "n_unique": 83, "top": donor_top}, {"name": "seaad_donor.id"}],
+        # author column named innocently whose values contain donor ids
+        [{"type": "cat", "n_unique": 60, "top": _top([("Gazestani_R9581837", 10, 1.0)])},
+         {"name": "mac_anno_batch_like", "donorValues": ["H21.33.015", "R9581837"]}],
+    ], info_extra={"obs": obs, "replicate_column": "ant_donor", "replicate_unit": "donor"})
+    assert "1,499 donors; values not listed" in results[0] and "1,499 donors; values not listed" in results[1]
+    assert "83 categories; values not listed" in results[2]
+    assert "60 categories; values not listed" in results[3]
+    for html in results:
+        assert "H21.33.015" not in html and "R9581837" not in html and "<table" not in html
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_categorical_plottable_column_keeps_its_chips_and_plots(client, monkeypatch):
+    normal, missing = _run_cat_many_cell(client, monkeypatch, [
+        [{"type": "cat", "n_unique": 12, "top": _top([("microglia", 10, 50.0)])}, {"name": "cell_type"}],
+        [{"type": "cat", "n_unique": None, "top": []}, {"name": "cell_type"}]])
+    assert normal is None and missing is None
+    html = client.get("/browse/GroupA/ds1").text
+    script = html.split("antCatManyCell(s, CAT_POLICY")[1].split("// ECDF link")[0]
+    assert "plotsCell.innerHTML = ''" in script                     # plots only go for high-cardinality columns
+    assert "'<span class=\"cat-top\">' + tops.slice(0, 3)" in script  # plottable columns keep the top-3 chips
+    assert "too many categories to plot" not in html
+
+
+def test_categorical_value_policy_marks_donor_columns():
+    policy = browser._categorical_value_policy(
+        {"replicate_column": "mouse", "replicate_unit": "animal"},
+        ["cell_type", "ant_donor", "ant_donor_uid", "mouse", "SEAAD_Donor.ID", "ROSMAP_projid", "sample", "Batch",
+         "ant_author_cluster", "SEACell"])
+    assert policy["donor_columns"] == {"ant_donor": "donors", "ant_donor_uid": "donors", "mouse": "animals"}
+    assert policy["donor_like_columns"] == ["batch", "rosmap_projid", "sample", "seaad_donor.id"]
+    assert policy["top_n"] == browser.CATEGORICAL_TOP_LIST_N and policy["plot_max_distinct"] == browser.CATEGORICAL_PLOT_MAX_DISTINCT
+    assert browser._categorical_value_policy({}, ["cell_type"])["donor_columns"] == {}
+
+
+def test_dataset_page_asks_obs_summary_for_the_top_list(client):
+    html = client.get("/browse/GroupA/ds1").text
+    assert "fetch(apiBase + '/obs_summary?top_n=' + CAT_POLICY.top_n" in html
+    policy = html.split("var CAT_POLICY = ")[1].split(";\n")[0]
+    assert '"top_n": 15' in policy and '"exact_unique_limit": 5000' in policy

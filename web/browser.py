@@ -33,6 +33,7 @@ from facet_aliases import canonical_facet  # noqa: E402
 import help_content  # noqa: E402
 import safe_markdown  # noqa: E402
 import celltype_groups  # noqa: E402
+from cell_level_scope import DONOR_COLUMNS  # noqa: E402
 
 from canonical_columns import is_canonical_column, strip_ant_prefix  # noqa: E402
 
@@ -439,6 +440,47 @@ _GENESETS_TTL_FALSE = 5.0
 # fit the page. The column stays filterable through the search box; only the
 # inline plot affordance and top-N cell go away above this threshold.
 CATEGORICAL_PLOT_MAX_DISTINCT = 50
+
+# Above that limit the Categorical tab lists the most common values instead (count and share), from the same
+# /obs_summary call (top_n is one GROUP BY per view server side, memoised; never every category).
+CATEGORICAL_TOP_LIST_N = 15
+# /obs_summary counts distinct values exactly up to this many and estimates above it (lib/anthive_db.py
+# _OBS_SUMMARY_EXACT_UNIQUE_LIMIT); the tab writes "about" above it.
+OBS_SUMMARY_EXACT_UNIQUE_LIMIT = 5000
+
+# Column names whose values may identify donors (or animals, samples, multiplexing hashtags). Their values are not
+# listed in the Categorical tab's top list; only the count is shown. Deliberately broad: a missed donor column is
+# worse than a sample or batch column without its list. The page also hides any column whose listed values contain
+# a value of a donor column (Mac_anno_batch 'NPH_899' in F26/ACC).
+_DONOR_LIKE_COLUMN = re.compile(
+    r'donor|patient|individual|subject|participant|projid|proj_id|case|brain|specimen|pup|mouse|animal|'
+    r'sample|batch|orig\.?ident|hto|hashtag', re.I)
+_REPLICATE_NOUNS = {'donor': 'donors', 'animal': 'animals', 'sample': 'samples'}
+
+
+def _categorical_value_policy(info: Dict[str, Any], categorical_columns: List[str]) -> Dict[str, Any]:
+    """What the Categorical tab may list for a column with more values than CATEGORICAL_PLOT_MAX_DISTINCT.
+
+    ``donor_columns`` (lower case) are the donor identifier columns (ant_donor, ant_donor_uid and the replicate
+    column): only their count is shown, as "<n> donors" (or animals, samples for the replicate column).
+    ``donor_like_columns`` are other columns whose name suggests identifiers (``_DONOR_LIKE_COLUMN``): count only.
+    The values of the donor columns also go to the page's overlap check (in dataset.html)."""
+    present = {str(column).lower(): str(column) for column in categorical_columns}
+    replicate = str(info.get('replicate_column') or '').lower()
+    nouns: Dict[str, str] = {}
+    for column in DONOR_COLUMNS:
+        if column in present:
+            nouns[column] = 'donors'
+    if replicate and replicate in present:
+        nouns[replicate] = _REPLICATE_NOUNS.get(str(info.get('replicate_unit') or ''), 'donors')
+    donor_like = sorted(name for name in present if name not in nouns and _DONOR_LIKE_COLUMN.search(name))
+    return {
+        'plot_max_distinct': CATEGORICAL_PLOT_MAX_DISTINCT,
+        'top_n': CATEGORICAL_TOP_LIST_N,
+        'exact_unique_limit': OBS_SUMMARY_EXACT_UNIQUE_LIMIT,
+        'donor_columns': nouns,
+        'donor_like_columns': donor_like,
+    }
 
 
 def _probe_genesets_once(api_url: str) -> bool:
@@ -3378,6 +3420,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "n_cat_cols": n_cat,
         "n_num_cols": n_num,
         "categorical_plot_max_distinct": CATEGORICAL_PLOT_MAX_DISTINCT,
+        "categorical_value_policy": _categorical_value_policy(info, cat_cols_filtered),
         "module_scores": module_scores,
         "module_scores_by_catalog": module_scores_by_catalog,
         "n_module_scores": n_modules,
