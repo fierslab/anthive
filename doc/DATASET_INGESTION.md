@@ -305,6 +305,12 @@ ant ingest-watch --once --store /scratch/store --prefix __incoming_test/ \
     --catalog-prefix __ingest_test_catalog/ --api-url http://127.0.0.1:18850   # a test against a scratch store
 ```
 
+In a terminal (or with `--verbose`) the watcher prints one line per state change and per step with its
+timing: pulled N GB, convert started and finished, the check verdict with the failed checks and held reasons,
+post steps, live with the db id and version, and the deletions; when nothing happens, a "polling..." line
+every 5 minutes. Under systemd the console stays concise. The day's log file
+(`<ingest_state_dir>/logs/ingest_watch_<date>.log`) has every line plus the output of the tools.
+
 On a server it runs as its own systemd unit (`config/examples/anthive-ingest-watch.service.example`), never
 under `ant-supervisor`. It reaches the local ant-serve over HTTP only, keeps working while ant-serve restarts
 (rescans retry with backoff, an unserved item is rescanned on the next poll) and takes the per-dataset writer

@@ -5,7 +5,7 @@ The conversion + maintenance tools that turn `.h5ad` files into the
 
 | Tool | Role |
 | --- | --- |
-| `ant-convert` | Full rebuild of a `.duckdb` from a `.h5ad`. Refuses if `__pending_cols` is non-empty (`--force-discard-pending` to override). |
+| `ant-convert` | Full rebuild of a `.duckdb` from a `.h5ad`. Refuses if `__pending_cols` is non-empty (`--force-discard-pending` to override). Always stores the obs columns the `api:` section reads (`add_api_source_columns`, `obs_derive_forms.api_source_columns`), whatever the include lists say, and prints them. `--group-id` fills `{group_id}` when the folder has no `index.md` (the watcher passes it). |
 | `ant-merge-h5ad` | Cold-path merge of pending duckdb obs columns back into the h5ad without rewriting X. Self-heals half-completed merges. |
 | `ant-restore-obs` | Writes the obs columns an `.md` lists (`obscat_include` / `obsnum_include`) but the `.duckdb` lacks, reading the `.h5ad` **obs only** (h5py, no X). For datasets converted with empty include lists, where a full `ant-convert` would need the whole h5ad in RAM (over 100 GB for Gabitto2024 ExN). Goes through `AnnotationWriter(verbatim_names=True)` with `record_pending=False`: author column names with spaces are accepted and nothing lands in `__pending_cols` (the columns are already in the h5ad). `plan` / `apply`; afterwards run `ant-rebuild-obs-views --only <db_id>`. |
 | `ant-build-all` | Walk the whole h5adstore, rebuild stale `.duckdb` (h5ad newer than duckdb), refresh `.md` (sha256/n_obs/layer_stats). Parallel-friendly. |

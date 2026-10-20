@@ -305,6 +305,24 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### Ingest fixes from the first real deposit (Francken2026 PFC_Microglia_scvi_280926)
+
+- `ant-convert` stores every obs column the `api:` section reads (`obs_rename` keys, every `obs_derive`
+  source, `obs_value_rename` / `obs_value_hidden` keys) whatever `obscat_include` / `obsnum_include` say, in
+  the numerical table when the dtype is numeric, else the categorical one, and prints which it added. The
+  watcher's default `obscat_include` also keeps such a column above the 1,000-value limit (a donor column
+  with 1,499 donors).
+- `ant-convert --group-id`: the watcher passes the group id, because the work folder of a new dataset in an
+  existing group has no `index.md` (`{group_id}` was unknown and `ant_donor_uid` was not published).
+- `ant-ingest-check` `facets.mapping_data`: an `obs_rename` source column missing from the stored data is an
+  error, like a missing `obs_derive` source, and both messages name the column (a column name is not a donor
+  value; donor values stay withheld).
+- `ant-ingest-watch` console: in a terminal (or with `--verbose`) one line per state change and per step
+  with timings (pulled N GB, convert started and finished, check verdict with failed checks and held
+  reasons, post steps, live with db id and version, deletions) and a "polling..." line every 5 minutes when
+  nothing happens. Under systemd the console stays as concise as before; every line also goes to the day's
+  log file with the tools' output.
+
 ### Reanalyses visible in listings
 
 - MCP `search_datasets`: `exclude_secondary` defaults to false. Reanalyses (`is_secondary: true`) are listed
