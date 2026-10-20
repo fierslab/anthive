@@ -293,6 +293,18 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Markdown bodies (dataset `.md`, collection `index.md`, gene set and paper notes) render without raw HTML in the
   web UI; a collection deposit writes `<` in its description as `&lt;`.
 
+### Security review round 4
+
+- The cross-site check compares `Origin` (port included) with `Host` or the configured public URL
+  (`mcp.public_base_url`); `X-Forwarded-Host` is no longer believed. nginx in front of Caddy must forward
+  `Host $http_host` (the dev shim and the vhost examples do; host installs see doc/DEPLOY.md). A refused request
+  is logged at warning with its `Origin`, `Host`, `X-Forwarded-Host` and the public URL.
+- The MCP paper tools post multipart also without a PDF (`check_paper` was refused with 415).
+- A collection deposit whose description contains raw HTML (tags, comments) outside code is 422
+  `invalid_collection`; code spans and blocks are written to index.md as they are.
+- Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
+  become `application/octet-stream`.
+
 ### Deployment and sync (phase A4)
 
 - `site.yaml` gains an `artefacts:` block (`enabled`, `upload_groups`, `collections_create_groups`, size and
