@@ -139,7 +139,9 @@ def facet_definition(facet: str) -> Dict[str, Any]:
 
     Returns:
         Dict with ``facet``, ``tag``, ``label``, ``defined``, ``summary``,
-        ``definition``, ``kind``, ``values``, ``missing``, ``hint_keywords``.
+        ``definition``, ``kind``, ``values``, ``missing``, ``hint_keywords``,
+        and from the registry ``status``, ``scope``, ``facet_scopes``,
+        ``replaced_by`` and ``controlled_values`` (2.47.0).
     """
     tag = facet[len(FACET_PREFIX):] if facet.startswith(FACET_PREFIX) else facet
     entry = ((load_vocab().get('tags') or {}).get(tag) or {})
@@ -160,6 +162,7 @@ def facet_definition(facet: str) -> Dict[str, Any]:
         'scope': (facet_registry().get(tag) or {}).get('scope'),
         'facet_scopes': list((facet_registry().get(tag) or {}).get('facet_scopes') or []),
         'replaced_by': list((facet_registry().get(tag) or {}).get('replaced_by') or []),
+        'controlled_values': list((facet_registry().get(tag) or {}).get('controlled_values') or []),
     }
 
 

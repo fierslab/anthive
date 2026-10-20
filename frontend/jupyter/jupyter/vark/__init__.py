@@ -29,7 +29,21 @@ from ._credentials import VarkConfigError
 from .exceptions import (
     AnthiveAPIError,
     AnthiveWarmingUpError,
+    ArtefactDownloadError,
+    ArtefactError,
+    ArtefactFileNotFoundError,
+    ArtefactIntegrityError,
+    ArtefactNotFoundError,
+    ArtefactNotOnThisSiteError,
+    ArtefactPurgedError,
+    ArtefactPurgingError,
+    ArtefactRateLimitedError,
+    ArtefactStorageUnavailableError,
     DatasetDepositError,
+    DepositHeldError,
+    DepositNotOwnerError,
+    DepositQuotaError,
+    DepositStoppedError,
     PaperDuplicateError,
     PaperInvalidError,
     PaperNotPDFError,
@@ -43,11 +57,16 @@ from .exceptions import (
 # Backward-compatibility alias (matches antclient 1.x).
 AntClient = AnthiveClient
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 __all__ = [
     "AnthiveClient", "AntClient", "VarkConfigError", "__version__",
     "AnthiveAPIError", "AnthiveWarmingUpError", "ServerWarmingUpWarning",
-    "DatasetDepositError",
+    "DatasetDepositError", "DepositNotOwnerError", "DepositQuotaError",
+    "DepositHeldError", "DepositStoppedError",
+    "ArtefactError", "ArtefactNotFoundError", "ArtefactFileNotFoundError", "ArtefactNotOnThisSiteError",
+    "ArtefactPurgedError", "ArtefactPurgingError", "ArtefactIntegrityError",
+    "ArtefactStorageUnavailableError", "ArtefactRateLimitedError",
+    "ArtefactDownloadError",
     "PaperUploadError", "PaperUploadForbiddenError",
     "PaperUploadDisabledError", "PaperDuplicateError", "PaperInvalidError",
     "PaperTooLargeError", "PaperNotPDFError",

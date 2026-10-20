@@ -2040,7 +2040,7 @@ API_VERSION = "2.47.0"
 API_VERSION_RELEASED: Optional[str] = None
 # Oldest pyvark (codeberg.org/mfiers/pyvark, `from vark import AnthiveClient`)
 # that works with this API.
-API_COMPATIBLE_PYVARK = ">=0.9.0"
+API_COMPATIBLE_PYVARK = ">=0.11.0"
 
 # Create FastAPI app with lifespan handler (Phase 2)
 app = FastAPI(
@@ -14210,6 +14210,9 @@ def _build_facet_inventory() -> List[Dict[str, Any]]:
             'label': definition['label'],
             'summary': definition['summary'],
             'defined': definition['defined'],
+            # 2.47.0: registry status and the scopes the facet is tested in (MCP list_facets)
+            'status': definition.get('status'),
+            'facet_scopes': list(definition.get('facet_scopes') or []),
         })
 
     rows.sort(key=lambda r: (-r['n_datasets'], r['facet']))
