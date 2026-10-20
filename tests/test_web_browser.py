@@ -8420,3 +8420,37 @@ def test_peer_position_is_a_percentile_with_ties_half(client):
     html = client.get("/genesets/StudyX/Exp1").text
     core = html.split("function positionOf")[1].split("function comparePosition")[0]
     assert "countBelow(g.values, r.value)" in core and "0.5 * Math.max(0, equal - 1)" in core and "/ others" in core
+
+
+_REPEATED_BODY = ("Integrated object of 304,723 human prefrontal cortex microglia from 1,499 donors. "
+                  "X is log1p of counts; raw counts are in layers[\"counts\"]. obs keeps each cohort's own columns.")
+
+
+def test_dataset_body_repeated_in_the_description_renders_once(client, monkeypatch):
+    # a deposit wrote the same paragraph to the description key and the body (F26/PFC): show it once, in Overview
+    info = dict(_INFO["GroupA/ds1"], description=_REPEATED_BODY,
+                markdown="# Title of the dataset\n\n" + _REPEATED_BODY.replace("own columns", "**own** columns"))
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": info}))
+    text = client.get("/browse/GroupA/ds1").text
+    assert text.count("human prefrontal cortex microglia from 1,499 donors") == 1
+    assert 'class="ds-desc-oneline"' not in text
+    overview = text.split('id="tab-overview"')[1].split("</section>")[0]
+    assert "human prefrontal cortex microglia from 1,499 donors" in overview
+    top = text.split('id="ds-tab-bar"')[0]
+    assert info["title"] in top and "Title of the dataset" not in overview   # the title stays at the top
+
+
+def test_dataset_description_different_from_the_body_stays_at_the_top(client, monkeypatch):
+    info = dict(_INFO["GroupA/ds1"], description="Microglia from 12 donors.", markdown="## Notes\nSome **markdown**.")
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": info}))
+    text = client.get("/browse/GroupA/ds1").text
+    assert '<div class="ds-desc-oneline">Microglia from 12 donors.</div>' in text
+    assert text.count("Microglia from 12 donors.") == 1
+
+
+def test_description_repeats_body_compares_plain_text():
+    body = browser._store_markdown("Some *cohort* of donors, it's 12.\n\nMore text.")
+    assert browser._description_repeats_body("Some cohort of donors, it's 12.", body)
+    assert browser._description_repeats_body("more   TEXT", body)
+    assert not browser._description_repeats_body("Another text.", body)
+    assert not browser._description_repeats_body("", body) and not browser._description_repeats_body("x", None)

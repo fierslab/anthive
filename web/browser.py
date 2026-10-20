@@ -615,6 +615,22 @@ def _store_markdown(text: Optional[str]) -> str:
     return safe_markdown.render(text, demote_headings=False, allow_plot_images=True)
 
 
+def _comparable_text(value: Optional[str]) -> str:
+    """Lower-case plain text of a markdown or HTML snippet: tags, markdown markers, quotes and whitespace runs
+    removed, entities decoded. Only for telling whether two texts say the same thing."""
+    text = html_lib.unescape(re.sub(r'<[^>]*>', ' ', str(value or '')))
+    text = re.sub(r'[`*_#>\[\]"\'\u2018\u2019\u201c\u201d]', '', text)
+    return re.sub(r'\s+', ' ', text).strip().lower()
+
+
+def _description_repeats_body(description: Optional[str], body_html: Optional[str]) -> bool:
+    """True when the .md ``description`` key says nothing the rendered body does not: its text is part of the body.
+    Deposits accept the description as the key or the body and many write the same paragraph to both, so the
+    dataset page would show it twice (top of the page and Overview tab). The body wins; the top keeps the title."""
+    short = _comparable_text(description)
+    return bool(short) and short in _comparable_text(body_html)
+
+
 def _expand_plot_thumbnails(html_text: Optional[str], default_db: Optional[str] = None) -> Optional[str]:
     """Rewrite ``<img src="plot:GEOM?QUERY">`` into a clickable plot thumbnail.
 
@@ -3339,7 +3355,9 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "dataset_name": dataset_title,
         # One-line description from the .md frontmatter (edited via the admin
         # editor's Basics tab). Rendered near the title in dataset.html.
-        "dataset_description": (db.get('description') or '').strip() or None,
+        # the Overview tab shows the body; a description the body already holds is not repeated at the top
+        "dataset_description": (None if _description_repeats_body(db.get('description'), markdown_content)
+                                else (db.get('description') or '').strip() or None),
         "file_id": file_id,
         "db_id": db_id,
         # is_secondary marker (surfaced next to the title + h1 gets the

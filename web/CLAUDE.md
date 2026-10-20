@@ -574,9 +574,10 @@ and `index.md` files, so no body is trusted. Plot thumbnails survive as `<img sr
   explains; admin **`.id-edit`** ✎ at the right) → **`.ds-prov`** provenance row
   (access / source / license / contributor + doi/pubmed/accession/link badges) →
   **title-row** (`<h1>` title + greyed `.basename` when it differs + visualize ▾)
-  → **`.ds-desc`** description (the `.md` body minus its leading `# title`
-  heading; suppressed server-side when nothing remains, so a heading-only "no
-  description" body shows nothing) → context pills → stats row. **No-duplication:**
+  → **`.ds-desc-oneline`** the `.md` `description` key, left out when its text
+  is already part of the body (`_description_repeats_body`; deposits often write
+  one paragraph to both) → the body itself (minus its leading `# title` heading,
+  nothing when only the heading remains) renders once, in the Overview tab → context pills → stats row. **No-duplication:**
   headline biology lives ONLY in the context pills; the **Biology** section shows
   only condition/sex/age/strain; provenance + external links live ONLY in the top
   `.ds-prov` row. Each datum appears once; sections hide when empty.
