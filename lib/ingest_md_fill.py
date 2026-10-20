@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 
 import md_edit
+from obs_derive_forms import api_source_columns
 from sidecar_merge import MACHINE_KEYS, S3_KEYS, parse_lines
 
 #: Categorical obs columns with more distinct values than this are not
@@ -310,8 +311,10 @@ def fill_catalog_fields(meta: Dict[str, Any], profile: H5adProfile, sha256: str,
     put('layers_include', ['X'] + [name for name in profile.layer_stats if name != 'X'])
     put('obsm_include', {key: key for key in profile.obsm_keys})
     put('obsnum_include', list(profile.obs_numeric))
+    # api: sources are always stored, whatever their number of values (a donor column with 1,499 donors)
+    api_sources = set(api_source_columns(result.get('api') if isinstance(result.get('api'), dict) else None))
     put('obscat_include', [name for name, count in profile.obs_categorical.items()
-                           if count <= MAX_DEFAULT_OBSCAT_VALUES])
+                           if count <= MAX_DEFAULT_OBSCAT_VALUES or name in api_sources])
     if profile.layer_stats:
         put('layer_stats', profile.layer_stats)
     if not result.get('version'):

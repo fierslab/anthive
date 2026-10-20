@@ -422,6 +422,33 @@ def derive_sql(spec: Mapping[str, Any], column_sql: str, numeric: bool, group_id
 
 # ── group id of a dataset ────────────────────────────────────────────────────
 
+def api_source_columns(api_config: Optional[Mapping[str, Any]]) -> List[str]:
+    """Author obs columns the ``api:`` section reads, in .md order, without duplicates.
+
+    ``obs_rename`` keys, the ``source`` of every ``obs_derive`` (all forms),
+    ``obs_value_rename`` and ``obs_value_hidden`` keys. ``ant-convert`` stores
+    them whatever ``obscat_include`` / ``obsnum_include`` say: a mapping whose
+    source is not stored publishes nothing (Francken2026, 2026-10-20).
+    """
+    api = api_config or {}
+    columns: List[str] = []
+
+    def add(name: Any) -> None:
+        text = str(name or '').strip()
+        if text and text not in columns:
+            columns.append(text)
+
+    for key in (api.get('obs_rename') or {}):
+        add(key)
+    for spec in (api.get('obs_derive') or {}).values():
+        if isinstance(spec, Mapping):
+            add(spec.get('source'))
+    for section in ('obs_value_rename', 'obs_value_hidden'):
+        for key in (api.get(section) or {}):
+            add(key)
+    return columns
+
+
 def group_id_for_md(md_path: Path, max_levels: int = 4) -> Optional[str]:
     """The 3-character group id of the dataset described by ``md_path``.
 
