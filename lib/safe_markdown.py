@@ -139,6 +139,24 @@ def render(text: Optional[str], demote_headings: bool = True, allow_plot_images:
     return parser.close_all()
 
 
+def raw_html(text: Optional[str]) -> List[str]:
+    """The raw HTML a CommonMark renderer with HTML enabled would pass through (blocks, inline tags, comments),
+    outside code spans and blocks. Used to refuse such text where it is written into a file that other tools
+    render (a collection's index.md), instead of escaping it (escaping shows as &lt; inside code)."""
+    if not text:
+        return []
+    from markdown_it import MarkdownIt  # noqa: PLC0415
+    parser = MarkdownIt('commonmark', {'html': True}).enable(['table', 'strikethrough'])
+    found: List[str] = []
+    for token in parser.parse(str(text)[:MAX_SOURCE_CHARS]):
+        if token.type == 'html_block':
+            found.append(token.content.strip())
+        for child in token.children or []:
+            if child.type == 'html_inline':
+                found.append(child.content.strip())
+    return found
+
+
 def plain(text: Optional[str], max_chars: int = 300) -> str:
     """A single line of plain text (titles): HTML tags, markdown markers and whitespace runs removed; the
     caller's template autoescape escapes what is left."""

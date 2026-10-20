@@ -294,6 +294,15 @@ def assign_group_id(data_project: str, taken: Iterable[str]) -> str:
     raise DepositError(409, 'collection_exists', 'no free group id for this name; ask an admin')
 
 
+def _escape_raw_html(text: str) -> str:
+    """Defence in depth for index.md: if a raw HTML span is left (create refuses them; this covers direct
+    callers), write its '<' as '&lt;'. Code spans and blocks are untouched, so they render as written."""
+    import safe_markdown  # noqa: PLC0415
+    for part in set(safe_markdown.raw_html(text)):
+        text = text.replace(part, part.replace('<', '&lt;'))
+    return text
+
+
 def render_analysis_index_md(data_project: str, group_id: str, collection: Mapping[str, Any], created_by: str,
                              created: str) -> str:
     """The minimal ``index.md`` of an analysis collection (design 2.6), front matter in a fixed order."""
@@ -307,9 +316,9 @@ def render_analysis_index_md(data_project: str, group_id: str, collection: Mappi
             meta[key] = collection[key]
     if collection.get('papers'):
         meta['papers'] = dict(collection['papers'])
-    # the description is a depositor's markdown: no raw HTML ever reaches index.md, whatever renders it later
-    # (security review round 3); markdown renderers show &lt; as a plain "<"
-    body = (collection.get('description') or '').strip().replace('<', '&lt;')
+    # the description is a depositor's markdown; raw HTML is refused at create (safe_markdown.raw_html), and
+    # what is left over (a bare "<" not starting a tag) is escaped only outside code, as markdown shows it
+    body = _escape_raw_html(collection.get('description') or '').strip()
     text = '---\n' + yaml.safe_dump(meta, sort_keys=False, allow_unicode=True, width=10 ** 6) + '---\n'
     return text + (f'\n{body}\n' if body else '')
 
@@ -888,6 +897,14 @@ class ArtefactDepositService(DepositService):
         if description is not None and (not isinstance(description, str)
                                         or len(description.encode('utf-8')) > artefacts.DESCRIPTION_MAX_BYTES):
             raise DepositError(422, 'invalid_collection', 'description: markdown of at most 20 kB')
+        if isinstance(description, str):
+            import safe_markdown  # noqa: PLC0415
+            html_parts = safe_markdown.raw_html(description)
+            if html_parts:
+                # the description goes into index.md, which other tools render (review round 4): no raw HTML
+                raise DepositError(422, 'invalid_collection', f'description: no raw HTML (found '
+                                                              f'{html_parts[0][:40]!r}); write markdown, or put '
+                                                              f'literal tags in backticks')
         access = block.get('access') or 'internal'
         if access not in artefacts.COLLECTION_ACCESS_VALUES:
             raise DepositError(422, 'invalid_collection', 'access is internal or public')

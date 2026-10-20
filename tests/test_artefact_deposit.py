@@ -550,3 +550,21 @@ def test_manifest_json_is_a_reserved_top_level_name(tmp_path, clock, name):
              'invalid_name')
     # in a subfolder the name is fine (clients write the manifest at the top level only)
     _create(service, artefact_body({'meta/manifest.json': b'{}'}, kind='other', artefact_id='notes'), ANALYST, None)
+
+
+# ── review round 4, nit 7: raw HTML in a collection description is refused, code renders as written ─────
+
+def test_a_collection_description_with_raw_html_is_refused(tmp_path, clock):
+    service, _s3 = make_service(tmp_path, clock)
+    for description in ('Atlas.\n\n<img src=x onerror=alert(1)>', 'a <b>bold</b> word', '<!-- hidden -->'):
+        with pytest.raises(dd.DepositError) as caught:
+            _collection(service, description=description)
+        assert caught.value.status == 422 and 'raw HTML' in caught.value.body['message']
+
+
+def test_code_and_comparisons_in_a_collection_description_are_kept_as_written(tmp_path, clock):
+    service, _s3 = make_service(tmp_path, clock)
+    description = 'Use `<id>` and `a < b`; p < 0.05.\n\n```\n<script>x</script>\n```\n'
+    answer = _collection(service, description=description)
+    assert '`<id>`' in answer['index_md'] and '<script>x</script>' in answer['index_md']
+    assert '&lt;' not in answer['index_md']
