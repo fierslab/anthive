@@ -387,6 +387,7 @@ is a group in the store.
 | `files.size` | size against `datasets_upload_max_gb` (200 GB) | over the limit | split the dataset |
 | `files.filename` | basename and group folder names | spaces, special characters, over 50 characters, group starting with `_` or `.` | rename |
 | `h5ad.structure` | h5ad opens, has X or layers, obs, var | unreadable or incomplete; warns without an `obsm` embedding | re-save with anndata |
+| `h5ad.obs_columns` | names every obs column ant-convert will skip and why: a name that differs from another only in case (DuckDB names are case-insensitive), a reserved name, or (with include lists) a text column above the 1,000 values of the default `obscat_include` | never fails; warns for case collisions and reserved names | rename the column, or list it in `obscat_include` |
 | `duckdb.integrity` | `ant duckdb-check` on a copy of the (scratch) database | convert failed or tool exits non-zero | fix what `ant-convert` reads |
 | `meta.md_parse` | the `.md` exists and parses | no or broken YAML | write the front matter |
 | `meta.catalog` | id and group id valid and unique (`md_check`, fixing off; `scripts/validate_md.py`) | id not 3 characters, duplicate in the group or store; missing id is a warning with a proposal | set `id:` |

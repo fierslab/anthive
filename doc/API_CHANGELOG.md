@@ -307,6 +307,12 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 
 ### Updates change the dataset .md
 
+- `GET /datasets/deposit/md/{db_id}` (new, depositors): the store `.md`'s depositor-editable keys for a client
+  that diffs its local `.md` before an update: `{db_id, version, keys: {key: value}, editable_keys: [...]}`
+  (`keys` holds the editable keys the `.md` sets; no curated or managed key, no caveats). Allowed for the dataset
+  owner, admins, or anyone under `update_policy: any`; 403 otherwise (also for an unknown dataset), 404 for an
+  unknown dataset only for those who may update any dataset.
+
 - A deposited `<basename>.md` on an update (owner, admin, or `update_policy: any`) applies the
   depositor-editable keys `api`, `obscat_include`, `obsnum_include`, `obs_exclude`, `disease_basis`,
   `disease_derivation`, `description`, `title`, `replicate_unit`, `replicate_column`, `is_secondary`,
@@ -318,6 +324,15 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Other keys are curated: not applied, the seed stays in incoming with a warning, but its new caveats (and
   editable keys) are applied; before, a single differing key applied nothing, caveats included.
 - `access` and `license` changes in the sidecar stay `needs_decision`; `data_use` is plain metadata (above).
+
+### Fixes from the depositing session (2026-10-20)
+
+- `POST /databases/{id}/query/sql` (vark sql): missing values and infinities are JSON null. NaN left in float
+  and text columns made the answer a 500 ("Out of range float values are not JSON compliant"), seen as GROUP BY
+  and larger result sets failing on GF4/MIC and M23/IMM.
+- `ant-ingest-check` has a 35th check, `h5ad.obs_columns`: it names every obs column ant-convert will skip and
+  why (case collision such as `Sex` / `sex`, reserved name, a text column above the 1,000 values of the default
+  `obscat_include`). Case collisions and reserved names warn; nothing fails.
 
 ### Client sync (audit 2026-10-20)
 

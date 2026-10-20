@@ -316,6 +316,7 @@ No admin tools (approve, reviewed, send-back, retire, reject). Admin actions are
 | `files.size` | object size | config limits | over the limit = error |
 | `files.filename` | basename | `h5ad_utils.validate_filename` | invalid = error |
 | `h5ad.structure` | h5ad | `h5ad_utils.validate_structure`, `get_h5ad_info` | unreadable or missing X/obs/var = error |
+| `h5ad.obs_columns` (2.47.0) | h5ad obs + `.md` | `checks_files.obs_storage`, the rules of ant-convert: include lists plus the api: sources, per table a case collision or a reserved name is skipped; with include lists, text columns above `ingest_md_fill.MAX_DEFAULT_OBSCAT_VALUES` (1,000) are named; `max_obscat_values` (100, config) is read only by the legacy checkers | case collision or reserved name = warn; value limit = info |
 | `meta.md_parse` | `.md` | `metadata.parse_md_file` | parse error = error |
 | `meta.catalog` | staging folder | `md_check.check_md_folder(folder, fix=False, store=<store>)` and `<store>/scripts/validate_md.py` as a subprocess when present | id or group_id invalid or duplicate = error |
 | `meta.required_keys` | `.md` | key list from requirements (title, description of at least 200 characters, version, changelog, replicate_unit, disease_basis, access-related keys) | missing = error |
@@ -668,7 +669,7 @@ Rule kept: nothing hard-codes repo paths for runtime writes. Every path comes fr
 
 ## 20. P1 as implemented (2026-10-05)
 
-Delivered: `bin/ingest/ant-ingest-check`, `bin/ingest/ant-ingest-index`, `lib/ingest_check/` (34 checks, frozen ids
+Delivered: `bin/ingest/ant-ingest-check`, `bin/ingest/ant-ingest-index`, `lib/ingest_check/` (34 checks, frozen ids; 35 with `h5ad.obs_columns` since 2.47.0
 in `lib/ingest_check/checks_*.py`, listed by `ant ingest-check --list-checks`), `lib/facet_rules.py` (the facet test
 thresholds, now imported by `bin/annot/ant-facet-test`), `config.get_ingest_state_dir / get_ingest_index_dir /
 get_ingest_scratch_dir / get_dataset_ingest_settings`, `doc/DATASET_INGESTION.md` (what each check means), tests

@@ -5,7 +5,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import Outcome, check, fail, ok, warn
+from . import Outcome, check, fail, note, ok, warn
 from .context import MODE_EXISTING
 from .scratch import isolated_copy_for_check
 
@@ -81,6 +81,97 @@ def h5ad_structure(ctx) -> Outcome:
         return warn('no embedding in obsm (the dataset page needs at least one X_* embedding, UMAP preferred)',
                     'Add adata.obsm["X_umap"] before saving the h5ad.', **details)
     return ok(f'{info["n_cells"]} cells x {info["n_genes"]} genes', **details)
+
+
+#: Column names ant-convert never stores (they name its own index columns).
+RESERVED_OBS_COLUMNS = frozenset({'cell_id', 'cell_name', 'gene_id', 'gene_name'})
+
+
+def obs_storage(obs, metadata) -> dict:
+    """Which obs columns ant-convert stores and which it skips, with the reason (mirrors ``ant-convert``).
+
+    ant-convert stores the columns of ``obsnum_include`` / ``obscat_include`` plus every column the ``api:``
+    section reads (``obs_derive_forms.api_source_columns``), each list in order, and skips within one table a
+    column whose name differs from an earlier one only in case (DuckDB names are case-insensitive) and the
+    reserved names. Without include lists only the api sources are stored. The include lists of a new
+    deposit are filled by the watcher, leaving out text columns with more than
+    ``ingest_md_fill.MAX_DEFAULT_OBSCAT_VALUES`` (1,000) values (cell ids, barcodes) unless the api reads
+    them; ``max_obscat_values`` (100) in the config is read only by the two legacy checkers that rewrite ``.md`` files.
+
+    Returns ``{'stored': [...], 'skipped': [{'column', 'reason'}], 'has_lists': bool}``.
+    """
+    import pandas as pd  # noqa: PLC0415
+    from ingest_md_fill import MAX_DEFAULT_OBSCAT_VALUES  # noqa: PLC0415
+    from metadata import get_api_config  # noqa: PLC0415
+    from obs_derive_forms import api_source_columns  # noqa: PLC0415
+
+    columns = [str(name) for name in obs.columns]
+    numeric = [str(c) for c in (metadata.get('obsnum_include') or [])]
+    categorical = [str(c) for c in (metadata.get('obscat_include') or [])]
+    has_lists = bool(numeric or categorical)
+    listed = set(numeric) | set(categorical)
+    for column in api_source_columns(get_api_config(metadata)):
+        if column in listed or column not in columns:
+            continue
+        dtype = obs[column].dtype
+        (numeric if pd.api.types.is_numeric_dtype(dtype) and not pd.api.types.is_bool_dtype(dtype)
+         else categorical).append(column)
+        listed.add(column)
+    stored: list = []
+    skipped: list = []
+    for table in (numeric, categorical):
+        seen_lower: dict = {}
+        for column in table:
+            if column not in columns or column in stored:
+                continue
+            if column.lower() in RESERVED_OBS_COLUMNS:
+                skipped.append({'column': column, 'reason': 'reserved name (ant-convert uses it for its own index)'})
+                continue
+            if column.lower() in seen_lower:
+                skipped.append({'column': column, 'reason': f'differs from {seen_lower[column.lower()]!r} only in '
+                                                            f'case; DuckDB column names are case-insensitive'})
+                continue
+            seen_lower[column.lower()] = column
+            stored.append(column)
+    if has_lists:
+        for column in columns:
+            if column in listed or column in stored:
+                continue
+            series = obs[column]
+            if not pd.api.types.is_numeric_dtype(series.dtype) or pd.api.types.is_bool_dtype(series.dtype):
+                n_values = int(series.nunique(dropna=True))
+                if n_values > MAX_DEFAULT_OBSCAT_VALUES:
+                    skipped.append({'column': column, 'reason': f'{n_values} distinct values, above the '
+                                                                f'{MAX_DEFAULT_OBSCAT_VALUES} of the default '
+                                                                f'obscat_include (cell ids, barcodes)'})
+    return {'stored': stored, 'skipped': skipped, 'has_lists': has_lists}
+
+
+@check('h5ad.obs_columns', needs=('h5ad',))
+def h5ad_obs_columns(ctx) -> Outcome:
+    """Every obs column ant-convert will skip is named with the reason (case collision, reserved name, value limit)."""
+    try:
+        plan = obs_storage(ctx.adata.obs, ctx.md)
+    except Exception as exc:  # noqa: BLE001 - h5ad.structure reports an unreadable file
+        return ok(f'not judged: the obs table cannot be read ({type(exc).__name__})')
+    skipped = plan['skipped']
+    n_other = len(ctx.adata.obs.columns) - len(plan['stored']) - len(skipped)
+    details = {'n_stored': len(plan['stored']), 'skipped': skipped[:50], 'n_not_listed': max(n_other, 0)}
+    lines = [f"{item['column']}: {item['reason']}" for item in skipped]
+    collisions = [item for item in skipped if 'case' in item['reason'] or 'reserved' in item['reason']]
+    if collisions:
+        return warn('obs columns that will not be stored: ' + '; '.join(lines[:5])
+                    + (f' (+{len(lines) - 5} more)' if len(lines) > 5 else ''),
+                    'Rename the column in the h5ad (for example sex_author next to sex) so both can be stored; '
+                    'reserved names (cell_id, cell_name, gene_id, gene_name) need another name.', **details)
+    if skipped:
+        return note('text columns left out by the value limit: ' + '; '.join(lines[:5])
+                    + (f' (+{len(lines) - 5} more)' if len(lines) > 5 else '')
+                    + '. List one in obscat_include if it is not an id column', **details)
+    if not plan['has_lists']:
+        return note(f'no obscat_include / obsnum_include in the .md: only the {len(plan["stored"])} column(s) the '
+                    f'api: section reads are stored (the watcher fills the lists for a new dataset)', **details)
+    return ok(f'{len(plan["stored"])} obs columns will be stored', **details)
 
 
 def _report_lines(output: str) -> list:
