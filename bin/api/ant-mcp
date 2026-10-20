@@ -3213,10 +3213,14 @@ def main() -> None:
     async def _post_upload(metadata: Any, pdf: Optional[bytes], *, folder: Optional[str],
                            dry_run: bool, update: bool) -> Tuple[int, dict]:
         text = metadata if isinstance(metadata, str) else json.dumps(metadata)
-        data = {'metadata': text, 'dry_run': str(dry_run).lower(), 'update': str(update).lower()}
+        data = {'dry_run': str(dry_run).lower(), 'update': str(update).lower()}
         if folder:
             data['folder'] = folder
-        files = {'file': ('paper.pdf', pdf, 'application/pdf')} if pdf is not None else None
+        # always multipart/form-data, also without a PDF (as pyvark does): httpx sends data= alone as a
+        # urlencoded form, which ant-serve's cross-site guard refuses with 415 (review round 4)
+        files: Dict[str, Any] = {'metadata': (None, text)}
+        if pdf is not None:
+            files['file'] = ('paper.pdf', pdf, 'application/pdf')
         response = await _http_client.post(f"{api_base_url}/papers/upload", data=data, files=files,
                                            headers=_identity_headers(),
                                            timeout=httpx.Timeout(connect=10, read=300, write=120, pool=10))
