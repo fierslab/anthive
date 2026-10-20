@@ -3094,7 +3094,7 @@ def test_help_page_skills_and_mcp_facts(client):
     resp = client.get("/help")
     text = resp.text
     assert ("DISABLE_TELEMETRY=1 npx skills add "
-            "https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g -y --agent claude-code codex") in text
+            "https://gitlab.kuleuven.be/bdslab/anthive/skills.git -g -y --agent claude-code codex opencode pi") in text
     assert "https://gitlab.kuleuven.be/bdslab/anthive/skills/-/blob/main/INSTALL.md" in text
     assert "npx skills update -g" in text
     assert "claude mcp add --transport http anthive" in text
@@ -3126,11 +3126,16 @@ def test_help_page_quick_start_first(client):
     assert re.findall(r'href="#([a-z-]+)"', toc)[0] == "quickstart"
     quick = body.split('id="quickstart"', 1)[1].split('</section>', 1)[0]
     assert ("DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git"
-            " -g -y --agent claude-code codex") in quick
+            " -g -y --agent claude-code codex opencode pi") in quick
     quick_cmd = quick.split('id="quickstart-skills-cmd">', 1)[1].split('</pre>', 1)[0]
-    assert "*" not in quick_cmd and "--agent claude-code codex" in quick_cmd
+    assert "*" not in quick_cmd and "--agent claude-code codex opencode pi" in quick_cmd
     assert "data-copy-help" in quick
     assert "<code>gemini-cli</code> (Gemini CLI)" in quick
+    assert "<code>pi</code> (Pi)" in quick
+    for url in ("https://claude.com/claude-code", "https://github.com/openai/codex",
+                "https://opencode.ai", "https://github.com/badlogic/pi-mono"):
+        assert f'href="{url}" target="_blank" rel="noopener noreferrer"' in quick, url
+        assert url not in quick_cmd, url
     assert 'href="https://gitlab.kuleuven.be/bdslab/anthive/skills/-/blob/main/INSTALL.md"' in quick
     assert "ls ~/.claude/skills" in quick and "ls ~/.agents/skills" in quick
     for name in HELP_SKILL_NAMES:
@@ -3154,7 +3159,7 @@ def test_help_page_skills_section_complete(client):
     assert mentioned <= set(HELP_SKILL_NAMES), mentioned - set(HELP_SKILL_NAMES)
     assert "npx skills update -g" in skills
     assert "does not support global skill installation" in skills
-    assert "-g -y --agent claude-code codex" in skills
+    assert "-g -y --agent claude-code codex opencode pi" in skills
     assert 'href="https://gitlab.kuleuven.be/bdslab/anthive/skills/-/blob/main/INSTALL.md"' in skills
     assert "ls ~/.claude/skills" in skills and "ls ~/.agents/skills" in skills
     assert "--skill anthive-basics anthive-literature" in skills
@@ -6323,10 +6328,11 @@ def test_mcp_setup_prompt_fills_in_link_and_commands():
     assert "doc/MCP_CLIENTS.md" in prompt
     # Skills, optional vark (login typed by the user), checks.
     assert ("DISABLE_TELEMETRY=1 npx skills add https://gitlab.kuleuven.be/bdslab/anthive/skills.git"
-            " -g -y --agent claude-code codex") in prompt
+            " -g -y --agent claude-code codex opencode pi") in prompt
     # Named agents, never the all-apps wildcard; the skills INSTALL.md is the canonical guide.
     assert "--agent '*'" not in prompt
     assert "gemini-cli for Gemini CLI" in prompt
+    assert "pi for Pi" in prompt
     assert "https://gitlab.kuleuven.be/bdslab/anthive/skills/-/blob/main/INSTALL.md" in prompt
     assert "curl -sSL https://gitlab.kuleuven.be/bdslab/anthive/vark/-/raw/main/install.sh | bash" in prompt
     assert ("vark server login --name anthive-example --url https://anthive.example.org/api"
