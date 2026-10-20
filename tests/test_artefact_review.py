@@ -399,6 +399,10 @@ def test_active_content_types_become_octet_stream(value):
 
 def test_plain_content_types_are_kept():
     assert artefacts.safe_content_type('image/png') == 'image/png'
+    xlsx = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    docx = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    assert artefacts.safe_content_type(xlsx) == xlsx and artefacts.safe_content_type(docx) == docx
+    assert artefacts.safe_content_type('application/atom+xml') == 'application/octet-stream'
     assert artefacts.safe_content_type('text/tab-separated-values') == 'text/tab-separated-values'
 
 

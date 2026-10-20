@@ -171,8 +171,12 @@ def owned_by(owner: Any, user: Any) -> bool:
     return bool(user) and owner == user and str(user).lower() not in SYSTEM_OWNERS
 
 
-#: content types a browser runs or renders as active content; never served or recorded as such (review round 3)
-ACTIVE_CONTENT_MARKERS = ('html', 'xml', 'javascript', 'ecmascript', 'svg', 'x-shockwave', 'xsl')
+#: content types a browser runs or renders as active content; never served or recorded as such (review rounds
+#: 3 and 4: exact types plus the +xml suffix, so office formats such as xlsx and docx keep their type)
+ACTIVE_CONTENT_TYPES = frozenset({
+    'text/html', 'application/xhtml+xml', 'image/svg+xml', 'application/xml', 'text/xml', 'text/xsl',
+    'application/xslt+xml', 'application/javascript', 'text/javascript', 'application/ecmascript',
+    'text/ecmascript', 'application/x-javascript', 'text/jscript', 'application/x-shockwave-flash'})
 
 
 def safe_content_type(value: Any) -> str:
@@ -181,7 +185,7 @@ def safe_content_type(value: Any) -> str:
     local downloads."""
     if isinstance(value, str) and CONTENT_TYPE_RE.fullmatch(value.strip().lower()):
         lowered = value.strip().lower()
-        if not any(marker in lowered for marker in ACTIVE_CONTENT_MARKERS):
+        if lowered not in ACTIVE_CONTENT_TYPES and not lowered.endswith('+xml'):
             return lowered
     return 'application/octet-stream'
 
