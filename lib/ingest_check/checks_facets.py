@@ -1,6 +1,7 @@
 """Facet mapping checks: namespace, static rules, data rules, unmapped values, Braak, core facets."""
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import Outcome, no_database, check, fail, ok, skip, warn
@@ -9,6 +10,9 @@ from . import Outcome, no_database, check, fail, ok, skip, warn
 CROSSWALK_RULES = frozenset({'join_table_missing', 'join_cohort_unknown', 'crosswalk_conflict', 'join_unmatched'})
 NAMESPACE_RULES = frozenset({'namespace_unregistered', 'namespace_deprecated'})
 DONOR_FACETS = ('ant_donor', 'ant_donor_uid')
+#: a mapping source column the stored data lack: an error here (facet_lint warns for obs_rename, which suits
+#: ant md-check on the store), and the message names the column: a column name is not a donor value.
+SOURCE_MISSING_RULES = frozenset({'source_missing', 'rename_source_missing'})
 _MAX_LISTED = 10
 
 
@@ -26,6 +30,8 @@ def public_message(finding) -> str:
     """Finding text without donor values or crosswalk content."""
     if finding.rule in CROSSWALK_RULES:
         return f'[{finding.rule}] the donor id join cannot be resolved (see donor.uid_resolves)'
+    if finding.rule in SOURCE_MISSING_RULES:     # column and facet names only, never values
+        return f'[{finding.rule}] {finding.message}'
     if any(name in finding.message for name in DONOR_FACETS):
         return f'[{finding.rule}] concerns the donor facets; values are withheld from the report'
     return f'[{finding.rule}] {finding.message}'
@@ -87,6 +93,7 @@ def facets_mapping_data(ctx) -> Outcome:
     finally:
         close()
     findings = [item for item in findings if item.rule not in CROSSWALK_RULES and item.rule != 'unmapped_value']
+    findings = [replace(item, severity='error') if item.rule in SOURCE_MISSING_RULES else item for item in findings]
     return _verdict(findings, 'all source columns exist and numeric facets hold numbers in range',
                     'Correct the source column names in obs_rename / obs_derive (they must be obs columns of the '
                     'h5ad) and the values written into numeric facets.')

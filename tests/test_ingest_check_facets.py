@@ -177,3 +177,24 @@ def test_public_message_withholds_crosswalk_and_donor_content():
     assert 'a, b' not in checks_facets.public_message(join)
     assert 'D1' not in checks_facets.public_message(donor)
     assert "'x'" in checks_facets.public_message(plain)
+
+
+def test_missing_rename_source_fails_and_names_the_column(submission):
+    # Francken2026, 2026-10-20: obs_rename sources that were not stored went live as a warning
+    api = api_with(obs_rename={'sex_harmonised': 'ant_sex'})
+    api['obs_rename'].pop('sex_raw')
+    api.get('obs_value_rename', {}).pop('sex_raw', None)
+    outcome = outcome_of(submission, checks_facets.facets_mapping_data, api=api)
+    assert outcome.status == FAIL and 'rename_source_missing' in outcome.summary
+    assert 'sex_harmonised' in outcome.summary and 'ant_sex' in outcome.summary
+
+
+def test_missing_donor_source_names_the_column_not_withheld(submission):
+    api = api_with()
+    api['obs_rename'] = {key: value for key, value in api['obs_rename'].items() if key != 'donor'}
+    api['obs_rename']['donor_gone'] = 'ant_donor'
+    api['obs_derive']['ant_donor_uid'] = {'source': 'donor_gone', 'template': '{group_id}:{value}'}
+    outcome = outcome_of(submission, checks_facets.facets_mapping_data, api=api)
+    assert outcome.status == FAIL and 'donor_gone' in outcome.summary
+    assert 'withheld' not in outcome.summary
+    assert 'D00' not in str(outcome.details)                  # donor values never appear
