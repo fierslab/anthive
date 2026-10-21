@@ -810,6 +810,43 @@ s3:
 Signed links never reach the access log: the Caddy log filter drops the query string of a redirect's
 `Location` header (checked by `ant-stack check`).
 
+### Send deposits to a central watcher (since 2.47.0)
+
+A site can accept dataset and artefact deposits from its own users while one watcher on another host (the
+central watcher) ingests them into the store. The site then runs no watcher; its uploads, a signed record of
+each deposit and the incoming copies go to a separate ingestion bucket, and the watcher answers with a signed
+result that the site shows and e-mails to the depositor (design section 24).
+
+1. **Ingestion bucket and keys.** Ask the administrator of the central watcher for the ingestion bucket and a
+   key pair for this site (limited to that bucket if the object store can). Write the pair to
+   `<state_dir>/secrets/s3_ingest_access_key_id` and `<state_dir>/secrets/s3_ingest_secret_access_key`
+   (mode 600). The main `s3` keys of the data bucket stay on the host (the api does not get them for deposits).
+2. **The watcher's public key.** The administrator runs `ant ingest-watch result-key` on the watcher host and
+   sends the line `ed25519:...`.
+3. **site.yaml:**
+
+   ```yaml
+   services:
+     dataset_deposit: true
+   datasets:
+     site_id: intern                 # unique among the sites of the ingestion bucket
+     central_watcher:
+       ingestion_bucket: anthive-ingest
+       watcher_public_keys: ['ed25519:...']
+       key_id: k1
+   ```
+
+4. **The site secret.** `ant-stack up`; the api creates `<state_dir>/secrets/deposit_site_secret` at its first
+   start. Send it to the administrator over a safe channel; it goes to the watcher host as
+   `<sites_dir>/<site_id>.keys` (mode 600) with the line `k1 <secret>`. `ant-stack check` prints the exact
+   lines.
+5. `ant-stack check`; `ant-stack watch` refuses on such a site. Approve, reject and artefact purges happen on
+   the central site.
+
+To rotate the site secret: write a new secret to `deposit_site_secret`, set `key_id: k2`, and ask the
+administrator to add the line `k2 <new secret>` next to the old one; the old line can go once older deposits
+are processed.
+
 ### A mirror with a hand-picked subset (symlinked stores and library)
 
 A public mirror can serve a few curated datasets and papers that physically
@@ -949,7 +986,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.45.0** | (1) **Internal datasets need a login**: datasets that are not `access: public` (also those without an `access` value) are hidden from callers without an identity: absent from every listing, 404 on their routes (new `auth.internal_requires_auth`, default true; see "Internal datasets"). Sites with a login see no change; on `auth.mode: none` internal datasets disappear, and a `trusted-proxy` site behind a vhost without a login must drop the `Remote-*` headers there. (2) `X-Remote-User` / `X-Remote-Groups` are ignored everywhere and dropped by the Caddy snippets. (3) Cache, index and rescan routes (`/admin/*-cache/*`, `/admin/*-index/*`, `/admin/api-config/*`, `POST /genesets/rescan`, `/module-variability/rescan`, `/catalogs/rescan`) need an admin, a host-local tool or the internal secret; other signed-in users get 403. (4) The web, mcp and api containers must run the same release (the web now forwards the visitor's identity to the api). (5) **Cache warm-up**: after a start the api fills the facet caches for signed-in and anonymous visitors, per-donor values and the gene set rank tables in the background (new `warmup` block of anthive.yaml, default on; see "Cache warm-up after a start"). The first start builds the rank tables (up to a minute per dataset with scores, one at a time). | `ant-stack check` (it prints how many datasets are internal and who sees them, and warns only for `internal_requires_auth: false` or `trusted-proxy`), set `images: tag: 2.45.0`, `ant-stack pull`, `ant-stack up`; then `ant-stack restart api web mcp` (2.45.0's `up` does not recreate them when only the config changed; fixed in 2.45.1). If your upstream proxy sends identity as `X-Remote-*` only, switch it to `Remote-User` / `Remote-Groups`. If you copied an nginx vhost from `config/examples/`, add the new `proxy_set_header ... ""` lines (the public vhost must drop `Remote-*`). Scripts that call the rescan routes need an admin account. |
 | **2.45.1** | Fixes in `ant-stack`: `up` recreates api, web and mcp when their rendered config or secrets changed (before, a changed `auth.internal_requires_auth` or `auth.mode` did not take effect until a restart); `restart` takes several services; `passwd` without a terminal points to `--password`; `check` labels Caddy's in-container listener, prints the published host address and always prints the internal dataset count; `ant-stack logs api` shows the warm-up progress. | set `images: tag: 2.45.1`, `ant-stack pull`, `ant-stack up` |
 | **2.46.0** | Dataset deposits through the API: signed-in members of `datasets.upload_groups` get presigned uploads into the S3 watcher's incoming prefix and follow their deposit in the API (and two read-only MCP tools). Off by default; nothing changes for a site that leaves it off. `ant sync push` now sets `x-amz-meta-sha256` on uploaded `.h5ad` objects. | optional: `services: dataset_deposit: true`, the `datasets:` block, a presigning key pair and the watcher on the host (see "Let depositors add datasets"); `ant-stack check`. The primary site, once, for metadata-only updates of datasets pushed before: `bin/ops/ant-stack ingest -- ant sync stamp-sha256 --dry-run`, then without `--dry-run` |
-| **2.47.0** | Artefact store: versioned analysis files of datasets and collections, read routes under `/api/artefacts`, artefact and collection deposits (off by default), DE tables as `de_table` artefacts (the 2.46 DE-only deposit becomes an alias until 2.48.0). `ant sync push` never uploads `static/artefacts/`; `ant sync pull` brings inline artefact files and previews and deletes purged copies. | none required. Optional: the `artefacts:` block, the read-only pair `secrets/s3_artefacts_read_*`, the `analysts` group and the h5adstore `.gitignore` lines (see "Let analysts deposit artefacts"); `ant-stack check` |
+| **2.47.0** | Artefact store: versioned analysis files of datasets and collections, read routes under `/api/artefacts`, artefact and collection deposits (off by default), DE tables as `de_table` artefacts (the 2.46 DE-only deposit becomes an alias until 2.48.0). `ant sync push` never uploads `static/artefacts/`; `ant sync pull` brings inline artefact files and previews and deletes purged copies. A site can send its deposits to one central watcher on another host (`datasets.central_watcher`, a separate ingestion bucket, signed records and results); nothing changes for a site that leaves it unset. | none required. Optional: the `artefacts:` block, the read-only pair `secrets/s3_artefacts_read_*`, the `analysts` group and the h5adstore `.gitignore` lines (see "Let analysts deposit artefacts"); for a central watcher: `datasets.central_watcher`, `secrets/s3_ingest_*` and the site secret (see "Send deposits to a central watcher"); `ant-stack check` |
 | **2.46.1** | Fixes. (1) `ant sync pull --dry-run` changes nothing on every path (before, with `--include-duckdb` or `--only` it downloaded and overwrote files); `ant sync push --dry-run` exists. (2) `sync_policy.mode: priority` pulls each kept dataset with its layer, DE and score parquets plus the shared indexes, caches, `_facet_tests/` and `static/`, never `.h5ad`; `--include-duckdb` no longer bypasses it. (3) `pull` and `check` stage the rendered config, `up` applies it; the api warns about unknown config keys instead of stopping. (4) `check` counts datasets like the api (store-root documents and `static/*.md` are not datasets) and says "no datasets yet" for an empty store. (5) Facet routes answer 503 `warming_up` with `Retry-After` while the start-up warm-up builds their caches, instead of blocking for a minute; the web says "warming up, try again in a minute". (6) `publish-library --s3-host-config <path>`; it says "records: up to date" when there was nothing to push. (7) Deposit watcher: `ant-stack watch`, a watcher config with host paths (`config-path --role watcher`), the api reachable through Caddy's tools listener on `127.0.0.1:<ports.tools>`, and the full command in `check`. (8) `POST /api/me/mcp/links` also accepts `{"name": ...}`. | `git checkout v2.46.1`, set `images: tag: 2.46.1`, `ant-stack check`, `ant-stack pull`, then `ant-stack up` at once. A priority site: replace any `ant sync pull --include-duckdb` in cron with `ant sync pull` (add `--evict` if wanted), try it with `--dry-run`. A deposit site: replace the watcher's `ANTHIVE_CONFIG=... --role ingest` setup with `ant-stack watch` (`config/examples/anthive-ingest-watch-stack.service.example`); `up` publishes `127.0.0.1:8079` (`ports.tools`). A site with S3 keys only on the host: replace the two-step library publishing with `publish-library --s3-host-config <path>`. |
 | **2.46.2** | Security and scratch-site fixes. (1) The Caddy access log no longer writes the presigned query (signature) of a download redirect. (2) Validators refuse values with a trailing newline. (3) `check` refuses unknown keys in the `auth`, `tls`, `ports`, `s3`, `services`, `datasets` and `data` sections of `site.yaml` and warns about unknown keys elsewhere, with the closest known key. (4) An invalid rendered config is one `PROBLEM` line; `ant sync` with an unreachable S3 endpoint says so in one line. (5) The MCP instructions name `<public_url>/mcp`, not the container listener. (6) The deposit watcher gives up a listing of an unreachable endpoint within about a minute and logs every failed attempt; a second SIGTERM stops it at once. `ant-stack watch` prints the command it runs. | Fix every `site.yaml: unknown key` that `check` reports (typos there were silently ignored before), then `ant-stack pull` and `ant-stack up`. |
 | **2.46.3** | JupyterLite works again. The `Getting_Started` notebook failed at its first cell (`No module named 'requests'`) and the bundled Python client was pyvark 0.9.0; it is now 0.11.0, and the dataset and plot notebooks no longer install an old pyvark from PyPI. No API or configuration change. | `ant-stack pull` and `ant-stack up`. Optionally run `make test-live-site URL=<public_url>` from a checkout of v2.46.3 to confirm JupyterLite after the login. |

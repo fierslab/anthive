@@ -305,6 +305,27 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### One central watcher for several sites
+
+- A site with `datasets_deposit_central_watcher: true` sends its deposits to one watcher on another host
+  (design section 24): `datasets_deposit_s3` is then the ingestion bucket (staging, records, `__incoming/`),
+  each deposit's record travels as `__deposits/<site_id>/<deposit_id>/record.json` signed with HMAC-SHA256
+  under the site secret (`<state_dir>/secrets/deposit_site_secret`, key id `datasets_deposit_site_key_id`),
+  and the watcher answers with `result.json` signed with its Ed25519 key, which the site checks against
+  `datasets_deposit_watcher_public_keys`. Status, report and list read the result; a daemon thread does the
+  site's expiry, staging sweep, results and depositor e-mails. `datasets_deposit_catalog_bucket` names the
+  data bucket for metadata-only updates. Approve, reject and artefact purges answer 409 `central_watcher` on
+  such a site.
+- Watcher: `ingest_watch.incoming_bucket` (default `s3.bucket`) and `ingest_watch.sites_dir` (default
+  `<ingest_state_dir>/secrets/deposit_sites/`, files `<site_id>.keys`). New commands `ant ingest-watch
+  result-key` and `ant ingest-watch sites`. Records are verified (site, key id, signature, path, size,
+  monotonic version, field rules, signed ETags and sizes, update rights against the central owners) before
+  anything is imported; another site's depositors are named `<login>@<site_id>`.
+- ant-stack: `datasets.central_watcher` (ingestion_bucket, endpoint, region, use_path_style, key_id,
+  watcher_public_keys), secrets `s3_ingest_access_key_id` / `s3_ingest_secret_access_key`; `check` prints the
+  site secret hand-over; `watch` refuses on such a site.
+- Unchanged without these keys: the API and watcher of one host share `ingest_state_dir`.
+
 ### QC companion datasets
 
 - New designation (Mark, 2026-10-21): `.md` keys `qc: true` and `qc_of: <db_id of the final dataset>` (empty
