@@ -113,14 +113,51 @@ def test_render_central_watcher_site(tmp_path, ant_stack):
     assert 'datasets_deposit_s3' not in serve
 
 
+def test_the_site_secret_is_made_on_the_host_and_bound_into_the_api_only(tmp_path, ant_stack):
+    """Review S3 and N1: the secret is created by ensure_secrets on the host (not in the api's tmpfs, where it
+    changed at every restart), bound read-only into the api, and no other role gets the central keys."""
+    site = _site(tmp_path, ant_stack, services={'dataset_deposit': True, 'mcp': True}, s3=S3,
+                 datasets={'site_id': 'intern', 'central_watcher': CENTRAL})
+    created = ant_stack.ensure_secrets(site)
+    secret_file = site['_state'] / 'secrets' / 'deposit_site_secret'
+    assert 'secrets/deposit_site_secret' in created and len(secret_file.read_text().strip()) >= 32
+    assert oct(secret_file.stat().st_mode & 0o777) == '0o600'
+    first = secret_file.read_text()
+    ant_stack.ensure_secrets(site)
+    assert secret_file.read_text() == first                              # stable across runs
+    for name, value in (('s3_access_key_id', 'RW'), ('s3_secret_access_key', 'RWS'),
+                        ('s3_ingest_access_key_id', 'ING'), ('s3_ingest_secret_access_key', 'INGS')):
+        _secret(site, name, value)
+    stack = ant_stack.render(site, quiet=True)
+    compose = yaml.safe_load(next(path for path in stack.iterdir()
+                                  if path.name.startswith(('docker-compose', 'compose'))).read_text())
+    api = compose['services']['api']
+    binds = {volume['target']: volume for volume in api['volumes'] if isinstance(volume, dict)}
+    bound = binds['/var/lib/anthive/secrets/deposit_site_secret']
+    assert bound['source'] == str(secret_file) and bound.get('read_only') is True
+    for service in ('web', 'mcp', 'ingest'):
+        targets = [volume.get('target', '') for volume in compose['services'].get(service, {}).get('volumes', [])
+                   if isinstance(volume, dict)]
+        assert not any(target.endswith('deposit_site_secret') for target in targets), service
+    for name in ('anthive.yaml', 'anthive-ingest.yaml'):
+        cfg = yaml.safe_load((stack / name).read_text())
+        assert not any(key.startswith(('datasets_deposit_central', 'datasets_deposit_site_key',
+                                       'datasets_deposit_watcher', 'datasets_deposit_catalog')) for key in cfg), name
+    assert yaml.safe_load((stack / 'anthive-api.yaml').read_text())['datasets_deposit_central_watcher'] is True
+
+
 def test_check_central_watcher_site(tmp_path, ant_stack, capsys):
     site = _site(tmp_path, ant_stack, services={'dataset_deposit': True}, s3=S3,
                  datasets={'site_id': 'intern', 'central_watcher': {**CENTRAL, 'watcher_public_keys': []}})
     problems = ant_stack._check_datasets(site)
     assert any('s3_ingest_access_key_id' in problem for problem in problems)
     assert any('watcher_public_keys is empty' in problem for problem in problems)
-    out = capsys.readouterr().out
-    assert 'intern.keys' in out and 'ant-stack watch' in out
+    assert any('deposit_site_secret is missing' in problem and 'intern.keys' in problem for problem in problems)
+    assert 'ant-stack watch' in capsys.readouterr().out
+    ant_stack.ensure_secrets(site)
+    problems = ant_stack._check_datasets(site)
+    assert not any('deposit_site_secret' in problem for problem in problems)
+    assert 'intern.keys' in capsys.readouterr().out
 
 
 def test_central_watcher_validation(tmp_path, ant_stack):

@@ -434,6 +434,10 @@ def ensure_secrets(site: dict) -> list[str]:
         state / 'authelia' / 'secrets' / 'session': secrets.token_hex(64),
         state / 'authelia' / 'secrets' / 'storage': secrets.token_hex(32),
     }
+    if _central_block(site) is not None:
+        # the site secret that signs deposit records (design section 24): made here on the host, bound
+        # read-only into the api, so it survives restarts and is the file the watcher host gets a copy of
+        generated[state / 'secrets' / DEPOSIT_SITE_SECRET_FILE] = secrets.token_hex(32)
     for path, value in generated.items():
         if _write_secret(path, value):
             created.append(str(path.relative_to(state)))
@@ -693,13 +697,15 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
     central = _central_block(site)
     if central is not None:
         # deposits go to a central watcher on another host (design section 24): records travel signed with
-        # the site secret (<state_dir>/secrets/deposit_site_secret, created by the api), results come back
-        # signed with the watcher's key; the api presigns into the ingestion bucket with its own key pair
-        cfg['datasets_deposit_central_watcher'] = True
-        cfg['datasets_deposit_site_key_id'] = str(central.get('key_id') or 'k1')
-        cfg['datasets_deposit_watcher_public_keys'] = [str(k) for k in (central.get('watcher_public_keys') or [])]
-        cfg['datasets_deposit_catalog_bucket'] = str((site.get('s3') or {}).get('bucket') or '')
+        # the site secret (<state_dir>/secrets/deposit_site_secret, made by ensure_secrets and bound read-only
+        # into the api only), results come back signed with the watcher's key; the api presigns into the
+        # ingestion bucket with its own key pair. Only the api role gets any of it: web, mcp and ingest
+        # never read or create the site secret.
         if role == 'api':
+            cfg['datasets_deposit_central_watcher'] = True
+            cfg['datasets_deposit_site_key_id'] = str(central.get('key_id') or 'k1')
+            cfg['datasets_deposit_watcher_public_keys'] = [str(k) for k in (central.get('watcher_public_keys') or [])]
+            cfg['datasets_deposit_catalog_bucket'] = str((site.get('s3') or {}).get('bucket') or '')
             cfg['datasets_deposit_s3'] = _central_s3_block(site)
     elif role == 'api' and _watcher_enabled(site):
         block = _deposit_s3_block(site)
@@ -1051,7 +1057,9 @@ def render_compose_site(site: dict, read_from=None) -> dict:
     def config_mount(role: str) -> dict:
         return _bind(config_file(site, role), C_CONFIG, read_only=True)
     state_mount = _bind(state, C_STATE)
-    api_state, api_tmpfs = _state_mounts(site, ('internal_secret', 'mcp_token_secret'), whole_state=True)
+    api_secrets = ('internal_secret', 'mcp_token_secret') + ((DEPOSIT_SITE_SECRET_FILE,)
+                                                             if _central_block(site) is not None else ())
+    api_state, api_tmpfs = _state_mounts(site, api_secrets, whole_state=True)
     mcp_state, mcp_tmpfs = _state_mounts(site, ('internal_secret',), whole_state=False)
     scratch = (_bind(site['_scratch'], C_SCRATCH) if site['_scratch']
                else {'type': 'volume', 'source': 'scratch', 'target': C_SCRATCH})
@@ -1587,11 +1595,12 @@ def _check_central(site: dict, central: dict, groups: str) -> list[str]:
          f"`ant-stack watch` on this host")
     if secret.is_file():
         _say(f"dataset deposits: give the watcher host the site secret: a file <sites_dir>/{site_id}.keys "
-             f"(mode 600) with the line \"{central.get('key_id') or 'k1'} <contents of {secret}>\"")
+             f"(mode 600, owned by the watcher's user) with the line \"{central.get('key_id') or 'k1'} "
+             f"<contents of {secret}>\"")
     else:
-        _say(f"dataset deposits: the api creates the site secret {secret} at its first start; then copy it to the "
-             f"watcher host as <sites_dir>/{site_id}.keys (mode 600), line \"{central.get('key_id') or 'k1'} "
-             f"<secret>\"")
+        problems.append(f"datasets.central_watcher is set but the site secret {secret} is missing: run "
+                        f"`ant-stack up` (or init), which creates it on the host; then copy it to the watcher host "
+                        f"as <sites_dir>/{site_id}.keys (mode 600), line \"{central.get('key_id') or 'k1'} <secret>\"")
     _say("dataset deposits: approve, reject and purges happen on the central watcher host; this api shows the "
          "results and e-mails its depositors")
     return problems
