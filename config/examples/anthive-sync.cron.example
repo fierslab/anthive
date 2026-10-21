@@ -1,6 +1,10 @@
-# EXAMPLE: crontab entry that pulls new data from S3 into one container site
-# every night (`ant-stack ingest -- ant sync pull`: datasets, the paper
-# library PDFs, _facet_tests/). Install with `crontab -e` as the user that
+# EXAMPLE: crontab entry that keeps one container site up to date every hour:
+# first `git pull` of the h5adstore (the dataset .md / .h5ad.mus / index.md
+# metadata, which the ingest watcher commits and pushes), then
+# `ant-stack ingest -- ant sync pull` (datasets, the paper library PDFs,
+# _facet_tests/). The pull asks the api to rescan, so new datasets appear
+# without a restart. An hour with nothing new costs one S3 listing; flock
+# keeps two runs from overlapping when a large new dataset takes longer. Install with `crontab -e` as the user that
 # owns the stores (the run_as uid of site.yaml) and may run docker. Fill the
 # <PLACEHOLDERS>.
 #
@@ -15,4 +19,4 @@
 PATH=<HOME>/.local/bin:/usr/local/bin:/usr/bin:/bin
 ANTHIVE_SITE=<REPO_PATH>/site.yaml
 
-17 3 * * *  flock -n /tmp/anthive-sync.lock <REPO_PATH>/bin/ops/ant-stack ingest -- ant sync pull >> <LOG_DIR>/sync-pull.log 2>&1
+17 * * * *  flock -n /tmp/anthive-sync.lock sh -c 'git -C <H5ADSTORE_PATH> pull --ff-only -q; <REPO_PATH>/bin/ops/ant-stack ingest -- ant sync pull' >> <LOG_DIR>/sync-pull.log 2>&1

@@ -835,7 +835,7 @@ Set `PATH` in the crontab or the unit, as the templates do:
 
 | Job | Templates in `config/examples/` |
 | --- | --- |
-| `ant-stack ingest -- ant sync pull` (data, library PDFs, `_facet_tests/`) | `anthive-sync.cron.example`, `anthive-sync.service.example` (+ a timer like the next row) |
+| `git pull` of the h5adstore, then `ant-stack ingest -- ant sync pull` (metadata, data, library PDFs, `_facet_tests/`); **every hour** is the recommended interval, so datasets the ingest watcher publishes reach this site within the hour | `anthive-sync.cron.example`, `anthive-sync.service.example` (+ a timer like the next row) |
 | `ant-stack publish-library` | `anthive-publish-library.{cron,service,timer}.example` |
 
 `ant-stack check` prints where `uv` is and which directory cron needs on
