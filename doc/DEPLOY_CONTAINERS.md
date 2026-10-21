@@ -825,6 +825,42 @@ Rules and limits:
   there are no admins, so nobody does. `ant lib-check` on the host still
   reports them.
 
+### A public mirror: switch off facets, caveats, API pages and MCP
+
+A public read-only site (for example a data website with `auth.mode: none`)
+can leave out parts of the web UI with the `ui:` block. Every switch is
+`true` by default, so an existing site changes nothing:
+
+```yaml
+auth:
+  mode: none
+ui:
+  facets: false      # Facet tabs, /facets pages, facet DE on gene and gene set pages, per donor plots, facet help
+  caveats: false     # Caveats tab and caveat markers (see the warning below)
+  api: false         # API page, API links, code snippets and notebook buttons
+  mcp: false         # MCP account page, MCP links and MCP help; no mcp service
+services:
+  mcp: false         # say so here too; ui.mcp: false wins anyway
+```
+
+What each switch does:
+
+| Switch | Gone from the web UI | Closed on the server |
+| --- | --- | --- |
+| `ui.facets: false` | the `facets` menu entry, the Facet tab group (Facet, Gene, GS) of the dataset page, the Facet DE tab of gene and gene set pages, the "facet" label on `ant_*` column names, facet sections, topics and glossary terms on the help page | `/facets`, `/facets/<name>` and the per donor plot pages answer 404. The REST API keeps its facet endpoints (`/api/facets/...`, `/api/databases/<id>/facet-tests`) for vark and pyvark |
+| `ui.caveats: false` | the Caveats tab of the dataset page, the caveat mark in collection lists, the caveat button of plot pages, the caveats topic on the help page | nothing: the REST API and MCP still return caveats (`/api/databases/<id>/info`, `get_dataset_context`) |
+| `ui.api: false` | the API link in the top bar and the user menu, the changelog link of the version button, the notebook buttons, the REST API and notebook links on the about page, the programmatic access section of the help page | `/api-guide` answers 404; `/api/docs` and `/api/redoc` answer 404 to visitors who are not signed in. The REST API itself, `/api/openapi.json` and `/api/version` stay: the web UI calls the API from the browser, and the notebooks, vark and pyvark need it. JupyterLite (`/jupyter/`) is still served; nothing on the site links to it |
+| `ui.mcp: false` | the "Connect an MCP client" menu entry and every mention of MCP on the help, about and API pages | `/account/mcp` answers 404, the API reports MCP links as disabled, the mcp container is not started (even with `services.mcp: true`) and `/mcp` answers a JSON 404 |
+
+> **Caveats carry data-quality warnings.** They record curation decisions and
+> known defects of a dataset (for example a broken embedding or contaminated
+> cells). With `ui.caveats: false` visitors of the site see the data without
+> those warnings. `ant-stack check` prints a warning when the switch is off.
+
+`ant-stack check` lists the parts that are off (`ui: switched off: ...`) and
+the plan shows them on the `ui off` line. After a change, `ant-stack up`
+recreates the web, api and mcp containers with the new config.
+
 ### Run syncs from cron or a systemd timer
 
 `ant-stack` and `ant-sync` start with `#!/usr/bin/env -S uv run ...`, so
@@ -903,6 +939,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.46.2** | Security and scratch-site fixes. (1) The Caddy access log no longer writes the presigned query (signature) of a download redirect. (2) Validators refuse values with a trailing newline. (3) `check` refuses unknown keys in the `auth`, `tls`, `ports`, `s3`, `services`, `datasets` and `data` sections of `site.yaml` and warns about unknown keys elsewhere, with the closest known key. (4) An invalid rendered config is one `PROBLEM` line; `ant sync` with an unreachable S3 endpoint says so in one line. (5) The MCP instructions name `<public_url>/mcp`, not the container listener. (6) The deposit watcher gives up a listing of an unreachable endpoint within about a minute and logs every failed attempt; a second SIGTERM stops it at once. `ant-stack watch` prints the command it runs. | Fix every `site.yaml: unknown key` that `check` reports (typos there were silently ignored before), then `ant-stack pull` and `ant-stack up`. |
 | **2.46.3** | JupyterLite works again. The `Getting_Started` notebook failed at its first cell (`No module named 'requests'`) and the bundled Python client was pyvark 0.9.0; it is now 0.11.0, and the dataset and plot notebooks no longer install an old pyvark from PyPI. No API or configuration change. | `ant-stack pull` and `ant-stack up`. Optionally run `make test-live-site URL=<public_url>` from a checkout of v2.46.3 to confirm JupyterLite after the login. |
 | **2.46.4** | `ant-stack ingest`, `publish-library` and `watch` apply their own config before they run. In 2.46.1 to 2.46.3 S3 keys written after `init` stayed staged, and the first `ant-stack ingest -- ant sync pull` failed with `s3.access_key_id is not set`. No API change. | `ant-stack pull` and `ant-stack up`. (The workaround on older releases is `ant-stack render` after writing the key files.) |
+| **next release (number set at release)** | New `ui:` block in `site.yaml` (`facets`, `caveats`, `api`, `mcp`, all `true` by default) to switch parts of the web UI off on a public mirror; each switch also closes the pages it hides. `ui.mcp: false` stops the mcp service and Caddy answers `/mcp` with a JSON 404 (also when `services.mcp` is false; before, `/mcp` gave a 502). See "A public mirror: switch off facets, caveats, API pages and MCP". | none required: without a `ui:` block nothing changes. A public mirror may add `ui:` and run `ant-stack check` and `ant-stack up`. |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.
@@ -1160,6 +1197,7 @@ resolve inside the containers.
 | `run_as` | the user id the containers run as (default: whoever runs ant-stack) |
 | `images.*` | registry, image names, tag (the release number; change it at every upgrade) |
 | `services.mcp` | personal MCP links for AI clients (on by default; the supported way to use AI with anthive) |
+| `ui.facets`, `ui.caveats`, `ui.api`, `ui.mcp` | which parts of the web UI the site shows (all `true` by default; `ui.mcp: false` also stops the mcp service). Caveats carry data-quality warnings: switching them off hides those warnings from visitors. See "A public mirror: switch off facets, caveats, API pages and MCP" |
 | `mcp.token_ttl_days`, `mcp.max_links_per_user` | how long a link lives (0 = forever) and how many links one user may hold (default 5) |
 | `services.paper_upload` | let `library.upload_groups` add papers through the API and MCP (mounts the library read-write) |
 | `services.dataset_deposit` | since 2.46.0: let `datasets.upload_groups` deposit datasets through presigned S3 uploads (needs `s3.enabled`; see "Let depositors add datasets") |
