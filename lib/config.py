@@ -867,6 +867,68 @@ def facet_hidden_by_config(facet: str, visible: Optional[List[str]] = None) -> b
     return bool(visible) and facet not in visible
 
 
+UI_SWITCHES = ('facets', 'caveats', 'api', 'mcp')
+_TRUE_WORDS = ('true', '1', 'yes', 'on')
+_FALSE_WORDS = ('false', '0', 'no', 'off')
+
+
+def _ui_flag(value: Any, where: str) -> bool:
+    """A strict boolean for a ``ui`` switch: true/false (or yes/no, on/off, 1/0)."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in _TRUE_WORDS:
+        return True
+    if text in _FALSE_WORDS:
+        return False
+    raise ConfigError(
+        f"ERROR: [Config] Invalid value for {where}\n"
+        f"Details: expected true or false, got {value!r}\n"
+        f"Location: anthive.yaml\n"
+        f"Action: set {where} to true or false"
+    )
+
+
+def get_ui_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
+    """Which parts of the web UI this site shows (block ``ui``).
+
+    Returns ``{'facets', 'caveats', 'api', 'mcp'}`` as booleans, all True by
+    default. Env ``ANTHIVE_UI_<NAME>`` (true/false) wins over the config
+    value. A non-boolean value is a ConfigError everywhere (a typo must not
+    silently switch a part on or off); an unknown key inside ``ui`` is an
+    error under ``ANTHIVE_CONFIG_STRICT=1`` (ant-stack's render check) and a
+    warning otherwise.
+    """
+    cfg = cfg if cfg is not None else load_config()
+    block = cfg.get('ui')
+    if block is None:
+        block = {}
+    if not isinstance(block, dict):
+        raise ConfigError(
+            "ERROR: [Config] Invalid value for ui\n"
+            f"Details: expected a mapping of {', '.join(UI_SWITCHES)}, got {block!r}\n"
+            "Location: anthive.yaml\n"
+            "Action: write ui: as a block, e.g. ui: {facets: false}"
+        )
+    unknown = sorted(set(map(str, block)) - set(UI_SWITCHES))
+    if unknown:
+        message = (f"unknown key(s) in ui: {', '.join(unknown)} "
+                   f"(known: {', '.join(UI_SWITCHES)})")
+        if os.environ.get('ANTHIVE_CONFIG_STRICT', '').strip() in ('1', 'true', 'yes'):
+            raise ConfigError(f"ERROR: [Config] {message}\nLocation: anthive.yaml")
+        _warn_once(f'ui-unknown:{",".join(unknown)}', f"WARNING: [Config] ignoring {message}")
+    settings: Dict[str, bool] = {}
+    for name in UI_SWITCHES:
+        env_value = os.environ.get(f'ANTHIVE_UI_{name.upper()}', '').strip()
+        if env_value:
+            settings[name] = _ui_flag(env_value, f'ANTHIVE_UI_{name.upper()}')
+        elif block.get(name) is None:
+            settings[name] = True
+        else:
+            settings[name] = _ui_flag(block[name], f'ui.{name}')
+    return settings
+
+
 _COORDINATE_MODES = ('auto', 'always', 'never')
 
 

@@ -1,4 +1,5 @@
 id: facet-whole-cell-type
+ui: facets
 title: What a whole-cell-type effect can mean
 summary: A whole-cell-type pseudobulk effect can reflect a shift in the mix of cell states inside the cell type rather than every cell changing expression.
 aliases:

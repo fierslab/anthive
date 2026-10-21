@@ -1,4 +1,5 @@
 id: facet-replicates-needed
+ui: facets
 title: How many replicates are needed
 summary: A unit is fitted from 3 replicates per group (4 for a trend) but reports p and q values only from the p-value floor (5 donors per group, 10 for a trend; 3 animals and 6 in xenograft hosts); below that it is descriptive and not counted.
 terms:

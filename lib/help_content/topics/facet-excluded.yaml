@@ -1,4 +1,5 @@
 id: facet-excluded
+ui: facets
 title: Datasets left out of the facet analysis
 summary: Datasets without single cells or nuclei that can be grouped by cell type and donor (spatial, proteomics, metacell sets, pure mouse datasets, some set aside by curators) are left out of the facet analysis.
 terms:

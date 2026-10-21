@@ -13,9 +13,15 @@ Layout::
 A topic file has the keys ``id``, ``title``, ``summary`` (one or two plain
 sentences), ``body_html`` (the HTML fragment the help page shows), and the
 optional ``title_html`` (heading with inline markup), ``related`` (topic ids), ``terms`` (glossary slugs), ``children``
-(topic ids rendered after this body as ``<h3>`` subsections of it) and
-``aliases`` (extra words ``find`` matches). The literal ``{{ docs }}`` in
-HTML is replaced by the documentation base URL when rendering.
+(topic ids rendered after this body as ``<h3>`` subsections of it),
+``aliases`` (extra words ``find`` matches) and ``ui`` (the part of the web UI
+the topic describes: facets, caveats, api or mcp). The literal ``{{ docs }}``
+in HTML is replaced by the documentation base URL when rendering.
+
+A site can switch parts of its web UI off (``ui:`` in anthive.yaml). The web
+help page then leaves out topics and glossary terms whose ``ui`` is off, and
+any element of a body marked ``data-ui="<part>"`` (:func:`strip_ui`). The API
+and the MCP ``explain`` tool always serve everything.
 
 The markdown served by the API is derived from the HTML by
 :func:`html_to_markdown`, so there is exactly one text to maintain.
@@ -51,6 +57,7 @@ class GlossaryTerm:
     slug: str
     term: str
     definition_html: str
+    ui: str = ''
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,7 @@ class Topic:
         terms: Glossary slugs that belong to this topic.
         children: Ids of subsection topics rendered after the body.
         aliases: Extra search words.
+        ui: Part of the web UI the topic describes ('' for none).
     """
 
     id: str
@@ -78,6 +86,7 @@ class Topic:
     terms: List[str] = field(default_factory=list)
     children: List[str] = field(default_factory=list)
     aliases: List[str] = field(default_factory=list)
+    ui: str = ''
 
 
 # ── HTML to markdown ──────────────────────────────────────────────────────────
@@ -220,6 +229,70 @@ def _read_yaml(path: Path) -> dict:
         return yaml.safe_load(handle) or {}
 
 
+UI_PARTS = ('facets', 'caveats', 'api', 'mcp')
+
+
+def _ui_part(value, where: str) -> str:
+    """Validate the optional ``ui`` key of a topic or term."""
+    if value in (None, ''):
+        return ''
+    if value not in UI_PARTS:
+        raise ValueError(f'{where}: ui must be one of {", ".join(UI_PARTS)}, not {value!r}')
+    return str(value)
+
+
+_UI_ATTR = re.compile(r'<([a-zA-Z][a-zA-Z0-9]*)\b[^>]*\bdata-ui="([a-z]+)"[^>]*>')
+_VOID_TAGS = frozenset({'br', 'hr', 'img', 'input', 'meta', 'link', 'wbr'})
+
+
+def strip_ui(fragment: str, hidden=()) -> str:
+    """Remove every element marked ``data-ui="<part>"`` whose part is in ``hidden``.
+
+    The element is removed with its content up to the matching close tag
+    (same tag name, nesting counted).
+
+    Args:
+        fragment: HTML fragment.
+        hidden: Parts that are switched off.
+
+    Returns:
+        The fragment without those elements.
+    """
+    hidden = set(hidden or ())
+    if not hidden or 'data-ui=' not in fragment:
+        return fragment
+    out: List[str] = []
+    position = 0
+    while True:
+        match = _UI_ATTR.search(fragment, position)
+        if match is None:
+            out.append(fragment[position:])
+            break
+        tag, part = match.group(1).lower(), match.group(2)
+        if part not in hidden:
+            out.append(fragment[position:match.end()])
+            position = match.end()
+            continue
+        out.append(fragment[position:match.start()])
+        if tag in _VOID_TAGS or match.group(0).endswith('/>'):
+            position = match.end()
+            continue
+        depth, cursor = 1, match.end()
+        pattern = re.compile(rf'<(/?){tag}\b[^>]*?(/?)>', re.I)
+        while depth and cursor < len(fragment):
+            inner = pattern.search(fragment, cursor)
+            if inner is None:
+                cursor = len(fragment)
+                break
+            if inner.group(1):
+                depth -= 1
+            elif not inner.group(2):
+                depth += 1
+            cursor = inner.end()
+        position = cursor
+    return ''.join(out)
+
+
 @lru_cache(maxsize=1)
 def _load() -> tuple:
     """Load and validate all help files once per process.
@@ -244,12 +317,13 @@ def _load() -> tuple:
             body_html=raw['body_html'].strip('\n'), title_html=(raw.get('title_html') or '').strip(),
             related=list(raw.get('related') or []),
             terms=list(raw.get('terms') or []), children=list(raw.get('children') or []),
-            aliases=list(raw.get('aliases') or []),
+            aliases=list(raw.get('aliases') or []), ui=_ui_part(raw.get('ui'), path.name),
         )
     glossary: List[GlossaryTerm] = []
     for entry in _read_yaml(CONTENT_DIR / 'glossary.yaml').get('terms', []):
         glossary.append(GlossaryTerm(slug=entry['slug'], term=entry['term'].strip(),
-                                     definition_html=entry['definition_html'].strip()))
+                                     definition_html=entry['definition_html'].strip(),
+                                     ui=_ui_part(entry.get('ui'), f"glossary.yaml {entry['slug']}")))
     slugs = [term.slug for term in glossary]
     if len(slugs) != len(set(slugs)):
         raise ValueError('glossary.yaml: duplicate slug')
@@ -295,33 +369,42 @@ def fill(text: str, docs_url: str = DEFAULT_DOCS_URL) -> str:
     return text.replace(DOCS_PLACEHOLDER, docs_url.rstrip('/'))
 
 
-def topic_html(topic_id: str, docs_url: str = DEFAULT_DOCS_URL) -> str:
+def topic_html(topic_id: str, docs_url: str = DEFAULT_DOCS_URL, hidden=()) -> str:
     """Render a topic for the help page: own body, then each child as ``<h3>``.
 
     Args:
         topic_id: Topic id.
         docs_url: Base URL substituted for ``{{ docs }}``.
+        hidden: Parts of the web UI that are switched off: children with
+            such a ``ui`` and ``data-ui`` elements of those parts are left out.
 
     Returns:
-        HTML fragment.
+        HTML fragment ('' when the topic itself belongs to a hidden part).
 
     Raises:
         KeyError: Unknown topic id.
     """
+    hidden = set(hidden or ())
     topic = _load()[0][topic_id]
-    chunks = [fill(topic.body_html, docs_url)]
+    if topic.ui and topic.ui in hidden:
+        return ''
+    chunks = [strip_ui(fill(topic.body_html, docs_url), hidden)]
     for child_id in topic.children:
         child = _load()[0][child_id]
+        if child.ui and child.ui in hidden:
+            continue
         chunks.append(f'<h3 class="subsection-head" id="{escape(child.id)}">{child.title_html or escape(child.title, quote=False)}</h3>')
-        chunks.append(fill(child.body_html, docs_url))
+        chunks.append(strip_ui(fill(child.body_html, docs_url), hidden))
     return '\n'.join(chunks)
 
 
-def glossary_html(docs_url: str = DEFAULT_DOCS_URL) -> str:
-    """Render the glossary ``<dt>/<dd>`` pairs for the help page."""
+def glossary_html(docs_url: str = DEFAULT_DOCS_URL, hidden=()) -> str:
+    """Render the glossary ``<dt>/<dd>`` pairs for the help page (terms of hidden parts left out)."""
+    hidden = set(hidden or ())
     return '\n'.join(
-        f'<dt id="glossary-{term.slug}">{escape(term.term, quote=False)}</dt>\n<dd>{fill(term.definition_html, docs_url)}</dd>'
-        for term in _load()[1])
+        f'<dt id="glossary-{term.slug}">{escape(term.term, quote=False)}</dt>\n'
+        f'<dd>{strip_ui(fill(term.definition_html, docs_url), hidden)}</dd>'
+        for term in _load()[1] if not (term.ui and term.ui in hidden))
 
 
 def topic_markdown(topic_id: str, include_children: bool = True, docs_url: str = DEFAULT_DOCS_URL) -> str:

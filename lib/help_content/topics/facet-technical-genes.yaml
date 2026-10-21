@@ -1,4 +1,5 @@
 id: facet-technical-genes
+ui: facets
 title: Technical genes
 summary: Some genes (mitochondrial, ribosomal, sex chromosome, long genes, lncRNA or clone names) are flagged because their effects are often technical.
 terms:

@@ -1,4 +1,5 @@
 id: facet-modality
+ui: facets
 title: Nuclei and cells
 summary: Single-nucleus and single-cell datasets detect genes differently, so each dataset row says which it is; xenograft microglia are sorted live cells.
 related:

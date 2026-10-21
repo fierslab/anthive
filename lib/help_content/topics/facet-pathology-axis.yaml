@@ -1,4 +1,5 @@
 id: facet-pathology-axis
+ui: facets
 title: Pathologic AD and Braak are one axis
 summary: Pathologic AD and Braak stage are one pathology axis, not two independent lines of evidence.
 terms:

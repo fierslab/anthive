@@ -1,4 +1,5 @@
 id: facet-sensitivity
+ui: facets
 title: Sensitivity analyses
 summary: 'Two sensitivity tests check whether a Braak or APOE result depends on how the facet was coded: Braak III or higher against II or lower, and APOE e4 dose.'
 aliases:
