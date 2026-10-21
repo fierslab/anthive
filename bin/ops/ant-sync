@@ -49,9 +49,9 @@ from boto3.s3.transfer import TransferConfig
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'lib'))
 from config import get_config, is_slave, require_primary  # noqa: E402
-from h5adstore import iter_h5adstore  # noqa: E402
+from h5adstore import catalog_dataset_mds, iter_h5adstore  # noqa: E402
 from metadata import get_priority, parse_md_file, PRIORITY_DEFAULT  # noqa: E402
-from s3_etag import etag_matches_file, sha256_file  # noqa: E402
+from s3_etag import etag_matches_file, md5_file, sha256_file  # noqa: E402
 
 # Only these extensions are ever pushed/pulled.
 # .md files are intentionally excluded — they live in git (h5adstore repo), not S3.
@@ -765,12 +765,14 @@ def _git_pull_h5adstore(data_folder: Path) -> None:
 
 def _s3_index_with_mtime(
     client, bucket: str, prefix: str, allowed_exts: set[str] | None = None,
+    include_static: bool = True, etags: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Tuple[int, int]]:
     """{rel: (size_bytes, lastmodified_epoch)} for syncable S3 objects.
 
     LastModified is returned by the list call itself — no per-object HEAD.
     It is the upload time; a slave compares it to the local file's mtime to
-    decide 'same version' (the pull sets local mtime to this value).
+    decide 'same version' (the pull sets local mtime to this value). When
+    ``etags`` is a dict it is filled with {rel: ETag} from the same listing.
     """
     paginator = client.get_paginator('list_objects_v2')
     prefix_str = prefix.rstrip('/') + '/' if prefix else ''
@@ -778,9 +780,85 @@ def _s3_index_with_mtime(
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix_str):
         for obj in page.get('Contents', []):
             rel = _rel_from_s3_key(obj['Key'], prefix)
-            if rel and _is_syncable(rel, allowed_exts):
+            if rel and _is_syncable(rel, allowed_exts, include_static=include_static):
                 index[rel] = (obj['Size'], int(obj['LastModified'].timestamp()))
+                if etags is not None and obj.get('ETag'):
+                    etags[rel] = str(obj['ETag']).strip('"')
     return index
+
+
+def _catalogue(data_folder: Path) -> Tuple[Set[str], Set[str]]:
+    """(catalogued stems, inactive stems) of the h5adstore checkout, as store-relative paths
+    without suffix (``G1/a`` for ``G1/a.md``).
+
+    Catalogued = a dataset ``.md`` as ant-serve's catalog scan sees it (``catalog_dataset_mds``: not
+    in a ``_``-prefixed folder, not index.md / README.md / static/) with no ``.inactive`` sidecar.
+    Only catalogued datasets are ever pulled: an S3 object without its ``.md`` is a retired or
+    stale dataset (2.46.5).
+    """
+    catalogued: Set[str] = set()
+    inactive: Set[str] = set()
+    for _walked, resolved, rel in catalog_dataset_mds(data_folder, include_inactive=True):
+        stem = str(rel)[:-len('.md')]
+        (inactive if resolved.with_suffix('.inactive').exists() else catalogued).add(stem)
+    return catalogued, inactive
+
+
+def _dataset_stem(rel: str) -> Optional[str]:
+    """The store-relative dataset stem of a per-dataset file (``G1/a`` for ``G1/a.h5ad``,
+    ``G1/a.duckdb``, ``G1/a.layer.X.by_gene.parquet``, ``G1/a.de.parquet``), or None."""
+    folder, _, name = rel.rpartition('/')
+    stem = None
+    for suffix in ('.h5ad', '.duckdb'):
+        if name.endswith(suffix):
+            stem = name[:-len(suffix)]
+            break
+    else:
+        stem = _sidecar_stem(name)
+    if not stem:
+        return None
+    return f"{folder}/{stem}" if folder else stem
+
+
+def _is_shared_file(rel: str) -> bool:
+    """Files that belong to no single dataset and are always mirrored: root files, the
+    SYNC_PATH_PREFIXES caches and facet results, and per-group static/ files (any type)."""
+    return rel.startswith(SYNC_PATH_PREFIXES) or '/' not in rel or _is_static_path(rel)
+
+
+def _uncatalogued_reason(stem: Optional[str], inactive: Set[str]) -> str:
+    if stem is not None and stem in inactive:
+        return 'inactive (.inactive sidecar)'
+    return 'no .md in the checkout'
+
+
+def _print_uncatalogued(groups: Dict[str, list], inactive: Set[str], data_folder: Path) -> None:
+    """Report S3 datasets that are not catalogued: never pulled, never deleted from S3."""
+    if not groups:
+        return
+    total = sum(size for files in groups.values() for _rel, size in files)
+    print(f"\n  on S3 but not catalogued (retired?): {len(groups)} dataset(s), {_fmt_size(total)}. "
+          f"Not pulled, never deleted from S3; an admin decides (restore the .md, or delete the objects).")
+    for stem in sorted(groups):
+        files = groups[stem]
+        size = sum(entry[1] for entry in files)
+        local = any((data_folder / rel).exists() for rel, _size in files)
+        print(f"    {_fmt_size(size):>9}  {stem}  ({len(files)} object(s); "
+              f"{_uncatalogued_reason(stem, inactive)}{'; a local copy exists, left alone' if local else ''})")
+
+
+def _same_content(path: Path, etag: Optional[str], sha256: Optional[str] = None) -> Optional[bool]:
+    """Whether a local file holds the bytes of an S3 object: True / False when the object's
+    ``x-amz-meta-sha256`` or its ETag decides it, None when neither can (no ETag, or a multipart
+    ETag whose part size is not one of the common ones: it cannot disprove identity)."""
+    if sha256:
+        return sha256_file(path) == sha256.strip().lower()
+    if not etag:
+        return None
+    etag = etag.strip('"')
+    if '-' not in etag:
+        return md5_file(path) == etag
+    return True if etag_matches_file(etag, path) else None
 
 
 _LAYER_SIDECAR = re.compile(r'^(?P<stem>.+?)\.layer\..+\.(?:by_gene|by_cell)\.parquet$')
@@ -849,18 +927,35 @@ def _split_priority_index(s3_meta: Dict[str, Tuple[int, int]]
     return duckdbs, bundles, global_files
 
 
-def _file_status(path: Path, size: int, mtime: int, *, cheap_repull: bool) -> str:
-    """HERE / TOUCH / PULL / PULL* of one file against its S3 (size, LastModified)."""
+def _file_status(path: Path, size: int, mtime: int, *, cheap_repull: bool,
+                 etag: Optional[str] = None) -> Tuple[str, str]:
+    """(status, reason) of one file against its S3 (size, LastModified, ETag): HERE / TOUCH / PULL / PULL*.
+
+    Same size and same mtime is HERE. Same size with another mtime is decided by content identity
+    for small files (``cheap_repull``, up to CHEAP_REPULL_BYTES): the ETag proves the same bytes
+    (TOUCH: only the mtime is realigned, nothing is downloaded) or other bytes (PULL*, whichever side
+    is newer: S3 is canonical on a slave; a primary turns it into KEEP). Without a usable ETag a small
+    file newer on S3 is re-pulled. Bigger same-size files are only re-stamped (same size is taken as
+    same content, as for duckdbs: verifying them would read gigabytes on every run).
+    """
     if not path.exists():
-        return 'PULL'
+        return 'PULL', 'absent locally'
     stat = path.stat()
     if stat.st_size != size:
-        return 'PULL*'
-    if int(stat.st_mtime) == mtime:
-        return 'HERE'
-    if cheap_repull and size <= CHEAP_REPULL_BYTES and mtime > int(stat.st_mtime):
-        return 'PULL*'
-    return 'TOUCH'
+        return 'PULL*', f'size differs (local {_fmt_size(stat.st_size)}, S3 {_fmt_size(size)})'
+    local_mtime = int(stat.st_mtime)
+    if local_mtime == mtime:
+        return 'HERE', ''
+    side = 'local newer than S3' if local_mtime > mtime else 'S3 newer'
+    if cheap_repull and size <= CHEAP_REPULL_BYTES:
+        same = _same_content(path, etag)
+        if same is True:
+            return 'TOUCH', f'same content (ETag), {side}: mtime realigned only'
+        if same is False:
+            return 'PULL*', f'same size but other content (ETag), {side}: S3 is canonical on a slave'
+        if mtime > local_mtime:
+            return 'PULL*', 'same size, S3 newer, no ETag to compare'
+    return 'TOUCH', f'same size, {side}: mtime realigned only'
 
 
 def _build_priority_plan(
@@ -871,6 +966,7 @@ def _build_priority_plan(
     free_now: int,
     bundles: Optional[Dict[str, Dict[str, Tuple[int, int]]]] = None,
     primary: bool = False,
+    etags: Optional[Dict[str, str]] = None,
 ) -> Tuple[list, int]:
     """Ordered fill plan for mode='priority'.
 
@@ -897,9 +993,11 @@ def _build_priority_plan(
       KEEP  - primary: target, but its local sidecars differ from S3 → left as it is
       EVICT - below cutoff, local → delete (slave: S3 is the source of truth)
       SKIP  - below cutoff, absent → stays on S3
-    Each row also lists ``sidecars`` as (rel, size, mtime, status, local_size).
+    Each row also lists ``sidecars`` as (rel, size, mtime, status, local_size, reason) and ``reason``
+    for its own status. ``etags`` ({rel: ETag}) lets a small same-size sidecar be proven unchanged.
     """
     bundles = bundles or {}
+    etags = etags or {}
     min_free  = policy['min_free_bytes']
     max_local = policy['max_local_bytes']
     default   = policy['priority_default']
@@ -955,16 +1053,20 @@ def _build_priority_plan(
                 # in size). If only the mtime drifted, realign it locally —
                 # never re-download just to fix a timestamp.
                 status = 'HERE' if local_mtime == mtime else 'TOUCH'
+                reason = '' if status == 'HERE' else 'same size, mtime realigned only'
             elif is_local:
                 status = 'PULL*'   # size differs ⇒ content changed ⇒ re-pull
+                reason = f'size differs (local {_fmt_size(local_size)}, S3 {_fmt_size(size)})'
             else:
                 status = 'PULL'
+                reason = 'absent locally'
             for side_rel, (side_size, side_mtime) in sorted(sidecar_meta.items()):
-                side_status = _file_status(data_folder / side_rel, side_size, side_mtime, cheap_repull=True)
+                side_status, side_reason = _file_status(data_folder / side_rel, side_size, side_mtime,
+                                                        cheap_repull=True, etag=etags.get(side_rel))
                 if primary and side_status in ('PULL*', 'TOUCH'):
-                    side_status = 'KEEP'
+                    side_status, side_reason = 'KEEP', f'primary keeps its local copy ({side_reason})'
                 sidecars.append((side_rel, side_size, side_mtime, side_status,
-                                 local_meta.get(side_rel, (None, None))[0]))
+                                 local_meta.get(side_rel, (None, None))[0], side_reason))
             if primary and status in ('PULL', 'PULL*', 'TOUCH') and any(entry[3] == 'KEEP' for entry in sidecars):
                 # Keep the local version of the whole dataset: no new duckdb and no new
                 # sidecar next to layer parquets of another version. It occupies what is
@@ -972,21 +1074,24 @@ def _build_priority_plan(
                 cumulative -= bundle_size - (local_size or 0)
                 bundle_size = local_size or 0
                 status = 'KEEP'
+                reason = 'primary: local sidecars differ from S3'
                 sidecars = [(entry[0], entry[1], entry[2],
-                             'SKIP' if entry[4] is None else ('HERE' if entry[3] == 'HERE' else 'KEEP'), entry[4])
+                             'SKIP' if entry[4] is None else ('HERE' if entry[3] == 'HERE' else 'KEEP'), entry[4],
+                             entry[5])
                             for entry in sidecars]
         else:
             in_target = False
             status = 'EVICT' if is_local else 'SKIP'
+            reason = 'below the cutoff'
             for side_rel, (side_size, side_mtime) in sorted(sidecar_meta.items()):
                 local_side = local_meta.get(side_rel)
                 side_status = ('KEEP' if primary else 'EVICT') if local_side else 'SKIP'
                 sidecars.append((side_rel, side_size, side_mtime, side_status,
-                                 local_side[0] if local_side else None))
+                                 local_side[0] if local_side else None, 'below the cutoff'))
         rows.append(dict(
             rel=rel, priority=priority, mtime=mtime, size=size, bundle_size=bundle_size,
             is_local=is_local, local_size=local_size, local_mtime=local_mtime,
-            in_target=in_target, status=status, sidecars=sidecars,
+            in_target=in_target, status=status, reason=reason, sidecars=sidecars,
             cumulative=cumulative, projected_free=baseline_free - cumulative,
         ))
     return rows, baseline_free
@@ -1099,15 +1204,18 @@ def _release_db(base_url: str, rel: str) -> None:
                           "?duration_seconds=3600&drain_timeout_seconds=15")
 
 
-def _global_plan(global_files: Dict[str, Tuple[int, int]], data_folder: Path, primary: bool = False) -> list:
-    """(rel, size, mtime, status) of every always-mirrored file of a priority site. On a primary a local
-    copy that differs from S3 is KEEP (never overwritten or re-stamped: it may be unpushed work)."""
+def _global_plan(global_files: Dict[str, Tuple[int, int]], data_folder: Path, primary: bool = False,
+                 etags: Optional[Dict[str, str]] = None) -> list:
+    """(rel, size, mtime, status, reason) of every always-mirrored file of a priority site. A same-size
+    file whose ETag matches is never downloaded (TOUCH). On a primary a local copy that differs from S3
+    is KEEP (never overwritten or re-stamped: it may be unpushed work)."""
+    etags = etags or {}
     plan = []
     for rel, (size, mtime) in sorted(global_files.items()):
-        status = _file_status(data_folder / rel, size, mtime, cheap_repull=True)
+        status, reason = _file_status(data_folder / rel, size, mtime, cheap_repull=True, etag=etags.get(rel))
         if primary and status in ('PULL*', 'TOUCH'):
-            status = 'KEEP'
-        plan.append((rel, size, mtime, status))
+            status, reason = 'KEEP', f'primary keeps its local copy ({reason})'
+        plan.append((rel, size, mtime, status, reason))
     return plan
 
 
@@ -1133,25 +1241,48 @@ def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
         _git_pull_h5adstore(data_folder)
     else:
         print("h5adstore git pull: skipped (dry run; priorities from the current checkout)")
-    if getattr(args, 'filter', None):
-        print(f"WARNING: filter {args.filter!r} is ignored under sync_policy.mode='priority' "
-              f"(use --only EXTS to bypass the policy for one run)")
+    filter_pattern = getattr(args, 'filter', None)
     client = _s3_client(s3_cfg)
     bucket = s3_cfg['bucket']
     prefix = s3_cfg.get('prefix', '') or ''
     print('Scanning S3…')
-    s3_full = _s3_index_with_mtime(client, bucket, prefix)
-    s3_meta, bundles, global_files = _split_priority_index(s3_full)
+    etags: Dict[str, str] = {}
+    s3_full = _s3_index_with_mtime(client, bucket, prefix, etags=etags)
+    s3_all_duckdbs, all_bundles, global_files = _split_priority_index(s3_full)
+    # Only catalogued datasets (a .md in the checkout, not inactive, not in a _ folder) are ever
+    # planned: a .duckdb on S3 without its .md is a retired or stale dataset. It is reported, never
+    # pulled, evicted or deleted from S3.
+    catalogued, inactive = _catalogue(data_folder)
+    s3_meta = {rel: meta for rel, meta in s3_all_duckdbs.items() if _dataset_stem(rel) in catalogued}
+    bundles = {rel: all_bundles.get(rel, {}) for rel in s3_meta}
+    uncatalogued = {
+        _dataset_stem(rel): [(rel, meta[0])] + [(side, side_meta[0]) for side, side_meta in all_bundles.get(rel, {}).items()]
+        for rel, meta in s3_all_duckdbs.items() if rel not in s3_meta}
     priorities = _read_priorities(data_folder, policy['priority_default'])
     free_now = _free_space(data_folder)
     # A primary is where scores, DE tables, the fleet indexes and the caches are made: a local copy
     # that differs from S3 may be work not pushed yet. The plan never overwrites, re-stamps or evicts
     # those there (KEEP) and budgets accordingly; it only fetches what is missing.
     primary = not is_slave(get_config())
+    # The budget is planned over every catalogued dataset (a filter must not let one run fill the disk
+    # past the cap); the filter then limits which datasets and shared files this run acts on.
     rows, baseline_free = _build_priority_plan(
-        s3_meta, priorities, data_folder, policy, free_now, bundles=bundles, primary=primary)
-    globals_plan = _global_plan(global_files, data_folder, primary=primary) if do_pull else []
+        s3_meta, priorities, data_folder, policy, free_now, bundles=bundles, primary=primary, etags=etags)
+    globals_plan = _global_plan(global_files, data_folder, primary=primary, etags=etags) if do_pull else []
+    if filter_pattern:
+        def _in_scope(row: dict) -> bool:
+            return fnmatch.fnmatch(row['rel'], filter_pattern) or any(
+                fnmatch.fnmatch(entry[0], filter_pattern) for entry in row['sidecars'])
+        total_rows = len(rows)
+        rows = [row for row in rows if _in_scope(row)]
+        globals_plan = [entry for entry in globals_plan if fnmatch.fnmatch(entry[0], filter_pattern)]
+        uncatalogued = {stem: files for stem, files in uncatalogued.items()
+                        if any(fnmatch.fnmatch(rel, filter_pattern) for rel, _size in files)}
+        print(f"filter {filter_pattern!r}: {len(rows)} of {total_rows} catalogued dataset(s) in scope "
+              f"(a dataset is in scope when its .duckdb or a sidecar matches; the whole dataset is acted on; "
+              f"the budget is still planned over all of them)")
     _print_priority_plan(rows, policy, free_now, baseline_free)
+    _print_uncatalogued(uncatalogued, inactive, data_folder)
     kept = sum(1 for row in rows for entry in row['sidecars'] if entry[3] == 'KEEP') \
         + sum(1 for entry in globals_plan if entry[3] == 'KEEP')
     kept_datasets = [row['rel'] for row in rows if row['status'] == 'KEEP']
@@ -1163,14 +1294,27 @@ def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
               f"(no new duckdb next to layer parquets of another version)")
     if do_pull:
         busy = [entry for entry in globals_plan if entry[3] in ('PULL', 'PULL*')]
+        realign = [entry for entry in globals_plan if entry[3] == 'TOUCH']
         print(f"\n  ALWAYS {len(globals_plan)} shared file(s) (fleet indexes, caches, facet results, static): "
-              f"{len(busy)} to pull ({_fmt_size(sum(entry[1] for entry in busy))})")
+              f"{len(busy)} to pull ({_fmt_size(sum(entry[1] for entry in busy))}), "
+              f"{len(realign)} same content (mtime realigned only, no download)")
+    overwrites = [(row['rel'], row['size'], row['reason']) for row in rows if row['status'] == 'PULL*']
+    overwrites += [(entry[0], entry[1], entry[5]) for row in rows if row['in_target']
+                   for entry in row['sidecars'] if entry[3] == 'PULL*']
+    overwrites += [(entry[0], entry[1], entry[4]) for entry in globals_plan if entry[3] == 'PULL*']
+    if overwrites:
+        newer_local = sum(1 for _rel, _size, reason in overwrites if 'local newer' in reason)
+        print(f"\n  OVERWRITE {len(overwrites)} local file(s) that differ from S3"
+              + (f" ({newer_local} of them newer locally: a {'slave' if not primary else 'primary'} "
+                 f"takes S3 as canonical)" if newer_local else '') + ':')
+        for rel, size, reason in overwrites:
+            print(f"    would OVERWRITE {rel}  ({_fmt_size(size)}): {reason}")
 
     if dry_run:
         if do_pull:
             for entry in globals_plan:
-                if entry[3] in ('PULL', 'PULL*'):
-                    print(f"  would {'OVERWRITE' if entry[3] == 'PULL*' else 'DOWNLOAD'} {entry[0]}  ({_fmt_size(entry[1])})")
+                if entry[3] == 'PULL':
+                    print(f"  would DOWNLOAD {entry[0]}  ({_fmt_size(entry[1])})")
         print("\n(dry-run — nothing transferred or deleted)")
         return
 
@@ -1186,11 +1330,11 @@ def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
             os.utime(data_folder / row['rel'], (row['mtime'], row['mtime']))
             touched += 1
         if row['in_target']:
-            for side_rel, _size, side_mtime, side_status, _local in row['sidecars']:
+            for side_rel, _size, side_mtime, side_status, _local, _reason in row['sidecars']:
                 if side_status == 'TOUCH':
                     os.utime(data_folder / side_rel, (side_mtime, side_mtime))
                     touched += 1
-    for rel, _size, mtime, status in globals_plan:
+    for rel, _size, mtime, status, _reason in globals_plan:
         if status == 'TOUCH':
             os.utime(data_folder / rel, (mtime, mtime))
             touched += 1
@@ -1209,7 +1353,7 @@ def _run_priority(args, policy: dict, s3_cfg: dict, data_folder: Path, *,
                 evicted += 1
                 freed += row['local_size']
                 print(f"  EVICTED {row['rel']}  ({_fmt_size(row['local_size'])})")
-            for side_rel, _size, _mtime, side_status, local_size in row['sidecars']:
+            for side_rel, _size, _mtime, side_status, local_size, _reason in row['sidecars']:
                 side_path = data_folder / side_rel
                 if side_status == 'EVICT' and side_path.exists():
                     side_path.unlink()
@@ -1266,7 +1410,7 @@ def _priority_pulls(rows, globals_plan, do_pull, do_evict, policy, data_folder, 
     skipped_no_room = 0
     if do_pull:
         print("\nPulling shared files (fleet indexes, caches, facet results, static)…")
-        for rel, size, mtime, status in globals_plan:
+        for rel, size, mtime, status, _reason in globals_plan:
             if status in ('PULL', 'PULL*'):
                 if policy['min_free_bytes'] is not None and (_free_space(data_folder) - size) < policy['min_free_bytes']:
                     print(f"  SKIP {rel}: would breach min_free_space")
@@ -1298,7 +1442,7 @@ def _priority_pulls(rows, globals_plan, do_pull, do_evict, policy, data_folder, 
                 _download(row['rel'], row['size'], row['mtime'],
                           'OVERWRITE' if row['status'] == 'PULL*' else 'DOWNLOAD')
                 progress['pulled'] += 1
-            for side_rel, side_size, side_mtime, side_status, _local in todo_sidecars:
+            for side_rel, side_size, side_mtime, side_status, _local, _reason in todo_sidecars:
                 _download(side_rel, side_size, side_mtime, 'OVERWRITE' if side_status == 'PULL*' else 'DOWNLOAD')
                 progress['pulled'] += 1
     if skipped_no_room:
@@ -1368,12 +1512,27 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
     # (paper PDFs, supp tables — small, always-present catalog metadata).
     include_static = args.only is None and mode not in ('priority', 'duckdb')
     print('Scanning S3…')
-    s3_index = _s3_objects(client, bucket, prefix, allowed_exts=allowed,
-                           include_static=include_static)
+    etags: Dict[str, str] = {}
+    s3_index = _s3_index_with_mtime(client, bucket, prefix, allowed_exts=allowed,
+                                    include_static=include_static, etags=etags)
 
     if args.filter:
-        s3_index = {rel: size for rel, size in s3_index.items()
+        s3_index = {rel: meta for rel, meta in s3_index.items()
                     if fnmatch.fnmatch(rel, args.filter)}
+
+    # Per-dataset files (.h5ad, .duckdb, sidecars) come down only for catalogued datasets (a .md in
+    # the checkout, not inactive): an object without its .md is a retired or stale dataset. Shared
+    # files (root indexes, caches, facet results, static/) always.
+    catalogued, inactive = _catalogue(data_folder)
+    uncatalogued: Dict[str, list] = {}
+    for rel in sorted(s3_index):
+        if _is_shared_file(rel):
+            continue
+        stem = _dataset_stem(rel)
+        if stem in catalogued:
+            continue
+        uncatalogued.setdefault(stem or rel, []).append((rel, s3_index[rel][0]))
+        del s3_index[rel]
 
     print(f'Found {len(s3_index)} S3 file(s) to check.\n')
 
@@ -1382,7 +1541,7 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
     target_set: Set[str] = set(s3_index.keys())
     if args.evict:
         print("(--evict only acts under sync_policy.mode='priority'; nothing is evicted here)")
-    downloaded = skipped = skipped_no_fit = 0
+    downloaded = skipped = skipped_no_fit = realigned = 0
     pull_list = sorted(target_set)
 
     slave_mode = is_slave(cfg)
@@ -1390,29 +1549,53 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
     overwritten_ids: list = []
     pulled_duckdb = {'any': False}
 
+    import os
     try:
         for rel in pull_list:
-            s3_size = s3_index[rel]
+            s3_size, s3_lastmod = s3_index[rel]
             local_path = data_folder / rel
+            reason = 'absent locally'
 
-            if local_path.exists() and local_path.stat().st_size == s3_size:
-                # Slave mode: same size isn't enough — also check S3 mtime
-                # metadata. If S3 says the file is different (mtime drift),
-                # force re-download. Adds one HEAD per same-size file but
-                # only on slaves where correctness > speed.
-                if slave_mode:
-                    s3_mt = _s3_mtime(client, bucket, _s3_key(rel, prefix))
-                    local_mt = _local_mtime(local_path)
-                    if s3_mt is not None and s3_mt != local_mt:
-                        print(f'[FORCE]    {rel}  (slave: mtime drift, '
-                              f'Δ={abs(s3_mt - local_mt)}s — overwriting)')
-                        # Fall through to download below by NOT continuing
-                    else:
-                        skipped += 1
-                        continue
-                else:
+            if local_path.exists() and local_path.stat().st_size != s3_size:
+                reason = f'size differs (local {_fmt_size(local_path.stat().st_size)}, S3 {_fmt_size(s3_size)})'
+            elif local_path.exists():
+                # Same size. A primary keeps its copy. A slave checks that it is the same version:
+                # the local mtime a pull stamped (S3 LastModified) or the pushed original-mtime
+                # proves it cheaply; otherwise content identity decides (x-amz-meta-sha256, else
+                # the ETag), so a same-content file is never downloaded again, only re-stamped.
+                if not slave_mode:
                     skipped += 1
                     continue
+                local_mt = _local_mtime(local_path)
+                if local_mt == s3_lastmod:
+                    skipped += 1
+                    continue
+                head_meta = {}
+                try:
+                    head_meta = client.head_object(Bucket=bucket, Key=_s3_key(rel, prefix)).get('Metadata') or {}
+                except Exception:  # noqa: BLE001 - no metadata: decided by the ETag below
+                    pass
+                raw_mtime = head_meta.get(MTIME_METADATA_KEY)
+                s3_mt = int(raw_mtime) if raw_mtime and str(raw_mtime).isdigit() else None
+                if s3_mt is not None and s3_mt == local_mt:
+                    skipped += 1
+                    continue
+                same = _same_content(local_path, etags.get(rel), head_meta.get(SHA_METADATA_KEY))
+                side = 'local newer than S3' if local_mt > (s3_mt or s3_lastmod) else 'S3 newer'
+                if same is True:
+                    skipped += 1
+                    realigned += 1
+                    if dry_run:
+                        print(f'[would REALIGN] {rel}  (same content, {side}: mtime only, no download)')
+                    else:
+                        os.utime(local_path, (s3_lastmod, s3_lastmod))
+                    continue
+                if same is None and s3_mt is None:
+                    skipped += 1        # nothing to compare: same size is taken as in sync
+                    continue
+                reason = (f'same size but other content, {side}: slave, S3 is canonical' if same is False
+                          else f'same size, mtime differs by {abs(s3_mt - local_mt)}s and content identity '
+                               f'unknown: slave, S3 is canonical')
 
             # min_free_space safety: don't pull a file that would push the
             # filesystem below the configured floor.
@@ -1427,10 +1610,10 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
 
             action = 'UPDATE' if local_path.exists() else 'DOWNLOAD'
             if dry_run:
-                print(f'[would {action}] {rel}  ({_fmt_size(s3_size)})')
+                print(f'[would {action}] {rel}  ({_fmt_size(s3_size)}): {reason}')
                 downloaded += 1
                 continue
-            print(f'[{action}] {rel}  ({_fmt_size(s3_size)})')
+            print(f'[{action}] {rel}  ({_fmt_size(s3_size)}): {reason}')
 
             local_path.parent.mkdir(parents=True, exist_ok=True)
             if rel.endswith('.duckdb') and local_path.exists():
@@ -1444,6 +1627,8 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
                 Config=transfer,
                 Callback=callback,
             )
+            # Stamp the S3 upload time so the next run sees the same version without a content check.
+            os.utime(local_path, (s3_lastmod, s3_lastmod))
             downloaded += 1
             pulled_duckdb['any'] = pulled_duckdb['any'] or rel.endswith('.duckdb')
     finally:
@@ -1457,12 +1642,17 @@ def cmd_pull(args, s3_cfg: dict, data_folder: Path) -> None:
             print("ant-serve catalog refresh: "
                   + ("ok" if status == 200 else f"skipped (ant-serve not reachable / status={status})"))
 
+    _print_uncatalogued(uncatalogued, inactive, data_folder)
     print()
     if dry_run:
         print("(dry-run — nothing transferred or deleted)")
     print(f"{'Dry run' if dry_run else 'Done'}.  {'would download' if dry_run else 'downloaded'}={downloaded}  skipped (up-to-date)={skipped}", end='')
+    if realigned:
+        print(f"  {'would realign' if dry_run else 'realigned'} mtime (same content)={realigned}", end='')
     if skipped_no_fit:
         print(f"  skipped (no room)={skipped_no_fit}", end='')
+    if uncatalogued:
+        print(f"  not catalogued (not pulled)={len(uncatalogued)}", end='')
     print()
 
 
