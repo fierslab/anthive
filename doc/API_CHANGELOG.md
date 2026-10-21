@@ -29,6 +29,34 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.46.5 (2026-10-21)
+
+Patch release. No endpoint, parameter or response field changes. Clients do not need to update.
+
+`ant sync pull`, found by a `--dry-run` on the intern site (2.46.4, `sync_policy.mode: priority`, role slave):
+
+- Only catalogued datasets are pulled, on every path (priority fill, `--only`, `--include-duckdb`, the `all` and
+  `duckdb` modes): a dataset needs its `.md` in the h5adstore checkout, no `.inactive` sidecar and no `_`-prefixed
+  folder (`lib/h5adstore.catalog_dataset_mds`, the walker of the api's catalog scan). Objects without their `.md`
+  are listed as "on S3 but not catalogued (retired?)" with sizes; they are never pulled and never deleted from S3.
+  The priority plan on the intern site wanted 43 retired `.duckdb` objects (about 40 GB). Shared files (root
+  indexes, `_facet_tests/`, the `_*_cache/` folders, `static/`) are always mirrored as before.
+- The positional glob (`ant sync pull 'Francken2026/*'`) holds under `sync_policy.mode: priority`; it was ignored
+  with a warning. A dataset is in scope when its `.duckdb` or a sidecar matches, and is then pulled or evicted
+  whole; shared files must match themselves. The budget is still planned over every catalogued dataset, so a
+  filtered run never fills the disk past the cap.
+- Same-size files are compared by content before they are downloaded. The priority driver re-pulled any file up to
+  16 MB whose S3 LastModified was newer than the local mtime: when the primary re-uploaded identical
+  `_facet_tests/` and `_module_variability_cache/` files (all 1085 facet objects were re-uploaded on 2026-10-07
+  and 2026-10-10), the plan wanted to overwrite 346 of them. The ETag of the listing (single-part MD5, or a
+  multipart ETag for the common part sizes) now proves the same bytes: only the mtime is realigned. The generic
+  slave pull ("slave: mtime drift - overwriting") compared the pushed original-mtime with a local mtime it never
+  set, so it re-downloaded every same-size file on every run; it now accepts the stamped S3 time or the
+  original-mtime, else decides by `x-amz-meta-sha256` or the ETag, and stamps the S3 time on every download.
+  A file that differs is listed with its reason ("size differs", "same size but other content ... local newer
+  than S3: S3 is canonical on a slave") before it is overwritten; a primary still keeps its local copy.
+- `--dry-run` still changes nothing on every path (2.46.1).
+
 ## 2.46.4 (2026-10-19)
 
 Patch release. No endpoint, parameter or response field changes. Clients do not need to update.

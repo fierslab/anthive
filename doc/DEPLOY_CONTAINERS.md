@@ -4,7 +4,7 @@ This is the one supported way to run anthive: a docker compose stack,
 described by one file (`site.yaml`) and driven by one tool
 (`bin/ops/ant-stack`). Follow the steps in order.
 
-Every command below was run end to end on a fresh checkout for release 2.46.4.
+Every command below was run end to end on a fresh checkout for release 2.46.5.
 
 Plan about an hour, plus the time it takes to download the data.
 
@@ -183,7 +183,7 @@ sudo mkdir -p /srv/anthive && sudo chown $USER /srv/anthive
 cd /srv/anthive
 git clone https://gitlab.kuleuven.be/bdslab/anthive/anthive4.git
 cd anthive4
-git checkout v2.46.4
+git checkout v2.46.5
 ```
 
 Always check out a release tag, and use the same number as the image tag in
@@ -271,7 +271,7 @@ ports:
 
 images:
   registry: registry.gitlab.kuleuven.be/bdslab/anthive/anthive4
-  tag: 2.46.4                                 # same number as the git tag (step 2)
+  tag: 2.46.5                                 # same number as the git tag (step 2)
 
 s3:                                           # skip if you have no S3 keys
   enabled: true
@@ -391,7 +391,16 @@ the `_*_cache/` folders, `static/`), and never a raw `.h5ad`. There
 `--include-duckdb` has no effect (before 2.46.1 it switched the policy
 off and pulled every `.h5ad`; do not use it on such a site with an older
 release). Try any pull first with `--dry-run`: it lists what would be
-downloaded or evicted and changes nothing. A dataset whose files are not
+downloaded or evicted and changes nothing. Only catalogued datasets come
+down: those with a `.md` in your h5adstore checkout, without a `.inactive`
+sidecar and not in a `_` folder (since 2.46.5). Objects on S3 without their
+`.md` (retired datasets) are listed as "on S3 but not catalogued (retired?)"
+with their sizes, never pulled and never deleted from S3. A glob such as
+`'Francken2026/*'` limits the run to the datasets and shared files it
+matches (the budget is still planned over the whole catalogue). A file
+whose S3 ETag shows the same content is never downloaded again, only its
+mtime is realigned; a file that does differ is listed with the reason
+before it is overwritten. A dataset whose files are not
 local is only listed with `s3.api_access: read` (step 4); it is then read
 from S3 over the network, which is slow. Running the same pull again only
 downloads what changed.
@@ -903,6 +912,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.46.2** | Security and scratch-site fixes. (1) The Caddy access log no longer writes the presigned query (signature) of a download redirect. (2) Validators refuse values with a trailing newline. (3) `check` refuses unknown keys in the `auth`, `tls`, `ports`, `s3`, `services`, `datasets` and `data` sections of `site.yaml` and warns about unknown keys elsewhere, with the closest known key. (4) An invalid rendered config is one `PROBLEM` line; `ant sync` with an unreachable S3 endpoint says so in one line. (5) The MCP instructions name `<public_url>/mcp`, not the container listener. (6) The deposit watcher gives up a listing of an unreachable endpoint within about a minute and logs every failed attempt; a second SIGTERM stops it at once. `ant-stack watch` prints the command it runs. | Fix every `site.yaml: unknown key` that `check` reports (typos there were silently ignored before), then `ant-stack pull` and `ant-stack up`. |
 | **2.46.3** | JupyterLite works again. The `Getting_Started` notebook failed at its first cell (`No module named 'requests'`) and the bundled Python client was pyvark 0.9.0; it is now 0.11.0, and the dataset and plot notebooks no longer install an old pyvark from PyPI. No API or configuration change. | `ant-stack pull` and `ant-stack up`. Optionally run `make test-live-site URL=<public_url>` from a checkout of v2.46.3 to confirm JupyterLite after the login. |
 | **2.46.4** | `ant-stack ingest`, `publish-library` and `watch` apply their own config before they run. In 2.46.1 to 2.46.3 S3 keys written after `init` stayed staged, and the first `ant-stack ingest -- ant sync pull` failed with `s3.access_key_id is not set`. No API change. | `ant-stack pull` and `ant-stack up`. (The workaround on older releases is `ant-stack render` after writing the key files.) |
+| **2.46.5** | `ant sync pull` fixes, found on a priority slave. (1) Only catalogued datasets are pulled (a `.md` in the h5adstore checkout, no `.inactive`, not in a `_` folder), on every path; S3 objects without their `.md` are listed as "on S3 but not catalogued (retired?)" with sizes and left on S3. Before, a priority site planned to download every retired `.duckdb` (about 40 GB on the intern site). (2) The glob filter (`ant sync pull 'Francken2026/*'`) now holds under `sync_policy.mode: priority`; it was ignored. (3) Same-size files with the same content (S3 ETag, or `x-amz-meta-sha256`) are never downloaded again, only their mtime is realigned; before, a priority site re-downloaded small `_facet_tests/` and cache files whenever their S3 copy had been re-uploaded, and the generic slave pull re-downloaded every same-size file on every run. A file that does differ is listed with the reason before it is overwritten. No API change. | `git pull` the h5adstore, then `ant-stack pull` and `ant-stack up`. Try `ant-stack ingest -- ant sync pull --dry-run` and review the "not catalogued" list (restore a `.md` for anything that should still be served). |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.

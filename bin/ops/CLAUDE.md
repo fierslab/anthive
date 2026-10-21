@@ -76,6 +76,17 @@ releases it first and rescans after. The ant-serve URL is `config.get_api_url` (
 a compose-only host such as `http://api:8080` used outside a container is warned about once. Tests:
 `tests/test_ant_sync_dry_run.py` (recording fake S3 that allows only list/HEAD).
 
+2.46.5: only catalogued datasets are pulled on every path (`_catalogue`: `catalog_dataset_mds` stems, no
+`.inactive`, no `_` folder; `_dataset_stem` maps h5ad/duckdb/sidecars to their stem, `_is_shared_file` exempts root
+files, `SYNC_PATH_PREFIXES` and `static/`); the rest is printed by `_print_uncatalogued` ("on S3 but not catalogued
+(retired?)") and never pulled or deleted. The priority driver honours the positional glob (`_run_priority` plans the
+budget over all catalogued datasets, then acts only on rows whose duckdb or a sidecar matches, and on matching shared
+files). Same size is checked by content before a download: `_file_status` returns (status, reason) and, for files up
+to `CHEAP_REPULL_BYTES`, decides by the listing ETag (`_same_content`: `x-amz-meta-sha256` first, single-part MD5,
+multipart for common part sizes; an unknown multipart part size cannot disprove identity); the generic slave path
+accepts a local mtime equal to S3 LastModified or the original-mtime, else `_same_content`, and stamps LastModified
+after each download. Every overwrite is listed with its reason. Tests: `tests/test_ant_sync_catalogue.py`.
+
 `ant-sync library` runs the two-way paper library sync, also run by push and pull
 unless `--no-library`: records via `git pull --rebase` (+ push with
 `library_git_push`, never forced), PDFs against S3 through the manifest
