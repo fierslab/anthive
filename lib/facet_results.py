@@ -834,8 +834,7 @@ class FacetResults:
         file rewritten during the build must not be cached under the old key). ``keep`` entries per name stay
         on disk (default: one per visitor kind; the warm-up builds the signed-in tables before the anonymous ones,
         so the entry a new one replaces is the oldest). ``store_if(value)`` False keeps a value out of the disk
-        cache. The gene tables of a full store take about 1.5 GB on disk per visitor kind, the families about
-        0.8 GB.
+        cache. All entries of a full store take about 1.4 GB on disk per visitor kind.
         """
         if self.disk is None:
             return build()

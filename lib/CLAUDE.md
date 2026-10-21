@@ -55,7 +55,7 @@ After the 2026-06 reorgs, the consumers live under:
 | `ingest_versions.py` | archived versions under `<group>/_versions/<basename>/<version>/` and the matching S3 keys: `archive_plan` (hard links, applied by the swap journal), `archive_s3` (fails loudly), `find_datasets`, `plan_purge`, `purge` (only `_versions` keys, one at a time) |
 | `scores_parquet.py` | per-cell score sidecar `<stem>.scores.parquet` (`upsert_scores`, `delete_scores`, `read_scores`, `summarize`); flock-serialised atomic writers, a module has rows for its cell type scope only |
 | `module_rank.py` | rank of a module's mean score among all modules of the same source scored in the same dataset, per cell type group (`stratum_means` from the sidecar joined with `ant_cell_type`, `module_rank`, disk-cached `ModuleRankStore`); peers need >= 20 cells and >= 10 of them; within one dataset only |
-| `warm_cache.py` | persistent cache of ant-serve's facet warm-up (`DiskCache`: pickles stored with their full key, atomic temp + rename under `flock`, pruning; `digest` stable across processes; `code_version` hashes `lib/`). Used by `facet_results.FacetResults(cache_dir=...)` and `facet_module_results` |
+| `warm_cache.py` | persistent cache of ant-serve's facet warm-up (`DiskCache`: tagged JSON + parquet entries (no pickle) stored with their full key, atomic temp + rename under `flock`, pruning; `digest` stable across processes; `code_version` hashes `lib/`). Used by `facet_results.FacetResults(cache_dir=...)` and `facet_module_results` |
 | `layer_stats.py`, `plotting.py`, `checksum.py`, `md_check.py` | layer stats, server-side plots, file hashing, `.md` sanity checks |
 
 ## DuckDB schema model (know this before touching anthive_db)
