@@ -92,7 +92,7 @@ _anthive_config_module.set_unknown_keys_lenient()
 
 from anthive_db import AnthiveDB, install_portable_layer_views, safe_ident
 from canonical_columns import BACKCOMPAT_LEGACY_NAMES  # type: ignore
-from config import get_config, get_docs_base_url
+from config import get_config, get_docs_base_url, get_ui_settings
 from config import facet_hidden_by_config, get_facet_results_dir, get_facets_visible
 from config import (get_auth_settings, get_catalog_scan_mode, get_data_folder,
                     get_duckdb_temp_dir, get_internal_requires_auth, get_library_dir, get_warmup_settings,
@@ -2797,6 +2797,37 @@ class _DatasetAccessGuard:
 app.add_middleware(_DatasetAccessGuard)
 
 
+# ── ui.api: false (a public mirror without the API page) ──────────────────────
+#
+# The interactive API docs (Swagger UI /docs, ReDoc /redoc) answer 404 to
+# callers that are not signed in. The REST API itself, /openapi.json (the
+# machine contract /version points at) and /version stay: the web UI, the
+# JupyterLite notebooks, vark and pyvark all need the API. Signed-in users and
+# local tools still get the docs.
+
+_API_DOC_PATHS = frozenset({'/docs', '/docs/oauth2-redirect', '/redoc'})
+
+
+class _ApiDocsGuard:
+    """Pure-ASGI: hide the interactive API docs from anonymous callers when ui.api is false."""
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if (scope['type'] == 'http' and _request_path(scope) in _API_DOC_PATHS
+                and not _ui_settings()['api']):
+            request = Request(scope)
+            if not request.headers.get('Remote-User') and not _is_local_tool_request(request):
+                response = JSONResponse({'detail': 'Not Found'}, status_code=404)
+                await response(scope, receive, send)
+                return
+        await self._app(scope, receive, send)
+
+
+app.add_middleware(_ApiDocsGuard)
+
+
 # ── Personal MCP links (/me/mcp, /admin/mcp-links, /internal/mcp/verify) ──
 
 _mcp_link_store = None
@@ -2804,7 +2835,29 @@ _mcp_link_store_lock = Lock()
 
 
 def _mcp_cfg() -> Dict[str, Any]:
-    return get_config().get('mcp') or {}
+    """The ``mcp`` block; ``ui.mcp: false`` switches personal MCP links off
+    whatever ``mcp.enabled`` says (a public mirror without MCP)."""
+    cfg = get_config()
+    block = dict(cfg.get('mcp') or {})
+    if not _ui_settings(cfg)['mcp']:
+        block['enabled'] = False
+    return block
+
+
+_UI_SETTINGS: Dict[str, bool] = {}
+
+
+def _ui_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
+    """``ui`` switches (config.get_ui_settings), read once: a change needs a restart.
+    An invalid block keeps everything on here; ant-stack's render check and
+    ant-browse report it."""
+    if not _UI_SETTINGS:
+        try:
+            _UI_SETTINGS.update(get_ui_settings(cfg if cfg is not None else get_config()))
+        except Exception as error:  # noqa: BLE001
+            log.warning("ui settings invalid, all parts stay on: %s", error)
+            _UI_SETTINGS.update({'facets': True, 'caveats': True, 'api': True, 'mcp': True})
+    return _UI_SETTINGS
 
 
 def _get_mcp_link_store():
