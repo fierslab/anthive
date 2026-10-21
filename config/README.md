@@ -21,7 +21,7 @@ prod:   browser ─https─▶ nginx :443 (TLS [+ auth]) ─http─▶ Caddy 127
 | --- | --- | --- |
 | `Caddyfile` | ✅ | The shared, env-driven router. All path routing lives here. |
 | `caddy-{tls,auth,http-redirect,servers}.{dev,prod}` | ✅ | Snippets imported by the Caddyfile; pick dev vs prod behaviour. |
-| `caddy-mcp.{on,off}` | ✅ | What `/mcp` does: proxy to ant-mcp (`on`, default) or a JSON 404 (`off`, a site without MCP: `ui.mcp: false`). Picked by `ANTHIVE_MCP_SNIPPET`. |
+| `caddy-mcp.{on,off}` | ✅ | What `/mcp` does: proxy to ant-mcp (`on`, default) or a JSON 404 (`off`, a site without MCP: `ui.mcp: false`). Picked by `ANTHIVE_MCP_SNIPPET`; the container stack renders the chosen one into `stack/caddy/mcp.caddy`. |
 | `authelia/` | partial | `configuration.example.yml` is tracked; the real `configuration.yml`, `secrets/`, `users_database.yml` are gitignored. |
 | `examples/` | ✅ | Templates for the per-instance files of a host install (nginx vhosts, systemd unit, sync and library cron/timer jobs). Placeholders only. |
 | `nginx.conf` | ✅ | Dev-only nginx shim for `make serve-nginx` (no login; drops every identity header). |

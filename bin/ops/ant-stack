@@ -718,6 +718,17 @@ http://:{{$ANTHIVE_TOOLS_PORT:{PORT_TOOLS}}} {{
 """
 
 
+def render_caddy_mcp(site: dict) -> str:
+    """What Caddy's /mcp route does (imported inside `handle /mcp*` through ANTHIVE_MCP_SNIPPET).
+
+    The text of config/caddy-mcp.on (proxy to the mcp service) or caddy-mcp.off (JSON 404,
+    no mcp service: services.mcp or ui.mcp false), rendered from this checkout into stack/caddy
+    so it does not depend on the Caddy config copied out of the image."""
+    which = 'on' if mcp_enabled(site) else 'off'
+    head = f"# Rendered by bin/ops/ant-stack from services.mcp and ui.mcp (config/caddy-mcp.{which}).\n"
+    return head + (REPO / 'config' / f'caddy-mcp.{which}').read_text()
+
+
 def render_caddy_auth(site: dict) -> str:
     mode = site['auth']['mode']
     head = f"# Rendered by bin/ops/ant-stack for auth.mode={mode}. Do not edit; edit site.yaml.\n"
@@ -973,8 +984,8 @@ def render_compose_site(site: dict, read_from=None) -> dict:
                      + ([f"127.0.0.1:{site['ports']['tools']}:{PORT_TOOLS}"] if _deposit_enabled(site) else []),
             'volumes': [_bind(stack / 'caddy', C_CADDY_SNIPPETS, read_only=True)],
             'environment': {'ANTHIVE_HTTP_REDIRECT_SNIPPET': f"{C_CADDY_SNIPPETS}/tools.caddy",
-                            # /mcp: proxy to the mcp service, or a JSON 404 when it is off
-                            'ANTHIVE_MCP_SNIPPET': f"{C_CADDY_CONFIG}/caddy-mcp.{'on' if mcp_enabled(site) else 'off'}"},
+                            # /mcp: proxy to the mcp service, or a JSON 404 when it is off (render_caddy_mcp)
+                            'ANTHIVE_MCP_SNIPPET': f"{C_CADDY_SNIPPETS}/mcp.caddy"},
         },
         'authelia': {'volumes': [_bind(state / 'authelia', '/config')]},
     }
@@ -999,7 +1010,7 @@ def _config_roles(site: dict) -> dict[str, str]:
 # Files `render` produces, relative to stack/ (configs are 0600 secrets).
 def _rendered_files(site: dict) -> list[str]:
     files = list(_config_roles(site).values()) + ['caddy/auth.caddy', 'caddy/tls.caddy', 'caddy/servers.caddy',
-                                                  'caddy/tools.caddy', 'compose.site.yaml', '.env']
+                                                  'caddy/tools.caddy', 'caddy/mcp.caddy', 'compose.site.yaml', '.env']
     if site['auth']['mode'] == 'authelia':
         files.append('authelia/configuration.yml')
     return files
@@ -1158,6 +1169,7 @@ def _render_locked(site: dict, quiet: bool, apply: bool) -> Path:
     _atomic_write(staging / 'caddy' / 'tls.caddy', render_caddy_tls(site).encode())
     _atomic_write(staging / 'caddy' / 'servers.caddy', render_caddy_servers(site).encode())
     _atomic_write(staging / 'caddy' / 'tools.caddy', render_caddy_tools(site).encode())
+    _atomic_write(staging / 'caddy' / 'mcp.caddy', render_caddy_mcp(site).encode())
     if _deposit_enabled(site):
         for folder in [*watcher_dirs(site).values(), state / 'ingest']:
             try:

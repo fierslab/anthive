@@ -1,8 +1,8 @@
 """site.yaml ``ui:`` switches in bin/ops/ant-stack (a public mirror without facets, caveats, API pages or MCP).
 
 Render: the block reaches every rendered anthive*.yaml; ``ui.mcp: false`` drops the
-mcp compose profile, switches personal links off and points Caddy's /mcp route at
-config/caddy-mcp.off. Validation: strict section, booleans only. Check: what is off
+mcp compose profile, switches personal links off and renders Caddy's /mcp snippet
+(stack/caddy/mcp.caddy) from config/caddy-mcp.off. Validation: strict section, booleans only. Check: what is off
 and the caveats warning. The Caddy test runs the real Caddyfile (skipped without a
 ``caddy`` binary) and proves /mcp answers a JSON 404 when MCP is off.
 """
@@ -40,8 +40,8 @@ def test_defaults_render_every_part_on(tmp_path, ant_stack):
         assert rendered['mcp']['enabled'] is True
     assert 'COMPOSE_PROFILES="mcp,authelia"' in (stack / '.env').read_text()
     compose = _rendered(stack, 'compose.site.yaml')
-    assert compose['services']['caddy']['environment']['ANTHIVE_MCP_SNIPPET'] == \
-        f"{ant_stack.C_CADDY_CONFIG}/caddy-mcp.on"
+    assert compose['services']['caddy']['environment']['ANTHIVE_MCP_SNIPPET'] == f"{ant_stack.C_CADDY_SNIPPETS}/mcp.caddy"
+    assert 'reverse_proxy' in (stack / 'caddy' / 'mcp.caddy').read_text()
 
 
 def test_all_off_renders_a_public_mirror(tmp_path, ant_stack):
@@ -55,9 +55,8 @@ def test_all_off_renders_a_public_mirror(tmp_path, ant_stack):
         assert rendered['mcp']['enabled'] is False, name
     env = (stack / '.env').read_text()
     assert 'COMPOSE_PROFILES=""' in env                    # neither mcp nor authelia
-    compose = _rendered(stack, 'compose.site.yaml')
-    assert compose['services']['caddy']['environment']['ANTHIVE_MCP_SNIPPET'] == \
-        f"{ant_stack.C_CADDY_CONFIG}/caddy-mcp.off"
+    mcp_snippet = (stack / 'caddy' / 'mcp.caddy').read_text()
+    assert 'respond' in mcp_snippet and '404' in mcp_snippet and 'reverse_proxy' not in mcp_snippet
     assert not ant_stack.mcp_enabled(site)
 
 
@@ -71,8 +70,8 @@ def test_ui_mcp_off_wins_over_services_mcp(tmp_path, ant_stack, capsys):
 
 def test_services_mcp_off_still_routes_404(tmp_path, ant_stack):
     site = _site(ant_stack, tmp_path, services={'mcp': False})
-    compose = ant_stack.render_compose_site(site)
-    assert compose['services']['caddy']['environment']['ANTHIVE_MCP_SNIPPET'].endswith('/caddy-mcp.off')
+    assert 'respond' in ant_stack.render_caddy_mcp(site)
+    assert 'reverse_proxy' in ant_stack.render_caddy_mcp(_site(ant_stack, tmp_path))
 
 
 def test_check_warns_that_caveats_carry_data_quality_warnings(tmp_path, ant_stack, capsys):
@@ -153,7 +152,7 @@ def test_caddy_routes_mcp_only_when_on(tmp_path, ant_stack, mcp_on):
     port = _free_port()
     env = _caddy_env(ant_stack, site, stack, port, server.server_port, server.server_port)
     snippet = _rendered(stack, 'compose.site.yaml')['services']['caddy']['environment']['ANTHIVE_MCP_SNIPPET']
-    env['ANTHIVE_MCP_SNIPPET'] = snippet.replace(ant_stack.C_CADDY_CONFIG, str(REPO / 'config'))
+    env['ANTHIVE_MCP_SNIPPET'] = snippet.replace(ant_stack.C_CADDY_SNIPPETS, str(stack / 'caddy'))
     proc = subprocess.Popen([caddy, 'run', '--config', str(REPO / 'config' / 'Caddyfile'), '--adapter', 'caddyfile'],
                             env=env, cwd=tmp_path, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
