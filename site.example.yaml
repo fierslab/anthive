@@ -189,8 +189,9 @@ datasets:
   # Deposits ingested by ONE central watcher on another host (since 2.47.0; doc/DESIGN_dataset_ingestion.md
   # section 24). Set ingestion_bucket to switch it on: the api presigns into that bucket with the key pair in
   # <state_dir>/secrets/s3_ingest_access_key_id + s3_ingest_secret_access_key (the main s3 keys can stay on the
-  # host), writes each deposit's record.json signed with <state_dir>/secrets/deposit_site_secret (created by the
-  # api at its first start; copy it to the watcher host, `check` says how), and reads the watcher's signed
+  # host), writes each deposit's record.json signed with <state_dir>/secrets/deposit_site_secret (created on the
+  # host by `up` / `init`, bound read-only into the api only; copy it to the watcher host, `check` says how;
+  # scope the ingestion key pair to __deposits/<site_id>/ and __incoming/ where the store can), and reads the watcher's signed
   # result.json back. No watcher runs on this site (`ant-stack watch` refuses).
   central_watcher:
     ingestion_bucket: null  # e.g. anthive-ingest: holds __deposits/<site_id>/ and __incoming/

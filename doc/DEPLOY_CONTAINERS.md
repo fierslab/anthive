@@ -818,7 +818,10 @@ each deposit and the incoming copies go to a separate ingestion bucket, and the 
 result that the site shows and e-mails to the depositor (design section 24).
 
 1. **Ingestion bucket and keys.** Ask the administrator of the central watcher for the ingestion bucket and a
-   key pair for this site (limited to that bucket if the object store can). Write the pair to
+   key pair for this site. Where the object store can scope keys, limit the pair to `__deposits/<site_id>/`
+   (read and write) and `__incoming/` (write): every holder of a key for the whole bucket can read the other
+   sites' deposit records and results (logins, file keys and checksums, redacted reports), and can rewrite
+   their uploads (the watcher then holds both deposits for an admin). Write the pair to
    `<state_dir>/secrets/s3_ingest_access_key_id` and `<state_dir>/secrets/s3_ingest_secret_access_key`
    (mode 600). The main `s3` keys of the data bucket stay on the host (the api does not get them for deposits).
 2. **The watcher's public key.** The administrator runs `ant ingest-watch result-key` on the watcher host and
@@ -836,10 +839,13 @@ result that the site shows and e-mails to the depositor (design section 24).
        key_id: k1
    ```
 
-4. **The site secret.** `ant-stack up`; the api creates `<state_dir>/secrets/deposit_site_secret` at its first
-   start. Send it to the administrator over a safe channel; it goes to the watcher host as
-   `<sites_dir>/<site_id>.keys` (mode 600) with the line `k1 <secret>`. `ant-stack check` prints the exact
-   lines.
+4. **The site secret.** `ant-stack up` (or `init`) creates `<state_dir>/secrets/deposit_site_secret` on the
+   host and binds it read-only into the api container only (web, mcp and ingest never get it). Send it to the
+   administrator over a safe channel; it goes to the watcher host as `<sites_dir>/<site_id>.keys` (mode 600,
+   owned by the watcher's user, in a folder only that user can write) with the line `k1 <secret>`.
+   `ant-stack check` prints the exact lines and reports a missing secret. A site's admins are ordinary
+   depositors at the central store unless the watcher's administrator lists the site in
+   `ingest_watch.trusted_admin_sites`.
 5. `ant-stack check`; `ant-stack watch` refuses on such a site. Approve, reject and artefact purges happen on
    the central site.
 

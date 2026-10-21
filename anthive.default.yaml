@@ -156,8 +156,8 @@ datasets_deposit_s3: {}
 # One central watcher for several sites (doc/DESIGN_dataset_ingestion.md section 24). true: this API writes
 # each deposit's signed record.json next to its uploads in the ingestion bucket and reads the watcher's
 # signed result.json back; it expires its own deposits and e-mails its depositors. The record is signed with
-# the site secret <state_dir>/secrets/deposit_site_secret (created at first use; env
-# ANTHIVE_DEPOSIT_SITE_SECRET), which the watcher host also holds. Off: the API and the watcher share
+# the site secret <state_dir>/secrets/deposit_site_secret (created at first use; on container sites
+# ant-stack creates it on the host; env ANTHIVE_DEPOSIT_SITE_SECRET), which the watcher host also holds. Off: the API and the watcher share
 # ingest_state_dir (one host).
 datasets_deposit_central_watcher: false
 # Key id of the site secret (change it together with a new secret to rotate; the watcher accepts both ids
@@ -282,6 +282,10 @@ ingest_watch:
   # "<key_id> <secret>" (two lines while a secret rotates). Empty: <ingest_state_dir>/secrets/deposit_sites.
   # No file: no other site's deposits are read (the single-host route is unchanged).
   sites_dir: ''
+  # Sites whose admins count as admins here (their deposits may update any dataset, replace another
+  # route's DE study, skip owner checks). Default none: another site's admin is an ordinary depositor at the
+  # central store, and dataset owners across sites are assigned with `ant ingest-watch owner set`.
+  trusted_admin_sites: []
   # Lower the priority of the pipeline's children (nice 19, ionice idle).
   low_priority: true
   # An upload for a dataset that is already published becomes a new version.

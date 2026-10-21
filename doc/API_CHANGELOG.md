@@ -319,11 +319,20 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Watcher: `ingest_watch.incoming_bucket` (default `s3.bucket`) and `ingest_watch.sites_dir` (default
   `<ingest_state_dir>/secrets/deposit_sites/`, files `<site_id>.keys`). New commands `ant ingest-watch
   result-key` and `ant ingest-watch sites`. Records are verified (site, key id, signature, path, size,
-  monotonic version, field rules, signed ETags and sizes, update rights against the central owners) before
-  anything is imported; another site's depositors are named `<login>@<site_id>`.
+  monotonic version, field rules, signed ETags and sizes, the objects' deposit marks and claims, update rights
+  against the central owners) before anything is imported; another site's depositors are named
+  `<login>@<site_id>`. Security review round 1: `record.json` and `result.json` are a signature line and a
+  canonical body, verified over the exact bytes before parsing and parsed with a depth limit; records carry no
+  names or e-mail addresses; a site's `is_admin` counts only for `ingest_watch.trusted_admin_sites` (default
+  none); an object rewritten after its record was signed, or claimed by two deposits, holds the deposits
+  (`disputed`) instead of linking either; remote deposits are ordered by the watcher's import time; pulled
+  files are checked against the signed sha256; result versions follow the watcher's clock; the keys folder and
+  files must belong to the watcher's user.
 - ant-stack: `datasets.central_watcher` (ingestion_bucket, endpoint, region, use_path_style, key_id,
-  watcher_public_keys), secrets `s3_ingest_access_key_id` / `s3_ingest_secret_access_key`; `check` prints the
-  site secret hand-over; `watch` refuses on such a site.
+  watcher_public_keys), secrets `s3_ingest_access_key_id` / `s3_ingest_secret_access_key`; `ensure_secrets`
+  (up, init) creates `secrets/deposit_site_secret` on the host and binds it read-only into the api only, and only
+  the api's config carries the central keys; `check` reports a missing secret and prints the hand-over; `watch`
+  refuses on such a site.
 - Unchanged without these keys: the API and watcher of one host share `ingest_state_dir`.
 
 ### QC companion datasets

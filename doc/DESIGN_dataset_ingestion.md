@@ -1280,22 +1280,28 @@ refused as `needs_decision` (deposit-marked objects nobody accounts for).
 ### 24.2 Records travel with the upload (`lib/deposit_records.py`)
 
 At the end of complete, and at withdraw and expiry of a deposit the watcher has seen, the site writes
-`__deposits/<site_id>/<deposit_id>/record.json`: its local deposit row (`RECORD_FIELDS`: identity, kind,
-update_of, state, watch key and ETags, the artefact block, timestamps as integers) and its files (`FILE_FIELDS`:
-name, kind, incoming key, size, sha256, method, state, ETag, staging key and ETag). Upload ids and the watcher's
-columns never travel. The local record stays the site's source of truth; the bucket copy is what the watcher
+`__deposits/<site_id>/<deposit_id>/record.json`: its local deposit row (`RECORD_FIELDS`: login, admin flag,
+kind, update_of, state, watch key and ETags, the artefact block, creation, expiry and completion as integers) and
+its files (`FILE_FIELDS`: name, kind, incoming key, size, sha256, method, state, ETag, staging key and ETag).
+Upload ids, the watcher's columns, and the depositor's name and e-mail address never travel (every holder of
+the ingestion keys can read every record; the site e-mails its own depositors from its local row). The local record stays the site's source of truth; the bucket copy is what the watcher
 reads. The staging sweep keeps `record.json` and `result.json` until the deposit is over (withdrawn, expired,
 live or rejected) and older than `max_open_days`.
 
 ### 24.3 Signed records
 
-The envelope `{schema: anthive.deposit_record/1, site_id, deposit_id, version, key_id, record, signature}` is
-signed with HMAC-SHA256 over its canonical JSON (sorted keys, no whitespace, ASCII, no floats; the signature
-field left out). The secret is per site (`<state_dir>/secrets/deposit_site_secret`, created at the API's first
-use, or env `ANTHIVE_DEPOSIT_SITE_SECRET`; at least 32 characters); `datasets_deposit_site_key_id` names it.
-The watcher holds the table of known sites: `<sites_dir>/<site_id>.keys` (default
-`<ingest_state_dir>/secrets/deposit_sites/`), mode 600, lines `<key_id> <secret>`; two lines while a secret
-rotates. No file: no other site is read (the single-host route is unchanged).
+`record.json` is one signature line, `anthive.deposit_record/1 <key_id> <HMAC-SHA256 hex>`, then the body:
+the canonical JSON (sorted keys, no whitespace, ASCII, no floats) of `{schema, site_id, deposit_id, version,
+key_id, record}`. The HMAC covers the exact body bytes, so the watcher checks it before it parses anything
+(review C1: a deeply nested body from any key holder stopped every import when it was parsed first); the body
+is then parsed with a nesting limit of 32. The secret is per site (`<state_dir>/secrets/deposit_site_secret`,
+at least 32 characters; on container sites `ant-stack` creates it on the host and binds it read-only into the
+api, elsewhere the API creates it at first use, or env `ANTHIVE_DEPOSIT_SITE_SECRET`);
+`datasets_deposit_site_key_id` names it. The watcher holds the table of known sites:
+`<sites_dir>/<site_id>.keys` (default `<ingest_state_dir>/secrets/deposit_sites/`), lines `<key_id> <secret>`,
+two lines while a secret rotates. The folder must belong to the watcher's user and not be writable by group or
+others; each file must be a regular file (no symbolic link) of that user with mode 600. No file: no other site
+is read (the single-host route is unchanged).
 
 The watcher (`lib/remote_deposits.py`, `RemoteSites.import_records`, called by `Watcher.poll` before the
 deposits are linked) lists `__deposits/*/*/record.json` of the ingestion bucket and, per record:
@@ -1303,8 +1309,10 @@ deposits are linked) lists `__deposits/*/*/record.json` of the ingestion bucket 
 1. the path must be `<root><site_id>/<deposit_id>/record.json` with a valid site id and deposit id; the site
    must be known; its own site id is skipped (that API shares the store directly); objects above 1 MiB are
    ignored;
-2. `verify_record`: JSON, schema, site id and deposit id inside equal to the path, key id known for that site,
-   HMAC compared in constant time. A record that fails is logged and nothing in it is trusted or answered;
+2. `verify_record`: signature line, key id known for that site, HMAC over the body compared in constant time,
+   then the depth-limited body, schema, site id, deposit id and key id inside equal to the path and the
+   signature line. A record that fails is logged and nothing in it is trusted or answered. Every record is
+   handled on its own: an exception in one never stops the others;
 3. replay: the version must not be older than the highest version seen (`<ingest_state_dir>/remote_deposits.json`);
    at import an equal version with other content, and a deposit id already imported for another site, are
    refused (`import_record`);
@@ -1316,23 +1324,44 @@ deposits are linked) lists `__deposits/*/*/record.json` of the ingestion bucket 
 5. swapped files: for an uploaded record, an incoming object listed under a file's key with another ETag or
    size than the signed one refuses the record (`listing_mismatches`); the route then links only objects that
    match the record anyway (find_for_item);
-6. update rights (24.5);
-7. only `uploaded`, `withdrawn` and `expired` records are imported, into the watcher's `deposits.sqlite` with
-   `site_id`, `record_version` and `record_digest`, the user written as `<login>@<site_id>`. From there the
+6. ownership of the objects (review S1, `_ownership_problems`): `continues` must name a deposit of the same
+   site already imported; every object the record names (its files, and the h5ad and sidecar an item is linked
+   by) must be listed with the signed ETag (the record waits otherwise); an object whose LastModified is later
+   than the record's own was rewritten after the site signed (another key holder re-marked or replaced it):
+   the record is refused, keeps its claim, and a waiting deposit the object's mark now names is disputed; no
+   other deposit may claim the objects (an open or waiting deposit of the store, or an earlier authentic record
+   kept in the state file until it is withdrawn, expired or final); and every object must carry the server's
+   `x-amz-meta-deposit` mark of this deposit or of the deposit it continues. Withdrawn and expired records of a
+   poll are handled first, so they release their claims before the uploads;
+7. update rights (24.5);
+8. only `uploaded`, `withdrawn` and `expired` records are imported, into the watcher's `deposits.sqlite` with
+   `site_id`, `record_version`, `record_digest` and `imported` (the watcher's clock), the user written as
+   `<login>@<site_id>`. Remote deposits are ordered by `imported`, never by a site's own times (`find_for_item`,
+   `owner_of_dataset`), and a `disputed` deposit is never linked. From there the
    existing route links, checks and publishes it like a local deposit (dataset, metadata update, DE-only,
    artefact, collection). The watcher never expires, sweeps or e-mails another site's deposits.
 
-An authentic record that fails 3 to 6 gets a signed `needs_decision` result with the reason.
+An authentic record that fails 3 to 7 gets a signed `needs_decision` result with the reason, and is looked at
+again at the next poll (a claim released meanwhile lets it through).
+
+The route checks every pulled file of a remote deposit against the sha256 of the signed record (h5ad, sidecar,
+static files, DE tables; artefact files were already checked against the record), because the store may ignore
+`IfMatch` on the GET (review C5).
 
 ### 24.4 Results go back
 
 After each poll `RemoteSites.export_results` writes `__deposits/<site_id>/<deposit_id>/result.json` for every
-imported deposit whose outcome changed: `{schema: anthive.deposit_result/1, site_id, deposit_id, version, key,
-result: {state, db_id, version, kind, artefact_ref, held_reasons, error, warnings, report}, signature}`, signed
-with the watcher's Ed25519 key (`<ingest_state_dir>/secrets/deposit_result_ed25519.pem`, mode 600, created at
+imported deposit whose outcome changed: a signature line `anthive.deposit_result/1 <Ed25519 signature,
+base64>`, then the canonical body `{schema, site_id, deposit_id, version, key, result: {state, db_id, version,
+kind, artefact_ref, held_reasons, error, warnings, report}}`, signed with the watcher's Ed25519 key (`<ingest_state_dir>/secrets/deposit_result_ed25519.pem`, mode 600, created at
 first use; `ant ingest-watch result-key` prints the public half). Sites list the public keys they trust in
 `datasets_deposit_watcher_public_keys` (two during a rotation), so a site can verify but never forge a result.
-The report is the redacted copy (floats as strings; above 4 MiB the report is left out).
+The site checks the signature over the exact body against each trusted key before parsing, then parses with
+the nesting limit, and the body must name the key that verified it; reading a result never raises (review C2: a
+nested result.json broke the status and list routes). The report is the redacted copy (floats as strings;
+above 4 MiB the report is left out). The version is the watcher's clock in milliseconds, at least one above the
+last version written (state file and the deposit row), so a lost state file never makes a site ignore new
+results (review N2).
 
 The site reads the result when a depositor asks (status, report, list) and every 120 s in a daemon thread of
 ant-serve (`DepositService.site_sync`: expiry and the staging sweep of its own prefix, then the results of its
@@ -1344,9 +1373,13 @@ the sites.
 ### 24.5 Identity and rights
 
 The accepting site decides who may deposit (its groups), ownership and update rights, as before. The watcher
-checks an update (`update_of`) once more against the owners of the central store: refused unless the record's
-`is_admin` is set by the site or the store's owner of that dataset (`owners` table, else the newest live
-deposit) is `<login>@<site_id>`. So a deposit from site A cannot update a dataset owned by a user of site B
+checks an update once more against the owners of the central store: a dataset, metadata update or DE-only
+deposit with `update_of`, and a `de_table` artefact on its scope dataset, is refused unless the store's owner of
+that dataset (`owners` table, else the newest live deposit) is `<login>@<site_id>`. A plain artefact on a
+visible dataset needs no ownership, as on a single host (review C3). A site's `is_admin` is honoured only for
+the sites in `ingest_watch.trusted_admin_sites` (default none; review S2): otherwise a site admin would be an
+admin of the whole central store (owner checks skipped, another route's DE study replaced, the de_table rule
+skipped), so it is imported as 0 and the site admin is an ordinary depositor at the central store. So a deposit from site A cannot update a dataset owned by a user of site B
 (also not when site A runs `update_policy: any`); an admin of the central site assigns an owner with
 `ant ingest-watch owner set <db_id> <login>@<site_id>`. Datasets published before deposits existed have no
 owner: only site admins update them. Approve, reject and artefact purges happen on the central site (the
@@ -1362,21 +1395,40 @@ pair). Tested in `tests/test_deposit_central_watcher.py`:
 | forged record (no secret) | HMAC under the site's secret; unknown site and unknown key id refused; nothing of an unverified record is used or answered |
 | a malicious site writes under another site's prefix | the key is chosen by the path's site id and the signed site id must equal it; a site can only sign for itself, its deposits live under its own prefix, its users are named `<login>@<site>` |
 | a site re-using another site's deposit id | refused at import (`another site`) |
+| an authentic site claims another site's (or the central host's) pending upload with a copied record | every object must carry the server's deposit mark of this deposit, no other deposit or earlier record may claim it, `continues` stays within the site, ordering by the watcher's import time; a site that also re-marks the objects gets at most a dispute (both held), never the upload (`tests/test_deposit_central_review.py`) |
+| a site admin acting as an admin of the whole store | `is_admin` only for `ingest_watch.trusted_admin_sites` |
+| a parse bomb in record.json or result.json | signatures over the exact bytes before parsing, depth limit, every record and result handled on its own |
+| a pulled file that is not the signed one | sha256 of every pulled file against the signed record |
 | replay of an older record | versions are monotonic per deposit (state file and store); older refused, an equal version with other content refused |
 | files swapped after signing | ETag and size of each incoming object against the signed record; linking matches ETags too; pulls are pinned to the listed ETag |
 | path traversal in names or keys | every segment `[A-Za-z0-9][A-Za-z0-9._-]*`, keys only under the deposit's project in incoming and the site's own staging folder; record paths parsed strictly |
 | oversized record or result | 1 MiB per record (listing size and read limit), 4 MiB per result, 500 files |
 | a site updates datasets it does not own | owners re-checked against the central store (24.5) |
 | a forged result shown to a depositor | Ed25519 signature under a key the site trusts, site and deposit id inside checked, monotonic versions |
-| secrets in logs | errors name the rule, never key material; key files must be mode 600 (refused otherwise) |
+| secrets in logs | errors name the rule, never key material; key files must be regular files of the watcher's user, mode 600, in a folder only that user writes (refused otherwise) |
 
-Not covered (for the security review): a site whose secret leaked can deposit as any of its own users (rotate
-the key: new secret on the site, both lines on the watcher, then drop the old one). An authentic site is trusted
-for what its API checked: `is_admin`, the artefact block (scope, made_from) and a new collection's group id are
-taken as the site validated them; the watcher re-checks paths, sizes, ETags and update rights, and the artefact
-route its own placement rules, but not the site's artefact-block checks. Two sites can assign the same new
-group id at the same time; that clash is not checked across sites yet. The ingestion keys allow
-deleting objects: a holder can remove uploads (availability, not integrity).
+Not covered:
+
+- A site whose secret leaked can deposit as any of its own users (rotate the key: new secret on the site, both
+  lines on the watcher, then drop the old one).
+- An authentic site is trusted for what its API checked in the artefact block (scope, made_from) and for a new
+  collection's group id; the watcher re-checks paths, sizes, ETags, the objects' marks and claims, update
+  rights, raw HTML in a collection's index.md (review N5) and the artefact route its own placement rules, but
+  not the site's artefact-block checks. Two sites can assign the same new group id at the same time; that clash
+  is not checked across sites yet.
+- With one shared `__incoming/` every holder of ingestion keys can rewrite any upload. The watcher turns a
+  rewrite it can see (an object newer than the record that signed it) into a dispute, but a re-mark in the
+  instant between a site's copy into incoming and its record write is not seen. Delete rights also let a holder
+  remove uploads (availability, not integrity). A dispute is resolved by an admin of the central site (reject the
+  items; the right site deposits again; remove the keys file of a site that misbehaves).
+- Confidentiality: every site that holds ingestion keys can read the other sites' records (logins, keys, sha256,
+  dataset ids) and results (the redacted reports: counts and digests, held reasons, db ids). Records carry no
+  names or e-mail addresses and results nothing of other sites. Where the object store can scope keys, give each
+  site a key pair limited to `__deposits/<site_id>/` (read and write) and `__incoming/` (write), so a site
+  cannot read other sites' records and results; encrypting results per site is possible later if reports need
+  more protection.
+- The watcher's claims on refused records live in `<ingest_state_dir>/remote_deposits.json`; losing that file
+  forgets them (the deposits in the store keep theirs).
 
 ### 24.7 Backwards compatible
 
@@ -1394,8 +1446,11 @@ store even when other sites are known (its own site id is skipped when reading r
    prints the public key; lab members' `mus s3 upload` must then write to the ingestion bucket as well.
 3. Each site (site.yaml): `datasets.central_watcher: {ingestion_bucket, watcher_public_keys: [<that line>]}`,
    the pair in `secrets/s3_ingest_access_key_id` and `secrets/s3_ingest_secret_access_key`, a unique
-   `datasets.site_id`; start the api once (it creates `secrets/deposit_site_secret`), copy the secret to the
-   watcher host as `<sites_dir>/<site_id>.keys` with the line `k1 <secret>` (mode 600); `ant-stack check`
-   prints the exact lines. No watcher runs on the site (`ant-stack watch` refuses).
+   `datasets.site_id`; `ant-stack up` (or init) creates `secrets/deposit_site_secret` on the host and binds it
+   read-only into the api only; copy it to the watcher host as `<sites_dir>/<site_id>.keys` with the line
+   `k1 <secret>` (mode 600, owned by the watcher's user, folder mode 700); `ant-stack check` prints the exact
+   lines and reports a missing secret. No watcher runs on the site (`ant-stack watch` refuses). A site whose
+   admins should count as admins of the central store goes into `ingest_watch.trusted_admin_sites` on the
+   watcher (default none).
 4. Rotation: new secret file and `key_id` on the site, both lines on the watcher until every older record is
    processed; for the watcher's key, add the new public key on every site first.
