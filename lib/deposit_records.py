@@ -1,0 +1,533 @@
+"""Signed deposit records and results for one central watcher serving several sites (2.47.0).
+
+Design: doc/DESIGN_dataset_ingestion.md section 24. Every object in the ingestion bucket is reachable by anyone
+holding its keys, so nothing read from it is trusted until verified here.
+
+* A site (an anthive API that accepts deposits) writes ``<staging_root><site_id>/<deposit_id>/record.json``:
+  its local deposit record (identity, files with sizes, sha256 and ETags, update_of, deposit_kind, artefact
+  fields, state) in an envelope signed with HMAC-SHA256 under a per-site secret the watcher also holds.
+  Canonical JSON (sorted keys, no floats, ASCII), with the site id, the deposit id, a version counter and the key
+  id inside the signed part.
+* The watcher verifies (known site, key id, signature, site and deposit id equal to the object's path, schema,
+  size limit, monotonic version, field rules) and imports the record into its own deposit store, where the
+  existing route links it to the incoming objects.
+* The watcher answers with ``.../result.json``: the outcome (state, held reasons, the redacted report, db id
+  and version or artefact reference) signed with its own Ed25519 key. Sites verify it with the public key(s)
+  in their configuration, so a site cannot forge another site's or its own results.
+
+Secrets never appear in logs or exceptions: errors name the rule, not the material.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import re
+import stat
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+RECORD_SCHEMA = 'anthive.deposit_record/1'
+RESULT_SCHEMA = 'anthive.deposit_result/1'
+RECORD_NAME = 'record.json'
+RESULT_NAME = 'result.json'
+MAX_RECORD_BYTES = 1024 * 1024
+MAX_RESULT_BYTES = 4 * 1024 * 1024
+MAX_FILES = 500
+SITE_ID_RE = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
+KEY_ID_RE = re.compile(r'[A-Za-z0-9._-]{1,32}')
+DEPOSIT_ID_RE = re.compile(r'dep_[0-9a-f]{20}')
+USER_RE = re.compile(r'[A-Za-z0-9._@-]{1,80}')
+SEGMENT_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}')
+ETAG_RE = re.compile(r'[0-9a-f]{32}(-[0-9]{1,5})?')
+SHA256_RE = re.compile(r'[0-9a-f]{64}')
+DB_ID_RE = re.compile(r'[A-Za-z0-9]{1,16}/[A-Za-z0-9]{1,16}')
+ED25519_PREFIX = 'ed25519:'
+
+#: Deposit columns a site exports (the watcher's own columns are never taken from a site).
+RECORD_FIELDS = ('id', 'user', 'name', 'email', 'is_admin', 'data_project', 'basename', 'update_of', 'state',
+                 'created', 'updated', 'expires', 'completed', 'total_bytes', 'watch_key', 'h5ad_etag', 'mus_key',
+                 'mus_etag', 'continues', 'h5ad_sha256', 'deposit_kind', 'artefact_ref', 'artefact', 'group_id')
+FILE_FIELDS = ('name', 'kind', 'key', 'size', 'sha256', 'method', 'state', 'etag', 'staging_key', 'staging_etag',
+               'completed')
+INT_FIELDS = {'is_admin', 'created', 'updated', 'expires', 'completed', 'total_bytes', 'size'}
+DEPOSIT_KINDS = ('dataset', 'metadata_update', 'de_only', 'artefact', 'collection')
+RECORD_STATES = ('uploading', 'completing', 'uploaded', 'withdrawing', 'withdrawn', 'expiring', 'expired')
+
+
+class RecordError(ValueError):
+    """A record or result that must not be trusted; the message names the rule (never secret material)."""
+
+
+# ── canonical form ───────────────────────────────────────────────────────────
+
+def _check_value(value: Any, path: str = '') -> None:
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return
+    if isinstance(value, int):
+        if abs(value) >= 2 ** 63:
+            raise RecordError(f'integer out of range at {path or "top"}')
+        return
+    if isinstance(value, float):
+        raise RecordError(f'floats are not allowed in a signed document ({path or "top"})')
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _check_value(item, f'{path}[{index}]')
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise RecordError(f'non-string key at {path or "top"}')
+            _check_value(item, f'{path}.{key}')
+        return
+    raise RecordError(f'unsupported value type {type(value).__name__} at {path or "top"}')
+
+
+def canonical(document: Mapping[str, Any]) -> bytes:
+    """The bytes that are signed: sorted keys, no whitespace, ASCII escapes, no floats."""
+    _check_value(dict(document))
+    return json.dumps(document, sort_keys=True, separators=(',', ':'), ensure_ascii=True,
+                      allow_nan=False).encode('ascii')
+
+
+def digest(document: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical(document)).hexdigest()
+
+
+def _parse(raw: bytes, limit: int, what: str) -> Dict[str, Any]:
+    if not isinstance(raw, (bytes, bytearray)):
+        raise RecordError(f'{what} is not bytes')
+    if len(raw) > limit:
+        raise RecordError(f'{what} is larger than {limit} bytes')
+    try:
+        document = json.loads(raw.decode('utf-8'), parse_float=_no_float, parse_constant=_no_float)
+    except RecordError:
+        raise
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise RecordError(f'{what} is not JSON ({type(exc).__name__})') from None
+    if not isinstance(document, dict):
+        raise RecordError(f'{what} is not a JSON object')
+    return document
+
+
+def _no_float(text: str) -> Any:
+    raise RecordError('floats are not allowed in a signed document')
+
+
+# ── paths ────────────────────────────────────────────────────────────────────
+
+def staging_root(prefix: str) -> str:
+    """``__deposits/`` (the staging prefix without the site folder)."""
+    return str(prefix or '__deposits/').strip().strip('/') + '/'
+
+
+def object_key(root: str, site_id: str, deposit_id: str, name: str) -> str:
+    if not SITE_ID_RE.fullmatch(site_id) or not DEPOSIT_ID_RE.fullmatch(deposit_id) or name not in (RECORD_NAME,
+                                                                                                     RESULT_NAME):
+        raise RecordError('not a deposit record path')
+    return f'{staging_root(root)}{site_id}/{deposit_id}/{name}'
+
+
+def parse_object_key(key: str, root: str, name: str = RECORD_NAME) -> Optional[Tuple[str, str]]:
+    """``(site_id, deposit_id)`` of ``<root><site>/<deposit>/<name>``, or None for any other key."""
+    base = staging_root(root)
+    if not isinstance(key, str) or not key.startswith(base):
+        return None
+    parts = key[len(base):].split('/')
+    if len(parts) != 3 or parts[2] != name:
+        return None
+    site_id, deposit_id = parts[0], parts[1]
+    if not SITE_ID_RE.fullmatch(site_id) or not DEPOSIT_ID_RE.fullmatch(deposit_id):
+        return None
+    return site_id, deposit_id
+
+
+# ── site secrets (HMAC) ──────────────────────────────────────────────────────
+
+def _secret_bytes(secret: str) -> bytes:
+    value = str(secret or '').strip()
+    if len(value) < 32:
+        raise RecordError('a site secret must have at least 32 characters')
+    return value.encode('utf-8')
+
+
+def load_site_keys(directory: Path) -> Dict[str, Dict[str, bytes]]:
+    """The watcher's table of known sites: ``<directory>/<site_id>.keys`` with lines ``<key_id> <secret>``.
+
+    Several lines rotate a secret (old and new accepted during the window). A file readable by group or others,
+    a bad site id or key id, or a short secret is refused (RecordError naming the file, never the secret).
+    """
+    sites: Dict[str, Dict[str, bytes]] = {}
+    directory = Path(directory)
+    if not directory.is_dir():
+        return sites
+    for path in sorted(directory.glob('*.keys')):
+        site_id = path.name[:-len('.keys')]
+        if not SITE_ID_RE.fullmatch(site_id):
+            raise RecordError(f'{path.name}: not a site id')
+        mode = path.stat().st_mode
+        if mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise RecordError(f'{path}: readable by group or others; chmod 600')
+        keys: Dict[str, bytes] = {}
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) != 2 or not KEY_ID_RE.fullmatch(parts[0]):
+                raise RecordError(f'{path.name} line {number}: expected "<key_id> <secret>"')
+            try:
+                keys[parts[0]] = _secret_bytes(parts[1])
+            except RecordError as exc:
+                raise RecordError(f'{path.name} line {number}: {exc}') from None
+        if keys:
+            sites[site_id] = keys
+    return sites
+
+
+def sign_record(record: Mapping[str, Any], site_id: str, deposit_id: str, version: int, key_id: str,
+                secret: str) -> bytes:
+    """The ``record.json`` bytes of a site: the envelope with its HMAC-SHA256 signature."""
+    if not SITE_ID_RE.fullmatch(site_id) or not DEPOSIT_ID_RE.fullmatch(deposit_id) or not KEY_ID_RE.fullmatch(key_id):
+        raise RecordError('bad site id, deposit id or key id')
+    if not isinstance(version, int) or version < 1:
+        raise RecordError('version must be a positive integer')
+    envelope = {'schema': RECORD_SCHEMA, 'site_id': site_id, 'deposit_id': deposit_id, 'version': version,
+                'key_id': key_id, 'record': dict(record)}
+    signature = hmac.new(_secret_bytes(secret), canonical(envelope), hashlib.sha256).hexdigest()
+    return canonical({**envelope, 'signature': signature})
+
+
+def verify_record(raw: bytes, site_id: str, deposit_id: str, sites: Mapping[str, Mapping[str, bytes]]) -> Dict[str, Any]:
+    """The verified envelope of ``record.json`` found at ``<root><site_id>/<deposit_id>/``; RecordError otherwise.
+
+    Checks the size limit, the schema, that the site and deposit id inside equal the path, that the site and
+    key id are known, and the HMAC (constant-time compare). Field rules are :func:`record_problems`.
+    """
+    keys = sites.get(site_id)
+    if not keys:
+        raise RecordError(f'unknown site {site_id!r}')
+    envelope = _parse(raw, MAX_RECORD_BYTES, 'record.json')
+    if envelope.get('schema') != RECORD_SCHEMA:
+        raise RecordError('record.json: unknown schema')
+    if envelope.get('site_id') != site_id:
+        raise RecordError('record.json: the site id inside does not match its path')
+    if envelope.get('deposit_id') != deposit_id:
+        raise RecordError('record.json: the deposit id inside does not match its path')
+    version = envelope.get('version')
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise RecordError('record.json: version is not a positive integer')
+    key_id = envelope.get('key_id')
+    secret = keys.get(key_id) if isinstance(key_id, str) else None
+    if secret is None:
+        raise RecordError(f'record.json: key id {key_id!r} is not known for site {site_id!r}')
+    signature = envelope.get('signature')
+    if not isinstance(signature, str) or not re.fullmatch(r'[0-9a-f]{64}', signature):
+        raise RecordError('record.json: no signature')
+    body = {key: value for key, value in envelope.items() if key != 'signature'}
+    expected = hmac.new(secret, canonical(body), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise RecordError('record.json: bad signature')
+    if not isinstance(envelope.get('record'), dict):
+        raise RecordError('record.json: no record')
+    return envelope
+
+
+# ── record content rules ─────────────────────────────────────────────────────
+
+def _key_ok(key: Any) -> bool:
+    return isinstance(key, str) and 0 < len(key) <= 1024 and all(SEGMENT_RE.fullmatch(part) or
+                                                                 (index == 0 and part.startswith('__')
+                                                                  and SEGMENT_RE.fullmatch(part[2:] or 'x'))
+                                                                 for index, part in enumerate(key.split('/')))
+
+
+def record_problems(record: Mapping[str, Any], site_id: str, deposit_id: str, incoming_prefix: str,
+                    root: str) -> List[str]:
+    """Why a verified record cannot be imported (empty list: it can). Path traversal, foreign prefixes, types."""
+    problems: List[str] = []
+    incoming = str(incoming_prefix or '__incoming/').strip().strip('/') + '/'
+    staging = f'{staging_root(root)}{site_id}/{deposit_id}/'
+    unknown = set(record) - set(RECORD_FIELDS) - {'files'}
+    if unknown:
+        problems.append(f'unknown record fields: {", ".join(sorted(unknown))[:200]}')
+    if record.get('id') != deposit_id:
+        problems.append('record id differs from the deposit id')
+    user = record.get('user')
+    if not isinstance(user, str) or not USER_RE.fullmatch(user) or '@' in user:
+        problems.append('user is not a plain login (letters, digits, ._-)')
+    for field in ('name', 'email'):
+        if record.get(field) is not None and (not isinstance(record[field], str) or len(record[field]) > 200
+                                              or any(ord(ch) < 32 for ch in record[field])):
+            problems.append(f'{field} is not a short single-line text')
+    for field in ('data_project', 'basename'):
+        if not isinstance(record.get(field), str) or not SEGMENT_RE.fullmatch(record[field]):
+            problems.append(f'{field} is not a safe name')
+    if record.get('deposit_kind') not in DEPOSIT_KINDS:
+        problems.append('deposit_kind is unknown')
+    if record.get('state') not in RECORD_STATES:
+        problems.append('state is unknown')
+    if record.get('update_of') is not None and (not isinstance(record['update_of'], str)
+                                                or not DB_ID_RE.fullmatch(record['update_of'])):
+        problems.append('update_of is not a dataset id')
+    for field in sorted(INT_FIELDS & set(record)):
+        if record[field] is not None and (not isinstance(record[field], int) or isinstance(record[field], bool)):
+            problems.append(f'{field} is not an integer')
+    for field in ('h5ad_etag', 'mus_etag'):
+        if record.get(field) is not None and (not isinstance(record[field], str) or not ETAG_RE.fullmatch(record[field])):
+            problems.append(f'{field} is not an ETag')
+    if record.get('h5ad_sha256') is not None and (not isinstance(record['h5ad_sha256'], str)
+                                                  or not SHA256_RE.fullmatch(record['h5ad_sha256'])):
+        problems.append('h5ad_sha256 is not a sha256')
+    project_prefix = f'{incoming}{record.get("data_project")}/'
+    for field in ('watch_key', 'mus_key', 'continues'):
+        value = record.get(field)
+        if value is None:
+            continue
+        if field == 'continues':
+            if not isinstance(value, str) or not DEPOSIT_ID_RE.fullmatch(value):
+                problems.append('continues is not a deposit id')
+            continue
+        if field == 'watch_key' and record.get('deposit_kind') in ('artefact', 'collection'):
+            if value != f'artefact:{deposit_id}':
+                problems.append('the watch key of an artefact or collection deposit is artefact:<deposit_id>')
+            continue
+        if not _key_ok(value) or not value.startswith(project_prefix):
+            problems.append(f'{field} is not a key under {project_prefix}')
+    files = record.get('files')
+    if not isinstance(files, list) or len(files) > MAX_FILES:
+        problems.append(f'files is not a list of at most {MAX_FILES}')
+        return problems
+    names = set()
+    for entry in files:
+        if not isinstance(entry, dict) or set(entry) - set(FILE_FIELDS):
+            problems.append('a file entry has unknown fields')
+            continue
+        name = entry.get('name')
+        if not isinstance(name, str) or not 0 < len(name) <= 255 or name in names or '\\' in name \
+                or any(not SEGMENT_RE.fullmatch(part) for part in name.split('/')):
+            problems.append(f'file name {str(name)[:60]!r} is not safe or not unique')
+            continue
+        names.add(name)
+        key = entry.get('key')
+        if not _key_ok(key) or not key.startswith(project_prefix):
+            problems.append(f'{name}: key is not under {project_prefix}')
+        if entry.get('kind') == 'artefact' or record.get('deposit_kind') in ('artefact', 'collection'):
+            if isinstance(key, str) and record.get('deposit_kind') == 'artefact' \
+                    and not key.startswith(f'{project_prefix}artefacts/{deposit_id}/'):
+                problems.append(f'{name}: an artefact file must lie under artefacts/{deposit_id}/')
+        staging_key = entry.get('staging_key')
+        if staging_key is not None and (not _key_ok(staging_key) or not staging_key.startswith(staging)) \
+                and entry.get('method') != 'reuse':
+            problems.append(f'{name}: staging key is not under {staging}')
+        if not isinstance(entry.get('size'), int) or isinstance(entry.get('size'), bool) or entry['size'] < 0:
+            problems.append(f'{name}: size is not a non-negative integer')
+        for field in ('etag', 'staging_etag'):
+            if entry.get(field) is not None and (not isinstance(entry[field], str) or not ETAG_RE.fullmatch(entry[field])):
+                problems.append(f'{name}: {field} is not an ETag')
+        if entry.get('sha256') is not None and (not isinstance(entry['sha256'], str)
+                                                or not SHA256_RE.fullmatch(entry['sha256'])):
+            problems.append(f'{name}: sha256 is not a sha256')
+    return problems[:20]
+
+
+# ── export (site) and import (watcher) ───────────────────────────────────────
+
+def _int_or_none(value: Any) -> Optional[int]:
+    if value is None or value == '':
+        return None
+    return int(value)
+
+
+def export_record(store: Any, deposit_id: str) -> Dict[str, Any]:
+    """A site's local deposit record as the signed ``record`` (no floats, no watcher columns, no upload ids)."""
+    row = store.get(deposit_id)
+    if row is None:
+        raise RecordError('no such deposit')
+    record: Dict[str, Any] = {}
+    for field in RECORD_FIELDS:
+        value = row.get(field)
+        record[field] = _int_or_none(value) if field in INT_FIELDS else value
+    record['is_admin'] = 1 if row.get('is_admin') else 0
+    files = []
+    for entry in store.files(deposit_id):
+        item = {}
+        for field in FILE_FIELDS:
+            value = entry.get(field)
+            item[field] = _int_or_none(value) if field in INT_FIELDS else value
+        files.append(item)
+    record['files'] = files
+    return record
+
+
+def qualified_user(user: str, site_id: str) -> str:
+    """How the watcher names a remote site's depositor: ``<login>@<site_id>`` (logins are per site)."""
+    return f'{user}@{site_id}'
+
+
+def import_record(store: Any, envelope: Mapping[str, Any], site_id: str) -> str:
+    """Write a verified, checked record into the watcher's deposit store. Returns ``imported``, ``unchanged``.
+
+    Raises RecordError for a replay (a version older than the stored one), a different record under an already
+    stored version, or a deposit id that belongs to another site.
+    """
+    record = dict(envelope['record'])
+    deposit_id = envelope['deposit_id']
+    version = int(envelope['version'])
+    record_digest = digest(record)
+    existing = store.get(deposit_id)
+    if existing is not None:
+        if (existing.get('site_id') or '') != site_id:
+            raise RecordError(f'{deposit_id} is a deposit of another site')
+        stored = int(existing.get('record_version') or 0)
+        if version < stored:
+            raise RecordError(f'replay: version {version} is older than the stored version {stored}')
+        if version == stored:
+            if existing.get('record_digest') == record_digest:
+                return 'unchanged'
+            raise RecordError(f'version {version} was already imported with other content')
+    values = {field: record.get(field) for field in RECORD_FIELDS}
+    values['user'] = qualified_user(str(record['user']), site_id)
+    values['is_admin'] = 1 if record.get('is_admin') else 0
+    values.update(site_id=site_id, record_version=version, record_digest=record_digest)
+    store.import_remote(deposit_id, values, [dict(entry) for entry in record['files']])
+    return 'imported'
+
+
+def listing_mismatches(record: Mapping[str, Any], listed: Mapping[str, Tuple[str, int]]) -> List[str]:
+    """Files of an uploaded record whose incoming object is listed with another ETag or size (swapped after signing).
+
+    ``listed``: key -> (etag, size) of the incoming listing. A file not listed (yet, or consumed) is not a
+    mismatch here: the route links only what matches the record.
+    """
+    problems = []
+    for entry in record.get('files') or []:
+        key = entry.get('key')
+        if key in listed and entry.get('state') == 'complete':
+            etag, size = listed[key]
+            if entry.get('etag') and etag != entry['etag']:
+                problems.append(f'{entry.get("name")}: the incoming object has another ETag than the signed record')
+            elif entry.get('size') is not None and size != entry['size']:
+                problems.append(f'{entry.get("name")}: the incoming object has another size than the signed record')
+    return problems
+
+
+# ── watcher results (Ed25519) ────────────────────────────────────────────────
+
+def load_or_create_result_key(path: Path) -> Any:
+    """The watcher's Ed25519 private key (PEM, created once with mode 0600)."""
+    from cryptography.hazmat.primitives import serialization  # noqa: PLC0415
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: PLC0415
+
+    path = Path(path)
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        key = Ed25519PrivateKey.generate()
+        pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                serialization.NoEncryption())
+        fd = os.open(f'{path}.{os.getpid()}.tmp', os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, pem)
+        finally:
+            os.close(fd)
+        try:
+            os.link(f'{path}.{os.getpid()}.tmp', path)
+        except FileExistsError:
+            pass
+        finally:
+            Path(f'{path}.{os.getpid()}.tmp').unlink(missing_ok=True)
+    if path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise RecordError(f'{path}: readable by group or others; chmod 600')
+    return serialization.load_pem_private_key(path.read_bytes(), password=None)
+
+
+def public_key_text(private_key: Any) -> str:
+    """``ed25519:<base64>`` of the public half (what sites put in datasets_deposit_watcher_public_keys)."""
+    from cryptography.hazmat.primitives import serialization  # noqa: PLC0415
+
+    raw = private_key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return ED25519_PREFIX + base64.b64encode(raw).decode('ascii')
+
+
+def _public_key(text: str) -> Any:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey  # noqa: PLC0415
+
+    if not isinstance(text, str) or not text.startswith(ED25519_PREFIX):
+        raise RecordError('a watcher public key reads ed25519:<base64>')
+    try:
+        raw = base64.b64decode(text[len(ED25519_PREFIX):], validate=True)
+        return Ed25519PublicKey.from_public_bytes(raw)
+    except Exception:  # noqa: BLE001
+        raise RecordError('a watcher public key is not a valid Ed25519 key') from None
+
+
+def sign_result(result: Mapping[str, Any], site_id: str, deposit_id: str, version: int, private_key: Any) -> bytes:
+    """The ``result.json`` bytes: the watcher's answer to one deposit, signed with its Ed25519 key."""
+    envelope = {'schema': RESULT_SCHEMA, 'site_id': site_id, 'deposit_id': deposit_id, 'version': int(version),
+                'key': public_key_text(private_key), 'result': dict(result)}
+    signature = private_key.sign(canonical(envelope))
+    return canonical({**envelope, 'signature': base64.b64encode(signature).decode('ascii')})
+
+
+def verify_result(raw: bytes, site_id: str, deposit_id: str, public_keys: Sequence[str]) -> Dict[str, Any]:
+    """The verified envelope of a ``result.json`` for this site's deposit; RecordError otherwise."""
+    from cryptography.exceptions import InvalidSignature  # noqa: PLC0415
+
+    trusted = [text for text in public_keys or [] if isinstance(text, str)]
+    if not trusted:
+        raise RecordError('no watcher public key is configured (datasets_deposit_watcher_public_keys)')
+    envelope = _parse(raw, MAX_RESULT_BYTES, 'result.json')
+    if envelope.get('schema') != RESULT_SCHEMA:
+        raise RecordError('result.json: unknown schema')
+    if envelope.get('site_id') != site_id or envelope.get('deposit_id') != deposit_id:
+        raise RecordError('result.json: it belongs to another site or deposit')
+    version = envelope.get('version')
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        raise RecordError('result.json: version is not a positive integer')
+    key_text = envelope.get('key')
+    if key_text not in trusted:
+        raise RecordError('result.json: signed with a key this site does not trust')
+    try:
+        signature = base64.b64decode(str(envelope.get('signature') or ''), validate=True)
+    except Exception:  # noqa: BLE001
+        raise RecordError('result.json: no signature') from None
+    body = {key: value for key, value in envelope.items() if key != 'signature'}
+    try:
+        _public_key(key_text).verify(signature, canonical(body))
+    except InvalidSignature:
+        raise RecordError('result.json: bad signature') from None
+    if not isinstance(envelope.get('result'), dict):
+        raise RecordError('result.json: no result')
+    return envelope
+
+
+def result_from_row(row: Mapping[str, Any], report: Optional[Mapping[str, Any]], refused: Optional[str] = None) -> Dict[str, Any]:
+    """The ``result`` the watcher signs for a deposit row of its store (watcher columns plus the redacted report)."""
+    def loads(value: Any, default: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except ValueError:
+                return default
+        return value if value is not None else default
+
+    return {'state': 'needs_decision' if refused else row.get('watch_state'),
+            'db_id': row.get('db_id'), 'version': row.get('version'), 'kind': row.get('kind'),
+            'artefact_ref': row.get('artefact_ref'),
+            'held_reasons': [str(item) for item in loads(row.get('held_reasons'), [])],
+            'error': refused or row.get('error'),
+            'warnings': [str(item) for item in loads(row.get('warnings'), [])],
+            'report': json.loads(canonical(report).decode()) if isinstance(report, Mapping) else None}
+
+
+def ensure_no_floats(document: Any) -> Any:
+    """``document`` with floats turned into strings (reports carry floats; the signed form has none)."""
+    if isinstance(document, float):
+        return repr(document)
+    if isinstance(document, dict):
+        return {str(key): ensure_no_floats(value) for key, value in document.items()}
+    if isinstance(document, (list, tuple)):
+        return [ensure_no_floats(item) for item in document]
+    return document

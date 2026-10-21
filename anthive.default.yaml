@@ -150,8 +150,26 @@ datasets_deposit_site_id: ''
 # deposit published it, and admins) or any (every depositor).
 datasets_deposit_update_policy: own
 # Optional separate key pair for presigning (endpoint, region and bucket are
-# taken from s3 unless given here). Empty: the s3 block's keys.
+# taken from s3 unless given here). Empty: the s3 block's keys. With a central
+# watcher (below) this is the INGESTION bucket: staging, records and __incoming/.
 datasets_deposit_s3: {}
+# One central watcher for several sites (doc/DESIGN_dataset_ingestion.md section 24). true: this API writes
+# each deposit's signed record.json next to its uploads in the ingestion bucket and reads the watcher's
+# signed result.json back; it expires its own deposits and e-mails its depositors. The record is signed with
+# the site secret <state_dir>/secrets/deposit_site_secret (created at first use; env
+# ANTHIVE_DEPOSIT_SITE_SECRET), which the watcher host also holds. Off: the API and the watcher share
+# ingest_state_dir (one host).
+datasets_deposit_central_watcher: false
+# Key id of the site secret (change it together with a new secret to rotate; the watcher accepts both ids
+# during the change).
+datasets_deposit_site_key_id: k1
+# The watcher's result keys this site trusts: 'ed25519:<base64>' lines from `ant ingest-watch result-key`
+# on the watcher host (two during a rotation).
+datasets_deposit_watcher_public_keys: []
+# The bucket of the published catalog when datasets_deposit_s3 names another (the ingestion) bucket; a
+# metadata-only update copies the published h5ad from it (the deposit key pair then needs read access on
+# the catalog prefix). Empty: the s3 block's bucket.
+datasets_deposit_catalog_bucket: ''
 
 # Artefact store (doc/DESIGN_artefacts.md): versioned, immutable analysis files
 # (DE tables, figures, tables, notebooks, reports, models) of a dataset or a
@@ -256,6 +274,14 @@ ingest_watch:
   delete_despite_post_warnings: true
   # Base URL of the local ant-serve (empty: api_url / rest_api_host:port).
   api_url: ''
+  # The bucket of the incoming prefix and of the sites' deposit records (the INGESTION bucket of a central
+  # watcher, doc/DESIGN_dataset_ingestion.md section 24). Empty: s3.bucket. The watcher's s3 keys must
+  # read, write and delete in it; published files still go to s3.bucket.
+  incoming_bucket: ''
+  # Folder of the known sites' secrets: one file <site_id>.keys (mode 600) per site, lines
+  # "<key_id> <secret>" (two lines while a secret rotates). Empty: <ingest_state_dir>/secrets/deposit_sites.
+  # No file: no other site's deposits are read (the single-host route is unchanged).
+  sites_dir: ''
   # Lower the priority of the pipeline's children (nice 19, ionice idle).
   low_priority: true
   # An upload for a dataset that is already published becomes a new version.

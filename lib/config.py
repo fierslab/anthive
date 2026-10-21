@@ -581,6 +581,8 @@ INGEST_WATCH_DEFAULTS: Dict[str, Any] = {
     'work_ttl_days': 14,
     'allow_repo_dirs': False,
     'accept_unlinked': True,
+    'incoming_bucket': '',
+    'sites_dir': '',
     'notify': {'on': ['live', 'held', 'failed', 'needs_decision'], 'webhook_url': '', 'email_to': '',
                'email_from': 'anthive-ingest@localhost', 'smtp_host': '', 'smtp_port': 25},
 }
@@ -711,9 +713,12 @@ def get_dataset_deposit_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[s
     if policy not in ('own', 'any'):
         raise ConfigError("ERROR: [Config] datasets_deposit_update_policy must be 'own' or 'any'")
     try:
-        prefix = get_ingest_watch_settings(cfg)['prefix']
+        watch = get_ingest_watch_settings(cfg)
+        prefix, notify = watch['prefix'], watch['notify']
     except ConfigError:
-        prefix = '__incoming/'
+        prefix, notify = '__incoming/', {}
+    central = _flag(_setting(cfg, 'datasets_deposit_central_watcher', 'ANTHIVE_DATASETS_DEPOSIT_CENTRAL_WATCHER',
+                             False), False)
     return {
         'upload_groups': [str(g).strip().lower() for g in groups if str(g).strip()],
         'enabled': _flag(_setting(cfg, 'datasets_deposit_enabled', 'ANTHIVE_DATASETS_DEPOSIT_ENABLED', False), False),
@@ -739,6 +744,14 @@ def get_dataset_deposit_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[s
         'bucket': str(s3.get('bucket') or ''),
         's3': s3,
         'credential_source': credential_source,
+        # one central watcher for several sites (design section 24)
+        'catalog_bucket': str(cfg.get('datasets_deposit_catalog_bucket') or base_s3.get('bucket') or ''),
+        'central_watcher': central,
+        'site_key_id': str(cfg.get('datasets_deposit_site_key_id') or 'k1'),
+        'site_secret': (get_or_create_secret('deposit_site_secret', env_var='ANTHIVE_DEPOSIT_SITE_SECRET', cfg=cfg)
+                        if central else ''),
+        'watcher_public_keys': [str(key) for key in (cfg.get('datasets_deposit_watcher_public_keys') or [])],
+        'notify': notify,
     }
 
 

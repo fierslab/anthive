@@ -3,6 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "boto3",
+#   "cryptography>=42",
 #   "duckdb>=1.3,<1.6",
 #   "h5py>=3.0.0",
 #   "numpy>=1.24.0",
@@ -39,6 +40,8 @@ Usage:
     ant ingest-watch reject <key|db_id> --by NAME [--note TEXT]
     ant ingest-watch retry <key|db_id> --by NAME [--note TEXT]     # run a needs_decision / failed item again
     ant ingest-watch owner set <db_id> <user> --by NAME [--note TEXT]   # who may deposit new versions (API)
+    ant ingest-watch result-key            # the public key sites trust for this watcher's results (section 24)
+    ant ingest-watch sites                 # the sites whose deposits this watcher reads
     ant ingest-watch --once --store /scratch/store --prefix __incoming_test/ \\
         --catalog-prefix __ingest_test_catalog/ --api-url http://127.0.0.1:18850
 """
@@ -242,6 +245,9 @@ def build(args: argparse.Namespace):
     global LOG_FILE
     LOG_FILE = state_dir / 'logs' / f'ingest_watch_{time.strftime("%Y%m%d")}.log'
     runner = SubprocessRunner(log_path=LOG_FILE)
+    # The incoming prefix may live in an ingestion bucket of its own (a central watcher, design section 24);
+    # published files always go to s3.bucket. One client: the watcher's keys reach both buckets.
+    incoming_bucket = settings.get('incoming_bucket') or s3_cfg['bucket']
     pipeline = Pipeline(
         PipelineConfig(store_root=store_root, work_root=work_root, reports_root=state_dir / 'reports',
                        bucket=s3_cfg['bucket'], catalog_prefix=settings['catalog_prefix'],
@@ -251,19 +257,82 @@ def build(args: argparse.Namespace):
                        store_git_push=settings['store_git_push'], git_identity=settings['git_identity'],
                        route='s3-watch', state_dir=state_dir, s3_endpoint=s3_cfg.get('endpoint'),
                        min_free_gb=settings['min_free_gb'],
-                       require_update_marker=settings['require_update_marker']),
+                       require_update_marker=settings['require_update_marker'],
+                       incoming_bucket=incoming_bucket),
         client, runner, ApiClient(api_url, config.internal_auth_headers()), log=log,
         stop_requested=lambda: _stop)
     pipeline.progress = progress
     db = ingest_watch.StateDB(state_dir / ingest_watch.DB_FILE)
     db.on_transition = on_transition
-    watcher = ingest_watch.Watcher(settings, db, client, s3_cfg['bucket'], pipeline, state_dir, log=log,
+    watcher = ingest_watch.Watcher(settings, db, client, incoming_bucket, pipeline, state_dir, log=log,
                                    max_items=args.max_items, stop_requested=lambda: _stop,
                                    deposit_settings=deposit_settings(cfg, settings),
                                    artefact_publisher=artefact_publisher(cfg, settings, client, s3_cfg, db, store_root,
                                                                          state_dir, work_root, pipeline.api),
-                                   list_s3=s3_client(s3_cfg, LIST_RETRIES, LIST_TIMEOUTS))
+                                   list_s3=s3_client(s3_cfg, LIST_RETRIES, LIST_TIMEOUTS),
+                                   remote=remote_sites(cfg, settings, client, incoming_bucket, state_dir))
     return settings, state_dir, db, watcher, store_root
+
+
+def sites_dir(settings: dict, state_dir: Path) -> Path:
+    return Path(settings.get('sites_dir') or state_dir / 'secrets' / 'deposit_sites')
+
+
+def result_key_path(state_dir: Path) -> Path:
+    return state_dir / 'secrets' / 'deposit_result_ed25519.pem'
+
+
+def remote_sites(cfg: dict, settings: dict, client, incoming_bucket: str, state_dir: Path):
+    """The deposits of other sites (design section 24), or None when no site secret is installed."""
+    import deposit_records  # noqa: PLC0415
+    import remote_deposits  # noqa: PLC0415
+
+    try:
+        sites = deposit_records.load_site_keys(sites_dir(settings, state_dir))
+    except deposit_records.RecordError as exc:
+        sys.exit(f'ERROR: site secrets: {exc}')
+    if not sites:
+        return None
+    staging = str(cfg.get('datasets_deposit_staging_prefix') or '__deposits/')
+    log(f'remote deposits: reading the records of {", ".join(sorted(sites))} in s3://{incoming_bucket}/'
+        f'{deposit_records.staging_root(staging)}')
+    return remote_deposits.RemoteSites(
+        s3=client, bucket=incoming_bucket, state_dir=state_dir, sites=sites,
+        result_key=deposit_records.load_or_create_result_key(result_key_path(state_dir)),
+        staging_root=staging, incoming_prefix=settings['prefix'], local_site_id=config.deposit_site_id(cfg), log=log)
+
+
+def cmd_result_key(args: argparse.Namespace) -> int:
+    """Print the public half of the result key (created on first use, mode 600)."""
+    import deposit_records  # noqa: PLC0415
+
+    state_dir = config.get_ingest_state_dir(config.get_config())
+    key = deposit_records.load_or_create_result_key(result_key_path(state_dir))
+    print(deposit_records.public_key_text(key))
+    print(f'# put this line in datasets_deposit_watcher_public_keys of every site (site.yaml: '
+          f'datasets.central_watcher.watcher_public_keys); the private key stays in {result_key_path(state_dir)}',
+          file=sys.stderr)
+    return 0
+
+
+def cmd_sites(args: argparse.Namespace) -> int:
+    """The known sites and their key ids (never the secrets)."""
+    import deposit_records  # noqa: PLC0415
+
+    cfg = config.get_config()
+    state_dir = config.get_ingest_state_dir(cfg)
+    folder = sites_dir(config.get_ingest_watch_settings(cfg), state_dir)
+    try:
+        sites = deposit_records.load_site_keys(folder)
+    except deposit_records.RecordError as exc:
+        print(f'ERROR: {exc}', file=sys.stderr)
+        return 2
+    if not sites:
+        print(f'no site secrets in {folder}: only this host\'s own deposits are read')
+        return 0
+    for site_id, keys in sorted(sites.items()):
+        print(f'{site_id}: key ids {", ".join(sorted(keys))}')
+    return 0
 
 
 def artefact_publisher(cfg: dict, settings: dict, client, s3_cfg: dict, db, store_root: Path, state_dir: Path,
@@ -274,7 +343,8 @@ def artefact_publisher(cfg: dict, settings: dict, client, s3_cfg: dict, db, stor
     artefact_settings = config.get_artefact_settings(cfg)
     return artefact_pipeline.ArtefactPublisher(
         store_root=store_root, state_dir=state_dir, work_root=work_root / 'artefacts', s3=client,
-        bucket=s3_cfg['bucket'], incoming_prefix=settings['prefix'],
+        bucket=s3_cfg['bucket'], incoming_bucket=settings.get('incoming_bucket') or s3_cfg['bucket'],
+        incoming_prefix=settings['prefix'],
         catalog_prefix=artefact_settings['catalog_prefix'], artefact_settings=artefact_settings, db=db, api=api,
         settle_seconds=float(settings['settle_seconds']), log=log, git_commit=settings['store_git_commit'],
         git_identity=settings['git_identity'], delete_incoming=settings['delete_incoming_after_ingest'],
@@ -465,7 +535,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0], epilog=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('command', nargs='?', choices=('run', 'status', 'approve', 'reject', 'retry', 'owner'), default='run')
+    parser.add_argument('command', nargs='?', choices=('run', 'status', 'approve', 'reject', 'retry', 'owner',
+                                                      'result-key', 'sites'), default='run')
     parser.add_argument('item', nargs='?', help='approve / reject / retry: the item key (or db id); owner: set')
     parser.add_argument('rest', nargs='*', help='owner set: <db_id> <user>')
     parser.add_argument('--by', help='approve / reject / retry: who decided (recorded in the caveat and the state)')
@@ -494,6 +565,10 @@ def main() -> int:
         return cmd_review(args)
     if args.command == 'owner':
         return cmd_owner(args)
+    if args.command == 'result-key':
+        return cmd_result_key(args)
+    if args.command == 'sites':
+        return cmd_sites(args)
     config.require_primary(config.get_config(), tool='ant-ingest-watch')
     return cmd_run(args)
 

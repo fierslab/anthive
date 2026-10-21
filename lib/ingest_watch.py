@@ -486,8 +486,10 @@ class Watcher:
                  state_dir: Path, log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
                  max_items: Optional[int] = None, stop_requested: Callable[[], bool] = lambda: False,
                  deposit_settings: Any = None, artefact_publisher: Any = None,
-                 list_s3: Any = None):
+                 list_s3: Any = None, remote: Any = None):
         self.settings = settings
+        #: ``remote_deposits.RemoteSites``: the deposits of other sites (central watcher, design section 24)
+        self.remote = remote
         self.db = db
         self.s3 = s3
         #: client for listing the prefix (fewer, shorter retries than the transfer client ``s3``); None: ``s3``
@@ -550,6 +552,8 @@ class Watcher:
         for message in self.pipeline.recover():
             self.db.event('-', 'recovery', message)
         objects = self.list_prefix()
+        if self.remote is not None:
+            self.import_remote_records(objects)
         items, malformed = plan_items(objects, self.settings['prefix'])
         for message in malformed:
             self.log(f'malformed: {message}')
@@ -577,8 +581,40 @@ class Watcher:
                     counts[f'artefact_{state}'] = counts.get(f'artefact_{state}', 0) + number
             except Exception as exc:  # noqa: BLE001 - never stop the poll for the artefact route
                 self.log(f'artefacts: not processed this poll: {exc}')
+        if self.remote is not None:
+            self.export_remote_results()
         self.prune_work_dirs()
         return counts
+
+    # deposits of other sites (central watcher, lib/remote_deposits.py) -------
+
+    def _open_deposit_store(self) -> Any:
+        import dataset_deposit  # noqa: PLC0415
+
+        return dataset_deposit.DepositStore(self.state_dir / dataset_deposit.DB_FILE)
+
+    def import_remote_records(self, objects: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+        """Verify and import the signed records of the known sites before the deposits are linked."""
+        listed = {str(obj['Key']): (str(obj.get('ETag', '')).strip('"'), int(obj.get('Size') or 0)) for obj in objects}
+        store = self._open_deposit_store()
+        try:
+            return self.remote.import_records(store, listed)
+        except Exception as exc:  # noqa: BLE001 - a broken site never stops the route
+            self.log(f'remote deposits: import failed ({type(exc).__name__}: {str(exc)[:200]})')
+            return {}
+        finally:
+            store.close()
+
+    def export_remote_results(self) -> int:
+        """Write the signed results of imported deposits whose outcome changed."""
+        store = self._open_deposit_store()
+        try:
+            return self.remote.export_results(store)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f'remote deposits: results not written ({type(exc).__name__}: {str(exc)[:200]})')
+            return 0
+        finally:
+            store.close()
 
     # API deposits (lib/dataset_deposit.py) --------------------------------
 
@@ -817,7 +853,8 @@ class Watcher:
                             str(dataset_deposit.sanitize_text(row.get('error') or row.get('version') or '', roots)))
                 record = store.get(deposit_id) or {}
                 marker = f'{row["state"]}:{row.get("processed_signature") or ""}'
-                if record.get('notified_state') != marker and row['state'] in dataset_deposit.NOTIFY_DEPOSITOR_ON:
+                if record.get('notified_state') != marker and row['state'] in dataset_deposit.NOTIFY_DEPOSITOR_ON \
+                        and not record.get('site_id'):     # another site's depositor: that site sends the e-mail
                     summary = None
                     if copy:
                         summary = dataset_deposit.report_summary(json.loads(copy.read_text()))

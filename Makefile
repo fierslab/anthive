@@ -75,7 +75,7 @@ TEST_DEPS = --with pytest --with duckdb --with pyyaml --with numpy \
             --with markdown --with markdown-it-py --with requests --with anndata --with bcrypt \
             --with uvicorn --with matplotlib --with seaborn \
             --with 'bibtexparser>=1.4,<2' --with python-multipart --with tqdm --with boto3 \
-            --with nbformat
+            --with nbformat --with cryptography
 
 test:
 	uv run $(TEST_DEPS) env PYTHONPATH=lib python -m pytest tests/ -v

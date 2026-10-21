@@ -168,6 +168,16 @@ class DepositSettings:
     catalog_prefix: str = ''
     bucket: str = ''
     s3: Dict[str, Any] = field(default_factory=dict)
+    #: the bucket of the published catalog, when deposits use their own ingestion bucket (``bucket``); metadata
+    #: updates copy the published h5ad from it (empty: the same bucket)
+    catalog_bucket: str = ''
+    #: one central watcher for several sites (design section 24): records travel as signed record.json next to
+    #: the uploads, results come back as signed result.json, and this API does the expiry and the e-mails
+    central_watcher: bool = False
+    site_key_id: str = 'k1'
+    site_secret: str = ''
+    watcher_public_keys: Sequence[str] = ()
+    notify: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         prefix, staging = self.prefix or '', self.staging_prefix or ''
@@ -179,6 +189,18 @@ class DepositSettings:
     @property
     def credentials_present(self) -> bool:
         return bool(self.bucket and self.s3.get('access_key_id') and self.s3.get('secret_access_key'))
+
+    @property
+    def catalog(self) -> str:
+        """The bucket the published files live in (``catalog_bucket``, else the deposit bucket)."""
+        return self.catalog_bucket or self.bucket
+
+    @property
+    def staging_root(self) -> str:
+        """``__deposits/``: the staging prefix without this site's folder (where every site's records live)."""
+        folder = f'{self.site_id}/'
+        prefix = self.staging_prefix or '__deposits/'
+        return prefix[:-len(folder)] if self.site_id and prefix.endswith(folder) else prefix
 
     @property
     def active(self) -> bool:
@@ -320,7 +342,11 @@ class DepositStore:
                                     ('deposits', 'worker', 'TEXT'),
                                     # artefact and collection deposits (lib/artefact_deposit.py, REST 2.47)
                                     ('deposits', 'artefact_ref', 'TEXT'), ('deposits', 'artefact', 'TEXT'),
-                                    ('deposits', 'group_id', 'TEXT')):
+                                    ('deposits', 'group_id', 'TEXT'),
+                                    # one central watcher for several sites (lib/deposit_records.py, 2.47)
+                                    ('deposits', 'site_id', 'TEXT'), ('deposits', 'record_version', 'INTEGER'),
+                                    ('deposits', 'record_digest', 'TEXT'), ('deposits', 'result_version', 'INTEGER'),
+                                    ('deposits', 'result_digest', 'TEXT')):
             if column not in {row[1] for row in self.conn.execute(f'PRAGMA table_info({table})')}:
                 self.conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
 
@@ -439,6 +465,36 @@ class DepositStore:
             except BaseException:
                 self.conn.execute('ROLLBACK')
                 raise
+
+    def import_remote(self, deposit_id: str, values: Dict[str, Any], files: Sequence[Dict[str, Any]]) -> None:
+        """The watcher's copy of another site's verified record (``deposit_records.import_record``).
+
+        Only the columns a site owns are written; the watcher's own columns (watch_state, db_id, report_file,
+        ...) of an earlier import stay. The files are replaced as a whole.
+        """
+        columns = list(values)
+        with self._lock:
+            self.conn.execute('BEGIN IMMEDIATE')
+            try:
+                updates = ', '.join(f'{name} = excluded.{name}' for name in columns if name != 'id')
+                self.conn.execute(f'INSERT INTO deposits ({", ".join(columns)}) VALUES ({", ".join("?" * len(columns))}) '
+                                  f'ON CONFLICT(id) DO UPDATE SET {updates}', [values[name] for name in columns])
+                self.conn.execute('DELETE FROM files WHERE deposit_id = ?', (deposit_id,))
+                for entry in files:
+                    entry = {**entry, 'deposit_id': deposit_id}
+                    entry.setdefault('state', 'pending')
+                    names = list(entry)
+                    self.conn.execute(f'INSERT INTO files ({", ".join(names)}) VALUES ({", ".join("?" * len(names))})',
+                                      [entry[name] for name in names])
+                self.conn.execute('COMMIT')
+            except BaseException:
+                self.conn.execute('ROLLBACK')
+                raise
+
+    def remote_rows(self, local_site: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Deposits imported from other sites (``site_id`` set and not ``local_site``)."""
+        return [row for row in self._rows("SELECT * FROM deposits WHERE COALESCE(site_id, '') != ''")
+                if row.get('site_id') != local_site]
 
     def claim_import(self, deposit_id: str) -> bool:
         """The watcher takes a completed DE-only deposit (watch state ``importing``); withdraw then waits."""
@@ -1203,13 +1259,20 @@ class DepositService:
             objects.extend(page.get('Contents', []) or [])
         return objects
 
-    def _clean_staging(self, deposit_id: str) -> List[str]:
-        """Delete every object below this deposit's staging folder (never outside it)."""
+    def _clean_staging(self, deposit_id: str, keep_records: bool = True) -> List[str]:
+        """Delete every object below this deposit's staging folder (never outside it).
+
+        ``keep_records``: the signed record.json and result.json of a central watcher (section 24) stay.
+        """
+        import deposit_records  # noqa: PLC0415
+
         folder = self._staging_folder(deposit_id)
         removed = []
         for obj in self._list(folder):
             key = obj['Key']
             if not key.startswith(folder) or '..' in key.split('/'):
+                continue
+            if keep_records and key[len(folder):] in (deposit_records.RECORD_NAME, deposit_records.RESULT_NAME):
                 continue
             self.s3.delete_object(Bucket=self.bucket, Key=key)
             removed.append(key)
@@ -1238,9 +1301,12 @@ class DepositService:
             record = self.store.get(deposit_id)
             if record is not None:
                 if record['state'] in TERMINAL_STATES:
-                    removed += self._clean_staging(deposit_id)
+                    # a central watcher's record and result stay until the deposit is over and old
+                    over = record['state'] in ('withdrawn', 'expired') or record.get('watch_state') in ('live',
+                                                                                                        'rejected')
+                    removed += self._clean_staging(deposit_id, keep_records=not (over and stamp < cutoff))
             elif stamp < cutoff:
-                removed += self._clean_staging(deposit_id)
+                removed += self._clean_staging(deposit_id, keep_records=False)
         return removed
 
     def _expire_one(self, record: Dict[str, Any], actor: str, from_states: Sequence[str]) -> bool:
@@ -1255,6 +1321,8 @@ class DepositService:
         self.store.cas(record['id'], ('expiring',), 'expired')
         self.store.release_keys(record['id'])
         self.store.event(record['id'], actor, 'expired', 'upload window passed; uploads aborted, files removed')
+        if record.get('record_version'):            # only a deposit the central watcher has seen
+            self.publish_record(record['id'])
         return True
 
     def expire_stale(self) -> List[str]:
@@ -1380,7 +1448,12 @@ class DepositService:
         entries = []
         for kind, name in wanted:
             source = f'{self.settings.catalog_prefix}{data_project}/{name}'
-            head = _head(self.s3, self.bucket, source)
+            try:
+                head = _head(self.s3, self.settings.catalog, source)
+            except Exception as exc:  # noqa: BLE001 - the ingestion keys may not read the catalog bucket
+                raise DepositError(409, 'h5ad_unavailable', f'the published {name} cannot be read with this site\'s '
+                                                            f'deposit keys ({_error_code(exc)}); deposit the h5ad '
+                                                            f'again') from exc
             if head is None:
                 raise DepositError(409, 'h5ad_unavailable', f'the published {name} is not on the object store; '
                                                             f'deposit it again')
@@ -1708,7 +1781,7 @@ class DepositService:
         if row['state'] == 'complete':
             return {'name': row['name'], 'ok': True}
         if row['method'] == 'reuse':                   # the published copy, recorded at create: still the same?
-            head = _head(self.s3, self.bucket, row['staging_key'])
+            head = _head(self.s3, self.settings.catalog, row['staging_key'])
             if head is None or head['etag'] != row['staging_etag']:
                 return {'name': row['name'], 'ok': False,
                         'problems': ['the published copy changed since this deposit started; deposit again']}
@@ -1759,7 +1832,8 @@ class DepositService:
         staged = row.get('staging_etag')
         if not staged:
             raise StagingChanged(f'{row["name"]} was not verified')
-        source = {'Bucket': self.bucket, 'Key': row['staging_key']}
+        source = {'Bucket': self.settings.catalog if row.get('method') == 'reuse' else self.bucket,
+                  'Key': row['staging_key']}
         metadata = self._metadata(deposit_id, row['sha256'])
         condition = f'"{staged}"'
         try:
@@ -1792,8 +1866,8 @@ class DepositService:
         """A verified staging text file, read with IfMatch on its verified ETag (and its MD5 checked, as a store may
         ignore IfMatch); raises StagingChanged when it is no longer the verified version."""
         try:
-            response = self.s3.get_object(Bucket=self.bucket, Key=row['staging_key'],
-                                          IfMatch=f'"{row["staging_etag"]}"')
+            response = self.s3.get_object(Bucket=self.settings.catalog if row.get('method') == 'reuse' else self.bucket,
+                                          Key=row['staging_key'], IfMatch=f'"{row["staging_etag"]}"')
         except Exception as exc:  # noqa: BLE001
             if _error_code(exc) in ('PreconditionFailed', '412'):
                 raise StagingChanged(f'{row["name"]} changed in staging during complete') from exc
@@ -2026,6 +2100,7 @@ class DepositService:
         for row in rows.values():                      # only now: the deposit is uploaded
             self._delete_staging(deposit_id, row)
         self.store.event(deposit_id, user, 'completed', f'{len(rows)} file(s)')
+        self.publish_record(deposit_id)
         return {'deposit_id': deposit_id, 'state': 'uploaded',
                 'files': [{'name': row['name'], 'key': row['key'], 'size': row['size'], 'sha256': row['sha256'],
                            'etag': copied[row['key']]} for row in rows.values()],
@@ -2175,18 +2250,18 @@ class DepositService:
             self.expire_stale()
         if all_users and not identity.is_admin:
             raise DepositError(403, 'forbidden', 'only admins list every deposit')
-        records = self.store.deposits(None if all_users else identity.user)
+        records = [self.refresh_result(record) for record in self.store.deposits(None if all_users else identity.user)]
         return {'deposits': [self._view(record, False, identity) for record in records], 'all': bool(all_users)}
 
     def status(self, identity: Identity, deposit_id: str) -> Dict[str, Any]:
-        record = self._get_own(identity, deposit_id)
+        record = self.refresh_result(self._get_own(identity, deposit_id))
         if record['state'] == 'uploading' and record['expires'] <= self.clock() and self.settings.active:
             self.expire_stale()
             record = self.store.get(deposit_id) or record
         return self._view(record, True, identity)
 
     def report(self, identity: Identity, deposit_id: str) -> Dict[str, Any]:
-        record = self._get_own(identity, deposit_id)
+        record = self.refresh_result(self._get_own(identity, deposit_id))
         row = read_watch_row(self.state_dir, record.get('watch_key'))
         report = self._report(record, row if watch_row_matches(record, row) else None)
         if report is None:
@@ -2279,6 +2354,7 @@ class DepositService:
                 self.store.cas(other['id'], ('withdrawing',), 'withdrawn')
                 self.store.release_keys(other['id'])
                 self.store.event(other['id'], identity.user, 'withdrawn', f'with the original deposit {deposit_id}')
+                self.publish_record(other['id'])
                 cascaded.append(other['id'])
         if not self.store.cas(deposit_id, ('uploading', 'uploaded'), 'withdrawing', not_importing=True):
             raise DepositError(409, 'busy', 'the deposit changed state meanwhile; look at it again')
@@ -2290,12 +2366,116 @@ class DepositService:
         self.store.cas(deposit_id, ('withdrawing',), 'withdrawn')
         self.store.release_keys(deposit_id)
         self.store.event(deposit_id, identity.user, 'withdrawn', '')
+        self.publish_record(deposit_id)
         return {'deposit_id': deposit_id, 'state': 'withdrawn', 'withdrawn_corrections': cascaded, **result}
 
     @staticmethod
     def _require_admin(identity: Identity, what: str = 'approve or reject deposits') -> None:
         if not identity.is_admin:
             raise DepositError(403, 'forbidden', f'only admins {what}')
+
+    def _require_local_watcher(self) -> None:
+        if self.settings.central_watcher:
+            raise DepositError(409, 'central_watcher', 'this site sends its deposits to a central watcher: an admin '
+                                                       'approves or rejects them there (ant-ingest-watch approve / '
+                                                       'reject <item> --by NAME)')
+
+    # ── central watcher: signed records out, signed results in (design section 24) ───────────────
+
+    def publish_record(self, deposit_id: str) -> None:
+        """Write this deposit's signed record.json next to its uploads (a site with a central watcher only).
+
+        The version counter grows with every write, so the watcher refuses an older copy (replay). Never raises:
+        a failed write is an event, and the next state change writes again.
+        """
+        if not self.settings.central_watcher:
+            return
+        import deposit_records  # noqa: PLC0415
+
+        try:
+            record = deposit_records.export_record(self.store, deposit_id)
+            current = self.store.get(deposit_id) or {}
+            version = int(current.get('record_version') or 0) + 1
+            raw = deposit_records.sign_record(record, self.settings.site_id, deposit_id, version,
+                                              self.settings.site_key_id, self.settings.site_secret)
+            key = deposit_records.object_key(self.settings.staging_root, self.settings.site_id, deposit_id,
+                                             deposit_records.RECORD_NAME)
+            self.s3.put_object(Bucket=self.bucket, Key=key, Body=raw, ContentType='application/json')
+            self.store.update(deposit_id, record_version=version)
+        except Exception as exc:  # noqa: BLE001 - the error text never carries the secret
+            self.store.event(deposit_id, 'site', 'record_not_written', str(exc)[:200])
+
+    def refresh_result(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Read the central watcher's signed result.json of an uploaded deposit into the local record.
+
+        Verified with the watcher's public key(s); an older or equal version is ignored. Writes the redacted
+        report copy, the watch state, db id, version, held reasons and warnings, and e-mails the depositor on
+        live, held and failed (this site sends the e-mails of its deposits). Returns the (updated) record.
+        """
+        if not self.settings.central_watcher or record.get('state') != 'uploaded':
+            return record
+        import deposit_records  # noqa: PLC0415
+
+        deposit_id = record['id']
+        key = deposit_records.object_key(self.settings.staging_root, self.settings.site_id, deposit_id,
+                                         deposit_records.RESULT_NAME)
+        try:
+            response = self.s3.get_object(Bucket=self.bucket, Key=key)
+            raw = response['Body'].read(deposit_records.MAX_RESULT_BYTES + 1)
+        except Exception:  # noqa: BLE001 - no result yet (or unreadable): the record stays as it is
+            return record
+        try:
+            envelope = deposit_records.verify_result(raw, self.settings.site_id, deposit_id,
+                                                     list(self.settings.watcher_public_keys))
+        except deposit_records.RecordError as exc:
+            self.store.event(deposit_id, 'site', 'result_refused', str(exc)[:200])
+            return record
+        if envelope['version'] <= int(record.get('result_version') or 0):
+            return record
+        result = envelope['result']
+        report = result.get('report') if isinstance(result.get('report'), dict) else None
+        copy = None
+        if report is not None:
+            copy = report_copy_path(self.state_dir, deposit_id)
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_text(json.dumps(redacted_report(report, self.roots), indent=1))
+        row = {'state': str(result.get('state') or ''), 'db_id': result.get('db_id'), 'version': result.get('version'),
+               'kind': result.get('kind'), 'held_reasons': list(result.get('held_reasons') or []),
+               'warnings': list(result.get('warnings') or []), 'error': result.get('error')}
+        self.store.record_watch(deposit_id, row, self.roots, report_file=str(copy) if copy else None)
+        extra = {'result_version': envelope['version']}
+        if result.get('artefact_ref'):
+            extra['artefact_ref'] = str(result['artefact_ref'])[:200]
+        self.store.update(deposit_id, **extra)
+        self.store.event(deposit_id, 'watcher', row['state'] or 'result', str(sanitize_text(
+            row.get('error') or row.get('version') or '', self.roots))[:300])
+        updated = self.store.get(deposit_id) or record
+        marker = f'{row["state"]}:{envelope["version"]}'
+        if row['state'] in NOTIFY_DEPOSITOR_ON and updated.get('notified_state') != marker:
+            try:
+                import ingest_watch  # noqa: PLC0415
+                summary = report_summary(json.loads(copy.read_text())) if copy else None
+                if ingest_watch.notify_depositor({'notify': dict(self.settings.notify or {})}, updated, row, summary,
+                                                 lambda message: None):
+                    self.store.update(deposit_id, notified_state=marker)
+            except Exception:  # noqa: BLE001 - the e-mail is a courtesy
+                pass
+        return self.store.get(deposit_id) or updated
+
+    def site_sync(self, limit: int = 200) -> Dict[str, int]:
+        """The periodic work of a site with a central watcher: expiry, the staging sweep of its own prefix,
+        and the results of its uploaded deposits (ant-serve runs it in a background thread)."""
+        counts = {'expired': 0, 'results': 0}
+        if not self.settings.central_watcher:
+            return counts
+        counts['expired'] = len(self.expire_stale())
+        rows = self.store._rows("SELECT * FROM deposits WHERE state = 'uploaded' AND COALESCE(watch_state, '') NOT IN "
+                                "('live', 'rejected') ORDER BY updated LIMIT ?", (int(limit),))
+        for row in rows:
+            before = row.get('result_version')
+            if self.refresh_result(row).get('result_version') != before:
+                counts['results'] += 1
+        return counts
 
     def _held_row(self, record: Dict[str, Any]) -> Dict[str, Any]:
         row = read_watch_row(self.state_dir, record.get('watch_key'))
@@ -2315,6 +2495,7 @@ class DepositService:
         import ingest_watch  # noqa: PLC0415
 
         self._require_admin(identity)
+        self._require_local_watcher()
         record = self._get_own(identity, deposit_id)
         row = self._held_row(record)
         if row['state'] in ('needs_decision', 'failed'):
@@ -2373,6 +2554,7 @@ class DepositService:
         import ingest_watch  # noqa: PLC0415
 
         self._require_admin(identity)
+        self._require_local_watcher()
         record = self._get_own(identity, deposit_id)
         row = self._held_row(record)
         watch_db = ingest_watch.StateDB(self.state_dir / WATCH_DB_FILE)

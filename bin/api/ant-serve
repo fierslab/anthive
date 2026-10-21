@@ -8,6 +8,7 @@
 #   "pandas>=2.0.0",
 #   "pyyaml>=6.0",
 #   "boto3>=1.26.0",
+#   "cryptography>=42",
 #   "matplotlib>=3.7.0",
 #   "adjustText>=0.8",
 #   "seaborn>=0.13.0",
@@ -1999,6 +2000,9 @@ async def lifespan(app: FastAPI):
     # Facet caches (per kind of visitor), per-donor values and module rank tables: minutes of
     # CPU, so build them in a low-priority thread; the first pages then hit warm caches.
     _start_warmup()
+    # A site with a central deposit watcher (design section 24) expires its own deposits and reads the
+    # watcher's signed results back in a daemon thread.
+    _start_deposit_site_sync()
     # Slave-mode banner — make the deployment role obvious in the logs
     # so it's the first thing visible when debugging "why won't this
     # write?". Banner ONLY fires when role=slave is opt-in; primaries
@@ -17392,6 +17396,31 @@ def _deposit_service():
                     except Exception as exc:  # noqa: BLE001
                         log.warning("dataset deposits: resuming interrupted completes failed: %s", exc)
     return _deposit_service_instance
+
+
+DEPOSIT_SITE_SYNC_SECONDS = 120
+
+
+def _start_deposit_site_sync() -> None:
+    """Start the site sync of a central-watcher site (expiry, its staging sweep, results, e-mails). Never raises."""
+    try:
+        from config import get_dataset_deposit_settings  # noqa: PLC0415
+        if not get_dataset_deposit_settings(get_config()).get('central_watcher'):
+            return
+    except Exception as exc:  # noqa: BLE001
+        log.warning("dataset deposits: central watcher settings unreadable: %s", exc)
+        return
+
+    def loop() -> None:
+        while True:
+            try:
+                counts = _deposit_service().site_sync()
+                if counts.get('expired') or counts.get('results'):
+                    log.info("dataset deposits: site sync %s", counts)
+            except Exception as exc:  # noqa: BLE001 - the next round tries again
+                log.warning("dataset deposits: site sync failed: %s", str(exc)[:200])
+            time.sleep(DEPOSIT_SITE_SYNC_SECONDS)
+    threading.Thread(target=loop, name='deposit-site-sync', daemon=True).start()
 
 
 def _deposit_call(request: Request, action, admin_only: bool = False, status_code: int = 200,

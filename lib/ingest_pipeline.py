@@ -823,6 +823,13 @@ class PipelineConfig:
     s3_endpoint: Optional[str] = None
     min_free_gb: float = 50.0
     require_update_marker: bool = False
+    #: the bucket of ``__incoming/`` (a central watcher's ingestion bucket, design section 24); default ``bucket``
+    incoming_bucket: Optional[str] = None
+
+    @property
+    def incoming(self) -> str:
+        """The bucket deposits are pulled from (``incoming_bucket``, else the catalog ``bucket``)."""
+        return self.incoming_bucket or self.bucket
 
     @property
     def journal_dir(self) -> Path:
@@ -915,16 +922,16 @@ class Pipeline:
         if manifest is not None and manifest.get(obj.key) == obj.etag and dest.exists() \
                 and dest.stat().st_size == obj.size:
             return
-        before = head_etag(self.s3, self.config.bucket, obj.key)
+        before = head_etag(self.s3, self.config.incoming, obj.key)
         if before != obj.etag:
             raise TransientError(f'{obj.key} changed since it was listed (ETag {before} != {obj.etag})')
         try:
-            download(self.s3, self.config.bucket, obj.key, dest, obj.size)
+            download(self.s3, self.config.incoming, obj.key, dest, obj.size)
         except TransientError:
             raise
         except Exception as exc:  # noqa: BLE001 - S3 / network
             raise TransientError(f'pull of {obj.key} failed: {exc}') from exc
-        after = head_etag(self.s3, self.config.bucket, obj.key)
+        after = head_etag(self.s3, self.config.incoming, obj.key)
         if after != obj.etag:
             raise TransientError(f'{obj.key} changed during the pull')
         if dest.stat().st_size != obj.size:

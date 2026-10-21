@@ -331,12 +331,15 @@ class ArtefactPublisher:
                  delete_incoming: bool = True, notify_settings: Optional[Dict[str, Any]] = None,
                  stop_requested: Callable[[], bool] = lambda: False, server_version: str = '',
                  site_id: str = '', run: Optional[Callable[..., Any]] = None, de_runner: Any = None,
-                 dataset_catalog_prefix: Optional[str] = None, update_policy: str = 'own'):
+                 dataset_catalog_prefix: Optional[str] = None, update_policy: str = 'own',
+                 incoming_bucket: Optional[str] = None):
         self.store_root = Path(store_root)
         self.state_dir = Path(state_dir)
         self.work_root = Path(work_root)
         self.s3 = s3
-        self.bucket = bucket
+        self.bucket = bucket                       # the catalog (published artefacts)
+        #: where deposits arrive (the ingestion bucket of a central watcher, section 24); default the catalog's
+        self.incoming_bucket = incoming_bucket or bucket
         self.prefix = incoming_prefix
         self.catalog_prefix = catalog_prefix
         self.settings = dict(artefact_settings)
@@ -525,7 +528,8 @@ class ArtefactPublisher:
             store.event(record['id'], 'watcher', outcome.state,
                         str(dataset_deposit.sanitize_text(outcome.detail or row.get('version') or '', roots)))
             marker = f'{outcome.state}:{signature}'
-            if record.get('notified_state') != marker and outcome.state in dataset_deposit.NOTIFY_DEPOSITOR_ON:
+            if record.get('notified_state') != marker and outcome.state in dataset_deposit.NOTIFY_DEPOSITOR_ON \
+                    and not record.get('site_id'):         # another site's depositor: that site sends the e-mail
                 import ingest_watch  # noqa: PLC0415
                 summary = dataset_deposit.report_summary(outcome.report) if outcome.report else None
                 if ingest_watch.notify_depositor({'notify': self.notify_settings}, record, row, summary, self.log):
@@ -540,7 +544,7 @@ class ArtefactPublisher:
         cache = (obj.key, obj.etag)
         if cache not in self._marks:
             try:
-                head = self.s3.head_object(Bucket=self.bucket, Key=obj.key)
+                head = self.s3.head_object(Bucket=self.incoming_bucket, Key=obj.key)
             except Exception as exc:  # noqa: BLE001
                 raise TransientError(f'HEAD {obj.key} failed ({_code(exc)})') from exc
             if str(head.get('ETag', '')).strip('"') != obj.etag:
@@ -556,7 +560,7 @@ class ArtefactPublisher:
         def record(s3_key: str, etag: str, result: str) -> None:
             results[s3_key] = result
             self.db.record_deletion(key, s3_key, etag, result)
-        delete_consumed(self.s3, self.bucket, self.prefix, consumed, record)
+        delete_consumed(self.s3, self.incoming_bucket, self.prefix, consumed, record)
         gone = all(results.get(s3_key) in ('deleted', 'skipped:absent') for s3_key in consumed)
         self.db.upsert(key, deleted=int(gone))
 
@@ -638,7 +642,7 @@ class ArtefactPublisher:
     def _hash(self, obj: ObjInfo, entry: Dict[str, Any], keep: Optional[Path]) -> FileCheck:
         """Stream the object pinned to its listed ETag; sha256 (and MD5 for single-part ETags) on the stream."""
         try:
-            response = self.s3.get_object(Bucket=self.bucket, Key=obj.key, IfMatch=f'"{obj.etag}"')
+            response = self.s3.get_object(Bucket=self.incoming_bucket, Key=obj.key, IfMatch=f'"{obj.etag}"')
         except Exception as exc:  # noqa: BLE001
             if _code(exc) in ('PreconditionFailed', '412'):
                 raise Stop('needs_decision', f'{entry["name"]} changed in incoming while it was read')
@@ -815,7 +819,7 @@ class ArtefactPublisher:
         if source is None:
             if obj is None:
                 return f'{check.name}: the archive could not be read for its central directory'
-            source = RangedObject(self.s3, self.bucket, obj.key, obj.etag, check.size)
+            source = RangedObject(self.s3, self.incoming_bucket, obj.key, obj.etag, check.size)
         try:
             with zipfile.ZipFile(source) as archive:
                 total = 0
@@ -1092,7 +1096,7 @@ class ArtefactPublisher:
                 return
             raise Stop('needs_decision', f'{key} already exists with other content; a version is never overwritten')
         metadata = {'sha256': info['sha256'], 'deposit': record['id'], 'artefact': f'{ref}@v{number}'}
-        source = {'Bucket': self.bucket, 'Key': obj.key}
+        source = {'Bucket': self.incoming_bucket, 'Key': obj.key}
         condition = f'"{obj.etag}"'
         content_type, disposition = stored_type(name)
         try:
@@ -1343,7 +1347,7 @@ class ArtefactPublisher:
         check = self._hash(objs[0], files[0], None)
         if check.sha256 != files[0]['sha256']:
             raise Stop('needs_decision', 'the index.md in incoming is not the one the server wrote')
-        response = self.s3.get_object(Bucket=self.bucket, Key=objs[0].key, IfMatch=f'"{objs[0].etag}"')
+        response = self.s3.get_object(Bucket=self.incoming_bucket, Key=objs[0].key, IfMatch=f'"{objs[0].etag}"')
         raw = response['Body'].read(1024 * 1024 + 1)
         if hashlib.sha256(raw).hexdigest() != files[0]['sha256']:
             raise Stop('needs_decision', 'the index.md read back is not the one the server wrote')

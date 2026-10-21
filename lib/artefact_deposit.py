@@ -990,6 +990,7 @@ class ArtefactDepositService(DepositService):
         if not self.store.finish_complete(deposit_id, {'index.md': etag}, self.clock(), completed=self.clock()):
             raise DepositError(409, 'not_completed', 'the deposit was ended meanwhile; start again')
         self.store.event(deposit_id, identity.user, 'created', f'collection {data_project} ({group_id})')
+        self.publish_record(deposit_id)
         return {'deposit_id': deposit_id, 'state': 'uploaded', 'deposit_kind': 'collection',
                 'data_project': data_project, 'group_id': group_id, 'index_md': text,
                 'held': ['public_access'] if block['access'] == 'public' and self.artefact_settings.get(
@@ -1015,6 +1016,9 @@ class ArtefactDepositService(DepositService):
         """``POST /artefacts/{group_id}/{scope}/{artefact_id}/v{N}/purge`` (design 4.4): record the request;
         the watcher carries it out. The uploader of that version, the artefact's owner or an admin."""
         self._require_artefacts_active()
+        if self.settings.central_watcher:
+            raise DepositError(409, 'central_watcher', 'this site sends its deposits to a central watcher: ask an '
+                               'admin of the central site to purge the version')
         service = artefacts.ArtefactService(context.store_root, {})
         try:
             entry = service.resolve(context.index, context.policy, context.viewer, group_id, scope, artefact_id)
