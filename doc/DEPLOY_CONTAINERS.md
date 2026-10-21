@@ -132,7 +132,8 @@ Where the numbers come from:
   DuckDB spills large queries and `ant convert` stages its work on the
   scratch disk (`scratch_dir`, by default a docker volume, also under
   `/var/lib/docker`); a conversion needs room for about the size of the
-  `.h5ad` it converts. `state_dir` stays small (users, links, caches).
+  `.h5ad` it converts. The api's facet cache there takes about 2.5 GB per
+  kind of visitor on a full store (see "Cache warm-up after a start"). `state_dir` stays small (users, links, caches).
 
 ### Network
 
@@ -1073,6 +1074,27 @@ anthive:
     donor_genes: [TREM2, APOE]             # [] skips the per-donor step
     anonymous: false                       # login-only site: skip the anonymous caches
 ```
+
+The facet tables, replication families and dataset summaries are kept on
+the scratch disk too, in `tmp/facet_cache` (`/scratch/tmp/facet_cache` in
+the containers; the `tmp_dir` setting moves it). A restart whose inputs did
+not change loads them in seconds instead of building them again (about
+100 s on a full store). Each entry is stored with a key over everything it was
+built from: the release (any change of the server code), the facet result
+files under `_facet_tests/` (by size and modification time), the cohort table
+and every dataset attribute the tables carry. After `ant sync pull` brings a
+new result file, the next start rebuilds the tables and only the replication
+families that file is part of (for a human post-mortem dataset most of them,
+for a xenograft dataset only the xenograft ones); after an upgrade the first start rebuilds
+everything once. On a full store the folder takes about 2.5 GB per kind of
+visitor (signed-in, anonymous). Nothing needs to be done to keep it right. To
+clear it, which only costs one slow start, delete the folder while the stack
+runs and restart the api: `bin/ops/ant-stack ingest -- rm -rf
+/scratch/tmp/facet_cache`, then `bin/ops/ant-stack restart api` (with
+`scratch_dir` set you can also delete `<scratch_dir>/tmp/facet_cache` on the
+host). `tmp/module_rank` is cleared the same way. Do not share the scratch
+disk with other users: the cache files are Python pickles, and the api runs
+whatever such a file contains.
 
 The anonymous facet tables cost memory in the api container, about as much
 as the signed-in ones (above 1 GB on a full store); a site that only serves
