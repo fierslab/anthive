@@ -211,11 +211,41 @@ and `lib/config.py` (anthive.yaml loader).
   facet route, after its parameter checks (an unknown facet stays a 404); the donor
   routes gate inside `_donor_units_payload`. The gate opens after
   `FACET_WARMUP_GATE_MAX_SECONDS` (900). ant-mcp's `api_request` turns the 503 into a
-  plain "warming up" message. ant-serve, ant-browse and ant-mcp call
+  plain "warming up" message. The module rank step pauses `pause_seconds` only after a table it
+  built (`_module_rank_means(db_id, status)`): 2.46.4 paused after every dataset, so a restart with
+  every table cached still took datasets x 0.5 s (77 s for 153 datasets on intern). ant-serve, ant-browse and ant-mcp call
   `config.set_unknown_keys_lenient()` before loading the config. A 503 carrying `X-Anthive-Unavailable` (`EXPECTED_UNAVAILABLE_HEADER`:
   warming up, no geneset store) is logged at info once per reason, not as ERROR.
   `facets_visible` (config) only adds `hidden_by_config` to the facet
   listings; nothing is dropped from the API.
+- **Persistent facet cache** (unreleased, `lib/warm_cache.py`): `FacetResults(results_dir,
+  cache_dir=_facet_cache_dir())` keeps the gene tables, the module tables, every replication family
+  (gene and module) and the summaries of tested datasets under `<tmp_dir>/facet_cache`
+  (`config.get_tmp_dir`; `/scratch/tmp/facet_cache` in the containers), so a restart with unchanged
+  inputs loads them instead of rebuilding (dev, 153 datasets: facet and module phases 94 s without the cache,
+  127 s on a cold start that also writes it, 21 s warm, of which 6 s is the GENCODE parse that containers do not
+  have; one changed human dataset rebuilds the tables and every human family it is in, the xenograft ones load). The warm-up logs `facet cache <dir>: N loaded,
+  N built, N written (built: ...)`. Hooks are `_disk_backed`
+  inside the existing `_cached_build` builds. Keys are sha256 digests (`warm_cache.digest`, never
+  `hash()`, which changes per process): the tables key on `code_version()` (every `lib/*.py` and
+  `*.yaml` plus Python, numpy, pandas, pyarrow versions), the cohort table stat and every attribute of
+  every dataset dict with the stat (path relative to the results folder, mtime_ns, size) of its five
+  result files; a family keys on its whole unit table (`_disk_units_key`) plus the stat of the files
+  of the datasets in it, so a changed dataset recomputes only the families it is in (module families
+  also key on the directionless sets of the gene set store, which `ModuleResults._finish_tables`
+  applies after the disk load). The key is recomputed after a build and nothing is written when an
+  input changed meanwhile. Writes are a unique temp file plus `os.replace` under a per-entry `flock`;
+  a load checks the stored key and format, anything unreadable is a miss. **Never pickle** (the scratch
+  volume is shared by the api and ingest containers): an entry is one `.awc` file, a JSON header (key,
+  value as tagged JSON) followed by one parquet blob per DataFrame; object columns that are not plain
+  strings are stored as tagged JSON per cell (dicts, frozensets, lists, None vs NaN survive). A value
+  holding any other type is not cached (logged), and pyarrow before 14.0.1 turns the cache off
+  (CVE-2023-47248). At most `VISIBILITY_KINDS`
+  entries per name stay (about 1.4 GB per visitor kind on the dev store). Untested
+  summaries are never stored (their reason can come from the run logs). A key input you add to a
+  build must go into its disk key too; a change in `lib/` invalidates everything by itself. Clearing:
+  delete the folder (the next start rebuilds). Tests: `tests/test_warm_cache.py`, the `disk cache`
+  section of `tests/test_facet_results.py`.
 - **Catalog scan** walks the store with `lib/h5adstore.catalog_dataset_mds` (2.46.1), the same helper
   `ant-stack check` counts with: store-root documents, `static/` documents, `index.md`/`README.md`,
   `_` folders and inactive datasets are never datasets.
@@ -264,7 +294,9 @@ and `lib/config.py` (anthive.yaml loader).
 - **Module rank** (2.45): `GET /genesets/{study}/{experiment}/{name}/rank` (`lib/module_rank.py`) answers where a gene set's mean score
   ranks among all gene sets scored in the same dataset (scanpy source primary, UCell secondary). It reads the `.scores.parquet` sidecar,
   not `scores_index.parquet` (no cell type column, can lag the rescoring), and caches the per-dataset table under `<tmp_dir>/module_rank/`
-  keyed on sidecar and duckdb stat; the first call per dataset reads the whole sidecar (up to a minute) with at most 2 builds at once, so
+  keyed on `module_rank.table_fingerprint` (sidecar mtime and size, duckdb mtime, `table_version()` = `TABLE_FORMAT`, the SQL and
+  `celltype_groups.py/.yaml`; bump `TABLE_FORMAT` when `cell_strata` or `stratum_means` change); writes are unique temp file plus
+  rename under a per-dataset `flock`; the first call per dataset reads the whole sidecar (up to a minute) with at most 2 builds at once, so
   clients ask per dataset (`?db_id=`). Tests: `tests/test_module_rank.py`.
 
 - **Lineage and secondaries** (unreleased): dataset metadata carries

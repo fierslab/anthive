@@ -34,6 +34,7 @@ import logging
 import math
 import re
 import threading
+import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -49,6 +50,7 @@ import facet_scopes
 import gene_classes
 import replicates
 import replication
+import warm_cache
 from celltype_groups import UNMAPPED, group_info, group_of
 from donor_keys import distinct_count
 from facet_aliases import DEPRECATED_FACET_TAGS, canonical_facet
@@ -570,11 +572,15 @@ class FacetResults:
         results_dir: The facet results folder (``config.get_facet_results_dir()``,
             by default ``<h5adstore>/_facet_tests``).
         max_frames: Parsed parquet files kept in memory (LRU).
+        cache_dir: Folder of the persistent cache (``lib/warm_cache.py``) of the gene tables, the replication
+            families and the dataset summaries, reused by the next process when nothing they depend on changed
+            (ant-serve: ``<tmp_dir>/facet_cache``). None keeps everything in memory only.
     """
 
-    def __init__(self, results_dir: Path, max_frames: int = 12):
+    def __init__(self, results_dir: Path, max_frames: int = 12, cache_dir: Optional[Path] = None):
         self.results_dir = Path(results_dir)
         self.max_frames = max_frames
+        self.disk: Optional[warm_cache.DiskCache] = warm_cache.DiskCache(cache_dir) if cache_dir else None
         self._lock = threading.Lock()
         self._frames: "OrderedDict[Tuple[Tuple[str, int, int], Tuple[str, ...]], pd.DataFrame]" = OrderedDict()
         self._json: Dict[Tuple[str, int, int], Optional[dict]] = {}
@@ -778,6 +784,77 @@ class FacetResults:
         """Changes whenever any result file of the dataset changes."""
         return tuple(_file_key(p) for p in result_paths(self.results_dir, group_folder, stem).values())
 
+    # ── persistent cache (lib/warm_cache.py) ───────────────────────────────
+
+    def _stable_file_key(self, path: Path) -> Optional[Tuple[str, int, int]]:
+        """``_file_key`` with the path relative to the results folder, so a disk key does not depend on where
+        the store is mounted (containers, hosts)."""
+        key = _file_key(path)
+        if key is None:
+            return None
+        try:
+            name = str(Path(path).relative_to(self.results_dir))
+        except ValueError:
+            name = str(path)
+        return (name, key[1], key[2])
+
+    def _stable_fingerprint(self, group_folder: str, stem: str) -> Tuple:
+        return tuple(self._stable_file_key(p) for p in result_paths(self.results_dir, group_folder, stem).values())
+
+    def _disk_dataset_entries(self, datasets: Sequence[Dict[str, Any]]) -> List[Any]:
+        """Every attribute of each dataset dict (title, sha256, scope, ...) with the stat of its result files."""
+        return [[dict(sorted(dataset.items())), self._stable_fingerprint(dataset['group_folder'], dataset['stem'])]
+                for dataset in datasets]
+
+    def _disk_tables_key(self, kind: str, datasets: Sequence[Dict[str, Any]]) -> str:
+        """Disk key of a table built from every result file of ``datasets`` (resolved by ``prepare``)."""
+        return warm_cache.digest(kind, warm_cache.code_version(),
+                                 self._stable_file_key(self.results_dir / COHORT_TABLE_NAME),
+                                 self._disk_dataset_entries(datasets))
+
+    def _disk_units_key(self, kind: str, units: pd.DataFrame, datasets: Sequence[Dict[str, Any]], *extra: Any) -> str:
+        """Disk key of a value computed from one (facet, scope) table: the whole unit table (every column,
+        unit numbers included) and the stat of the result files of the datasets in it (the rows of a unit come
+        from its dataset's files only), so a change elsewhere in the store leaves it valid."""
+        by_id = {str(dataset['db_id']): dataset for dataset in datasets}
+        files = []
+        for db_id in sorted({str(value) for value in units['db_id']}) if len(units) else []:
+            dataset = by_id.get(db_id)
+            files.append([db_id, self._stable_fingerprint(dataset['group_folder'], dataset['stem'])
+                          if dataset is not None else None])
+        return warm_cache.digest(kind, warm_cache.code_version(), extra,
+                                 self._stable_file_key(self.results_dir / COHORT_TABLE_NAME),
+                                 units.to_dict(orient='records'), files)
+
+    def _disk_backed(self, name: str, key_of: Any, build: Any, keep: int = VISIBILITY_KINDS,
+                     store_if: Any = None) -> Any:
+        """``build()``, or the value a previous process stored for the same key (``key_of()``).
+
+        The key is computed again after a build and the value is stored only when it did not change (a result
+        file rewritten during the build must not be cached under the old key). ``keep`` entries per name stay
+        on disk (default: one per visitor kind; the warm-up builds the signed-in tables before the anonymous ones,
+        so the entry a new one replaces is the oldest). ``store_if(value)`` False keeps a value out of the disk
+        cache. All entries of a full store take about 1.4 GB on disk per visitor kind.
+        """
+        if self.disk is None:
+            return build()
+        try:
+            key = key_of()
+        except Exception as exc:  # noqa: BLE001 - a key we cannot compute means no disk cache, never an error
+            log.warning('facet results: no disk cache for %s: %s', name, exc)
+            return build()
+        value = self.disk.load(name, key)
+        if value is not warm_cache.MISSING:
+            return value
+        value = build()
+        try:
+            unchanged = key_of() == key
+        except Exception:  # noqa: BLE001
+            unchanged = False
+        if unchanged and (store_if is None or store_if(value)):
+            self.disk.save(name, key, value, keep)
+        return value
+
     # ── summary ────────────────────────────────────────────────────────────
 
     def summary(self, db_id: str, group_folder: str, stem: str,
@@ -806,6 +883,39 @@ class FacetResults:
             cached = self._summary_cache.get(key)
         if cached is not None:
             return cached
+
+        def disk_key() -> str:
+            supplementary = (Path(self.results_dir) / group_folder / SUPPLEMENTARY_DIRNAME
+                             / f'{stem}{SUFFIXES["gene_manifest"]}')
+            return warm_cache.digest(
+                'summary', warm_cache.code_version(), db_id, group_folder, stem, current_sha256, disease_basis,
+                '<unset>' if facet_scope is _UNSET else facet_scope, facet_exclude_reason, scope_reason,
+                self._stable_fingerprint(group_folder, stem), self._stable_file_key(self.results_dir / COHORT_TABLE_NAME),
+                self._stable_file_key(supplementary))
+
+        def compute() -> Dict[str, Any]:
+            return self._summary_from_files(db_id, group_folder, stem, current_sha256, disease_basis, facet_scope,
+                                            facet_exclude_reason, scope_reason)
+
+        # Only tested datasets go to disk: the reason of an untested one may come from the run logs, whose
+        # changes the key does not follow, and it is cheap to compute.
+        result = self._disk_backed(f'summary-{db_id}', disk_key, compute, keep=4,   # routes pass other arguments
+                                   store_if=lambda value: value.get('status') == 'tested') \
+            if self._has_results(group_folder, stem) else compute()
+        with self._lock:
+            if len(self._summary_cache) > 512:
+                self._summary_cache.clear()
+            self._summary_cache[key] = result
+        return result
+
+    def _has_results(self, group_folder: str, stem: str) -> bool:
+        paths = result_paths(self.results_dir, group_folder, stem)
+        return _file_key(paths['genes']) is not None or _file_key(paths['modules']) is not None
+
+    def _summary_from_files(self, db_id: str, group_folder: str, stem: str, current_sha256: Optional[str],
+                            disease_basis: Optional[str], facet_scope: Any, facet_exclude_reason: Optional[str],
+                            scope_reason: Optional[str]) -> Dict[str, Any]:
+        """The summary of ``summary`` computed from the result files (no cache)."""
         result = json_safe(self._compute_summary(db_id, group_folder, stem, current_sha256))
         result['disease_basis'] = disease_basis or result.get('disease_basis')
         for unit in result['units']:
@@ -833,10 +943,6 @@ class FacetResults:
         for unit in result['units']:
             if unit['facet'] in HUMAN_CELL_SEX_FACETS and unit['tested']:
                 unit['sex_control'] = controls.get((unit['cell_type'], unit['celltype_source']))
-        with self._lock:
-            if len(self._summary_cache) > 512:
-                self._summary_cache.clear()
-            self._summary_cache[key] = result
         return result
 
     def _compute_summary(self, db_id: str, group_folder: str, stem: str,
@@ -1419,8 +1525,11 @@ class FacetResults:
         """
         facet = canonical_facet(facet) if facet else facet
         prepared = self.prepare(datasets)
-        tables = self._cached_build(self._tables, ('tables', prepared.visibility), prepared.signature,
-                                    lambda: self._build_gene_tables(prepared.datasets), max_entries=VISIBILITY_KINDS)
+        tables = self._cached_build(
+            self._tables, ('tables', prepared.visibility), prepared.signature,
+            lambda: self._disk_backed('gene_tables', lambda: self._disk_tables_key('gene_tables', prepared.datasets),
+                                      lambda: self._build_gene_tables(prepared.datasets)),
+            max_entries=VISIBILITY_KINDS)
         if scope is not None:
             return tables.get((facet, scope)) or self._empty_gene_table()
         with self._lock:
@@ -1673,12 +1782,17 @@ class FacetResults:
         Meant for a background thread at server start; safe to call concurrently with requests (they
         share the builds). Returns the number of families built.
         """
+        started = time.monotonic()
         prepared = self.prepare(datasets)
         gene_classes.flags('TREM2')  # parses the GENCODE file once
+        prepared_at = time.monotonic()
         self.facet_gene_table(FACET_ORDER[0], prepared, facet_scopes.DEFAULT_SCOPE)
+        tables_at = time.monotonic()
         wanted = [(facet, scope) for facet in FACET_ORDER for scope in self.scopes_with_results(facet, prepared)]
         with ThreadPoolExecutor(max_workers=FAMILY_WORKERS) as pool:
             list(pool.map(lambda pair: self.replication_families(pair[0], prepared, exclude_secondary, pair[1]), wanted))
+        self.last_warm_seconds = {'prepare': prepared_at - started, 'gene_tables': tables_at - prepared_at,
+                                  'families': time.monotonic() - tables_at}
         return len(wanted)
 
     @staticmethod
@@ -1961,8 +2075,7 @@ class FacetResults:
         scope = scope or self.default_scope(facet)
         prepared = self.prepare(datasets)
 
-        def build() -> Dict[str, Dict[str, Any]]:
-            rows, units = self.facet_gene_table(facet, prepared, scope)
+        def compute(rows: pd.DataFrame, units: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
             families: Dict[str, Dict[str, Any]] = {}
             if len(units):
                 units = self._counted_units(units, exclude_secondary, facet)
@@ -1972,6 +2085,14 @@ class FacetResults:
                         sub = rows[rows['unit'].isin(group_units['unit'])]
                         families[group] = self._family(sub, group_units, facet)
             return families
+
+        def build() -> Dict[str, Dict[str, Any]]:
+            rows, units = self.facet_gene_table(facet, prepared, scope)
+            return self._disk_backed(
+                f'gene_families-{facet}-{scope}-{bool(exclude_secondary)}',
+                lambda: self._disk_units_key('gene_families', units, prepared.datasets, facet, scope,
+                                             bool(exclude_secondary)),
+                lambda: compute(rows, units))
 
         return self._cached_build(self._families, (facet, scope, bool(exclude_secondary), prepared.visibility),
                                   prepared.signature, build, max_entries=FAMILY_CACHE_ENTRIES * VISIBILITY_KINDS)
