@@ -21,6 +21,7 @@ prod:   browser ─https─▶ nginx :443 (TLS [+ auth]) ─http─▶ Caddy 127
 | --- | --- | --- |
 | `Caddyfile` | ✅ | The shared, env-driven router. All path routing lives here. |
 | `caddy-{tls,auth,http-redirect,servers}.{dev,prod}` | ✅ | Snippets imported by the Caddyfile; pick dev vs prod behaviour. |
+| `caddy-mcp.{on,off}` | ✅ | What `/mcp` does: proxy to ant-mcp (`on`, default) or a JSON 404 (`off`, a site without MCP: `ui.mcp: false`). Picked by `ANTHIVE_MCP_SNIPPET`. |
 | `authelia/` | partial | `configuration.example.yml` is tracked; the real `configuration.yml`, `secrets/`, `users_database.yml` are gitignored. |
 | `examples/` | ✅ | Templates for the per-instance files of a host install (nginx vhosts, systemd unit, sync and library cron/timer jobs). Placeholders only. |
 | `nginx.conf` | ✅ | Dev-only nginx shim for `make serve-nginx` (no login; drops every identity header). |
@@ -46,6 +47,7 @@ vars the `Caddyfile` reads. Defaults (no `--prod`) reproduce dev behaviour.
 | `ANTHIVE_AUTH_SNIPPET` | `caddy-auth.dev` | `caddy-auth.prod` (empty — nginx auths, Caddy trusts headers) |
 | `ANTHIVE_HTTP_REDIRECT_SNIPPET` | `caddy-http-redirect.dev` | `caddy-http-redirect.prod` (empty) |
 | `ANTHIVE_SERVERS_SNIPPET` | `caddy-servers.dev` (empty) | `caddy-servers.prod` (trust nginx on loopback for `X-Forwarded-*`) |
+| `ANTHIVE_MCP_SNIPPET` | `caddy-mcp.on` | `caddy-mcp.on`; `caddy-mcp.off` when `ui.mcp` is false (set by ant-supervisor) |
 | `ANTHIVE_CADDY_BIND` | `0.0.0.0 ::` | `127.0.0.1` |
 | `ANTHIVE_API_PORT` / `ANTHIVE_BROWSE_PORT` | from `anthive.yaml` | from `anthive.yaml` |
 

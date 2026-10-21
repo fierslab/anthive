@@ -199,12 +199,15 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 	# MCP server (FastMCP streamable-http). ant-mcp authenticates every
 	# request itself (personal link /mcp/u/<token> or Bearer amcp_ token)
 	# and never reads client identity headers, but strip them anyway.
+	# ANTHIVE_MCP_SNIPPET: caddy-mcp.on proxies to ant-mcp (default),
+	# caddy-mcp.off answers a JSON 404 (ui.mcp false or services.mcp false:
+	# no mcp service runs). Set by ant-stack and ant-supervisor.
 	handle /mcp* {
 		request_header -Remote-User
 		request_header -Remote-Groups
 		request_header -Remote-Name
 		request_header -Remote-Email
-		reverse_proxy {$ANTHIVE_MCP_HOST:localhost}:{$ANTHIVE_MCP_PORT:8090}
+		import {$ANTHIVE_MCP_SNIPPET:caddy-mcp.on}
 	}
 
 	# MCP clients (per RFC 8414 / MCP spec) probe many discovery URLs
