@@ -88,3 +88,41 @@ def test_config_defaults_and_validation():
         config.get_dataset_deposit_settings({'datasets_deposit_max_gb': 'lots'})
     watch = config.get_dataset_deposit_settings({'ingest_watch': {'prefix': '__incoming_test'}})
     assert watch['prefix'] == '__incoming_test/'
+
+
+# ── central watcher (design section 24) ─────────────────────────────────────
+
+CENTRAL = {'ingestion_bucket': 'anthive-ingest', 'watcher_public_keys': ['ed25519:' + 'A' * 43 + '='], 'key_id': 'k2'}
+
+
+def test_render_central_watcher_site(tmp_path, ant_stack):
+    site = _site(tmp_path, ant_stack, services={'dataset_deposit': True}, s3=S3,
+                 datasets={'site_id': 'intern', 'central_watcher': CENTRAL})
+    ant_stack.ensure_secrets(site)
+    for name, value in (('s3_access_key_id', 'RW'), ('s3_secret_access_key', 'RWS'),
+                        ('s3_ingest_access_key_id', 'ING'), ('s3_ingest_secret_access_key', 'INGS')):
+        _secret(site, name, value)
+    stack = ant_stack.render(site, quiet=True)
+    api = yaml.safe_load((stack / 'anthive-api.yaml').read_text())
+    assert api['datasets_deposit_central_watcher'] is True and api['datasets_deposit_site_key_id'] == 'k2'
+    assert api['datasets_deposit_s3']['bucket'] == 'anthive-ingest'
+    assert api['datasets_deposit_s3']['access_key_id'] == 'ING'          # never the main pair
+    assert api['datasets_deposit_catalog_bucket'] == 'b'
+    assert api['datasets_deposit_watcher_public_keys'] == CENTRAL['watcher_public_keys']
+    serve = yaml.safe_load((stack / 'anthive.yaml').read_text())
+    assert 'datasets_deposit_s3' not in serve
+
+
+def test_check_central_watcher_site(tmp_path, ant_stack, capsys):
+    site = _site(tmp_path, ant_stack, services={'dataset_deposit': True}, s3=S3,
+                 datasets={'site_id': 'intern', 'central_watcher': {**CENTRAL, 'watcher_public_keys': []}})
+    problems = ant_stack._check_datasets(site)
+    assert any('s3_ingest_access_key_id' in problem for problem in problems)
+    assert any('watcher_public_keys is empty' in problem for problem in problems)
+    out = capsys.readouterr().out
+    assert 'intern.keys' in out and 'ant-stack watch' in out
+
+
+def test_central_watcher_validation(tmp_path, ant_stack):
+    with pytest.raises(ant_stack.SiteError, match='watcher_public_keys'):
+        _site(tmp_path, ant_stack, datasets={'central_watcher': {'ingestion_bucket': 'x', 'watcher_public_keys': ['abc']}})

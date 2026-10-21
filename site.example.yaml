@@ -186,6 +186,19 @@ datasets:
   incoming_prefix: __incoming/   # where the watcher looks (the api presigns there); the watcher must use the same
   catalog_prefix: null      # where published files live on S3; default s3.prefix (the ant-sync layout)
   watcher_config: null      # host path of the watcher's anthive.yaml, if it has its own: `check` compares the prefixes
+  # Deposits ingested by ONE central watcher on another host (since 2.47.0; doc/DESIGN_dataset_ingestion.md
+  # section 24). Set ingestion_bucket to switch it on: the api presigns into that bucket with the key pair in
+  # <state_dir>/secrets/s3_ingest_access_key_id + s3_ingest_secret_access_key (the main s3 keys can stay on the
+  # host), writes each deposit's record.json signed with <state_dir>/secrets/deposit_site_secret (created by the
+  # api at its first start; copy it to the watcher host, `check` says how), and reads the watcher's signed
+  # result.json back. No watcher runs on this site (`ant-stack watch` refuses).
+  central_watcher:
+    ingestion_bucket: null  # e.g. anthive-ingest: holds __deposits/<site_id>/ and __incoming/
+    endpoint: null          # default s3.endpoint
+    region: null            # default s3.region
+    use_path_style: null    # default s3.use_path_style
+    key_id: k1              # id of the site secret (change with a new secret to rotate)
+    watcher_public_keys: [] # 'ed25519:<base64>' from `ant ingest-watch result-key` on the watcher host
 
 # Artefact store (since 2.47.0; doc/DESIGN_artefacts.md): versioned analysis files of datasets and
 # collections. The read routes always serve what the store holds; `enabled` switches deposits on. They
