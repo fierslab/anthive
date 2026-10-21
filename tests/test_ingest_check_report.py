@@ -10,7 +10,7 @@ from tests.ingest_helpers import Submission
 
 #: The ids are a contract with the curator skill (doc/DESIGN_dataset_ingestion.md section 8.3): never rename.
 FROZEN_IDS = [
-    'files.sha256', 'files.size', 'files.filename', 'h5ad.structure', 'h5ad.obs_columns', 'duckdb.integrity',
+    'files.sha256', 'files.size', 'files.filename', 'h5ad.structure', 'h5ad.obs_columns', 'h5ad.embeddings', 'duckdb.integrity',
     'meta.md_parse', 'meta.catalog', 'meta.required_keys', 'meta.index_md', 'mus.vocab', 'version.initial',
     'layers.counts', 'layers.x_lognorm', 'layers.consistency', 'genes.ids',
     'facets.namespace', 'facets.mapping_static', 'facets.mapping_data', 'facets.unmapped_values',
@@ -25,7 +25,7 @@ FROZEN_IDS = [
 
 def test_check_ids_are_frozen():
     assert sorted(ingest_check.check_ids()) == sorted(FROZEN_IDS)
-    assert len(set(FROZEN_IDS)) == 35
+    assert len(set(FROZEN_IDS)) == 36
 
 
 def test_every_check_has_a_docstring_and_a_family():

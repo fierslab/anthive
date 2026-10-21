@@ -52,7 +52,7 @@ def test_running_every_check_changes_nothing_but_the_scratch_dir(populated):
     database = populated.duckdb()
     with populated.context(duckdb_path=database) as ctx:
         results = run_checks(ctx)
-    assert len(results) == 35
+    assert len(results) == 36
     assert {name: snapshot(folder) for name, folder in (('group', populated.group_dir), ('store', populated.store))} == watched
     assert not any(populated.group_dir.glob('*.log')) and not (populated.group_dir / 'tmp').exists()
     assert populated.scratch.exists()                      # the only place anything was written

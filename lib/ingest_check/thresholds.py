@@ -35,6 +35,16 @@ GENES_UNIVERSE_MIN_DATASETS = 3     # fewer datasets of the organism and the sha
 # files
 MIN_DESCRIPTION_CHARS = 200
 
+# h5ad.embeddings: every dense numeric 2-D obsm matrix (dataframe-style entries skipped); the rule of vark's local
+# check (vark 487d259). A cell has no coordinate when its row is all zero or holds NaN or inf. An embedding named
+# X_* fails when more than EMBEDDING_NO_COORD_FAIL_CELLS cells or more than EMBEDDING_NO_COORD_FAIL_FRACTION of the
+# cells have no coordinate and warns below; other obsm names only warn.
+EMBEDDING_NO_COORD_FAIL_CELLS = 100
+EMBEDDING_NO_COORD_FAIL_FRACTION = 0.01
+EMBEDDING_FAIL_PREFIX = 'X_'
+EMBEDDING_COLLAPSED_VARIANCE_RATIO = 1e-6  # a dimension whose variance is below this times the largest one's: warning
+EMBEDDING_READ_ROWS = 100_000              # rows read per block (memory bound for big obsm matrices)
+
 # donor.uid_resolves
 UID_FALLBACK_WARN_FRACTION = 0.20
 

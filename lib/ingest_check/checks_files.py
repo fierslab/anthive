@@ -174,6 +174,110 @@ def h5ad_obs_columns(ctx) -> Outcome:
     return ok(f'{len(plan["stored"])} obs columns will be stored', **details)
 
 
+def embedding_stats(h5ad_path) -> list:
+    """Per 2-D numeric ``obsm`` matrix: shape, cells without a coordinate (row all zero or with NaN / inf;
+    ``zero_rows`` and ``non_finite_rows`` count the two kinds), non-finite values and collapsed dimensions.
+
+    Read with h5py in row blocks (``thresholds.EMBEDDING_READ_ROWS``); a dataframe or sparse obsm entry is
+    listed with ``skipped`` and its encoding. Variances are over the finite values of each dimension.
+    """
+    import h5py  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
+
+    from . import thresholds  # noqa: PLC0415
+
+    results = []
+    with h5py.File(h5ad_path, 'r') as handle:
+        group = handle.get('obsm')
+        if not isinstance(group, h5py.Group):
+            return results
+        for name in group:
+            node = group[name]
+            if not isinstance(node, h5py.Dataset) or node.ndim != 2 or node.dtype.kind not in 'fiu':
+                encoding = node.attrs.get('encoding-type', '') if hasattr(node, 'attrs') else ''
+                results.append({'name': str(name), 'skipped': str(encoding.decode() if isinstance(encoding, bytes)
+                                                               else encoding or 'not a dense numeric matrix')})
+                continue
+            n_rows, n_dims = (int(value) for value in node.shape)
+            zero_rows = non_finite = non_finite_rows = no_coordinate = 0
+            count = np.zeros(n_dims)
+            total = np.zeros(n_dims)
+            total_sq = np.zeros(n_dims)
+            for first in range(0, n_rows, thresholds.EMBEDDING_READ_ROWS):
+                block = np.asarray(node[first:first + thresholds.EMBEDDING_READ_ROWS], dtype=np.float64)
+                finite = np.isfinite(block)
+                non_finite += int((~finite).sum())
+                bad_row = ~finite.all(axis=1)
+                zero_row = np.all(block == 0, axis=1)
+                non_finite_rows += int(bad_row.sum())
+                zero_rows += int(zero_row.sum())
+                no_coordinate += int((bad_row | zero_row).sum())
+                values = np.where(finite, block, 0.0)
+                count += finite.sum(axis=0)
+                total += values.sum(axis=0)
+                total_sq += (values ** 2).sum(axis=0)
+            with np.errstate(invalid='ignore', divide='ignore'):
+                mean = total / np.maximum(count, 1)
+                variance = np.maximum(total_sq / np.maximum(count, 1) - mean ** 2, 0.0)
+            largest = float(variance.max()) if n_dims else 0.0
+            collapsed = [int(index) for index in range(n_dims)
+                         if largest > 0 and variance[index] < thresholds.EMBEDDING_COLLAPSED_VARIANCE_RATIO * largest]
+            if largest == 0 and n_dims:
+                collapsed = list(range(n_dims))
+            results.append({'name': str(name), 'n_cells': n_rows, 'n_dims': n_dims, 'no_coordinate': no_coordinate,
+                            'zero_rows': zero_rows, 'non_finite_rows': non_finite_rows, 'non_finite': non_finite,
+                            'collapsed_dims': collapsed})
+    return results
+
+
+@check('h5ad.embeddings', needs=('h5ad',))
+def h5ad_embeddings(ctx) -> Outcome:
+    """Every obsm embedding: cells without a coordinate (row all zero or with NaN / inf; an X_* embedding fails
+    above 100 cells or 1% of the cells, other names warn), collapsed dimensions (warning). vark's rule."""
+    from . import thresholds  # noqa: PLC0415
+
+    try:
+        stats = embedding_stats(ctx.h5ad_path)
+    except Exception as exc:  # noqa: BLE001 - h5ad.structure reports an unreadable file
+        return ok(f'not judged: obsm cannot be read ({type(exc).__name__})')
+    checked = [item for item in stats if 'skipped' not in item]
+    details = {'embeddings': stats,
+               'rule': f'cells without a coordinate (row all zero or with NaN / inf): an error for '
+                       f'{thresholds.EMBEDDING_FAIL_PREFIX}* embeddings above '
+                       f'{thresholds.EMBEDDING_NO_COORD_FAIL_CELLS} cells or '
+                       f'{thresholds.EMBEDDING_NO_COORD_FAIL_FRACTION:.0%} of the cells, else a warning (other names '
+                       f'always a warning); dimensions with a variance below '
+                       f'{thresholds.EMBEDDING_COLLAPSED_VARIANCE_RATIO:g} of the largest: warning'}
+    if not checked:
+        return ok('no dense obsm embedding to check', **details)
+    errors, warnings = [], []
+    for item in checked:
+        name, n_cells, missing = item['name'], item['n_cells'], item['no_coordinate']
+        if missing:
+            share = missing / max(n_cells, 1)
+            kinds = [part for part in (f"{item['zero_rows']:,} all zero" if item['zero_rows'] else '',
+                                       f"{item['non_finite_rows']:,} with NaN or inf" if item['non_finite_rows'] else '')
+                     if part]
+            text = f'{name}: {missing:,} of {n_cells:,} cells ({share:.1%}) have no coordinate ({", ".join(kinds)})'
+            too_many = share > thresholds.EMBEDDING_NO_COORD_FAIL_FRACTION or missing > thresholds.EMBEDDING_NO_COORD_FAIL_CELLS
+            if too_many and name.startswith(thresholds.EMBEDDING_FAIL_PREFIX):
+                errors.append(text)
+            else:
+                warnings.append(text)
+        if item['collapsed_dims']:
+            dims = item['collapsed_dims']
+            warnings.append(f"{name}: {len(dims)} of {item['n_dims']} dimensions have (almost) no variance "
+                            f"(dimension {', '.join(str(d + 1) for d in dims[:8])}{' ...' if len(dims) > 8 else ''})")
+    fix = ('Recompute the embedding on all cells of the h5ad (zero rows usually mean it was computed on part of '
+           'a concatenation and padded), or leave it out of obsm.')
+    if errors:
+        return fail('; '.join(errors + warnings), fix, **details)
+    if warnings:
+        return warn('; '.join(warnings), fix, **details)
+    return ok(f"{len(checked)} embedding(s) with a coordinate for every cell and no collapsed dimension: "
+              + ', '.join(item['name'] for item in checked), **details)
+
+
 def _report_lines(output: str) -> list:
     """Lines of the tool's ``WARNINGS & ERRORS`` block, without the banner and the final verdict."""
     lines: list = []

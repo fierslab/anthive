@@ -333,6 +333,10 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - `ant-ingest-check` has a 35th check, `h5ad.obs_columns`: it names every obs column ant-convert will skip and
   why (case collision such as `Sex` / `sex`, reserved name, a text column above the 1,000 values of the default
   `obscat_include`). Case collisions and reserved names warn; nothing fails.
+- A 36th check, `h5ad.embeddings`, reads every dense numeric 2-D obsm matrix (vark's local rule): a cell has no
+  coordinate when its row is all zero or holds NaN or inf; an `X_*` embedding fails above 100 such cells or 1% of
+  the cells and warns below, other obsm names only warn; a dimension whose variance is below 1e-6 of the largest
+  warns. F26/PFC's X_pca (215,210 of 304,723 cells all zeros) fails it.
 
 ### Client sync (audit 2026-10-20)
 
