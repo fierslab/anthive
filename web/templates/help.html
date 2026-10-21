@@ -12,8 +12,8 @@
 {% set _skills_install_guide = _skills_repo ~ '/-/blob/main/INSTALL.md' %}
 {% set _skills_update = 'DISABLE_TELEMETRY=1 npx skills update -g' %}
 {% set _skills = [
-  ('anthive-basics', 'Start here: connecting (MCP or REST), finding datasets, several servers, ground rules.'),
-  ('anthive-setup', 'After the first install: updating the skills and vark, adding a second anthive server, replacing a revoked MCP link, finding out why tools are missing.'),
+  ('anthive-basics', 'Start here: connecting (MCP or REST), finding datasets, several servers, ground rules.' if ui.mcp else 'Start here: connecting over REST, finding datasets, several servers, ground rules.'),
+  ('anthive-setup', 'After the first install: updating the skills and vark, adding a second anthive server, replacing a revoked MCP link, finding out why tools are missing.' if ui.mcp else 'After the first install: updating the skills and vark, adding a second anthive server, finding out why tools are missing.'),
   ('anthive-dataset-analysis', 'Expression, plots, module scores, SQL, and statistics without overclaiming.'),
   ('anthive-literature', 'Searching and citing the paper library, and combining it with the data.'),
   ('anthive-paper-upload', "Preparing a paper's metadata and uploading it to the paper library. Only useful if you have upload rights."),
@@ -77,26 +77,28 @@
     microglia and other brain cells in health and Alzheimer's disease, together
     with a library of the papers behind it.
     {% if n_datasets is not none %}It currently holds <strong>{{ n_datasets }}</strong> datasets{% if n_collections is not none %} in <strong>{{ n_collections }}</strong> collections{% endif %}{% if n_genesets is not none %} and <strong>{{ n_genesets }}</strong> gene sets{% endif %}.{% endif %}
-    You can explore it in the browser, from your own code, or through an AI
-    assistant connected with your personal MCP link.
+    {% if ui.api and ui.mcp %}You can explore it in the browser, from your own code, or through an AI
+    assistant connected with your personal MCP link.{% elif ui.mcp %}You can explore it in the browser or
+    through an AI assistant connected with your personal MCP link.{% elif ui.api %}You can explore it in the
+    browser or from your own code.{% else %}You explore it in the browser.{% endif %}
   </div>
 
   <details class="help-section quickstart" id="quickstart" open><summary><h2 class="section-head">Quick start</h2></summary>
     <ol>
       <li><strong>Sign in and look around.</strong> The site asks for your login once per session. The <a href="/">front page</a> lists every collection; type in the search box (a gene, a disease, an author, a dataset code) or open <em>Filters</em>, then open a dataset to see its cells, plots and papers.</li>
-      <li><strong>Connect your AI client.</strong> MCP is the way AI assistants use outside tools; a personal MCP link lets yours use anthive as you. Open your name at the top right and choose <strong>Connect an MCP client</strong>, which takes you to <a href="/account/mcp" id="quickstart-mcp-link">your MCP page</a>, and create a link there. Keep it private, it works like a password.
+      {% if ui.mcp %}<li><strong>Connect your AI client.</strong> MCP is the way AI assistants use outside tools; a personal MCP link lets yours use anthive as you. Open your name at the top right and choose <strong>Connect an MCP client</strong>, which takes you to <a href="/account/mcp" id="quickstart-mcp-link">your MCP page</a>, and create a link there. Keep it private, it works like a password.
         <ul>
           <li><strong>Agents that can run commands</strong> (Claude Code, Codex, OpenCode, Cursor) are quickest. Copy the setup prompt from your MCP page and paste it into the agent: it connects anthive and installs the skills in one go, so you can skip step 3.</li>
           <li><strong>Other clients</strong>, including Claude Desktop and claude.ai, are set up by hand. Your MCP page has ready-made snippets with your link filled in, and the <a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener" id="quickstart-mcp-clients-doc">client guide on GitLab</a> walks through more than 20 clients step by step.</li>
         </ul>
-      </li>
-      <li><strong>Install the skills.</strong> Skills are short written instructions your assistant reads when a task fits: which tool to use first, how to cite, which statistics not to trust.
+      </li>{% endif %}
+      {% if ui.mcp or ui.api %}<li><strong>Install the skills.</strong> Skills are short written instructions your assistant reads when a task fits: which tool to use first, how to cite, which statistics not to trust.
         <ul>
           <li>In {{ _harness_links }}, Cursor, Gemini CLI and most other agents that read skill folders, run this once in a terminal. It needs <a href="https://nodejs.org/" target="_blank" rel="noopener">Node.js</a>, the free program that provides <code>npx</code>.
             <div class="cmd"><pre id="quickstart-skills-cmd">{{ _skills_install }}</pre><button type="button" data-copy-help>Copy</button></div>
             <p>Replace <code>claude-code codex opencode pi</code> with the apps you use, separated by spaces: <code>claude-code</code> (Claude Code), <code>codex</code> (Codex), <code>gemini-cli</code> (Gemini CLI), <code>opencode</code> (OpenCode), <code>pi</code> (Pi), <code>cursor</code> (Cursor), <code>github-copilot</code> (GitHub Copilot). Other names, and every step in detail, are in the <a href="{{ _skills_install_guide }}" target="_blank" rel="noopener">skills install guide</a>. Check the install with <code>ls ~/.claude/skills</code> (Claude Code only) or <code>ls ~/.agents/skills</code> (the other apps).</p>
           </li>
-          <li>In Claude Desktop and claude.ai, download the zips and upload each one under Customize &gt; Skills, with code execution switched on (<a href="#skills-claude-apps">step by step</a>). Then add your MCP link under Customize &gt; Connectors.
+          <li>In Claude Desktop and claude.ai, download the zips and upload each one under Customize &gt; Skills, with code execution switched on (<a href="#skills-claude-apps">step by step</a>).{% if ui.mcp %} Then add your MCP link under Customize &gt; Connectors.{% endif %}
             <ul class="zips">
               {% for name, _desc in _skills %}<li><a href="{{ _skills_repo }}/-/raw/main/zips/{{ name }}.zip?inline=false">{{ name }}.zip</a></li>
               {% endfor %}
@@ -109,12 +111,12 @@
           <li class="prompt">"Which datasets have human microglia from Alzheimer's disease donors? Show APOE by disease in one of them and tell me what the papers in the library say about it."</li>
           <li class="prompt">"Search the paper library for what is known about TREM2 in microglia, then check whether TREM2 expression differs between the disease groups in one of the datasets."</li>
         </ul>
-      </li>
+      </li>{% endif %}
     </ol>
-    <p>Writing scripts instead? The <a href="/api-guide" id="quickstart-api-guide-link">API page</a> shows how to sign in and make your first calls with curl, Python and vark.</p>
+    {% if ui.api %}<p>Writing scripts instead? The <a href="/api-guide" id="quickstart-api-guide-link">API page</a> shows how to sign in and make your first calls with curl, Python and vark.</p>{% endif %}
   </details>
 
-  <input type="search" class="filter" id="help-filter" placeholder="Search this help page (for example: MCP, skills, download, library)" aria-label="Search this help page">
+  <input type="search" class="filter" id="help-filter" placeholder="Search this help page (for example: {% if ui.mcp %}MCP, skills, {% endif %}download, library)" aria-label="Search this help page">
   <div class="filter-status" id="help-filter-status"></div>
   <div class="expand-all"><button type="button" id="help-expand-all">Expand all sections</button> <button type="button" id="help-collapse-all">Collapse all</button></div>
 
@@ -125,8 +127,9 @@
       <li><a href="#finding">Finding data</a></li>
       <li><a href="#pages">Collection and dataset pages</a></li>
       <li><a href="#plots">Plots</a></li>
-      <li><a href="#genes">Genes, gene sets and facets</a></li>
+      <li><a href="#genes">{{ 'Genes, gene sets and facets' if ui.facets else 'Genes and gene sets' }}</a></li>
       <li><a href="#per-cell-per-donor">Per cell vs per donor</a></li>
+      {% if ui.facets %}
       <li><a href="#facet-effects">Facets and facet effects</a>
         <ul>
           <li><a href="#facet-counting">Replication across cohorts</a></li>
@@ -135,18 +138,25 @@
           <li><a href="#glossary">Glossary</a></li>
         </ul>
       </li>
+      {% else %}
+      <li><a href="#glossary">Glossary</a></li>
+      {% endif %}
       <li><a href="#papers">The paper library</a></li>
+      {% if ui.mcp or ui.api %}
       <li><a href="#ai">Working with AI assistants</a>
         <ul>
+          {% if ui.mcp %}
           <li><a href="#mcp">MCP: connect an assistant</a></li>
           <li><a href="#mcp-clients">Setting up each client</a></li>
           <li><a href="#mcp-offers">What the MCP server offers</a></li>
+          {% endif %}
           <li><a href="#skills">Skills</a></li>
           <li><a href="#servers">Several anthive servers</a></li>
           <li><a href="#ai-practice">Good practice and limits</a></li>
         </ul>
       </li>
-      <li><a href="#code">Programmatic access</a></li>
+      {% endif %}
+      {% if ui.api %}<li><a href="#code">Programmatic access</a></li>{% endif %}
       <li><a href="#account">Accounts, privacy and getting help</a></li>
     </ol>
   </nav>
@@ -167,7 +177,7 @@
     {{ help_topic_html('plots') }}
   </details>
 
-  <details class="help-section" id="genes"><summary><h2 class="section-head">Genes, gene sets and facets</h2></summary>
+  <details class="help-section" id="genes"><summary><h2 class="section-head">{{ 'Genes, gene sets and facets' if ui.facets else 'Genes and gene sets' }}</h2></summary>
     {{ help_topic_html('genes') }}
   </details>
 
@@ -175,6 +185,7 @@
     {{ help_topic_html('per-cell-per-donor') }}
   </details>
 
+  {% if ui.facets %}
   <details class="help-section" id="facet-effects"><summary><h2 class="section-head">Facets and facet effects</h2></summary>
     {{ help_topic_html('facet-effects') }}
   </details>
@@ -190,9 +201,10 @@
   <details class="help-section" id="donor-variability"><summary><h2 class="section-head">Donor variability: how much do donors differ?</h2></summary>
     {{ help_topic_html('donor-variability') }}
   </details>
+  {% endif %}
 
   <details class="help-section" id="glossary"><summary><h2 class="section-head">Glossary</h2></summary>
-    <p>Short definitions of the terms used on the facet, gene and gene set pages. The info balloons on those pages link here.</p>
+    <p>Short definitions of the terms used on the {{ 'facet, gene and gene set' if ui.facets else 'gene and gene set' }} pages. The info balloons on those pages link here.</p>
     <dl class="glossary">
       {{ help_glossary_html() }}
     </dl>
@@ -202,13 +214,19 @@
     {{ help_topic_html('papers') }}
   </details>
 
+  {% if ui.mcp or ui.api %}
   <details class="help-section" id="ai"><summary><h2 class="section-head">Working with AI assistants</h2></summary>
+    {% if ui.mcp %}
     <p>You can let an AI assistant (Claude, ChatGPT-based tools, Cursor, VS Code, Codex, OpenCode and others) search, plot and analyse anthive data for you, and read the papers. Two pieces work together:</p>
     <ul>
       <li><strong>MCP</strong> is the live connection: it lets the assistant use anthive, as you, through a personal link.</li>
       <li><strong>Skills</strong> are written know-how installed in your assistant: how to use anthive well, which caveats matter, how to cite. They are loaded automatically when relevant.</li>
     </ul>
+    {% else %}
+    <p>You can let an AI assistant that runs commands (Claude Code, Codex, OpenCode, Cursor and others) search, plot and analyse anthive data for you through the REST API or vark. <strong>Skills</strong>, written know-how installed in your assistant, tell it how to use anthive well, which caveats matter and how to cite.</p>
+    {% endif %}
     <p id="ai-provider-note">Anything anthive returns to your AI client, including text from papers and datasets, is sent to that client's AI provider.</p>
+    {% if ui.mcp %}
     <p>Use both if your assistant supports skills; MCP alone works too.</p>
 
     <h3 class="subsection-head" id="mcp">MCP: connect an assistant</h3>
@@ -252,7 +270,7 @@
       <tr><td><code>search_datasets</code></td><td>Search and filter the datasets.</td></tr>
       <tr><td><code>get_dataset_info</code></td><td>Details of one dataset: layers, embeddings, annotation columns.</td></tr>
       <tr><td><code>get_dataset_context</code></td><td>Background before analysing a dataset: metadata, caveats, exact column names, module scores and the source paper's methods.</td></tr>
-      <tr><td><code>explain</code></td><td>The maintainers' plain-language text for a topic or glossary term (facets, replication, scopes, caveats, ...). Assistants are told to call it before explaining these things to you. The same texts are on this page and at <code>/api/help</code>.</td></tr>
+      <tr><td><code>explain</code></td><td>The maintainers' plain-language text for a topic or glossary term ({{ 'facets, replication, scopes, caveats, ...' if ui.facets else 'gene set scores, per cell vs per donor, ...' }}). Assistants are told to call it before explaining these things to you. The same texts are on this page{% if ui.api %} and at <code>/api/help</code>{% endif %}.</td></tr>
       <tr><td><code>search_genes</code></td><td>Find gene names in a dataset (names are case-sensitive).</td></tr>
       <tr><td><code>plot</code></td><td>Make a plot and return it, with its link.</td></tr>
       <tr><td><code>analytics_schema</code></td><td>Show the tables and columns available for queries.</td></tr>
@@ -261,12 +279,14 @@
       <tr><td><code>module_score</code></td><td>Score a gene set per cell (like scanpy <code>score_genes</code> or Seurat <code>AddModuleScore</code>).</td></tr>
       <tr><td><code>list_module_scores</code></td><td>Module scores already computed for a dataset; optionally each set's <a href="#glossary-rank-among-gene-sets">rank among gene sets</a> in that dataset.</td></tr>
       <tr><td><code>list_genesets</code>, <code>get_geneset</code></td><td>Browse the curated gene sets and fetch one with its genes; with a dataset, the set's rank among the gene sets scored there.</td></tr>
+      {% if ui.facets %}
       <tr><td><code>facet_overview</code></td><td>One facet in one call: per cell type group, how many genes replicate across cohorts and the strongest of them.</td></tr>
       <tr><td><code>facet_effects</code>, <code>facet_top_genes</code></td><td>One gene across cohorts for the facets, and the genes that replicate in the most cohorts.</td></tr>
       <tr><td><code>module_facet_effects</code>, <code>facet_top_modules</code></td><td>The same for gene sets, with the member genes that replicate.</td></tr>
       <tr><td><code>facet_donor_values</code></td><td>The values per donor behind one result, with a link to the per donor plot; optionally for one dataset.</td></tr>
       <tr><td><code>get_facet_tests</code>, <code>facet_units</code></td><td>The facet tests of one dataset (counts up and down, rows, models) and which units were tested.</td></tr>
       <tr><td><code>donor_variability</code></td><td>How much donors differ for a gene or gene set, the genes that vary most in several cohorts, or one dataset's units and most variable genes (exploratory).</td></tr>
+      {% endif %}
       <tr><td><code>list_de_studies</code>, <code>de_study</code>, <code>gene_de</code></td><td>Differential expression stored with a dataset by its authors or the lab: the studies, one study's contrasts and top genes, and one gene in every study. Not anthive's own tests; cell-level studies are marked descriptive.</td></tr>
       <tr><td><code>donor_groups</code></td><td>Datasets that share donors, so they are not counted twice.</td></tr>
       <tr><td><code>search_literature</code></td><td>Search the full text of the library papers; returns passages with the citation, page and section.</td></tr>
@@ -281,9 +301,10 @@
       <li><code>/mcp__anthive__literature_in_our_data</code> with a topic: what the papers say, and whether the data agree.</li>
     </ul>
     <p>And two <strong>resources</strong>, documents your client can attach (Claude Desktop and Claude Code support this): <code>anthive://guide</code>, how to use anthive well, and <code>anthive://dataset/&lt;collection&gt;/&lt;dataset&gt;/context</code>, the background of one dataset.</p>
+    {% endif %}
 
     <h3 class="subsection-head" id="skills">Skills</h3>
-    <p>A <strong>skill</strong> is a small folder with instructions (a <code>SKILL.md</code>) that your assistant loads by itself when a task fits. Where MCP gives the assistant access, a skill gives it judgement: which tool to call first, how to avoid misleading statistics, how to cite. Skills follow an open format, so the same skills work in Claude Code, Codex, OpenCode, Cursor, Gemini CLI, GitHub Copilot and many other agents.</p>
+    <p>A <strong>skill</strong> is a small folder with instructions (a <code>SKILL.md</code>) that your assistant loads by itself when a task fits. {% if ui.mcp %}Where MCP gives the assistant access, a skill gives it judgement:{% else %}A skill gives the assistant judgement:{% endif %} which tool to call first, how to avoid misleading statistics, how to cite. Skills follow an open format, so the same skills work in Claude Code, Codex, OpenCode, Cursor, Gemini CLI, GitHub Copilot and many other agents.</p>
     <p>The anthive skills are public at <a href="{{ _skills_repo }}" target="_blank" rel="noopener" id="help-skills-repo">gitlab.kuleuven.be/bdslab/anthive/skills</a>. Names starting with <code>anthive-</code> need access to an anthive server; names starting with <code>sc-</code> are general single-cell and research practice and work without anthive. Currently:</p>
     <div class="table-wrap">
     <table>
@@ -298,7 +319,7 @@
     <div class="cmd"><pre>{{ _skills_install }}</pre><button type="button" data-copy-help>Copy</button></div>
     <p>Replace <code>claude-code codex opencode pi</code> with the apps you use, separated by spaces: <code>claude-code</code> (Claude Code), <code>codex</code> (Codex), <code>gemini-cli</code> (Gemini CLI), <code>opencode</code> (OpenCode), <code>pi</code> (Pi), <code>cursor</code> (Cursor), <code>github-copilot</code> (GitHub Copilot). Other names, and every step in detail, are in the <a href="{{ _skills_install_guide }}" target="_blank" rel="noopener">skills install guide</a>. Check the install with <code>ls ~/.claude/skills</code> (Claude Code only) or <code>ls ~/.agents/skills</code> (the other apps).</p>
     <p><code>--agent '*'</code> (all apps) also works, but it creates settings folders for about fifty apps you probably do not have and prints lines such as "Eve does not support global skill installation"; those lines are harmless.</p>
-    <p>An agent that can run commands can also do this for you: the setup prompt on <a href="/account/mcp">your MCP page</a> connects anthive and installs the skills in one paste.</p>
+    {% if ui.mcp %}<p>An agent that can run commands can also do this for you: the setup prompt on <a href="/account/mcp">your MCP page</a> connects anthive and installs the skills in one paste.</p>{% endif %}
     <p>Update them now and then:</p>
     <div class="cmd"><pre>{{ _skills_update }}</pre><button type="button" data-copy-help>Copy</button></div>
     <ul>
@@ -320,29 +341,29 @@
           {% endfor %}
         </ul>
       </li>
-      <li>Add your MCP link as a custom connector (Customize &gt; Connectors &gt; <em>Add custom connector</em>, no sign-in) so the skills have something to talk to.</li>
+      {% if ui.mcp %}<li>Add your MCP link as a custom connector (Customize &gt; Connectors &gt; <em>Add custom connector</em>, no sign-in) so the skills have something to talk to.</li>{% endif %}
     </ol>
     <p>To update, delete the old skill and upload the new zip. On a Team or Enterprise plan an organisation owner can upload the zips once for everyone.</p>
-    <div class="warn"><strong>Custom connectors are called from Anthropic's cloud, also from Claude Desktop.</strong> They only reach an anthive site that is reachable from the internet. For a site on a campus network or VPN, use Claude Desktop with the <code>mcp-remote</code> bridge, or a client that runs on your machine such as Claude Code or Codex (see the <a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener">client guide</a>).</div>
+    {% if ui.mcp %}<div class="warn"><strong>Custom connectors are called from Anthropic's cloud, also from Claude Desktop.</strong> They only reach an anthive site that is reachable from the internet. For a site on a campus network or VPN, use Claude Desktop with the <code>mcp-remote</code> bridge, or a client that runs on your machine such as Claude Code or Codex (see the <a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener">client guide</a>).</div>{% endif %}
 
-    <p><strong>The vark skill.</strong> If you use <a href="#code">vark</a>, <code>vark skill install</code> adds its own skill to the agents on your computer, and <code>vark upgrade</code> keeps it current.</p>
+    {% if ui.api %}<p><strong>The vark skill.</strong> If you use <a href="#code">vark</a>, <code>vark skill install</code> adds its own skill to the agents on your computer, and <code>vark upgrade</code> keeps it current.</p>{% endif %}
 
-    <p><strong>What the skills do not contain.</strong> No data, no credentials and no site address: they work with any anthive server. Your assistant still needs a connection, in one of three ways:</p>
+    <p><strong>What the skills do not contain.</strong> No data, no credentials and no site address: they work with any anthive server. Your assistant still needs a connection{% if ui.mcp and ui.api %}, in one of three ways{% endif %}:</p>
     <ul>
-      <li>your personal MCP link from <a href="/account/mcp">your MCP page</a> (recommended);</li>
-      <li><a href="#code">vark</a>, after <code>vark server login</code>;</li>
-      <li>the REST API, with <code>ANTHIVE_URL=https://&lt;this site&gt;</code> in your environment and your login in <code>~/.netrc</code> (see the <a href="/api-guide">API page</a>).</li>
+      {% if ui.mcp %}<li>your personal MCP link from <a href="/account/mcp">your MCP page</a>{% if ui.api %} (recommended){% endif %};</li>{% endif %}
+      {% if ui.api %}<li><a href="#code">vark</a>, after <code>vark server login</code>;</li>
+      <li>the REST API, with <code>ANTHIVE_URL=https://&lt;this site&gt;</code> in your environment and your login in <code>~/.netrc</code> (see the <a href="/api-guide">API page</a>).</li>{% endif %}
     </ul>
-    <p>Assistants without skills support still get the same guidance through MCP: the <code>anthive://guide</code> resource and the prompts.</p>
+    {% if ui.mcp %}<p>Assistants without skills support still get the same guidance through MCP: the <code>anthive://guide</code> resource and the prompts.</p>{% endif %}
     <p class="note">The <a href="{{ _skills_repo }}#readme" target="_blank" rel="noopener">skills README</a> on GitLab has the current list and per-agent install notes.</p>
 
     <h3 class="subsection-head" id="servers">Several anthive servers</h3>
     <p>You may have access to more than one anthive server, for example an internal one with everything you may see and a public one. The skills and tools work with any of them.</p>
     <ul>
-      <li>Add one MCP connection per server, each with its own link and a clear name (for example <code>anthive-intern</code> and <code>anthive-public</code>). The assistant should say which server each result came from.</li>
+      {% if ui.mcp %}<li>Add one MCP connection per server, each with its own link and a clear name (for example <code>anthive-intern</code> and <code>anthive-public</code>). The assistant should say which server each result came from.</li>{% endif %}
       <li>Dataset ids such as <code>L26/FMG</code> are unique only within one server; always name the server with the id.</li>
       <li>Servers hold different data and may run different versions (shown on the version button). Literature search needs version 2.39.0 or newer.</li>
-      <li>Without MCP, assistants and scripts reach a server over plain HTTP: if you use <a href="https://codeberg.org/mfiers/vark" target="_blank" rel="noopener">vark</a>, its server list (<code>vark server ls</code>) is used; otherwise set <code>ANTHIVE_URL=https://&lt;site&gt;</code> and put your login in <code>~/.netrc</code> (<code>machine &lt;site&gt; login &lt;user&gt; password &lt;password&gt;</code>).</li>
+      {% if ui.api %}<li>{% if ui.mcp %}Without MCP, assistants{% else %}Assistants{% endif %} and scripts reach a server over plain HTTP: if you use <a href="https://codeberg.org/mfiers/vark" target="_blank" rel="noopener">vark</a>, its server list (<code>vark server ls</code>) is used; otherwise set <code>ANTHIVE_URL=https://&lt;site&gt;</code> and put your login in <code>~/.netrc</code> (<code>machine &lt;site&gt; login &lt;user&gt; password &lt;password&gt;</code>).</li>{% endif %}
     </ul>
 
     <h3 class="subsection-head" id="ai-practice">Good practice and limits</h3>
@@ -352,10 +373,12 @@
       <li><strong>Drafts.</strong> Paper summaries marked as drafts are model-written; quotes from the paper are more reliable.</li>
       <li><strong>Permissions.</strong> Some tools are admin-only (custom Python figures, reloading the catalogue, adding papers). The assistant gets a clear refusal instead of a result.</li>
       <li><strong>Privacy.</strong> Anything anthive returns to your AI client, including text from papers and datasets, is sent to that client's AI provider (for example Anthropic, OpenAI or the maker of your editor), together with the questions you ask. This applies to every paper and document in the library; none is held back. The underlying expression matrices stay on this server unless a tool returns or you download them. Use a provider and settings you trust for unpublished work.</li>
-      <li><strong>The built-in chat</strong> that some sites showed in the corner of the page is switched off; use your own assistant through MCP instead.</li>
+      <li><strong>The built-in chat</strong> that some sites showed in the corner of the page is switched off; use your own assistant{% if ui.mcp %} through MCP{% endif %} instead.</li>
     </ul>
   </details>
+  {% endif %}
 
+  {% if ui.api %}
   <details class="help-section" id="code"><summary><h2 class="section-head">Programmatic access</h2></summary>
     <h3 class="subsection-head">REST API</h3>
     <p>Everything the site shows comes from a REST API under <code>/api</code>. Start with the <a href="/api-guide" id="help-api-guide-link">API page</a> (the <strong>API</strong> link in the top bar and in the menu under your name): it explains signing in, keeping your password out of scripts, first calls with curl, pyvark and vark, with this site's address filled in. The interactive documentation is at <a href="/api/docs">/api/docs</a> (also <a href="/api/redoc">/api/redoc</a>). Scripts sign in with your normal username and password over HTTPS; keep them in <code>~/.netrc</code> and use <code>curl -n</code>:</p>
@@ -377,13 +400,14 @@ python -c "from vark import AnthiveClient; c = AnthiveClient('https://&lt;this s
     <h3 class="subsection-head">Notebooks in the browser</h3>
     <p>The <em>📓 notebook</em> button on a plot, and <a href="/jupyter/lab/index.html">JupyterLite</a>, open notebooks that run in your browser with pyvark preinstalled. Nothing is installed on your computer; download a notebook to keep it.</p>
   </details>
+  {% endif %}
 
   <details class="help-section" id="account"><summary><h2 class="section-head">Accounts, privacy and getting help</h2></summary>
     <ul>
-      <li><strong>Signing in and out.</strong> The site asks for your login once per session; <em>Logout</em> is in the menu under your name, which also has your <a href="/account/mcp">MCP links</a>, the <a href="/api-guide">API page</a> and <a href="/settings">Preferences</a> (scoring method, favourite genes; stored in your browser only).</li>
-      <li><strong>Version.</strong> The small button left of <em>Help</em> shows the version of the running server (for example <code>v2.40.0</code>); hover for details, click for the changelog. Mention it when you report a problem.</li>
+      <li><strong>Signing in and out.</strong> The site asks for your login once per session; <em>Logout</em> is in the menu under your name, which also has {% if ui.mcp %}your <a href="/account/mcp">MCP links</a>, {% endif %}{% if ui.api %}the <a href="/api-guide">API page</a> and {% endif %}<a href="/settings">Preferences</a> (scoring method, favourite genes; stored in your browser only).</li>
+      <li><strong>Version.</strong> The small button left of <em>Help</em> shows the version of the running server (for example <code>v2.40.0</code>); hover for details{% if ui.api %}, click for the changelog{% endif %}. Mention it when you report a problem.</li>
       <li><strong>Privacy.</strong> The site uses no analytics or tracking; preferences stay in your browser. See <a href="/privacy">the privacy note</a>.</li>
-      <li id="help-docs-link"><strong>More documentation.</strong> Detailed guides live on GitLab, where they can be corrected quickly: <a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener">connecting AI clients</a>, <a href="{{ _docs }}/MCP_LINKS.md" target="_blank" rel="noopener">MCP links</a>, <a href="{{ _docs }}/LIBRARY.md" target="_blank" rel="noopener">the paper library</a>, <a href="{{ _docs }}/API_CHANGELOG.md" target="_blank" rel="noopener">API changes</a> and, for people running a site, <a href="{{ _docs }}/DEPLOY_CONTAINERS.md" target="_blank" rel="noopener">the deployment guide</a>.</li>
+      <li id="help-docs-link"><strong>More documentation.</strong> Detailed guides live on GitLab, where they can be corrected quickly: {% if ui.mcp %}<a href="{{ _docs }}/MCP_CLIENTS.md" target="_blank" rel="noopener">connecting AI clients</a>, <a href="{{ _docs }}/MCP_LINKS.md" target="_blank" rel="noopener">MCP links</a>, {% endif %}<a href="{{ _docs }}/LIBRARY.md" target="_blank" rel="noopener">the paper library</a>, {% if ui.api %}<a href="{{ _docs }}/API_CHANGELOG.md" target="_blank" rel="noopener">API changes</a> {% endif %}and, for people running a site, <a href="{{ _docs }}/DEPLOY_CONTAINERS.md" target="_blank" rel="noopener">the deployment guide</a>.</li>
       {% set _help_issue_url = issue_tracker_url() %}
       {% if _help_issue_url %}<li id="help-issue-link"><strong>Problems and requests.</strong> <a href="{{ _help_issue_url }}" target="_blank" rel="noopener">Report an issue</a> (also in the menu under your name): bugs, wrong annotations, datasets or papers you would like added.</li>{% endif %}
     </ul>

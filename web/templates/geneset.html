@@ -42,17 +42,17 @@
 <div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
   <button type="button" class="tab-btn {{ view_class('geneset-expression') }}" title="{{ view_tip('geneset-expression', 'Where the gene set ranks among all gene sets scored in a dataset, per cell type') }}" data-vtab="expression" data-hash="expression" role="tab">Expression</button>
   <button type="button" class="tab-btn {{ view_class('geneset-score') }}" title="{{ view_tip('geneset-score', 'The earlier expression table: rank among gene sets and spread of the score') }}" data-vtab="score" data-hash="module-score" data-alias="geneset-view" role="tab">Module score</button>
-  <button type="button" class="tab-btn {{ view_class('geneset-shifts') }}" title="{{ view_tip('geneset-shifts', 'Facet DE: donor-level facet effects on the mean score of the set') }}" data-vtab="shifts" data-hash="facet-de" data-alias="shifts" role="tab">Facet DE</button>
-  <button type="button" class="tab-btn {{ view_class('geneset-variability') }}" title="{{ view_tip('geneset-variability') }}" data-vtab="variability" data-hash="variability" role="tab" hidden>Donor variability</button>
-  <button type="button" class="tab-btn {{ view_class('geneset-genes') }}" title="{{ view_tip('geneset-genes', 'Member genes and their own facet calls') }}" data-vtab="genes" data-hash="genes" role="tab">Genes</button>
+  {% if ui.facets %}<button type="button" class="tab-btn {{ view_class('geneset-shifts') }}" title="{{ view_tip('geneset-shifts', 'Facet DE: donor-level facet effects on the mean score of the set') }}" data-vtab="shifts" data-hash="facet-de" data-alias="shifts" role="tab">Facet DE</button>
+  <button type="button" class="tab-btn {{ view_class('geneset-variability') }}" title="{{ view_tip('geneset-variability') }}" data-vtab="variability" data-hash="variability" role="tab" hidden>Donor variability</button>{% endif %}
+  <button type="button" class="tab-btn {{ view_class('geneset-genes') }}" title="{{ view_tip('geneset-genes', 'Member genes and their own facet calls' if ui.facets else 'Member genes of the set') }}" data-vtab="genes" data-hash="genes" role="tab">Genes</button>
   <span class="vw-older"><button type="button" class="tab-btn vw-older-btn {{ view_class('older-views') }}" aria-haspopup="true" aria-expanded="false" title="{{ view_tip('older-views', 'Earlier designs of this page, kept reachable') }}">Older views &#9662;</button><span class="vw-older-menu" hidden>
   <button type="button" class="tab-btn vw-old {{ view_class('geneset-page') }}" title="{{ view_tip('geneset-page', 'The earlier geneset page: members, where the score varies most') }}" data-vtab="page" data-hash="page" role="tab">Gene set page (old)</button>
   </span></span>
 </div>
 <div class="tab-panel vw-panel" id="vt-expression">{{ expression_panel('geneset', payload.display_name|no_dash) }}</div>
 <div class="tab-panel vw-panel" id="vt-score">{{ _review_banner('geneset-score') }}{{ view_geneset_score(name) }}</div>
-<div class="tab-panel vw-panel" id="vt-shifts">{{ _review_banner('geneset-shifts') }}{{ view_geneset_headline() }}{{ view_geneset_shifts(name) }}</div>
-<div class="tab-panel vw-panel" id="vt-variability">{{ _review_banner('geneset-variability') }}{{ view_geneset_variability() }}</div>
+{% if ui.facets %}<div class="tab-panel vw-panel" id="vt-shifts">{{ _review_banner('geneset-shifts') }}{{ view_geneset_headline() }}{{ view_geneset_shifts(name) }}</div>
+<div class="tab-panel vw-panel" id="vt-variability">{{ _review_banner('geneset-variability') }}{{ view_geneset_variability() }}</div>{% endif %}
 <div class="tab-panel vw-panel" id="vt-genes">{{ _review_banner('geneset-genes') }}{{ view_geneset_genes(name) }}</div>
 <div class="tab-panel" id="vt-page">
 {{ _review_banner('geneset-page') }}

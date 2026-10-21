@@ -34,7 +34,7 @@
 <p class="dg-desc" id="dg-intro">A donor group collects the datasets whose donors come from one donor collection, so the same people can appear in several of them.</p>
 {% call doc_block('About donor groups', id='dg-about') %}
   <p>Each dataset is marked <span class="lineage-pill primary">primary data</span> when its cells are served by this dataset only, or <span class="lineage-pill reanalysis">reanalysis</span> when it re-serves cells of another dataset.</p>
-  <p>Reanalyses are left out of pooled numbers and never count towards facet replication. Agreement between datasets of one group is not independent replication either, because they can contain the same people (<a href="/help#glossary-cohort">glossary</a>).</p>
+  <p>Reanalyses are left out of pooled numbers{% if ui.facets %} and never count towards facet replication{% endif %}. Agreement between datasets of one group is not independent replication either, because they can contain the same people (<a href="/help#glossary-cohort">glossary</a>).</p>
 {% endcall %}
 
 {% if error %}<p style="color:#dc2626">{{ error }}</p>{% endif %}

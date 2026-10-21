@@ -23,11 +23,11 @@
     <h4>Nuclei and cells</h4>
     <p>Detection rates are not comparable between nuclei and cells: nuclei detect long and nuclear-enriched genes better, whole cells detect cytoplasmic genes better. The tag on each dataset tells which it is, and the xenograft datasets are sorted live cells.</p>
     <h4>Grouping and dataset categories</h4>
-    <p>Rows are cell types, taken across all datasets, not split by system. A dataset whose cells are all of one known cell type (for example sorted or cultured microglia) is listed in that cell type's row, whatever its system. Open a row to see its datasets; each carries a tag for its category: <strong>post-mortem</strong>, <strong>xenograft</strong> (human cells in a mouse brain), <strong>biopsy</strong>, <strong>in vitro</strong> (cultured cells, iPSC derivatives) or <strong>bulk</strong>. Only tissue datasets (post-mortem, xenograft, biopsy) are averaged into the numbers of the row. In vitro and bulk datasets are listed in the opened row with their tag and marked "not pooled", so cultured cells or bulk samples are never mistaken for tissue. A bulk dataset has no per-cell detection, so it shows n/a for % expressing; its sample count is given as n, and its rank is the position of the gene among all genes of that dataset. The Facet DE tab still keeps post-mortem and xenograft apart, because a facet effect must never be pooled across systems.</p>
+    <p>Rows are cell types, taken across all datasets, not split by system. A dataset whose cells are all of one known cell type (for example sorted or cultured microglia) is listed in that cell type's row, whatever its system. Open a row to see its datasets; each carries a tag for its category: <strong>post-mortem</strong>, <strong>xenograft</strong> (human cells in a mouse brain), <strong>biopsy</strong>, <strong>in vitro</strong> (cultured cells, iPSC derivatives) or <strong>bulk</strong>. Only tissue datasets (post-mortem, xenograft, biopsy) are averaged into the numbers of the row. In vitro and bulk datasets are listed in the opened row with their tag and marked "not pooled", so cultured cells or bulk samples are never mistaken for tissue. A bulk dataset has no per-cell detection, so it shows n/a for % expressing; its sample count is given as n, and its rank is the position of the gene among all genes of that dataset.{% if ui.facets %} The Facet DE tab still keeps post-mortem and xenograft apart, because a facet effect must never be pooled across systems.{% endif %}</p>
     <h4>Datasets without per-cell cell types</h4>
     <p>The datasets under this header are listed one by one and are not averaged into a cell type row. Their cell type is not a single known one in the dataset-level label (a whole-tissue object or a mix of cell types with no per-cell annotation), so their cells cannot be assigned to microglia, astrocytes and so on. The same holds for <strong>spatial</strong> datasets (a spot holds a mixture of cells) and <strong>unclassified</strong> ones, which are shown here too, each with its category tag, its number of cells, the percent expressing and the rank in the dataset over all its cells. Their numbers describe the whole dataset, so compare them with the cell type rows with care.</p>
     <h4>Low detection</h4>
-    <p>A gene found in fewer than 5 percent of the cells of a cell type is called <a href="/help#glossary-low-detection">low detection</a> (the median over the datasets of that cell type). Facet effects on such genes are fragile; panel 2 says so when it applies.</p>
+    <p>A gene found in fewer than 5 percent of the cells of a cell type is called <a href="/help#glossary-low-detection">low detection</a> (the median over the datasets of that cell type).{% if ui.facets %} Facet effects on such genes are fragile; panel 2 says so when it applies.{% endif %}</p>
   {% endcall %}
   <div id="vwg-p1"><p class="vw-loading">Computing {{ gene }} across the catalogue (the first view can take up to a minute, later views are cached)...</p></div>
 </div>
@@ -87,7 +87,7 @@
 
 {% macro view_gene_author_de(gene) -%}
 <div id="vwa-root" data-gene="{{ gene }}">
-  <p class="vw-essential">As published by the authors and imported unchanged. anthive has not re-analysed or replicated these, the designs differ between datasets, and they are never combined with the facet effects. These are cell-level models: their p values are not comparable with the donor-level results of the Gene view.</p>
+  <p class="vw-essential">As published by the authors and imported unchanged. anthive has not re-analysed or replicated these, the designs differ between datasets{% if ui.facets %}, and they are never combined with the facet effects. These are cell-level models: their p values are not comparable with the donor-level results of the Gene view{% endif %}.</p>
   <div id="vwa-body"><p class="vw-loading">Looking for author differential expression of {{ gene }}...</p></div>
 </div>
 {%- endmacro %}
@@ -421,10 +421,12 @@
     renderP1(p1Host, collected);
     renderP2();
   }).catch(function () { p1Host.innerHTML = '<div class="vw-error">The expression summary could not be loaded.</div>'; });
+  {% if ui.facets %}{# ui.facets false: no Facet DE tab, so no facet effects to fetch #}
   V.cached(V.API + '/genes/' + enc(GENE) + '/facet-effects?include_units=false').then(function (effects) {
     state.effects = effects;
     renderP2();
   }).catch(function (error) { p2Host.innerHTML = V.loadError(error, 'The facet effects could not be loaded.'); document.getElementById('vwg-other-body').innerHTML = ''; });
+  {% endif %}
 
   /* ---------- author DE tab ---------- */
   var deBody = document.getElementById('vwa-body');
