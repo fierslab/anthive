@@ -8543,3 +8543,23 @@ def test_dataset_page_asks_obs_summary_for_the_top_list(client):
     assert "fetch(apiBase + '/obs_summary?top_n=' + CAT_POLICY.top_n" in html
     policy = html.split("var CAT_POLICY = ")[1].split(";\n")[0]
     assert '"top_n": 15' in policy and '"exact_unique_limit": 5000' in policy
+
+
+def test_dataset_page_marks_a_qc_companion_and_the_final_links_to_it(client, monkeypatch):
+    qc_info = dict(_INFO["GroupA/ds1"], designation="qc", qc=True, qc_of="GroupA/ds2", is_secondary=True)
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": qc_info}))
+    lineage = client.get("/browse/GroupA/ds1").text.split('id="ds-lineage"')[1].split("</div>")[0]
+    assert 'class="lineage-pill qc"' in lineage and '>QC companion</span>' in lineage
+    assert 'id="ds-qc-of"' in lineage and 'href="/browse/GroupA/ds2"' in lineage
+    final_info = dict(_INFO["GroupA/ds1"], designation="primary", qc_companions=["GroupA/ds1_qc"])
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": final_info}))
+    lineage = client.get("/browse/GroupA/ds1").text.split('id="ds-lineage"')[1].split("</div>")[0]
+    assert 'id="ds-qc-companions"' in lineage and 'href="/browse/GroupA/ds1_qc"' in lineage
+
+
+def test_folder_view_marks_a_qc_companion(client, monkeypatch):
+    databases = [dict(db, designation='qc', qc=True, qc_of='GroupA/ds1', is_secondary=True)
+                 if db.get('id') == 'GroupA/ds2' else db for db in _DATABASES]
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases": {"databases": databases}}))
+    text = client.get("/browse/GroupA").text
+    assert 'class="badge-qc"' in text and '>QC companion of GroupA/ds1</span>' in text

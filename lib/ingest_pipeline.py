@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 import ingest_md_fill as md_fill
+import qc_companion
 import ingest_versions
 
 H5AD_SUFFIX = '.h5ad'
@@ -1189,8 +1190,11 @@ class Pipeline:
                     from md_check import collect_db_ids  # noqa: PLC0415
 
                     taken_groups = {db_id.split('/')[0] for db_id in collect_db_ids(cfg.store_root)}
+                    default_name = item.basename           # a QC companion is never the default dataset
+                    if qc_companion.is_qc(seed_meta) and default_name.endswith(qc_companion.QC_SUFFIX):
+                        default_name = default_name[:-len(qc_companion.QC_SUFFIX)]
                     index_meta, index_body = md_fill.build_index_md(sidecar, item.data_project, taken_groups,
-                                                                    item.basename)
+                                                                    default_name)
                 index_meta.setdefault('group', item.data_project)
                 md_fill.coerce_year(index_meta)
                 write_md_file(group_dir / 'index.md', index_meta, index_body)
@@ -1206,8 +1210,17 @@ class Pipeline:
             if approval_caveat:
                 meta.setdefault('caveats', []).append(approval_caveat)
             meta['changelog'][-1]['changes'].extend(note for note in notes)
-            if not any(meta.get(key) not in (None, '', [], False) for key in
-                       ('is_secondary', 'reanalysis_of', 'donor_group')) and 'is_secondary' not in meta:
+            if qc_companion.is_qc(meta):
+                # a QC companion is always secondary (lib/qc_companion.py); design.designation refuses false
+                if meta.get('is_secondary') is not True:
+                    meta['is_secondary'] = True
+                    meta['changelog'][-1]['changes'].append('Designation: QC companion, so is_secondary: true.')
+                message = qc_companion.caveat_message(qc_companion.qc_target(meta))
+                meta.setdefault('caveats', []).append(md_fill.curation_caveat(message, qc_companion.CAVEAT_TOPIC,
+                                                                              today))
+                meta['changelog'][-1]['changes'].append(f'Caveat: {message}')
+            elif not any(meta.get(key) not in (None, '', [], False) for key in
+                         ('is_secondary', 'reanalysis_of', 'donor_group')) and 'is_secondary' not in meta:
                 # design.designation passed as "primary dataset": served as primary, not "unresolved"
                 meta['is_secondary'] = False
                 meta['changelog'][-1]['changes'].append('Designation: primary dataset (no re-analysis declared; '
@@ -1280,6 +1293,13 @@ class Pipeline:
                     line = md_fill.describe_change(key, store_value, seed_value)
                     extra_changes.append(line)
                     outcome.warnings.append(f'applied from {item.md_seed_name}: {line}')
+                merged = {**old_meta, **seed_keys}
+                if qc_companion.is_qc(merged) and ('qc' in delta.editable or 'qc_of' in delta.editable):
+                    if merged.get('is_secondary') is not True:            # a QC companion is always secondary
+                        seed_keys['is_secondary'] = True
+                        extra_changes.append('.md is_secondary set to True (a QC companion is always secondary).')
+                    extra_caveats.append(md_fill.curation_caveat(
+                        qc_companion.caveat_message(qc_companion.qc_target(merged)), qc_companion.CAVEAT_TOPIC, today))
                 if delta.editable:
                     extra_caveats.append(md_fill.curation_caveat(
                         f'The deposit on {today} changed {", ".join(delta.editable)} of the dataset description '

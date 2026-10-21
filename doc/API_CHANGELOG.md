@@ -305,6 +305,22 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### QC companion datasets
+
+- New designation (Mark, 2026-10-21): `.md` keys `qc: true` and `qc_of: <db_id of the final dataset>` (empty
+  while the final dataset is not deposited; both depositor-editable, so a metadata-only update fills it). A QC
+  companion holds all cells before filtering with per-cell QC statistics.
+- Always secondary: `is_secondary: false` is refused (`design.designation`: `qc_not_secondary`; also
+  `qc_of_without_qc`, `qc_target_missing`, `qc_not_boolean`); the route sets `is_secondary: true` and adds the
+  caveat "QC companion of <id>: all cells before filtering; not counted in statistics." Never facet-tested
+  (`facet_exclude_reason` "QC companion ..."), never counted, never the default dataset of a new group.
+- `cells.overlap` and `donor.overlap_ids` skip the pair (by `qc_of`, or `<name>_qc` next to `<name>` in the same
+  group while `qc_of` is empty), in either deposit order; `cells.overlap` reports it as `qc_pair_exempt`.
+- Dataset metadata (`/databases`, `/info`): `designation: qc`, `qc`, `qc_of`; `/info` adds `qc_companions` (the
+  datasets whose `qc_of` names this one). `is_secondary` is true for a QC companion. Metadata cache version 9.
+- Web: "QC companion of <id>" on the dataset page and in the collection table; the final dataset links to its
+  QC companion. MCP `search_datasets` marks "(QC companion of <db_id>)". Deposit vocab `seed_md.designation`.
+
 ### Updates change the dataset .md
 
 - `GET /datasets/deposit/md/{db_id}` (new, depositors): the store `.md`'s depositor-editable keys for a client

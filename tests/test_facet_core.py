@@ -366,6 +366,7 @@ def serve(tmp_path):
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple, 'Set': Set,
         'Path': Path, 'asyncio': asyncio, '_load_module_variability': lambda: variability,
         'BACKCOMPAT_LEGACY_NAMES': {}, 'GeneStatsCache': _GeneStatsCache, 'facet_scopes_lib': facet_scopes,
+        'qc_companion_lib': __import__('qc_companion'),
         'modality_of_metadata': modality_of_metadata,
         '_module_variability_path': lambda: tmp_path / 'module_variability.parquet',
         '_cell_level_skips': lambda path: {'G9/BULK': 'bulk data (technology bulk_RNA-seq)', 'G1/PRI': 'about one observation per donor'},
@@ -380,7 +381,7 @@ def test_lineage_fields(serve):
     lineage = namespace['_lineage_fields']
     assert lineage({'is_secondary': True, 'reanalysis_of': 'V25/SAL', 'donor_group': 'voet2025'},
                    ['ant_donor_uid']) == {
-        'designation': 'reanalysis', 'reanalysis_of': ['V25/SAL'], 'donor_group': 'voet2025',
+        'designation': 'reanalysis', 'qc': False, 'qc_of': None, 'reanalysis_of': ['V25/SAL'], 'donor_group': 'voet2025',
         'has_donor_uid': True, 'replicate_unit': 'none', 'replicate_column': None,
         'replicate_basis': 'inferred', 'disease_basis': None, 'control_basis': None, 'facet_scope': None,
         'facet_exclude': False, 'facet_exclude_reason': None}

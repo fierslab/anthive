@@ -64,7 +64,7 @@ _SERVE_WANTED = {
     '_internal_secret_value', '_internal_secret', '_has_valid_internal_secret', '_InternalSecretGuard',
     '_is_local_tool_request', '_require_admin', '_caller_is_admin', '_require_admin_or_local',
     '_ACCESS_SETTINGS', '_access_settings', '_caller_sees_internal', '_request_path', '_DatasetAccessGuard',
-    'get_group_info', 'get_database_info', 'rescan_databases', 'list_collections',
+    'get_group_info', 'get_database_info', '_qc_companions_of', 'rescan_databases', 'list_collections',
     '_artefact_service_instance', '_artefact_service_lock', '_artefact_s3_client', '_artefact_service',
     '_artefact_viewer', '_artefact_policy', '_artefact_error', '_artefact_resolve', '_artefact_count',
     *(name for path, name in ARTEFACT_ROUTES.items() if path not in WRITE_ROUTES | OWN_ROUTES),

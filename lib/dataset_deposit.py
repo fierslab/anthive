@@ -910,6 +910,7 @@ class DepositService:
         import mus  # noqa: PLC0415
         from disease_rule import DISEASE_BASES  # noqa: PLC0415
         from replicates import REPLICATE_UNITS  # noqa: PLC0415
+        from ingest_md_fill import DEPOSITOR_EDITABLE_KEYS  # noqa: PLC0415
 
         vocabulary = mus.load_vocabulary()
         settings = self.settings
@@ -1005,6 +1006,17 @@ class DepositService:
                                   'leave_out': ['version', 'changelog', 'sha256', 'n_obs', 'n_vars', 'layer_stats',
                                                 'ingest']},
                 'template': SEED_MD_TEMPLATE,
+                'designation': {
+                    'primary': 'nothing declared, or is_secondary: false',
+                    'reanalysis': 'is_secondary: true and reanalysis_of: <db_id> (or a list)',
+                    'donor_group': 'donor_group: <slug> for datasets of one donor collection',
+                    'qc_companion': ('qc: true and qc_of: <db_id of the final dataset>: all cells before filtering '
+                                     'with per-cell QC statistics. Always secondary (is_secondary: false is '
+                                     'refused), never counted or facet-tested, gets a caveat; qc_of may stay empty '
+                                     'when the QC dataset is deposited first and is filled by a metadata-only update; '
+                                     'the overlap checks do not compare a QC companion with its final dataset'),
+                    'editable_on_update': list(DEPOSITOR_EDITABLE_KEYS),
+                },
             },
             'index_md': {'required': ['group (equals data_project)', 'group_id (3 characters, unique)',
                                       'doi or paper_title', 'year', 'authors', 'default_dataset'],

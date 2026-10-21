@@ -108,6 +108,7 @@ import donor_variability as donor_variability_lib
 import module_rank as module_rank_lib
 import help_content
 import facet_scopes as facet_scopes_lib
+import qc_companion as qc_companion_lib
 import gene_classes as gene_classes_lib
 import gene_detection as gene_detection_lib
 from facet_module_results import (DIRECTIONLESS_NOTE, ModuleResults, default_directionless as default_module_directionless,
@@ -642,7 +643,7 @@ class ConnectionPool:
         }
 
 
-_METADATA_CACHE_VERSION = 8       # bump when the cache format OR the cached metadata payload (keys derived in _load_database_metadata) changes
+_METADATA_CACHE_VERSION = 9       # bump when the cache format OR the cached metadata payload (keys derived in _load_database_metadata) changes
 _METADATA_CACHE_TTL_S3  = 86_400  # 24 h for S3 databases (no local mtime)
 
 
@@ -692,8 +693,13 @@ def _lineage_fields(file_metadata: Dict[str, Any], obs_categorical: List[str],
     donor_group = file_metadata.get('donor_group')
     flag = file_metadata.get('is_secondary')
     designation = 'reanalysis' if flag is True else 'primary' if flag is False else 'unresolved'
+    is_qc = qc_companion_lib.is_qc(file_metadata)
+    if is_qc:                       # a QC companion (2.47.0) is always secondary, whatever is_secondary says
+        designation = 'qc'
     return {
         'designation': designation,
+        'qc': is_qc,
+        'qc_of': qc_companion_lib.qc_target(file_metadata) if is_qc else None,
         'reanalysis_of': [str(t) for t in targets],
         'donor_group': str(donor_group) if donor_group else None,
         'has_donor_uid': 'ant_donor_uid' in (obs_categorical or []),
@@ -1647,7 +1653,7 @@ class DatabaseRegistry:
             'year': file_metadata.get('year'),
             'default_layer': file_metadata.get('default_layer'),
             'has_lognorm':   file_metadata.get('has_lognorm', True),
-            'is_secondary':  file_metadata.get('is_secondary', False),
+            'is_secondary':  file_metadata.get('is_secondary', False) is True or qc_companion_lib.is_qc(file_metadata),
             # Lineage (audit L3): the datasets this one reanalyses (db_ids,
             # only on secondaries), the donor pool it shares with sibling
             # datasets (slug) and whether it publishes the cross-dataset
@@ -4115,6 +4121,13 @@ def get_group_info(request: Request, group_id: str):
     }
 
 
+def _qc_companions_of(db_id: str) -> List[str]:
+    """Visible datasets whose ``qc_of`` names ``db_id`` (its QC companions), sorted."""
+    wanted = str(db_id).upper()
+    return sorted(other for other, meta in (registry.metadata_cache or {}).items()
+                  if other != db_id and str((meta or {}).get('qc_of') or '').upper() == wanted)
+
+
 @app.get("/databases/{db_id:path}/info", tags=["databases"])
 def get_database_info(request: Request, db_id: str):
     """
@@ -4148,10 +4161,13 @@ def get_database_info(request: Request, db_id: str):
       - authors: List of authors
       - year: Publication year
     - artefacts_count: artefacts of this dataset the caller sees (REST 2.47)
+    - qc / qc_of: this dataset is the QC companion (all cells before filtering) of qc_of (REST 2.47)
+    - qc_companions: the visible QC companions of this dataset (their qc_of names it) (REST 2.47)
     """
     try:
         metadata = registry.get_database_metadata(db_id)
-        return {**metadata, 'artefacts_count': _artefact_count(request, db_id=db_id)}
+        return {**metadata, 'artefacts_count': _artefact_count(request, db_id=db_id),
+                'qc_companions': _qc_companions_of(db_id)}
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

@@ -535,6 +535,23 @@ def lint_lineage(metadata: Mapping[str, Any], known_db_ids: Iterable[str]) -> Li
             findings.append(Finding(ERROR, 'reanalysis_not_secondary',
                                     f'reanalysis_of is set ({", ".join(map(str, targets))}) but is_secondary '
                                     f'is {metadata.get("is_secondary")!r}'))
+    # QC companion (2.47.0, lib/qc_companion.py): always secondary, never primary
+    qc_flag = metadata.get('qc')
+    qc_of = str(metadata.get('qc_of') or '').strip()
+    if qc_flag is not None and not isinstance(qc_flag, bool):
+        findings.append(Finding(ERROR, 'qc_not_boolean', f'qc must be true or false, not {qc_flag!r}'))
+    elif qc_of and qc_flag is False:
+        findings.append(Finding(ERROR, 'qc_of_without_qc', f'qc_of names {qc_of} but qc is false: a QC companion '
+                                                           f'says qc: true'))
+    elif qc_flag is True or qc_of:
+        if metadata.get('is_secondary') is False:
+            findings.append(Finding(ERROR, 'qc_not_secondary', 'a QC companion (qc: true) is always secondary: '
+                                                               'is_secondary: false is not allowed (leave it out or '
+                                                               'set it to true)'))
+        if qc_of and qc_of not in known:
+            findings.append(Finding(ERROR, 'qc_target_missing', f'qc_of names {qc_of}, which is not a dataset in the '
+                                                                f'store (leave qc_of empty until the final dataset '
+                                                                f'is published, then fill it with an update)'))
     donor_group = metadata.get('donor_group')
     if donor_group is not None and not _DONOR_GROUP_RE.fullmatch(str(donor_group)):
         findings.append(Finding(WARNING, 'donor_group_format',

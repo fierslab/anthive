@@ -157,6 +157,9 @@ def facet_exclusion_reason(annotation: Mapping[str, Any], metadata: Optional[Map
     metadata = metadata or {}
     if metadata.get('facet_exclude') is True:
         return str(metadata.get('facet_exclude_reason') or 'facet_exclude is set')
+    if metadata.get('qc') is True or str(metadata.get('qc_of') or '').strip():
+        target = str(metadata.get('qc_of') or '').strip()
+        return f'QC companion{" of " + target if target else ""}: all cells before filtering, never tested'
     technologies = [token.lower() for token in _text_list(annotation.get('technology'))]
     for technology in technologies:
         if any(token in technology for token in SPATIAL_TECHNOLOGY_TOKENS):

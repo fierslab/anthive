@@ -137,6 +137,9 @@ def donor_overlap_ids(ctx) -> Outcome:
     if not uid_digests:
         return ok('no cross-dataset donor ids (ant_donor_uid) to compare', n_donors=int(len(donors)))
     per_dataset = shared_donors(uid_digests, index.donors(), ctx.group_id or '', digests.db_key)
+    partners = ctx.qc_partners()                     # a QC companion and its final dataset share every donor
+    per_dataset = {key: value for key, value in per_dataset.items() if key not in partners} \
+        if isinstance(per_dataset, dict) else [key for key in per_dataset if key not in partners]
     shared_persons = set()
     if per_dataset:
         other = index.donors()

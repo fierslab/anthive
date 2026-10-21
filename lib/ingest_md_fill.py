@@ -499,7 +499,7 @@ SEED_MANAGED_KEYS = frozenset({'version', 'changelog', 'sha256', 'n_obs', 'n_var
 DEPOSITOR_EDITABLE_KEYS = ('api', 'obscat_include', 'obsnum_include', 'obs_exclude', 'disease_basis',
                            'disease_derivation', 'description', 'title', 'replicate_unit', 'replicate_column',
                            'is_secondary', 'reanalysis_of', 'donor_group', 'facet_donor_exclusions',
-                           'counts_unavailable', 'normalisation', 'year')
+                           'counts_unavailable', 'normalisation', 'year', 'qc', 'qc_of')
 #: Editable keys that change what ant-convert builds: a change rebuilds the views.
 VIEW_KEYS = frozenset({'api', 'obscat_include', 'obsnum_include', 'obs_exclude'})
 

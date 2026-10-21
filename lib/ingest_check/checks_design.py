@@ -33,7 +33,8 @@ def _units_from_obs(ctx, column: Optional[str]) -> Optional[int]:
 
 @check('design.designation')
 def design_designation(ctx) -> Outcome:
-    """``reanalysis_of`` names a stored dataset and implies ``is_secondary``; ``donor_group`` is a slug."""
+    """``reanalysis_of`` names a stored dataset and implies ``is_secondary``; ``donor_group`` is a slug; a QC companion
+    (``qc: true``, ``qc_of``) is never primary."""
     import facet_lint  # noqa: PLC0415
     from md_check import collect_db_ids  # noqa: PLC0415
 
@@ -43,9 +44,18 @@ def design_designation(ctx) -> Outcome:
     warnings = [f'[{item.rule}] {item.message}' for item in findings if item.severity != 'error']
     if errors:
         return fail('; '.join(errors), 'Fix reanalysis_of (an existing <group_id>/<id>) and set is_secondary: true '
-                    'for a re-analysis. See reference/designation.md.', errors=errors)
+                    'for a re-analysis. A QC companion says qc: true, qc_of: <db_id of the final dataset> (empty until '
+                    'that is published) and is never is_secondary: false. See reference/designation.md.',
+                    errors=errors)
     if warnings:
         return warn('; '.join(warnings), 'Use a lower-case slug for donor_group.', warnings=warnings)
+    import qc_companion  # noqa: PLC0415
+
+    if qc_companion.is_qc(ctx.md):
+        target = qc_companion.qc_target(ctx.md)
+        return ok(f'QC companion of {target}: secondary, not counted, not facet-tested' if target else
+                  'QC companion (qc_of empty: fill it with an update once the final dataset is published): '
+                  'secondary, not counted, not facet-tested', qc_of=target)
     declared = [key for key in ('is_secondary', 'reanalysis_of', 'donor_group') if ctx.md.get(key)]
     if declared:
         return ok('designation: ' + ', '.join(declared))

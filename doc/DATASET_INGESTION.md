@@ -258,12 +258,21 @@ patch version with a changelog line and a caveat (topic `data_use`). A deposited
 (2.47.0) changes the dataset description: the keys the depositor owns (`api`, `obscat_include`, `obsnum_include`,
 `obs_exclude`, `disease_basis`, `disease_derivation`, `description`, `title`, `replicate_unit`,
 `replicate_column`, `is_secondary`, `reanalysis_of`, `donor_group`, `facet_donor_exclusions`, `counts_unavailable`,
-`normalisation`, `year`) are applied with one changelog line each and a caveat, and its new caveats are added.
+`normalisation`, `year`, `qc`, `qc_of`) are applied with one changelog line each and a caveat, and its new caveats are added.
 Without a new h5ad that is a patch version; a change of `api` or of the include lists rebuilds the views, and the
 facet and design checks run on the merged `.md` first (a failing mapping fails the deposit). Any other key is
 curated: it is not applied and the `.md` stays in `__incoming/` with a warning, but its new caveats and editable
 keys are applied. Only the dataset's owner, an admin, or anyone under `update_policy: any` can deposit an
 update.
+
+**QC companions** (2.47.0). The QC round of a workflow keeps all cells with their per-cell QC statistics and a keep
+flag and is deposited as `<name>_qc`; the cleanup round deposits the kept cells as `<name>`. The QC dataset's `.md`
+says `qc: true` and `qc_of: <db_id of the final dataset>`; `qc_of` may stay empty when the QC dataset is deposited
+first and is filled later with a metadata-only update. A QC companion is always secondary (`is_secondary: false` is
+refused; the route sets `true`), never counted or facet-tested, gets the caveat "QC companion of <id>: all cells
+before filtering; not counted in statistics.", and is never the default dataset of a new group. `cells.overlap` and
+`donor.overlap_ids` do not compare it with its final dataset (named by `qc_of`, or while that is empty by the name
+rule `<name>_qc` next to `<name>` in the group), in either order; other datasets are compared as usual.
 
 Caveats, curation fields and the facet mapping of the old `.md` stay as they are; the route appends one caveat
 saying which version was replaced. The served dataset is swapped under `/admin/release` and `/admin/restore`, through a journal: if the

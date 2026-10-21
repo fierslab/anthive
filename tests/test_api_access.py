@@ -56,7 +56,7 @@ _SERVE_WANTED = {
     '_internal_secret_value', '_internal_secret', '_has_valid_internal_secret', '_InternalSecretGuard',
     '_is_local_tool_request', '_require_admin', '_require_admin_or_local', '_chat_user_from_request',
     '_ACCESS_SETTINGS', '_access_settings', '_caller_sees_internal', '_request_path', '_DatasetAccessGuard',
-    'list_databases', 'get_database_info', 'get_group_info', '_pooled_db', 'list_de_studies',
+    'list_databases', 'get_database_info', '_qc_companions_of', 'get_group_info', '_pooled_db', 'list_de_studies',
     'get_de_study_summary', 'get_de_by_gene', 'get_de_study',
     'gene_stats_index_stats', 'gene_stats_cache_clear', 'plot_cache_clear', 'rescan_genesets',
     'rescan_module_variability', 'rescan_catalogs', 'gene_variance_index_stats',

@@ -2356,6 +2356,9 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             # the per-dataset .md frontmatter via the REST API. Defensive .get()
             # so a rescan-lagging API still renders (the badge just stays off).
             'is_secondary': bool(db.get('is_secondary')),
+            # QC companion (API 2.47): marked in the dataset table like a reanalysis
+            'qc': db.get('designation') == 'qc' or db.get('qc') is True,
+            'qc_of': db.get('qc_of'),
             'version':         (str(db.get('version')).strip() or None) if db.get('version') else None,
         })
 
@@ -3223,6 +3226,10 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         # lineage (API: primary / reanalysis / unresolved, donor group)
         'designation': db.get('designation'),
         'reanalysis_of': _as_list(db.get('reanalysis_of')),
+        # QC companion (API 2.47): this dataset holds all cells before filtering of qc_of; qc_companions are the
+        # QC companions of this dataset
+        'qc_of': db.get('qc_of'),
+        'qc_companions': _as_list(db.get('qc_companions')),
         'donor_group': db.get('donor_group'),
         'has_donor_uid': bool(db.get('has_donor_uid')),
         # replicate unit and disease definition (API: unreleased; absent on older servers)

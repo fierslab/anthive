@@ -122,6 +122,7 @@
   .lineage-pill { display: inline-block; padding: 0 7px; border-radius: 9px; font-size: 11px; line-height: 1.6; border: 1px solid #cbd5e1; background: #f1f5f9; color: #334155; cursor: help; }
   .lineage-pill.primary { background: #e8f3ee; border-color: #a7d7c0; color: #14532d; }
   .lineage-pill.reanalysis { background: #fdf3e1; border-color: #f0d3a1; color: #7a4b0c; }
+  .lineage-pill.qc { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
   .ds-desc-oneline { margin: 4px 0 12px; font-size: 14px; color: var(--text); line-height: 1.4; }
 
   /* Observation columns: filterable table (per tab). */
@@ -495,7 +496,9 @@
 {% if info and info.designation %}
 <div class="ds-lineage" id="ds-lineage">
   {% set _desig = info.designation %}
-  <span class="lineage-pill {{ _desig }}" id="ds-designation" title="{% if _desig == 'primary' %}Primary data: these cells are served by this dataset only. It counts in pooled numbers and towards facet replication.{% elif _desig == 'reanalysis' %}Reanalysis: these cells are also served by another dataset. It is left out of pooled numbers and never counts towards facet replication.{% else %}Not yet classified as primary or reanalysis (no is_secondary key in the .md).{% endif %}">{{ 'primary data' if _desig == 'primary' else ('reanalysis' if _desig == 'reanalysis' else 'designation unresolved') }}</span>
+  <span class="lineage-pill {{ _desig }}" id="ds-designation" title="{% if _desig == 'primary' %}Primary data: these cells are served by this dataset only. It counts in pooled numbers and towards facet replication.{% elif _desig == 'reanalysis' %}Reanalysis: these cells are also served by another dataset. It is left out of pooled numbers and never counts towards facet replication.{% elif _desig == 'qc' %}QC companion: all cells before filtering, with their per-cell QC statistics. Never counted in statistics or facet tests.{% else %}Not yet classified as primary or reanalysis (no is_secondary key in the .md).{% endif %}">{{ 'primary data' if _desig == 'primary' else ('reanalysis' if _desig == 'reanalysis' else ('QC companion' if _desig == 'qc' else 'designation unresolved')) }}</span>
+  {% if _desig == 'qc' %}<span id="ds-qc-of"><span class="pk">QC companion of</span> {% if info.qc_of %}<a href="/browse/{{ info.qc_of }}">{{ info.qc_of }}</a>{% else %}<span class="muted">its final dataset (not deposited yet)</span>{% endif %}</span>{% endif %}
+  {% if info.qc_companions %}<span id="ds-qc-companions"><span class="pk">QC companion</span> {% for companion in info.qc_companions %}<a href="/browse/{{ companion }}" title="All cells before filtering, with per-cell QC statistics">{{ companion }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
   {% if info.reanalysis_of %}<span id="ds-reanalysis-of"><span class="pk">reanalysis of</span> {% for parent in info.reanalysis_of %}<a href="/browse/{{ parent }}">{{ parent }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
   {% if info.donor_group %}<span id="ds-donor-group"><span class="pk">donor group</span> <a href="/donor-groups#dg-{{ info.donor_group }}" title="Datasets whose donors come from the same donor collection">{{ info.donor_group }}</a></span>{% endif %}
   {% if info.has_donor_uid %}<span class="muted" title="The dataset publishes ant_donor_uid, so its donors can be matched across datasets of the group">donor ids published</span>{% endif %}

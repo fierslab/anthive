@@ -48,8 +48,9 @@ def cells_overlap(ctx) -> Outcome:
     if digests.n_cells < thresholds.CELLS_MIN_CELLS:
         return skip(f'{digests.n_cells} cells: too few to compare by barcode')
     found: Dict[str, Dict[str, Any]] = {}
+    partners = ctx.qc_partners()      # a QC companion (all cells) and its final dataset: exempt, either direction
     for db_key in sorted(index.state()):
-        if db_key == digests.db_key:
+        if db_key == digests.db_key or db_key in partners:
             continue
         stored = index.cells(db_key)
         if stored is None:
@@ -58,8 +59,11 @@ def cells_overlap(ctx) -> Outcome:
         verdict = classify(shares)
         if verdict != 'none':
             found[db_key] = {'verdict': verdict, **{key: round(value, 4) for key, value in shares.items()}}
+    exempt = sorted(partner for partner in partners if partner in index.state())
     if not found:
-        return ok('no cell of the submission is in a stored dataset', n_cells=digests.n_cells)
+        return ok('no cell of the submission is in a stored dataset'
+                  + (f' (its QC pair {", ".join(exempt)} is not compared)' if exempt else ''),
+                  n_cells=digests.n_cells, qc_pair_exempt=exempt)
     reanalysis_of = _targets(ctx.md.get('reanalysis_of'))
     kinds = {key: info['verdict'] for key, info in found.items()}
     counts = {verdict: sum(1 for value in kinds.values() if value == verdict) for verdict in ('same', 'reanalysis', 'relabelled')}

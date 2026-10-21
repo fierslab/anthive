@@ -162,6 +162,40 @@ class CheckContext:
     def db_id(self) -> Optional[str]:
         return f'{self.group_id}/{self.file_id}' if self.group_id and self.file_id else None
 
+    def qc_partners(self) -> Set[str]:
+        """Db ids of the submission's QC pair: its final dataset (when it is a QC companion) or its QC companion(s).
+
+        ``qc_of`` decides; while it is empty, ``<basename>_qc`` next to ``<basename>`` in the same group pairs
+        (``lib/qc_companion.py``). Looks at the dataset ``.md`` files of the store group folder (a pair lives in
+        one group; ``qc_of`` across groups is honoured from the submission's side).
+        """
+        import qc_companion  # noqa: PLC0415
+
+        if 'qc_partners' in self._cache:
+            return self._cache['qc_partners']
+        partners: Set[str] = set()
+        mine = self.db_id or ''
+        target = qc_companion.qc_target(self.md) if qc_companion.is_qc(self.md) else None
+        if target:
+            partners.add(target)
+        folder = self.store_group_dir
+        group_index = self._parse(folder / 'index.md')['metadata'] or {} if folder.is_dir() else {}
+        for md_path in sorted(folder.glob('*.md')) if folder.is_dir() else []:
+            name = md_path.name
+            stem = md_path.stem
+            if name == 'index.md' or name.endswith('.index.md') or not (folder / f'{stem}.h5ad').exists():
+                continue
+            meta = self._parse(md_path)['metadata'] or {}
+            group_id = meta.get('group_id') or group_index.get('group_id')
+            other = f'{group_id}/{meta.get("id")}' if group_id and meta.get('id') else ''
+            if not other or other == mine:
+                continue
+            if qc_companion.is_pair(meta, other, stem, mine, self.basename, same_group=True) or \
+                    qc_companion.is_pair(self.md, mine, self.basename, other, stem, same_group=True):
+                partners.add(other)
+        self._cache['qc_partners'] = partners
+        return partners
+
     @property
     def annotation(self) -> Dict[str, Any]:
         """Effective ``.h5ad.mus`` annotation: store group cascade, submission cascade, sidecar."""

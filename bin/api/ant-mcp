@@ -599,7 +599,9 @@ def _count_text(value: Any) -> str:
 
 
 def _reanalysis_mark(dataset: dict) -> str:
-    """`` (reanalysis of <db_id>)`` for a secondary dataset in a listing, else ''."""
+    """`` (reanalysis of <db_id>)`` or `` (QC companion of <db_id>)`` for a secondary dataset in a listing."""
+    if dataset.get('qc') is True or dataset.get('designation') == 'qc':
+        return f" (QC companion of {dataset['qc_of']})" if dataset.get('qc_of') else ' (QC companion)'
     if dataset.get('is_secondary') is not True:
         return ''
     sources = [str(source) for source in (dataset.get('reanalysis_of') or [])]
@@ -610,6 +612,9 @@ def _lineage_line(dataset: dict) -> str:
     """One line on a dataset's lineage for the tool replies."""
     designation = dataset.get('designation') or ('reanalysis' if dataset.get('is_secondary') else 'primary')
     parts = [designation]
+    if designation == 'qc':
+        parts = ['QC companion' + (f" of {dataset['qc_of']}" if dataset.get('qc_of') else '')
+                 + ': all cells before filtering, not counted in statistics']
     if dataset.get('reanalysis_of'):
         parts.append('reanalysis of ' + ', '.join(dataset['reanalysis_of']))
     if dataset.get('donor_group'):
@@ -1053,7 +1058,9 @@ def main() -> None:
         donor pool, so never count them as independent donors or cohorts.
 
         Reanalyses are listed by default, each marked "(reanalysis of
-        <db_id>)": listing and discovery show every dataset. Pass
+        <db_id>)", and QC companions (all cells before filtering, with per-cell
+        QC statistics) "(QC companion of <db_id>)": listing and discovery show
+        every dataset. Pass
         exclude_secondary=true for primary datasets only. Statistics are
         different: the facet tests, replication counts, donor variability and
         the other counting tools keep exclude_secondary=true by default,
