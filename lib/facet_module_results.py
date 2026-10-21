@@ -323,6 +323,16 @@ class ModuleResults:
 
     def _build_tables(self, datasets: Sequence[Dict[str, Any]]
                       ) -> Dict[Tuple[str, str], Tuple[pd.DataFrame, pd.DataFrame]]:
+        """The tables of ``tables``: the rows read from the files (or the reader's disk cache), then the
+        directionless flags of the gene set store applied and the rows split by scope."""
+        raw = self.reader._disk_backed('module_tables',
+                                       lambda: self.reader._disk_tables_key('module_tables', datasets),
+                                       lambda: self._read_tables(datasets))
+        return self._finish_tables(raw)
+
+    def _read_tables(self, datasets: Sequence[Dict[str, Any]]) -> Dict[str, Tuple[pd.DataFrame, pd.DataFrame]]:
+        """``facet -> (rows, units)`` over every scope, from the result files only (the disk-cached part: the
+        gene set store's directionless flags are applied afterwards by ``_finish_tables``)."""
         cohorts = self.reader.cohorts()
         with ThreadPoolExecutor(max_workers=READ_WORKERS) as pool:
             per_dataset = list(pool.map(lambda dataset: self._read_dataset(dataset, cohorts), datasets))
@@ -335,13 +345,23 @@ class ModuleResults:
                     frame.insert(0, 'unit', np.full(len(frame), len(numbered), dtype='int32'))
                     numbered.append({'unit': len(numbered), **unit_dict})
                     parts.setdefault(facet, []).append(frame)
-        tables: Dict[Tuple[str, str], Tuple[pd.DataFrame, pd.DataFrame]] = {}
+        raw: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]] = {}
         for facet, facet_units in unit_rows.items():
             units = pd.DataFrame(facet_units, columns=MODULE_UNIT_COLUMNS)
             rows = pd.concat(parts[facet], ignore_index=True)
             for column in ('method', 'source', 'catalog', 'module'):
                 rows[column] = rows[column].astype('category')
             rows['module_key'] = rows['module_key'].astype('category')
+            raw[facet] = (rows, units)
+        return raw
+
+    def _finish_tables(self, raw: Dict[str, Tuple[pd.DataFrame, pd.DataFrame]]
+                       ) -> Dict[Tuple[str, str], Tuple[pd.DataFrame, pd.DataFrame]]:
+        """``(facet, scope) -> (rows, units)`` from ``_read_tables``: a set the gene set store calls directionless
+        is flagged (on top of the file's own column), then the rows are split by scope."""
+        tables: Dict[Tuple[str, str], Tuple[pd.DataFrame, pd.DataFrame]] = {}
+        for facet, (rows, units) in raw.items():
+            rows = rows.copy(deep=False)
             flagged = {name: bool(self.directionless(name)) for name in rows['module_key'].cat.categories}
             rows['directionless'] = rows['directionless'].to_numpy(dtype=bool) \
                 | rows['module_key'].map(flagged).astype(bool).to_numpy()
@@ -367,11 +387,8 @@ class ModuleResults:
         scope = scope or FacetResults.default_scope(facet)
         prepared = self.reader.prepare(datasets)
 
-        def build() -> Dict[Tuple[str, str, str], Dict[str, Any]]:
-            rows, units = self.tables(prepared).get((facet, scope)) or (None, None)
+        def compute(rows: pd.DataFrame, units: pd.DataFrame) -> Dict[Tuple[str, str, str], Dict[str, Any]]:
             families: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-            if rows is None or not len(units):
-                return families
             units = FacetResults.counting_units(units, exclude_secondary, facet)
             counted = units[units['counted_effective']]
             with self.reader._family_slots:
@@ -380,6 +397,18 @@ class ModuleResults:
                     for (method, source), part in sub.groupby(['method', 'source'], observed=True):
                         families[(group, str(method), str(source))] = self._family(part, group_units, facet)
             return families
+
+        def build() -> Dict[Tuple[str, str, str], Dict[str, Any]]:
+            rows, units = self.tables(prepared).get((facet, scope)) or (None, None)
+            if rows is None or not len(units):
+                return {}
+            # the directionless sets (gene set store) decide which rows enter a family: part of the key
+            directionless = sorted(rows.loc[rows['directionless'], 'module_key'].astype(str).unique())
+            return self.reader._disk_backed(
+                f'module_families-{facet}-{scope}-{bool(exclude_secondary)}',
+                lambda: self.reader._disk_units_key('module_families', units, prepared.datasets, facet, scope,
+                                                    bool(exclude_secondary), directionless),
+                lambda: compute(rows, units))
 
         return self.reader._cached_build(self._families, (facet, scope, bool(exclude_secondary), prepared.visibility),
                                          prepared.signature, build, max_entries=FAMILY_CACHE_ENTRIES * VISIBILITY_KINDS)

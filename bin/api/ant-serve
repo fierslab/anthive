@@ -4234,6 +4234,17 @@ _facet_results_reader: Optional[FacetResults] = None
 _facet_results_lock = Lock()
 
 
+def _facet_cache_dir() -> Optional[Path]:
+    """``<tmp_dir>/facet_cache``: the persistent cache of the facet gene and module tables, replication families
+    and dataset summaries (``lib/warm_cache.py``), reused by the next start when nothing changed. None (memory
+    only) when the tmp dir cannot be resolved."""
+    try:
+        return get_tmp_dir() / 'facet_cache'
+    except Exception as exc:  # noqa: BLE001
+        log.warning("facet cache: no tmp dir (%s); facet tables are kept in memory only", exc)
+        return None
+
+
 def _facet_results() -> FacetResults:
     """The shared reader over ``facet_results_dir`` (default <h5adstore>/_facet_tests)."""
     global _facet_results_reader
@@ -4248,7 +4259,7 @@ def _facet_results() -> FacetResults:
                     results_dir = get_facet_results_dir(cfg)
             except Exception as exc:
                 log.warning("facet_results_dir: %s; using %s", exc, results_dir)
-            _facet_results_reader = FacetResults(results_dir)
+            _facet_results_reader = FacetResults(results_dir, cache_dir=_facet_cache_dir())
         return _facet_results_reader
 
 
@@ -4298,10 +4309,18 @@ def _warm_facet_results() -> None:
     try:
         datasets = _facet_test_datasets()
         built = _facet_results().warm(datasets)
-        log.info("facet results warm-up: %d replication families in %.1f s", built, time.monotonic() - started)
+        log.info("facet results warm-up: %d replication families in %.1f s (%s)", built, time.monotonic() - started,
+                 ', '.join(f'{name} {seconds:.1f} s' for name, seconds in
+                           (getattr(_facet_results(), 'last_warm_seconds', None) or {}).items()))
         started = time.monotonic()
         built = _module_results().warm(datasets)
         log.info("module results warm-up: %d (facet, scope) families in %.1f s", built, time.monotonic() - started)
+        disk = getattr(_facet_results(), "disk", None)
+        if disk is not None:
+            rebuilt = sorted({name for name, outcome in list(disk.events)
+                              if outcome == 'miss' and not name.startswith('summary-')})
+            log.info("facet cache %s: %d loaded, %d built, %d written%s", disk.directory, disk.hits, disk.misses,
+                     disk.writes, f" (built: {', '.join(rebuilt)})" if rebuilt else '')
         started = time.monotonic()
         _detection_tables()
         log.info("gene detection table warm-up in %.1f s", time.monotonic() - started)
