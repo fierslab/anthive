@@ -10,5 +10,5 @@ aliases:
 - release
 - versions
 body_html: |
-  <p>Every dataset record carries a version <code>X.Y.Z</code>, shown as a small grey tag such as <code>v0.1.4</code>. A <strong>minor</strong> bump means the data changed (cells, expression, annotation columns). A <strong>patch</strong> bump means only the metadata changed (title, description, links, caveats). The record keeps a changelog: for each version the date, the checksum (sha256) of the previous file and what changed.</p>
-  <p>Facet test results record the checksum of the data they were computed from, and the API marks a result whose checksum no longer matches the current dataset. When you cite a dataset in an analysis, give its id and version.</p>
+  <p>Every dataset record carries a version <code>X.Y.Z</code>, shown as a small grey tag such as <code>v0.1.4</code>. A <strong>minor</strong> bump means the data changed (cells, expression, annotation columns). A <strong>patch</strong> bump means only the metadata changed (title, description, links<span data-ui="caveats">, caveats</span>). The record keeps a changelog: for each version the date, the checksum (sha256) of the previous file and what changed.</p>
+  <p><span data-ui="facets">Facet test results record the checksum of the data they were computed from, and the API marks a result whose checksum no longer matches the current dataset. </span>When you cite a dataset in an analysis, give its id and version.</p>

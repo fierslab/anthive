@@ -475,6 +475,28 @@ The chat assistant, geneset store path, and the report-site list all have
 sensible defaults in `anthive.default.yaml`. Copy over the ones that apply
 to your instance.
 
+**A public mirror without facets, caveats, API pages or MCP.** The `ui:`
+block switches parts of the web UI off (all `true` by default):
+
+```yaml
+ui:
+  facets: false    # Facet tabs, /facets pages, facet DE, per donor plots, facet help
+  caveats: false   # Caveats tab and markers; caveats carry data-quality warnings
+  api: false       # API page and links, notebook buttons; /api/docs and /api/redoc 404 for anonymous callers
+  mcp: false       # MCP page, links and help; ant-supervisor does not start ant-mcp, Caddy answers /mcp with 404
+```
+
+ant-serve, ant-browse and ant-supervisor read it at start, so restart the
+supervisor (or api, browse and caddy) after a change. The environment
+variables `ANTHIVE_UI_FACETS`, `ANTHIVE_UI_CAVEATS`, `ANTHIVE_UI_API` and
+`ANTHIVE_UI_MCP` (true or false) win over the file. With `mcp: false` the
+supervisor drops `mcp` from its services and passes
+`ANTHIVE_MCP_SNIPPET=caddy-mcp.off` to Caddy; a Caddy started some other way
+needs that variable set by hand. Caveats record curation decisions and known
+defects: with `caveats: false` visitors see the data without those warnings.
+The REST API keeps serving facets and caveats in every case. The container
+guide has the full table (`doc/DEPLOY_CONTAINERS.md`, "A public mirror").
+
 ---
 
 ## 4. Pull the data

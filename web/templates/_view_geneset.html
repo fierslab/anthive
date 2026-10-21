@@ -19,7 +19,7 @@
     <h4>Cell-to-cell SD</h4>
     <p>How much the score varies between cells within a dataset (median over the datasets of the row). Means and standard deviations are taken over the cells of one dataset: they describe the cells and say nothing about differences between donors.</p>
     <h4>Which datasets</h4>
-    <p>Scores exist only in the datasets where the set was scored in advance. The facet results in the next tab come from donor-level scores of the datasets they were tested in, which can be more datasets.</p>
+    <p>Scores exist only in the datasets where the set was scored in advance.{% if ui.facets %} The facet results in the next tab come from donor-level scores of the datasets they were tested in, which can be more datasets.{% endif %}</p>
     <h4>Rank and cell type</h4>
     <p>A set is scored on the cells of its own cell type, so in a cell type other than the one it was built for it ranks low by construction. Read the rank in the cell type the set belongs to.</p>
   {% endcall %}
@@ -65,7 +65,7 @@
 {% macro view_geneset_genes(name) -%}
 <div id="vws-genes">
   {% call section_help('Member genes', 'vws-pg-help') %}
-    <p>Every gene of {{ name }} with a link to its gene page and the facet calls it has on its own: each chip is a facet and cell type in which this gene replicates (same direction in at least 2 cohorts, r-value below 0.05), with the direction. The rule is the one of the gene view, so a gene can replicate while the mean score of the set does not. Genes that replicate are listed first. For the sex facet, genes on the X or Y chromosome carry no call.</p>
+    {% if not ui.facets %}<p>Every gene of {{ name }} with a link to its gene page.</p>{% else %}<p>Every gene of {{ name }} with a link to its gene page and the facet calls it has on its own: each chip is a facet and cell type in which this gene replicates (same direction in at least 2 cohorts, r-value below 0.05), with the direction. The rule is the one of the gene view, so a gene can replicate while the mean score of the set does not. Genes that replicate are listed first. For the sex facet, genes on the X or Y chromosome carry no call.</p>{% endif %}
   {% endcall %}
   <div id="vws-genes-body"><p class="vw-loading">Loading the member genes...</p></div>
 </div>
@@ -443,15 +443,16 @@
       var meta = V.facetMeta(call.scope, call.facet);
       return '<span class="vw-call" title="' + V.esc(meta.label + ' in ' + call.group + (call.scope === 'xenograft_human_in_mouse' ? ' (xenograft)' : '')) + '">' + V.esc(meta.label) + ' ' + V.arrow(call.direction) + ' ' + V.esc(V.plain(call.group)) + (call.scope === 'xenograft_human_in_mouse' ? ' (xeno)' : '') + '</span>';
     };
+    var withFacets = !window.antUi || window.antUi.facets;   // ui.facets false: members only, no facet calls column
     var rowHtml = function (gene) {
       var list = calls[gene.toUpperCase()] || [];
       return '<tr data-gene="' + V.esc(gene.toUpperCase()) + '"><td><a href="/genes/' + enc(gene) + '">' + V.esc(gene) + '</a></td>' + (hasRanks ? '<td class="num">' + V.esc(ranks[gene.toUpperCase()] == null ? '' : ranks[gene.toUpperCase()]) + '</td>' : '') +
-        '<td class="vw-gcalls">' + (list.length ? list.map(chip).join('') : '<span class="muted">no facet call</span>') + '</td></tr>';
+        (withFacets ? '<td class="vw-gcalls">' + (list.length ? list.map(chip).join('') : '<span class="muted">no facet call</span>') + '</td>' : '') + '</tr>';
     };
-    host.innerHTML = '<p class="vw-essential">' + (effects ? V.plural(called.length, 'member gene') + ' of ' + genes.length + ' replicate' + (called.length === 1 ? 's' : '') + ' on their own for at least one facet and cell type.' : 'The facet calls could not be loaded; the member genes are listed without them.') + '</p>' +
+    host.innerHTML = '<p class="vw-essential">' + (!withFacets ? V.plural(genes.length, 'member gene') + '.' : effects ? V.plural(called.length, 'member gene') + ' of ' + genes.length + ' replicate' + (called.length === 1 ? 's' : '') + ' on their own for at least one facet and cell type.' : 'The facet calls could not be loaded; the member genes are listed without them.') + '</p>' +
       '<input type="search" class="vw-genes-filter" id="vws-genes-filter" placeholder="Filter genes" aria-label="Filter the member genes">' +
-      '<div class="vw-box"><table class="vw-table fixed"><colgroup><col style="width:' + (hasRanks ? '20%' : '22%') + '">' + (hasRanks ? '<col style="width:10%">' : '') + '<col></colgroup><thead><tr><th>Gene ' + V.info('Click a gene to open its gene page.') + '</th>' + (hasRanks ? '<th class="num">Rank ' + V.info('Rank of the gene in the ranked list the set was made from.') + '</th>' : '') + '<th>Facet calls on its own ' + V.info('Facet and cell type in which this gene replicates (same direction in at least 2 cohorts, r-value below 0.05), with the direction.') + '</th></tr></thead><tbody id="vws-genes-rows">' + genes.map(rowHtml).join('') + '</tbody></table></div>' +
-      '<p class="vw-fnote">' + V.helpBtn('vws-pg-help') + ' Exploratory: a gene call is a gene-level result, separate from the result of the whole set.</p>';
+      '<div class="vw-box"><table class="vw-table fixed"><colgroup><col style="width:' + (hasRanks ? '20%' : '22%') + '">' + (hasRanks ? '<col style="width:10%">' : '') + (withFacets ? '<col>' : '') + '</colgroup><thead><tr><th>Gene ' + V.info('Click a gene to open its gene page.') + '</th>' + (hasRanks ? '<th class="num">Rank ' + V.info('Rank of the gene in the ranked list the set was made from.') + '</th>' : '') + (withFacets ? '<th>Facet calls on its own ' + V.info('Facet and cell type in which this gene replicates (same direction in at least 2 cohorts, r-value below 0.05), with the direction.') + '</th>' : '') + '</tr></thead><tbody id="vws-genes-rows">' + genes.map(rowHtml).join('') + '</tbody></table></div>' +
+      (withFacets ? '<p class="vw-fnote">' + V.helpBtn('vws-pg-help') + ' Exploratory: a gene call is a gene-level result, separate from the result of the whole set.</p>' : '');
     document.getElementById('vws-genes-filter').addEventListener('input', function (event) {
       var needle = event.target.value.trim().toUpperCase();
       host.querySelectorAll('#vws-genes-rows tr').forEach(function (tr) { tr.hidden = !!needle && tr.dataset.gene.indexOf(needle) < 0; });
@@ -482,6 +483,7 @@
   if (scoreTab) scoreTab.addEventListener('click', startScores);
   window.addEventListener('hashchange', function () { setTimeout(function () { if (document.getElementById('vt-score').classList.contains('active')) startScores(); }, 0); });
   setTimeout(function () { if (document.getElementById('vt-score').classList.contains('active')) startScores(); }, 0);
+  {% if ui.facets %}{# ui.facets false: no Facet DE tab; the Genes tab lists the members without facet calls #}
   V.cached(V.API + '/genesets/' + enc(STUDY) + '/' + enc(EXPERIMENT) + '/' + enc(NAME) + '/facet-effects').then(function (effects) {
     state.effects = effects;
     renderGenes(genesHost, effects);
@@ -525,6 +527,7 @@
     document.getElementById('vws-other-body').innerHTML = '';
     renderGenes(genesHost, null);
   });
+  {% endif %}
 })();
 </script>
 {%- endmacro %}

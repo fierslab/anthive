@@ -230,14 +230,64 @@ def _docs_base_url() -> str:
 templates.env.globals['docs_base_url'] = _docs_base_url
 
 
+# ── ui switches (site.yaml ui:, anthive.yaml ui:) ───────────────────────────────
+#
+# A public mirror can switch off parts of the UI: facets, caveats, api, mcp
+# (config.get_ui_settings). A part that is off disappears from every page and
+# its own pages answer 404 (`_require_ui`). Read once; tests set `_ui_cfg`.
+
+_UI_PARTS = ('facets', 'caveats', 'api', 'mcp')
+_ui_cfg: Dict[str, bool] = {}
+
+
+def _ui() -> Dict[str, bool]:
+    """The ui switches of this site, every part on unless the config says otherwise."""
+    if not _ui_cfg:
+        try:
+            from config import get_ui_settings, load_config  # noqa: PLC0415
+            _ui_cfg.update(get_ui_settings(load_config()))
+        except Exception as error:  # config unavailable (tests import this module bare) or invalid
+            print(f"ui settings unavailable, every part stays on: {error}")
+            _ui_cfg.update({part: True for part in _UI_PARTS})
+    return {part: bool(_ui_cfg.get(part, True)) for part in _UI_PARTS}
+
+
+class _UiFlags:
+    """Jinja global ``ui``: ``{% if ui.facets %}``, read per render."""
+
+    def __getattr__(self, name: str) -> bool:
+        if name not in _UI_PARTS:
+            raise AttributeError(name)
+        return _ui()[name]
+
+
+templates.env.globals['ui'] = _UiFlags()
+
+
+def _require_ui(part: str):
+    """Route dependency: 404 when ``part`` is switched off on this site."""
+    def check() -> None:
+        if not _ui()[part]:
+            from fastapi import HTTPException  # noqa: PLC0415
+            raise HTTPException(status_code=404, detail='not found')
+    return check
+
+
+def _ui_hidden() -> List[str]:
+    """Parts of the UI switched off on this site (help leaves them out)."""
+    return [part for part, shown in _ui().items() if not shown]
+
+
 def _help_topic_html(topic_id: str) -> Markup:
-    """Body of a help topic (and its child subsections) for the help page."""
-    return Markup(help_content.topic_html(topic_id, _docs_base_url()))
+    """Body of a help topic (and its child subsections) for the help page,
+    without the topics and passages of parts switched off on this site."""
+    return Markup(help_content.topic_html(topic_id, _docs_base_url(), hidden=_ui_hidden()))
 
 
 def _help_glossary_html() -> Markup:
-    """The glossary entries of ``lib/help_content`` as ``<dt>/<dd>`` pairs."""
-    return Markup(help_content.glossary_html(_docs_base_url()))
+    """The glossary entries of ``lib/help_content`` as ``<dt>/<dd>`` pairs
+    (terms of parts switched off on this site left out)."""
+    return Markup(help_content.glossary_html(_docs_base_url(), hidden=_ui_hidden()))
 
 
 templates.env.globals['help_topic_html'] = _help_topic_html
@@ -2284,7 +2334,7 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             # Caveats summary → ⚠ badge next to the dataset name; folder.html
             # only needs (n, max_level), not the full body (that lives on the
             # dataset page).
-            'caveats_summary': _summarize_caveats(db.get('caveats')),
+            'caveats_summary': _summarize_caveats(db.get('caveats') if _ui()['caveats'] else None),
             # is_secondary: true when the dataset contains cells that also
             # appear in other deposits (re-aggregated collection). Sourced from
             # the per-dataset .md frontmatter via the REST API. Defensive .get()
@@ -2706,7 +2756,7 @@ def datasets_redirect():
     return RedirectResponse("/", status_code=307)
 
 
-@router.get("/browse/{folder_browse_id}/{dataset_browse_id}/plot/donor", response_class=HTMLResponse)
+@router.get("/browse/{folder_browse_id}/{dataset_browse_id}/plot/donor", response_class=HTMLResponse, dependencies=[Depends(_require_ui('facets'))])
 async def donor_plot_view(request: Request, folder_browse_id: str, dataset_browse_id: str):
     """Per donor plot page of one gene or gene set for one facet and cell type of this dataset (the values the facet test
     used), built on the plot page shell. The image comes from ``/api/facets/{facet}/donor-plot.{fmt}`` with ``db_id``.
@@ -2729,7 +2779,7 @@ async def donor_plot_view(request: Request, folder_browse_id: str, dataset_brows
         print(f"API error: {error}")
         return _error_page(request, f"Dataset '{db_id}' not found", 404)
     collection = db.get('collection') or {}
-    caveats = db.get('caveats') or []
+    caveats = (db.get('caveats') or []) if _ui()['caveats'] else []
     subject = gene or module.rpartition('/')[2] or ''
     query = {'cell_type': cell_type, 'db_id': db_id}
     if gene:
@@ -2802,7 +2852,7 @@ async def plot_view(request: Request, folder_browse_id: str,
     # dataset.html shows, above the plot preview. A caveat like SP4/MPF's
     # astro-doublets applies directly to the plot the user is about to look
     # at; hiding it on the dataset overview page is dangerous.
-    caveats = db.get('caveats') or []
+    caveats = (db.get('caveats') or []) if _ui()['caveats'] else []
     caveats_summary = _summarize_caveats(caveats)
     plot_meta = {
         'embeddings':  sorted(list((db.get('embeddings') or {}).keys())),
@@ -3110,7 +3160,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     # near the top of the dataset page. The Python side reduces to a max
     # severity so the card's accent colour follows the highest-level entry
     # (cleaner than doing a max-reduce in Jinja).
-    caveats = db.get('caveats') or []
+    caveats = (db.get('caveats') or []) if _ui()['caveats'] else []   # ui.caveats false: none shown
     caveats_summary = _summarize_caveats(caveats)
 
     # Unified access + publication-status icon (shape=access, colour=pub).
@@ -3124,8 +3174,10 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     # translation). Best-effort: an older ant-serve without the endpoint
     # just hides the card.
     dataset_facets: List[Dict[str, Any]] = []
+    facets_on = _ui()['facets']     # ui.facets false: no facet tab group, no facet calls to the API
     try:
-        dataset_facets = _api_get_as_user(request, api_url, f'/databases/{db_id}/facets').get('facets') or []
+        if facets_on:
+            dataset_facets = _api_get_as_user(request, api_url, f'/databases/{db_id}/facets').get('facets') or []
     except Exception:
         dataset_facets = []
     # Facets outside the configured visible list (facets_visible) are not
@@ -3134,7 +3186,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     dataset_facets_other = [f for f in dataset_facets if f.get('hidden_by_config')]
     dataset_facets = [f for f in dataset_facets if not f.get('hidden_by_config')]
 
-    facet_tests = _dataset_facet_tests(api_url, db_id)
+    facet_tests = _dataset_facet_tests(api_url, db_id) if facets_on else None
     observed_columns = db.get('obs') if isinstance(db.get('obs'), dict) else {}
     tissue_detail = {
         'specific': _flatten_annotation_field(db.get('tissue')),
@@ -3189,13 +3241,14 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "has_duckdb": True,
         "update_pending": False,
         "de_studies": de_studies,
-        "other_de": _other_de_view(api_url, db_id, de_studies, obs),
+        # the Other DE matrices sit in the Facet tab group: not built without it
+        "other_de": _other_de_view(api_url, db_id, de_studies, obs) if facets_on else None,
         # bulk datasets: samples, not cells (Genes / Genesets tabs, Stats card)
         "is_bulk": _view_category(db) == 'bulk',
         "de_total_contrasts": de_total_contrasts,
         "papers": _dataset_papers(api_url, db_id),
         "facet_tests": facet_tests,
-        "replicate": _replicate_view(info, (facet_tests or {}).get('replicate_source')),
+        "replicate": _replicate_view(info, (facet_tests or {}).get('replicate_source')) if facets_on else None,
         "caveats": caveats,
         "caveats_summary": caveats_summary,
         "publication_status": pub_status,
@@ -3314,6 +3367,8 @@ async def help_view(request: Request):
         "n_datasets": n_datasets,
         "n_collections": n_collections,
         "n_genesets": n_genesets,
+        # auth.mode none (a public mirror): the help does not tell visitors to sign in
+        "auth_mode": _api_guide_site_settings()['mode'],
     })
 
 
@@ -3373,7 +3428,7 @@ def _site_base_url(request: Request, configured: str = '') -> str:
     return f"https://{host}"
 
 
-@router.get("/api-guide", response_class=HTMLResponse)
+@router.get("/api-guide", response_class=HTMLResponse, dependencies=[Depends(_require_ui('api'))])
 async def api_guide_view(request: Request):
     """How to use the REST API: login, first curl calls, pyvark, vark.
 
@@ -3529,7 +3584,7 @@ Safety rules. Follow them for the whole session.
 """
 
 
-@router.get("/account/mcp", response_class=HTMLResponse)
+@router.get("/account/mcp", response_class=HTMLResponse, dependencies=[Depends(_require_ui('mcp'))])
 async def account_mcp_view(request: Request):
     """The signed-in user's private MCP link: create, show, copy, rotate,
     revoke, plus per-client setup snippets and the 'set up with one paste'
@@ -3554,7 +3609,7 @@ async def account_mcp_view(request: Request):
          "mcp_prompt_placeholder": MCP_PROMPT_LINK_PLACEHOLDER})
 
 
-@router.get("/admin/mcp-links")
+@router.get("/admin/mcp-links", dependencies=[Depends(_require_ui('mcp'))])
 async def admin_mcp_links_view(request: Request):
     """The admin overview now lives on /account/mcp (section #all)."""
     return RedirectResponse("/account/mcp#all", status_code=307)
@@ -3811,7 +3866,7 @@ async def geneset_starcat_module_view(request: Request, catalog_id: str, module_
     })
 
 
-@router.get("/facets", response_class=HTMLResponse)
+@router.get("/facets", response_class=HTMLResponse, dependencies=[Depends(_require_ui('facets'))])
 async def facets_index(request: Request):
     """Top-level browser for the fleet's ``ant_*`` obs columns.
 
@@ -3864,7 +3919,7 @@ async def donor_groups_view(request: Request):
     })
 
 
-@router.get("/facets/{facet_name}", response_class=HTMLResponse)
+@router.get("/facets/{facet_name}", response_class=HTMLResponse, dependencies=[Depends(_require_ui('facets'))])
 async def facet_detail_view(request: Request, facet_name: str):
     """Per-facet drilldown page.
 
@@ -3940,7 +3995,7 @@ async def facet_detail_view(request: Request, facet_name: str):
     })
 
 
-@router.get("/facets/{facet_name}/effects-table", response_class=HTMLResponse)
+@router.get("/facets/{facet_name}/effects-table", response_class=HTMLResponse, dependencies=[Depends(_require_ui('facets'))])
 async def facet_effects_table(request: Request, facet_name: str):
     """HTML fragment: the per dataset and cell type effects table of one facet.
 

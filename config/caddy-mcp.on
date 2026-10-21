@@ -1,0 +1,3 @@
+# /mcp on: proxy to ant-mcp. Imported inside `handle /mcp*` of config/Caddyfile
+# (ANTHIVE_MCP_SNIPPET, the default).
+reverse_proxy {$ANTHIVE_MCP_HOST:localhost}:{$ANTHIVE_MCP_PORT:8090}

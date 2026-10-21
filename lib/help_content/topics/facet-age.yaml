@@ -1,4 +1,5 @@
 id: facet-age
+ui: facets
 title: 'Age: two twins'
 summary: The age facet is a linear trend per decade; age and AD pathology are correlated, so the unadjusted result overlaps the pathology result and an adjusted twin adds Braak stage.
 terms:

@@ -1,4 +1,5 @@
 id: donor-variability
+ui: facets
 title: Donor variability
 summary: How much donors (host animals in xenograft studies) differ from each other in one cell type, per gene and gene set, with the noise of counting cells removed and the technical differences between samples taken out step by step.
 related:

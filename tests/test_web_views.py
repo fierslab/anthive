@@ -23,6 +23,12 @@ _spec = importlib.util.spec_from_file_location("anthive_web_browser_views", _WEB
 browser = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(browser)
 
+
+@pytest.fixture(autouse=True)
+def _every_ui_part_on(monkeypatch):
+    """Every part of the UI on (a local anthive.yaml with ui: switches must not change the results)."""
+    monkeypatch.setattr(browser, "_ui_cfg", {"facets": True, "caveats": True, "api": True, "mcp": True})
+
 _DATABASES = [
     {"id": "A/n1", "title": "Nuclei microglia", "celltype": "microglial cell", "facet_scope": "human_postmortem",
      "organism": "human", "suspension_type": "nucleus", "experimental_system": "post_mortem_tissue",

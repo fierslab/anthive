@@ -252,17 +252,20 @@ _SERVE_WANTED = {
     'admin_revoke_mcp_link', 'McpVerifyRequest', 'verify_mcp_link',
     '_require_mcp_enabled', 'McpLinkCreateRequest', 'create_my_mcp_link',
     'rotate_one_mcp_link', 'revoke_one_mcp_link', 'admin_revoke_one_mcp_link',
-    '_chat_user_from_request', '_require_admin',
+    '_chat_user_from_request', '_require_admin', '_UI_SETTINGS', '_ui_settings',
 }
 
 INTERNAL = 'internal-test-secret'
 
 
-def _serve_app(tmp_path, monkeypatch, mcp_cfg: Optional[dict] = None):
+def _serve_app(tmp_path, monkeypatch, mcp_cfg: Optional[dict] = None, ui: Optional[dict] = None):
     monkeypatch.setenv('ANTHIVE_STATE_DIR', str(tmp_path / 'state'))
     cfg = {'internal_secret': INTERNAL,
            'mcp': {'enabled': True, 'token_ttl_days': 90, 'token_secret': 'tok-secret',
                    **(mcp_cfg or {})}}
+    if ui is not None:
+        cfg['ui'] = ui
+    monkeypatch.delenv('ANTHIVE_UI_MCP', raising=False)
     tree = ast.parse(SERVE_PATH.read_text())
     body = []
     for node in tree.body:
@@ -279,7 +282,7 @@ def _serve_app(tmp_path, monkeypatch, mcp_cfg: Optional[dict] = None):
         'hmac': hmac, 'Lock': Lock, 'Optional': Optional, 'Dict': Dict, 'List': List, 'Any': Any,
         'log': logging.getLogger('test-mcp-links'),
         'get_auth_settings': lambda cfg_arg=None: config.get_auth_settings(cfg),
-        'dataset_access': __import__('dataset_access'),
+        'dataset_access': __import__('dataset_access'), 'get_ui_settings': config.get_ui_settings,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     app.add_middleware(namespace['_InternalSecretGuard'])
@@ -334,6 +337,17 @@ def test_disabled_feature(tmp_path, monkeypatch):
     body = client.get('/me/mcp', headers=ALICE).json()
     assert body['enabled'] is False and body['url'] is None
     assert client.post('/me/mcp/rotate', headers=ALICE).status_code == 403
+
+
+def test_ui_mcp_off_disables_links_and_verification(tmp_path, monkeypatch):
+    """ui.mcp: false (a public mirror without MCP) wins over mcp.enabled: true."""
+    app, _ = _serve_app(tmp_path, monkeypatch, {'enabled': True}, ui={'mcp': False})
+    client = _client(app)
+    body = client.get('/me/mcp', headers=ALICE).json()
+    assert body['enabled'] is False and body['url'] is None
+    assert client.post('/me/mcp/rotate', headers=ALICE).status_code == 403
+    assert client.post('/internal/mcp/verify', json={'token': 'amcp_x'},
+                       headers={'X-Anthive-Internal': INTERNAL}).status_code == 401
 
 
 def test_internal_verify_needs_secret(tmp_path, monkeypatch):

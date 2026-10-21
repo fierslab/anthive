@@ -1,4 +1,5 @@
 id: facet-overview
+ui: facets
 title: The facet overview
 summary: The Overview tab of a facet page answers which genes and gene sets change with the facet and where the finding is repeated, in a sentence and four numbered sections (cell types, replicated genes, gene sets, cohorts), with the expert details closed.
 related:

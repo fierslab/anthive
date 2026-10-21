@@ -71,6 +71,14 @@ except Exception:
     _DATA_FOLDER = './data/h5adstore'
     _TMP_DIR = _script_dir / 'tmp'
 
+# ui.mcp false (a public mirror without MCP): ant-mcp is not started and
+# Caddy answers /mcp with a JSON 404 (config/caddy-mcp.off).
+try:
+    from config import get_ui_settings as _get_ui_settings
+    _MCP_UI = _get_ui_settings(_CFG)['mcp'] if _CFG else True
+except Exception:
+    _MCP_UI = True
+
 _API_HOST    = _CFG.get('rest_api_host', 'localhost')
 _API_PORT    = str(_CFG.get('rest_api_port', 8080))
 _BROWSE_HOST = _CFG.get('browse_host',    'localhost')
@@ -150,6 +158,8 @@ def _caddy_env_for_mode(prod: bool) -> dict[str, str]:
       caddy-auth.{dev,prod}           (forward_auth or empty)
       caddy-http-redirect.{dev,prod}  (:8500 redirect block or empty)
       caddy-servers.{dev,prod}        (trusted_proxies or empty)
+    ANTHIVE_MCP_SNIPPET (caddy-mcp.off) is added in both modes when ui.mcp is
+    false in anthive.yaml: /mcp then answers a JSON 404 and ant-mcp is not started.
     """
     if not prod:
         # Leave the env untouched so config/Caddyfile picks its defaults
@@ -462,6 +472,8 @@ async def _main() -> None:
     # spawn in _run_service picks it up.  Defaults match historical
     # behaviour byte-for-byte when --prod is NOT set.
     caddy_env = _caddy_env_for_mode(args.prod)
+    if not _MCP_UI:
+        caddy_env = {**caddy_env, 'ANTHIVE_MCP_SNIPPET': 'caddy-mcp.off'}
     if caddy_env:
         SERVICES['caddy']['env'] = caddy_env
 
@@ -471,6 +483,9 @@ async def _main() -> None:
     _services_env = os.environ.get('ANTHIVE_SERVICES', '').strip()
     base_services = ([s.strip() for s in _services_env.split(',') if s.strip()]
                      if _services_env else DEFAULT_SERVICES)
+    if not _MCP_UI and 'mcp' in base_services:
+        base_services = [name for name in base_services if name != 'mcp']
+        print("supervisor: ui.mcp is false in anthive.yaml, not starting mcp", flush=True)
     active_services = base_services + (['caddy'] if args.caddy else [])
     label_width = max(len(name) for name in active_services + ['supervisor'])
     sup_prefix, _ = _make_prefix('supervisor', DIM, label_width)

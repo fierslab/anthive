@@ -1,0 +1,5 @@
+# /mcp off: no MCP server on this site (ui.mcp or services.mcp false), so
+# answer a JSON 404 instead of a 502 from a missing upstream. Imported inside
+# `handle /mcp*` of config/Caddyfile through ANTHIVE_MCP_SNIPPET.
+header Content-Type application/json
+respond `{"error":"not_found","error_description":"This site has no MCP server"}` 404

@@ -55,7 +55,7 @@
 <p class="mv-intro">Which gene sets track a biological axis, and in which datasets. Pick a cell annotation column (for example braak or sex) and a statistic; each cell of the map is a <strong>per-cell association (descriptive)</strong>, not a tested effect.</p>
 
 {% call doc_block('About this heatmap', id='mv-about') %}
-  <p>Each value compares a gene set score with a cell annotation column across individual cells in one dataset. Because the cells of a donor are not independent and all carry the donor's value, these numbers mostly reflect differences between donors and are only loosely comparable across datasets. Use them to spot candidates, then confirm with a donor-level test on the Facets tab of a dataset (<a href="/help#glossary-per-cell-association">glossary</a>).</p>
+  <p>Each value compares a gene set score with a cell annotation column across individual cells in one dataset. Because the cells of a donor are not independent and all carry the donor's value, these numbers mostly reflect differences between donors and are only loosely comparable across datasets. Use them to spot candidates{% if ui.facets %}, then confirm with a donor-level test on the Facets tab of a dataset{% endif %} (<a href="/help#glossary-per-cell-association">glossary</a>).</p>
 {% endcall %}
 
 {% call doc_block('About the statistics', id='mv-stats-help', summary=True) %}

@@ -1,4 +1,5 @@
 id: facet-app-nlgf
+ui: facets
 title: App NL-G-F
 summary: App NL-G-F is a knock-in mouse genotype facet, tested only in mouse and xenograft host scopes, with the host animal as replicate.
 terms:

@@ -11,5 +11,5 @@ body_html: |
     <li><strong>Colour, subset and sample.</strong> Colour by a gene or a column; restrict to a subset of cells (for example one sex or one disease group); subsample very large datasets for speed. Settings such as palette and size live in the side panel.</li>
     <li><strong>Downloads.</strong> PNG, SVG or PDF. Figures contain no visible caption text, so they are clean for manuscripts; the caption is available separately.</li>
     <li><strong>Sharing.</strong> <em>copy URL</em> copies the address of the interactive plot page with all settings; <em>copy thumbnail md</em> copies a snippet to embed the plot in a description.</li>
-    <li><strong>Notebook.</strong> <em>📓 notebook</em> opens the same plot as a JupyterLite notebook in your browser, with the code to fetch the data and redraw it. Download the notebook to keep changes.</li>
+    <li data-ui="api"><strong>Notebook.</strong> <em>📓 notebook</em> opens the same plot as a JupyterLite notebook in your browser, with the code to fetch the data and redraw it. Download the notebook to keep changes.</li>
   </ul>

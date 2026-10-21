@@ -151,7 +151,7 @@
 <div class="gv-examples" id="gv-compare-block">
   <span class="gv-ex-label">Compare several genes</span>
   <a href="/genes/APOE,TREM2,CX3CR1">APOE,TREM2,CX3CR1</a>
-  <span class="info" title="Expression only, no facet results: a gene by dataset heatmap of the genes you list, separated by commas. For facet effects open one gene.">&#9432;</span>
+  <span class="info" title="{% if ui.facets %}Expression only, no facet results: a gene by dataset heatmap of the genes you list, separated by commas. For facet effects open one gene.{% else %}A gene by dataset heatmap of the expression of the genes you list, separated by commas.{% endif %}">&#9432;</span>
 </div>
 {% if logged_in %}<script>
 (function () {
@@ -205,8 +205,8 @@
 {{ expression_core() }}
 <div class="tab-bar vw-tabs-bar" id="vw-tabs" role="tablist">
   <button type="button" class="tab-btn {{ view_class('gene-expression') }}" title="{{ view_tip('gene-expression', 'Where the gene ranks among all genes, per cell type') }}" data-vtab="expression" data-hash="expression" role="tab">Expression</button>
-  <button type="button" class="tab-btn {{ view_class('gene-shifts') }}" title="{{ view_tip('gene-shifts', 'Facet DE: donor-level facet effects on the gene') }}" data-vtab="shifts" data-hash="facet-de" data-alias="shifts" role="tab">Facet DE</button>
-  <button type="button" class="tab-btn {{ view_class('gene-variability') }}" title="{{ view_tip('gene-variability') }}" data-vtab="variability" data-hash="variability" role="tab" hidden>Donor variability</button>
+  {% if ui.facets %}<button type="button" class="tab-btn {{ view_class('gene-shifts') }}" title="{{ view_tip('gene-shifts', 'Facet DE: donor-level facet effects on the gene') }}" data-vtab="shifts" data-hash="facet-de" data-alias="shifts" role="tab">Facet DE</button>
+  <button type="button" class="tab-btn {{ view_class('gene-variability') }}" title="{{ view_tip('gene-variability') }}" data-vtab="variability" data-hash="variability" role="tab" hidden>Donor variability</button>{% endif %}
   <button type="button" class="tab-btn {{ view_class('gene-author-de') }}" title="{{ view_tip('gene-author-de', 'Differential expression stored with the datasets: the authors analysis or one added by the lab') }}" data-vtab="de" data-hash="author-de" role="tab" hidden>Other DE (author and custom)<span class="tab-count"></span></button>
   <span class="vw-older"><button type="button" class="tab-btn vw-older-btn {{ view_class('older-views') }}" aria-haspopup="true" aria-expanded="false" title="{{ view_tip('older-views', 'Earlier designs of this page, kept reachable') }}">Older views &#9662;</button><span class="vw-older-menu" hidden>
   <button type="button" class="tab-btn {{ view_class('gene-detection') }}" title="{{ view_tip('gene-detection', 'The earlier expression table: percent of cells expressing and rank in dataset') }}" data-vtab="detection" data-hash="detection" data-alias="gene-view" role="tab">Detection</button>
@@ -214,8 +214,8 @@
   </span></span>
 </div>
 <div class="tab-panel vw-panel" id="vt-expression">{{ expression_panel('gene', gene) }}</div>
-<div class="tab-panel vw-panel" id="vt-shifts">{{ _review_banner('gene-shifts') }}{{ view_gene_headline() }}{{ view_gene_shifts(gene) }}</div>
-<div class="tab-panel vw-panel" id="vt-variability">{{ _review_banner('gene-variability') }}{{ view_gene_variability(gene) }}</div>
+{% if ui.facets %}<div class="tab-panel vw-panel" id="vt-shifts">{{ _review_banner('gene-shifts') }}{{ view_gene_headline() }}{{ view_gene_shifts(gene) }}</div>
+<div class="tab-panel vw-panel" id="vt-variability">{{ _review_banner('gene-variability') }}{{ view_gene_variability(gene) }}</div>{% endif %}
 <div class="tab-panel vw-panel" id="vt-de">{{ _review_banner('gene-author-de') }}{{ view_gene_author_de(gene) }}</div>
 <div class="tab-panel vw-panel" id="vt-detection">{{ _review_banner('gene-detection') }}{{ view_gene_expression(gene) }}</div>
 <div id="vt-atlas" class="tab-panel">{{ _review_banner('gene-atlas') }}
@@ -330,7 +330,7 @@
 
 {# ── multi-gene heatmap ── #}
 {% if gene and ',' in gene %}
-<p class="vw-fnote" id="gv-multi-note" style="max-width:none;margin:6px 0 8px">This comparison shows expression only. Facet results are per gene: open one gene for its facet effects, one gene at a time:
+<p class="vw-fnote" id="gv-multi-note" style="max-width:none;margin:6px 0 8px">This comparison shows expression only. {% if ui.facets %}Facet results are per gene: open one gene for its facet effects, one gene at a time:{% else %}Open one gene for its own page:{% endif %}
   {% for single in gene.split(',') if single.strip() %}<a href="/genes/{{ single.strip()|urlencode }}">{{ single.strip() }}</a>{% if not loop.last %}, {% endif %}{% endfor %}.</p>
 {% endif %}
 <div id="gv-hm-controls" class="gv-hm-controls" style="display:none">
@@ -360,7 +360,7 @@
 <div id="gene-missing" class="muted" style="font-size:11px; margin-top:10px"></div>
 <div id="gene-error" class="plot-status"></div>
 
-{% if ',' not in gene %}
+{% if ',' not in gene and ui.facets %}
 {% from "_facet_effects.html" import fx_gene_panel %}
 {{ fx_gene_panel(gene) }}
 {% endif %}

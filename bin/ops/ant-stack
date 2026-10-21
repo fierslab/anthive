@@ -154,7 +154,7 @@ def load_site(path: Path) -> dict:
 
 #: Sections whose unknown keys block `check` / `up` (a typo there silently changes security or
 #: what is served); unknown keys elsewhere are warnings.
-STRICT_SECTIONS = ('auth', 'tls', 'ports', 's3', 'services', 'datasets', 'data')
+STRICT_SECTIONS = ('auth', 'tls', 'ports', 's3', 'services', 'datasets', 'data', 'ui')
 #: Valid keys that site.example.yaml only shows in a comment.
 EXTRA_SITE_KEYS = {'site': {'docs_base_url'}}
 #: Mappings whose own keys are free-form (copied through or described elsewhere).
@@ -246,6 +246,17 @@ def validate_site(site: dict, path: Path) -> dict:
             not isinstance(facets_visible, list)
             or not all(isinstance(f, str) and re.fullmatch(r'ant_[A-Za-z0-9_]+', f) for f in facets_visible)):
         raise SiteError("site.facets_visible must be a list of ant_* facet names (or [] for all)")
+    ui = site.get('ui')
+    if ui is None:
+        ui = site['ui'] = {}
+    if not isinstance(ui, dict):
+        raise SiteError(f"ui must be a mapping ({', '.join(UI_SWITCHES)}: true or false)")
+    for key in UI_SWITCHES:
+        value = ui.get(key, True)
+        if value is None:
+            value = ui[key] = True
+        if not isinstance(value, bool):
+            raise SiteError(f"ui.{key} must be true or false, not {value!r}")
     site['_path'] = path
     site['_h5adstore'] = _abs(site['data'].get('h5adstore'), 'data.h5adstore')
     site['_genesetstore'] = _abs(site['data'].get('genesetstore'), 'data.genesetstore', False)
@@ -467,6 +478,21 @@ def _s3_block(site: dict, role: str) -> dict | None:
     }
 
 
+#: The ui: switches of site.yaml (lib/config.UI_SWITCHES): parts of the web UI a site shows.
+UI_SWITCHES = ('facets', 'caveats', 'api', 'mcp')
+
+
+def ui_settings(site: dict) -> dict[str, bool]:
+    """site.yaml ui: block with defaults (every part on)."""
+    block = site.get('ui') or {}
+    return {key: bool(block.get(key, True)) for key in UI_SWITCHES}
+
+
+def mcp_enabled(site: dict) -> bool:
+    """Whether the mcp service runs and Caddy routes /mcp: services.mcp and ui.mcp."""
+    return bool((site.get('services') or {}).get('mcp')) and ui_settings(site)['mcp']
+
+
 def _deposit_enabled(site: dict) -> bool:
     return bool((site.get('services') or {}).get('dataset_deposit')) and bool((site.get('s3') or {}).get('enabled'))
 
@@ -544,7 +570,7 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
         },
         'internal_requires_auth': bool(site['auth'].get('internal_requires_auth', True)),
         'mcp': {
-            'enabled': bool(site['services'].get('mcp')),   # personal links on/off
+            'enabled': mcp_enabled(site),   # personal links on/off (services.mcp and ui.mcp)
             'host': '0.0.0.0', 'port': 8090,
             'public_base_url': site['site']['public_url'].rstrip('/'),
             'plots_dir': f"{C_WEBAPP}/plots",
@@ -559,6 +585,8 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
     if site['site'].get('docs_base_url'):
         cfg['docs_base_url'] = str(site['site']['docs_base_url'])
     cfg['facets_visible'] = [str(f) for f in (site['site'].get('facets_visible') or [])]
+    # parts of the web UI (web, api and mcp read it; harmless for the other roles)
+    cfg['ui'] = ui_settings(site)
     lib = site.get('library') or {}
     cfg.update({
         'library_upload_groups': [str(g) for g in (lib.get('upload_groups') or ['admins'])],
@@ -688,6 +716,17 @@ http://:{{$ANTHIVE_TOOLS_PORT:{PORT_TOOLS}}} {{
 \treverse_proxy {{$ANTHIVE_API_HOST:api}}:{{$ANTHIVE_API_PORT:8080}}
 }}
 """
+
+
+def render_caddy_mcp(site: dict) -> str:
+    """What Caddy's /mcp route does (imported inside `handle /mcp*` through ANTHIVE_MCP_SNIPPET).
+
+    The text of config/caddy-mcp.on (proxy to the mcp service) or caddy-mcp.off (JSON 404,
+    no mcp service: services.mcp or ui.mcp false), rendered from this checkout into stack/caddy
+    so it does not depend on the Caddy config copied out of the image."""
+    which = 'on' if mcp_enabled(site) else 'off'
+    head = f"# Rendered by bin/ops/ant-stack from services.mcp and ui.mcp (config/caddy-mcp.{which}).\n"
+    return head + (REPO / 'config' / f'caddy-mcp.{which}').read_text()
 
 
 def render_caddy_auth(site: dict) -> str:
@@ -944,7 +983,9 @@ def render_compose_site(site: dict, read_from=None) -> dict:
             'ports': _listen_and_ports(site)[1]
                      + ([f"127.0.0.1:{site['ports']['tools']}:{PORT_TOOLS}"] if _deposit_enabled(site) else []),
             'volumes': [_bind(stack / 'caddy', C_CADDY_SNIPPETS, read_only=True)],
-            'environment': {'ANTHIVE_HTTP_REDIRECT_SNIPPET': f"{C_CADDY_SNIPPETS}/tools.caddy"},
+            'environment': {'ANTHIVE_HTTP_REDIRECT_SNIPPET': f"{C_CADDY_SNIPPETS}/tools.caddy",
+                            # /mcp: proxy to the mcp service, or a JSON 404 when it is off (render_caddy_mcp)
+                            'ANTHIVE_MCP_SNIPPET': f"{C_CADDY_SNIPPETS}/mcp.caddy"},
         },
         'authelia': {'volumes': [_bind(state / 'authelia', '/config')]},
     }
@@ -969,7 +1010,7 @@ def _config_roles(site: dict) -> dict[str, str]:
 # Files `render` produces, relative to stack/ (configs are 0600 secrets).
 def _rendered_files(site: dict) -> list[str]:
     files = list(_config_roles(site).values()) + ['caddy/auth.caddy', 'caddy/tls.caddy', 'caddy/servers.caddy',
-                                                  'caddy/tools.caddy', 'compose.site.yaml', '.env']
+                                                  'caddy/tools.caddy', 'caddy/mcp.caddy', 'compose.site.yaml', '.env']
     if site['auth']['mode'] == 'authelia':
         files.append('authelia/configuration.yml')
     return files
@@ -1128,6 +1169,7 @@ def _render_locked(site: dict, quiet: bool, apply: bool) -> Path:
     _atomic_write(staging / 'caddy' / 'tls.caddy', render_caddy_tls(site).encode())
     _atomic_write(staging / 'caddy' / 'servers.caddy', render_caddy_servers(site).encode())
     _atomic_write(staging / 'caddy' / 'tools.caddy', render_caddy_tools(site).encode())
+    _atomic_write(staging / 'caddy' / 'mcp.caddy', render_caddy_mcp(site).encode())
     if _deposit_enabled(site):
         for folder in [*watcher_dirs(site).values(), state / 'ingest']:
             try:
@@ -1150,7 +1192,7 @@ def _render_locked(site: dict, quiet: bool, apply: bool) -> Path:
         + yaml.safe_dump(render_compose_site(site, read_from), sort_keys=False)).encode())
 
     profiles = []
-    if site['services'].get('mcp'):
+    if mcp_enabled(site):
         profiles.append('mcp')
     if site['auth']['mode'] == 'authelia':
         profiles.append('authelia')
@@ -1196,7 +1238,7 @@ def _validate_rendered_config(path: Path) -> None:
             "try:\n"
             "    cfg = config.load_config(); config.get_auth_settings(cfg)\n"
             "    config.get_coordinate_mode(cfg); config.get_catalog_scan_mode(cfg)\n"
-            "    config.get_facets_visible(cfg); config.get_log_stderr_level(cfg)\n"
+            "    config.get_facets_visible(cfg); config.get_log_stderr_level(cfg); config.get_ui_settings(cfg)\n"
             "except Exception as error:\n"
             "    print(error if isinstance(error, config.ConfigError) else f'{type(error).__name__}: {error}',"
             " file=sys.stderr); sys.exit(3)\n")
@@ -1726,9 +1768,30 @@ def check(site: dict, running: bool = False) -> list[str]:
         _warn("auth.mode none: NO LOGIN. Admin features are off and only access: public datasets are "
               "served (unless auth.internal_requires_auth is false).")
     _check_internal_access(site)
+    _check_ui(site)
     if site['auth']['mode'] == 'trusted-proxy' and site['ports']['bind'] not in ('127.0.0.1', '::1'):
         problems.append("auth.mode trusted-proxy trusts identity headers: ports.bind must be 127.0.0.1")
     return problems
+
+
+def _check_ui(site: dict) -> None:
+    """Say which parts of the web UI are off and what that means."""
+    ui = ui_settings(site)
+    off = [key for key, on in ui.items() if not on]
+    if not off:
+        return
+    _say(f"ui: switched off: {', '.join(off)}")
+    if not ui['mcp'] and (site.get('services') or {}).get('mcp'):
+        _warn("ui.mcp is false: the mcp service is not started and /mcp answers 404, although "
+              "services.mcp is true (set services.mcp: false to say so)")
+    if not ui['caveats']:
+        _warn("ui.caveats is false: caveats carry data-quality warnings (curation decisions, known "
+              "defects such as a broken embedding); visitors of this site will not see them. The REST "
+              "API still serves them.")
+    if not ui['api']:
+        _say("ui.api is false: no API page, API links or notebook buttons; /api/docs and /api/redoc "
+             "answer 404 to visitors who are not signed in. The REST API itself stays (the web UI, "
+             "vark and pyvark use it).")
 
 
 def _catalog_dataset_mds(store: Path):
@@ -1836,7 +1899,8 @@ def print_plan(site: dict) -> None:
   run as         uid {site['_uid']} gid {site['_gid']}
   images         {image_ref(site, 'app')}
                  {image_ref(site, 'ingest')}
-  services       api web caddy{' mcp' if site['services'].get('mcp') else ''}{' authelia' if site['auth']['mode'] == 'authelia' else ''}
+  ui off         {', '.join(k for k, on in ui_settings(site).items() if not on) or '-'}
+  services       api web caddy{' mcp' if mcp_enabled(site) else ''}{' authelia' if site['auth']['mode'] == 'authelia' else ''}
 """)
 
 
@@ -1920,7 +1984,7 @@ def cmd_up(args: argparse.Namespace) -> int:
     # 3. Services whose profile is now off (auth mode or mcp switched) are
     #    not orphans to compose; stop and remove them explicitly.
     active = {'authelia': site['auth']['mode'] == 'authelia',
-              'mcp': bool(site['services'].get('mcp'))}
+              'mcp': mcp_enabled(site)}
     for service, is_active in active.items():
         if not is_active:
             run_compose(site, '--profile', service, 'rm', '--stop', '--force', service, check=False)

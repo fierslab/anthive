@@ -83,9 +83,9 @@
       <li><strong>Who you are matters.</strong> The API sees your username, so admin-only endpoints work for admins and refuse everybody else (see <a href="#permissions">below</a>).</li>
     </ul>
     {% endif %}
-    {% call doc_block('About MCP links (separate from the API)', id='api-guide-mcp-about', summary=True) %}
+    {% if ui.mcp %}{% call doc_block('About MCP links (separate from the API)', id='api-guide-mcp-about', summary=True) %}
     <p>The personal links on your <a href="/account/mcp" id="api-guide-mcp-link">MCP page</a> are for AI assistants. Each link is its own token that acts as your login on the MCP server (<code>/mcp</code>); it does not work on the REST API, and your password does not go into an MCP client. Treat a link like a password and revoke it there if it leaks.</p>
-    {% endcall %}
+    {% endcall %}{% endif %}
   </section>
 
   {% if _basic %}
@@ -203,7 +203,7 @@ result = client.upload_paper(Path("paper.md"), pdf="paper.pdf", dry_run=True)
 results = client.upload_papers(AnthiveClient.paper_items_from_folder("papers/"))</pre><button type="button" data-copy-api>Copy</button></div>
     <p><code>PaperUploadForbiddenError</code> (403) means your account may not upload; <code>PaperUploadDisabledError</code> (503) means this site does not accept uploads at the moment. With curl, the record goes in the <code>metadata</code> field and the PDF in <code>file</code>:</p>
     <div class="cmd"><pre>curl -n -s -F "metadata=&lt;paper.md" -F "file=@paper.pdf" -F dry_run=true {{ api_base }}/papers/upload</pre><button type="button" data-copy-api>Copy</button></div>
-    <p class="note">Upload large PDFs with vark, pyvark or curl, not through an AI assistant's MCP upload tool: the assistant has to pass the whole file through the conversation, and messages have size limits.</p>
+    {% if ui.mcp %}<p class="note">Upload large PDFs with vark, pyvark or curl, not through an AI assistant's MCP upload tool: the assistant has to pass the whole file through the conversation, and messages have size limits.</p>{% endif %}
     {% else %}
     <p id="api-guide-upload-restricted">Adding papers is limited to members of {% if upload_groups %}the {{ upload_groups | join(', ') }} group{% if upload_groups | length > 1 %}s{% endif %}{% else %}no group (uploads are off){% endif %} on this site. If you should be able to add papers, ask the people running it; once you may, this section shows the upload commands for vark, pyvark and curl.</p>
     {% endif %}
@@ -215,7 +215,7 @@ results = client.upload_papers(AnthiveClient.paper_items_from_folder("papers/"))
     <ul>
       <li>editing collection and dataset descriptions and annotations, and the curation suggestions;</li>
       <li>server control under <code>/api/admin/</code> (reloading the catalogue, cache rebuilds);</li>
-      <li>the list of every user's MCP links;</li>
+      {% if ui.mcp %}<li>the list of every user's MCP links;</li>{% endif %}
       <li>custom Python figures (<code>/analytics/viz</code>);</li>
       <li>adding papers to the library, which is limited to the upload groups the site configures (admins by default; see <a href="#papers-upload">adding papers</a>).</li>
     </ul>

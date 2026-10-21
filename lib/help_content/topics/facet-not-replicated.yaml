@@ -1,4 +1,5 @@
 id: facet-not-replicated
+ui: facets
 title: Reading "no evidence of replication"
 summary: 'Reading no evidence of replication: it means the data do not show a consistent effect, not that there is none; few or small cohorts cannot reach it.'
 aliases:

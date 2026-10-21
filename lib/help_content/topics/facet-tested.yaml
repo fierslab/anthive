@@ -1,4 +1,5 @@
 id: facet-tested
+ui: facets
 title: What was tested
 summary: Which facets are tested, with which model, per dataset and cell type, and how each result row states its model.
 terms:

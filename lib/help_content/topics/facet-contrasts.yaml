@@ -1,4 +1,5 @@
 id: facet-contrasts
+ui: facets
 title: Contrasts and other row details
 summary: The direction of each contrast (sex m vs f, disease AD vs control, APOE e4 carrier vs non-carrier, Braak and age as trends) and the flags that appear on a result row.
 terms:
