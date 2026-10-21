@@ -57,6 +57,22 @@ Patch release. No endpoint, parameter or response field changes. Clients do not 
   than S3: S3 is canonical on a slave") before it is overwritten; a primary still keeps its local copy.
 - `--dry-run` still changes nothing on every path (2.46.1).
 
+
+Public mirrors (new `ui:` block, all `true` by default; nothing changes without it):
+
+- `ui.facets`, `ui.caveats`, `ui.api` and `ui.mcp` switch parts of the web UI off, and each also closes the pages it
+  hides: the `/facets` pages, `/api-guide`, the MCP pages answer 404; with `ui.api: false` Swagger UI and ReDoc answer
+  404 to callers who are not signed in; with `ui.mcp: false` MCP links are refused, the mcp service is not started
+  and Caddy answers `/mcp` with a JSON 404. The REST API, `/openapi.json` and `/version` stay. `ui.caveats: false`
+  hides data-quality warnings from visitors; `ant-stack check` warns.
+
+Faster restarts:
+
+- The facet results warm-up is cached on the scratch disk (`<tmp_dir>/facet_cache`, parquet plus JSON, never pickle),
+  keyed on the code version, the cohort table, each dataset's `.md` sha256 and the result files; only families whose
+  inputs changed are rebuilt. The module rank warm-up no longer pauses after a cache hit (it paused 0.5 s per dataset,
+  77 s for 153 datasets), and its key now includes the cell type grouping. A restart with unchanged data finishes the
+  warm-up in about 30 s after `/health` answers (about 180 s before); the first start after the upgrade rebuilds once.
 ## 2.46.4 (2026-10-19)
 
 Patch release. No endpoint, parameter or response field changes. Clients do not need to update.
