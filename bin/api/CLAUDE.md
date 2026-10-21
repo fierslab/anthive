@@ -220,11 +220,11 @@ and `lib/config.py` (anthive.yaml loader).
   listings; nothing is dropped from the API.
 - **Persistent facet cache** (unreleased, `lib/warm_cache.py`): `FacetResults(results_dir,
   cache_dir=_facet_cache_dir())` keeps the gene tables, the module tables, every replication family
-  (gene and module) and the summaries of tested datasets as pickles under `<tmp_dir>/facet_cache`
+  (gene and module) and the summaries of tested datasets under `<tmp_dir>/facet_cache`
   (`config.get_tmp_dir`; `/scratch/tmp/facet_cache` in the containers), so a restart with unchanged
-  inputs loads them instead of rebuilding (dev, 153 datasets: facet and module phases 98 s cold, 15 s warm, of
-  which 6 s is the GENCODE parse that containers do not have; one changed human dataset rebuilds the tables and
-  every human family it is in, 79 s, the xenograft ones load). The warm-up logs `facet cache <dir>: N loaded,
+  inputs loads them instead of rebuilding (dev, 153 datasets: facet and module phases 94 s without the cache,
+  127 s on a cold start that also writes it, 21 s warm, of which 6 s is the GENCODE parse that containers do not
+  have; one changed human dataset rebuilds the tables and every human family it is in, the xenograft ones load). The warm-up logs `facet cache <dir>: N loaded,
   N built, N written (built: ...)`. Hooks are `_disk_backed`
   inside the existing `_cached_build` builds. Keys are sha256 digests (`warm_cache.digest`, never
   `hash()`, which changes per process): the tables key on `code_version()` (every `lib/*.py` and
@@ -235,8 +235,13 @@ and `lib/config.py` (anthive.yaml loader).
   also key on the directionless sets of the gene set store, which `ModuleResults._finish_tables`
   applies after the disk load). The key is recomputed after a build and nothing is written when an
   input changed meanwhile. Writes are a unique temp file plus `os.replace` under a per-entry `flock`;
-  a load checks the stored key and format, anything unreadable is a miss. At most `VISIBILITY_KINDS`
-  entries per name stay (gene tables about 1.5 GB per visitor kind, families about 0.8 GB). Untested
+  a load checks the stored key and format, anything unreadable is a miss. **Never pickle** (the scratch
+  volume is shared by the api and ingest containers): an entry is one `.awc` file, a JSON header (key,
+  value as tagged JSON) followed by one parquet blob per DataFrame; object columns that are not plain
+  strings are stored as tagged JSON per cell (dicts, frozensets, lists, None vs NaN survive). A value
+  holding any other type is not cached (logged), and pyarrow before 14.0.1 turns the cache off
+  (CVE-2023-47248). At most `VISIBILITY_KINDS`
+  entries per name stay (about 1.4 GB per visitor kind on the dev store). Untested
   summaries are never stored (their reason can come from the run logs). A key input you add to a
   build must go into its disk key too; a change in `lib/` invalidates everything by itself. Clearing:
   delete the folder (the next start rebuilds). Tests: `tests/test_warm_cache.py`, the `disk cache`
