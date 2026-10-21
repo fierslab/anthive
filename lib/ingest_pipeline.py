@@ -1095,6 +1095,19 @@ class Pipeline:
             raise Blocked('failed', 'the sidecar has no sha256= line; integrity cannot be verified')
         if declared != actual:
             raise Blocked('failed', f'sha256 mismatch: pulled {actual}, sidecar declares {declared}')
+        # a deposit of another site (design section 24, review C5): every pulled file against the sha256 of the
+        # signed record, because the store may ignore IfMatch on the GET
+        signed = dict((item.deposit or {}).get('signed_sha256') or {})
+        if signed:
+            pulled = [(item.h5ad, staged_h5ad), (item.mus, staged_mus)] + list(static_files.values())
+            for obj, path in pulled:
+                expected = signed.get(obj.key)
+                got = actual if path == staged_h5ad else sha256_file(path)
+                if expected is None and obj.key in (item.h5ad.key, item.mus.key):
+                    raise Blocked('failed', f'{obj.key}: the signed record of this deposit has no sha256 for it')
+                if expected is not None and got != expected:
+                    raise Blocked('failed', f'{obj.key}: pulled sha256 {got[:12]} is not the {expected[:12]} of '
+                                            f'the signed record')
         if sidecar.get('data_project') and sidecar['data_project'] != item.data_project:
             raise Blocked('failed', f'sidecar data_project={sidecar["data_project"]} but the deposit is under '
                                     f'{item.data_project}/')
@@ -2054,6 +2067,12 @@ class Pipeline:
             staged_data, staged_mus = de_dir / parent / name, de_dir / parent / (name + '.mus')
             self._pull(mus_obj, staged_mus)
             self._pull(obj, staged_data)
+            signed = deposit.get('signed_sha256') or {}
+            for pulled_obj, path in ((mus_obj, staged_mus), (obj, staged_data)):
+                if signed and signed.get(pulled_obj.key) != sha256_file(path):
+                    outcome.state, outcome.detail = 'failed', (f'{pulled_obj.key}: the pulled file is not the one '
+                                                               f'of the signed record (sha256)')
+                    return outcome
             meta = parse_sidecar_text(staged_mus.read_text(encoding='utf-8', errors='replace'))
             if not de_sidecar_names(meta, file_id, basename, db_id):
                 outcome.state, outcome.detail = 'failed', f'{mus_obj.name} does not name {db_id}'

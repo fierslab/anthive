@@ -32,10 +32,20 @@ SITES = {'intern': {'k1': SECRET.encode()}, 'prod': {'k1': OTHER_SECRET.encode()
 DEP = 'dep_' + 'a' * 20
 
 
+def _split(raw):
+    """(signature line, parsed body) of a signed record or result (tests only: never parse before verifying)."""
+    header, _, body = raw.partition(b'\n')
+    return header, json.loads(body)
+
+
+def _join(header, envelope):
+    return header + b'\n' + json.dumps(envelope).encode()
+
+
 def _record(**changes):
     record = {field: None for field in dr.RECORD_FIELDS}
-    record.update(id=DEP, user='alice', name='Alice', email='alice@example.org', is_admin=0, data_project=GROUP,
-                  basename='micro', state='uploaded', created=1, updated=2, total_bytes=10,
+    record.update(id=DEP, user='alice', is_admin=0, data_project=GROUP,
+                  basename='micro', state='uploaded', created=1, total_bytes=10,
                   watch_key=f'{PREFIX}{GROUP}/micro.h5ad', h5ad_etag='0' * 32, mus_key=f'{PREFIX}{GROUP}/micro.h5ad.mus',
                   mus_etag='1' * 32, deposit_kind='dataset',
                   files=[{'name': 'micro.h5ad', 'kind': 'h5ad', 'key': f'{PREFIX}{GROUP}/micro.h5ad', 'size': 10,
@@ -71,9 +81,9 @@ def test_forged_records_are_refused(case):
     elif case == 'deposit_id':
         deposit_id = 'dep_' + 'b' * 20
     elif case == 'tampered':
-        envelope = json.loads(raw)
+        header, envelope = _split(raw)
         envelope['record']['is_admin'] = 1
-        raw = json.dumps(envelope).encode()
+        raw = _join(header, envelope)
     elif case == 'unknown_key':
         raw = dr.sign_record(_record(), 'intern', DEP, 1, 'k9', SECRET)
     elif case == 'not_json':
@@ -81,9 +91,9 @@ def test_forged_records_are_refused(case):
     elif case == 'oversized':
         raw = b'{' + b' ' * (dr.MAX_RECORD_BYTES + 1) + b'}'
     elif case == 'float':
-        envelope = json.loads(raw)
+        header, envelope = _split(raw)
         envelope['version'] = 1.0
-        raw = json.dumps(envelope).encode()
+        raw = _join(header, envelope)
     with pytest.raises(dr.RecordError) as exc:
         dr.verify_record(raw, site, deposit_id, sites)
     assert SECRET not in str(exc.value) and OTHER_SECRET not in str(exc.value)
@@ -169,7 +179,7 @@ def test_import_refuses_replays_rewrites_and_foreign_deposit_ids(tmp_path):
     v1 = dr.verify_record(dr.sign_record(_record(), 'intern', DEP, 1, 'k1', SECRET), 'intern', DEP, SITES)
     with pytest.raises(dr.RecordError, match='replay'):
         dr.import_record(store, v1, 'intern')
-    other = dr.verify_record(dr.sign_record(_record(name='Changed'), 'intern', DEP, 2, 'k1', SECRET), 'intern', DEP,
+    other = dr.verify_record(dr.sign_record(_record(total_bytes=11), 'intern', DEP, 2, 'k1', SECRET), 'intern', DEP,
                              SITES)
     with pytest.raises(dr.RecordError, match='other content'):
         dr.import_record(store, other, 'intern')
@@ -189,10 +199,10 @@ def test_results_are_signed_by_the_watcher_and_checked_by_the_site(tmp_path):
     other = dr.load_or_create_result_key(tmp_path / 'other.pem')
     with pytest.raises(dr.RecordError, match='does not trust'):
         dr.verify_result(dr.sign_result({'state': 'live'}, 'intern', DEP, 1, other), 'intern', DEP, [public])
-    tampered = json.loads(raw)
+    header, tampered = _split(raw)
     tampered['result']['state'] = 'held'
     with pytest.raises(dr.RecordError, match='bad signature'):
-        dr.verify_result(json.dumps(tampered).encode(), 'intern', DEP, [public])
+        dr.verify_result(_join(header, tampered), 'intern', DEP, [public])
     with pytest.raises(dr.RecordError, match='another site'):
         dr.verify_result(raw, 'prod', DEP, [public])
 
@@ -221,7 +231,9 @@ class BucketCheckS3(DepositFakeS3):
 
     def put_object(self, Bucket, Key, Body, **kwargs):  # noqa: N803
         self._check(Bucket, Key)
-        return super().put_object(Bucket=Bucket, Key=Key, Body=Body, **kwargs)
+        result = super().put_object(Bucket=Bucket, Key=Key, Body=Body, **kwargs)
+        self.objects[Key]['mtime'] = self.clock()          # S3's LastModified: the server's clock at the write
+        return result
 
     def delete_object(self, Bucket, Key, **kwargs):  # noqa: N803
         self._check(Bucket, Key)
@@ -238,7 +250,9 @@ class BucketCheckS3(DepositFakeS3):
     def copy_object(self, Bucket, Key, CopySource, **kwargs):  # noqa: N803
         self._check(Bucket, Key)
         self._check(CopySource['Bucket'], CopySource['Key'])
-        return super().copy_object(Bucket=Bucket, Key=Key, CopySource=CopySource, **kwargs)
+        result = super().copy_object(Bucket=Bucket, Key=Key, CopySource=CopySource, **kwargs)
+        self.objects[Key]['mtime'] = self.clock()          # a copy (also onto itself) is a new write
+        return result
 
 
 @pytest.fixture()
@@ -308,9 +322,9 @@ def test_a_record_changed_after_signing_is_never_imported(tmp_path):
     env, service, clock = central(tmp_path)
     deposit_id = _deposit(env, service)
     key = f'__deposits/intern/{deposit_id}/record.json'
-    envelope = json.loads(env.s3.objects[key]['body'])
+    header, envelope = _split(env.s3.objects[key]['body'])
     envelope['record']['is_admin'] = 1
-    env.s3.put(key, json.dumps(envelope).encode())
+    env.s3.put(key, _join(header, envelope))
     counts = env.poll_twice()
     assert counts == {'needs_decision': 1}                          # deposit-marked objects nobody accounts for
     store = dd.DepositStore(env.state / dd.DB_FILE)

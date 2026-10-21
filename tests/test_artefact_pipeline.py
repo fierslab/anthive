@@ -382,6 +382,21 @@ def test_a_public_collection_is_held(tmp_path, clock):
     assert (tmp_path / 'store' / 'Fiers2026' / 'index.md').is_file()
 
 
+def test_raw_html_in_a_collection_index_md_is_refused_at_the_watcher(tmp_path, clock):
+    """Review N5 (central watcher): the index.md another site's server wrote is checked here too."""
+    service, s3, publisher, db, _git, _api = _setup(tmp_path, clock)
+    answer = _collection(service)
+    row = service.store.files(answer['deposit_id'])[0]
+    text = s3.objects[row['key']]['body'].decode() + '\n<script>alert(1)</script>\n'
+    sha = hashlib.sha256(text.encode()).hexdigest()
+    etag = s3.put(row['key'], text.encode(), clock[0], metadata={'deposit': answer['deposit_id'], 'sha256': sha})
+    service.store.update_file(answer['deposit_id'], 'index.md', sha256=sha, etag=etag, size=len(text.encode()))
+    poll_until_final(publisher, s3, clock)
+    watched = watch_row(db, answer['deposit_id'])
+    assert watched['state'] == 'failed' and 'raw HTML' in watched['error']
+    assert not (tmp_path / 'store' / 'Fiers2026').exists()
+
+
 def test_a_collection_folder_that_appeared_meanwhile_is_needs_decision(tmp_path, clock):
     service, s3, publisher, db, _git, _api = _setup(tmp_path, clock)
     answer = _collection(service)

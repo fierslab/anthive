@@ -595,7 +595,10 @@ class Watcher:
 
     def import_remote_records(self, objects: Sequence[Dict[str, Any]]) -> Dict[str, int]:
         """Verify and import the signed records of the known sites before the deposits are linked."""
-        listed = {str(obj['Key']): (str(obj.get('ETag', '')).strip('"'), int(obj.get('Size') or 0)) for obj in objects}
+        import remote_deposits  # noqa: PLC0415
+
+        listed = {str(obj['Key']): (str(obj.get('ETag', '')).strip('"'), int(obj.get('Size') or 0),
+                                    remote_deposits.epoch(obj.get('LastModified'))) for obj in objects}
         store = self._open_deposit_store()
         try:
             return self.remote.import_records(store, listed)
@@ -696,6 +699,14 @@ class Watcher:
                         item.deposit = {key: record.get(key) for key in
                                         ('id', 'user', 'name', 'email', 'update_of', 'data_project', 'basename')}
                         chain = set(store.chain(record['id']))
+                        if record.get('site_id'):
+                            # another site's deposit: the pipeline checks every pulled file against the signed
+                            # sha256 (review C5); the h5ad of a correction is the continued deposit's
+                            signed = {row['key']: row['sha256'] for deposit_id in reversed(store.chain(record['id']))
+                                      for row in store.files(deposit_id) if row.get('sha256')}   # newest wins
+                            if record.get('h5ad_sha256'):
+                                signed[item.h5ad.key] = record['h5ad_sha256']
+                            item.deposit['signed_sha256'] = signed
 
                         def own(obj, chain=chain):
                             entry = objects.get(obj.key)
@@ -762,7 +773,7 @@ class Watcher:
                 store.update(stale['id'], watch_state=None)
                 store.event(stale['id'], 'watcher', 'retry', 'an interrupted import is tried again')
             records = store._rows("SELECT * FROM deposits WHERE deposit_kind = 'de_only' AND state = 'uploaded' "
-                                  "AND COALESCE(watch_state, '') = ''")
+                                  "AND COALESCE(watch_state, '') = '' AND COALESCE(disputed, '') = ''")
             for record in records:
                 if self.stop_requested():
                     break
@@ -778,6 +789,8 @@ class Watcher:
                     counts['needs_decision'] = counts.get('needs_decision', 0) + 1
                     continue
                 self.log(f'DE deposit {record["id"]} for {record.get("update_of")}')
+                if record.get('site_id'):                     # review C5: pulled files against the signed sha256
+                    record = {**record, 'signed_sha256': {row['key']: row['sha256'] for row in files}}
                 try:
                     outcome = self.pipeline.ingest_de_deposit(record, objs)
                 except TransientError as exc:

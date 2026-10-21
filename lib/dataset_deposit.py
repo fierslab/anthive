@@ -39,7 +39,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from ingest_pipeline import (DE_DATA_EXTS, H5AD_SUFFIX, MUS_SUFFIX, delete_consumed, parse_sidecar_text,
                              valid_segment)
@@ -346,7 +346,10 @@ class DepositStore:
                                     # one central watcher for several sites (lib/deposit_records.py, 2.47)
                                     ('deposits', 'site_id', 'TEXT'), ('deposits', 'record_version', 'INTEGER'),
                                     ('deposits', 'record_digest', 'TEXT'), ('deposits', 'result_version', 'INTEGER'),
-                                    ('deposits', 'result_digest', 'TEXT')):
+                                    ('deposits', 'result_digest', 'TEXT'),
+                                    # watcher time of the import (orders remote deposits, never a site's clock)
+                                    # and why two deposits claiming one object are both held (review S1)
+                                    ('deposits', 'imported', 'REAL'), ('deposits', 'disputed', 'TEXT')):
             if column not in {row[1] for row in self.conn.execute(f'PRAGMA table_info({table})')}:
                 self.conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {kind}')
 
@@ -491,6 +494,30 @@ class DepositStore:
                 self.conn.execute('ROLLBACK')
                 raise
 
+    def claims(self, keys: Mapping[str, str], exclude: str) -> List[Dict[str, Any]]:
+        """Other deposits (not ``exclude``) that claim one of ``keys`` (incoming key -> ETag): the key is locked
+        by a deposit still uploading or completing, or a completed file of a deposit with that key has the same
+        ETag (whatever that deposit's watch state)."""
+        if not keys:
+            return []
+        found: Dict[str, Dict[str, Any]] = {}
+        marks = ', '.join('?' * len(keys))
+        for row in self._rows(f"SELECT d.id, d.site_id, d.state, d.watch_state, d.disputed, k.key FROM open_keys k JOIN deposits d "
+                              f"ON d.id = k.deposit_id WHERE d.state IN ('uploading', 'completing') AND k.key IN ({marks}) "
+                              f"AND d.id != ?", list(keys) + [exclude]):
+            found.setdefault(row['id'], {**row, 'open': True})
+        for row in self._rows(f"SELECT d.id, d.site_id, d.state, d.watch_state, d.disputed, f.key, f.etag FROM files f JOIN deposits d "
+                              f"ON d.id = f.deposit_id WHERE d.state IN ('completing', 'uploaded') AND f.state = 'complete' "
+                              f"AND f.key IN ({marks}) AND d.id != ?", list(keys) + [exclude]):
+            if row['etag'] == keys.get(row['key']):
+                found.setdefault(row['id'], {**row, 'open': False})
+        return list(found.values())
+
+    def dispute(self, deposit_id: str, reason: str) -> None:
+        """Hold a deposit another site's record claims the same objects of: never linked again (an admin decides)."""
+        self.update(deposit_id, disputed=reason[:2000], watch_state='needs_decision', error=reason[:2000])
+        self.event(deposit_id, 'watcher', 'disputed', reason)
+
     def remote_rows(self, local_site: Optional[str] = None) -> List[Dict[str, Any]]:
         """Deposits imported from other sites (``site_id`` set and not ``local_site``)."""
         return [row for row in self._rows("SELECT * FROM deposits WHERE COALESCE(site_id, '') != ''")
@@ -620,9 +647,12 @@ class DepositStore:
 
     def find_for_item(self, h5ad_key: str, h5ad_etag: str, mus_key: Optional[str],
                       mus_etag: Optional[str]) -> Optional[Dict[str, Any]]:
-        """The completed deposit whose h5ad and sidecar are exactly the listed objects (newest first)."""
+        """The completed deposit whose h5ad and sidecar are exactly the listed objects (newest first, by this
+        host's clock: the watcher's import time of a remote record, else the local completion; never a site's
+        own time). A disputed deposit is never linked."""
         rows = self._rows("SELECT * FROM deposits WHERE state = 'uploaded' AND watch_key = ? AND h5ad_etag = ? "
-                          "AND mus_key = ? AND mus_etag = ? ORDER BY completed DESC, rowid DESC LIMIT 1",
+                          "AND mus_key = ? AND mus_etag = ? AND COALESCE(disputed, '') = '' "
+                          "ORDER BY COALESCE(imported, completed) DESC, rowid DESC LIMIT 1",
                           (h5ad_key, h5ad_etag, mus_key or '', mus_etag or ''))
         return rows[0] if rows else None
 
@@ -632,7 +662,7 @@ class DepositStore:
         if assigned:
             return assigned[0]['user']
         rows = self._rows("SELECT user FROM deposits WHERE UPPER(db_id) = UPPER(?) AND watch_state = 'live' "
-                          "ORDER BY completed DESC LIMIT 1", (db_id,))
+                          "ORDER BY COALESCE(imported, completed) DESC, rowid DESC LIMIT 1", (db_id,))
         return rows[0]['user'] if rows else None
 
     def record_watch(self, deposit_id: str, row: Dict[str, Any], roots: Optional[Dict[str, Path]] = None,
@@ -2411,9 +2441,21 @@ class DepositService:
         Verified with the watcher's public key(s); an older or equal version is ignored. Writes the redacted
         report copy, the watch state, db id, version, held reasons and warnings, and e-mails the depositor on
         live, held and failed (this site sends the e-mails of its deposits). Returns the (updated) record.
+        Never raises (review C2): anything in the ingestion bucket is attacker-reachable, so a result that cannot
+        be read or checked leaves the record as it is and becomes an event.
         """
         if not self.settings.central_watcher or record.get('state') != 'uploaded':
             return record
+        try:
+            return self._refresh_result(record)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                self.store.event(record['id'], 'site', 'result_refused', f'{type(exc).__name__}'[:200])
+            except Exception:  # noqa: BLE001
+                pass
+            return record
+
+    def _refresh_result(self, record: Dict[str, Any]) -> Dict[str, Any]:
         import deposit_records  # noqa: PLC0415
 
         deposit_id = record['id']

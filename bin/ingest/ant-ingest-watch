@@ -7,6 +7,7 @@
 #   "duckdb>=1.3,<1.6",
 #   "h5py>=3.0.0",
 #   "numpy>=1.24.0",
+#   "markdown-it-py>=3.0.0",
 #   "pyyaml>=6.0",
 # ]
 # ///
@@ -299,7 +300,8 @@ def remote_sites(cfg: dict, settings: dict, client, incoming_bucket: str, state_
     return remote_deposits.RemoteSites(
         s3=client, bucket=incoming_bucket, state_dir=state_dir, sites=sites,
         result_key=deposit_records.load_or_create_result_key(result_key_path(state_dir)),
-        staging_root=staging, incoming_prefix=settings['prefix'], local_site_id=config.deposit_site_id(cfg), log=log)
+        staging_root=staging, incoming_prefix=settings['prefix'], local_site_id=config.deposit_site_id(cfg),
+        trusted_admin_sites=[str(site) for site in settings.get('trusted_admin_sites') or []], log=log)
 
 
 def cmd_result_key(args: argparse.Namespace) -> int:
@@ -330,8 +332,10 @@ def cmd_sites(args: argparse.Namespace) -> int:
     if not sites:
         print(f'no site secrets in {folder}: only this host\'s own deposits are read')
         return 0
+    trusted = {str(site) for site in config.get_ingest_watch_settings(cfg).get('trusted_admin_sites') or []}
     for site_id, keys in sorted(sites.items()):
-        print(f'{site_id}: key ids {", ".join(sorted(keys))}')
+        print(f'{site_id}: key ids {", ".join(sorted(keys))}; its admins are '
+              + ('trusted here (ingest_watch.trusted_admin_sites)' if site_id in trusted else 'ordinary depositors here'))
     return 0
 
 

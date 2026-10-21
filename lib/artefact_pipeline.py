@@ -385,7 +385,8 @@ class ArtefactPublisher:
             for state, number in self.process_purges(store).items():
                 counts[f'purge_{state}'] = counts.get(f'purge_{state}', 0) + number
             records = store._rows("SELECT * FROM deposits WHERE deposit_kind IN ('artefact', 'collection') AND "
-                                  "state = 'uploaded' ORDER BY completed")
+                                  "state = 'uploaded' AND COALESCE(disputed, '') = '' "
+                                  "ORDER BY COALESCE(imported, completed), rowid")
             for record in records:
                 if self.stop_requested():
                     break
@@ -1356,6 +1357,12 @@ class ArtefactPublisher:
         problems = artefacts.analysis_collection_problems(data_project, meta)
         if problems or meta.get('collection_kind') != 'analysis':
             raise Stop('failed', 'the index.md is not a valid analysis collection: ' + '; '.join(problems))
+        # review N5: no raw HTML in what other tools render, checked here too (a remote site's server wrote it)
+        import safe_markdown  # noqa: PLC0415
+        body = text.split('\n---\n', 1)[1] if text.startswith('---\n') and '\n---\n' in text[4:] else ''
+        html_parts = safe_markdown.raw_html(body) + safe_markdown.raw_html(str(meta.get('title') or ''))
+        if html_parts:
+            raise Stop('failed', f'the collection description or title holds raw HTML ({html_parts[0][:40]!r})')
         if not artefacts.DATA_PROJECT_RE.fullmatch(data_project):
             raise Stop('failed', 'the collection name does not follow the naming rule')
         clash = [entry.name for entry in self.store_root.iterdir() if entry.name.lower() == data_project.lower()]
