@@ -3367,6 +3367,8 @@ async def help_view(request: Request):
         "n_datasets": n_datasets,
         "n_collections": n_collections,
         "n_genesets": n_genesets,
+        # auth.mode none (a public mirror): the help does not tell visitors to sign in
+        "auth_mode": _api_guide_site_settings()['mode'],
     })
 
 

@@ -274,3 +274,16 @@ def test_help_topics_of_hidden_parts_render_empty():
     assert 'id="dataset-page"' in pages
     full = help_content.topic_html('pages')
     assert 'id="facets-columns"' in full and 'id="dataset-caveats"' in full
+
+
+def test_help_on_a_site_without_login_does_not_ask_to_sign_in(make_client, monkeypatch):
+    client = make_client(facets=False, caveats=False, api=False, mcp=False)
+    monkeypatch.setattr(browser, '_api_guide_site_settings', lambda: {'mode': 'none', 'public_base_url': '', 'admins': set(),
+                                                                      'upload_groups': ['admins'], 'max_pdf_mb': 25})
+    help_page = client.get('/help').text
+    assert 'Sign in and look around' not in help_page and 'Signing in and out' not in help_page
+    assert '<strong>Look around.</strong>' in help_page and 'No account needed' in help_page
+    login_site = make_client()
+    monkeypatch.setattr(browser, '_api_guide_site_settings', lambda: {'mode': 'authelia', 'public_base_url': '', 'admins': set(),
+                                                                      'upload_groups': ['admins'], 'max_pdf_mb': 25})
+    assert 'Sign in and look around' in login_site.get('/help').text
