@@ -183,6 +183,54 @@ def test_store_rebuilds_a_corrupt_cache_file(tmp_path):
     assert len(store.get('G/ds', 'v1', lambda: means_frame(many_modules(2)))) == 2
 
 
+
+def test_store_reports_whether_it_built(tmp_path):
+    """The warm-up pauses only after a build, so the store says where a table came from."""
+    store = module_rank.ModuleRankStore(tmp_path / 'cache')
+    build = lambda: means_frame(many_modules(3))  # noqa: E731
+    assert store.get_with_status('G/ds', 'v1', build)[1] is True
+    assert store.get_with_status('G/ds', 'v1', build)[1] is False                 # memory
+    assert module_rank.ModuleRankStore(tmp_path / 'cache').get_with_status('G/ds', 'v1', build)[1] is False  # disk
+
+
+def test_store_write_is_atomic_and_leaves_no_temporary_file(tmp_path):
+    store = module_rank.ModuleRankStore(tmp_path / 'cache')
+
+    def failing() -> pd.DataFrame:
+        frame = means_frame(many_modules(2))
+        frame['mean'] = [object()] * len(frame)       # parquet cannot store it: the write fails half way
+        return frame
+
+    store.get('G/ds', 'v1', lambda: means_frame(many_modules(3)))
+    store._write('G/ds', store._file('G/ds', 'v1'), failing())
+    assert len(pd.read_parquet(tmp_path / 'cache' / 'G__ds~v1.parquet')) == 3     # the old file is intact
+    assert [path.name for path in (tmp_path / 'cache').iterdir() if not path.name.startswith('.G__ds.lock')] == \
+        ['G__ds~v1.parquet']
+
+
+def _stat(mtime_ns: int, size: int):
+    return type('Stat', (), {'st_mtime_ns': mtime_ns, 'st_size': size})()
+
+
+def test_table_fingerprint_is_stable_and_follows_its_inputs(monkeypatch):
+    """No pid, start time or path in the key: the same files give the same key in every process; the sidecar,
+    the duckdb and the table code (format, cell type groups) each change it."""
+    base = module_rank.table_fingerprint(_stat(100, 10), _stat(200, 20))
+    assert base == module_rank.table_fingerprint(_stat(100, 10), _stat(200, 99))   # duckdb size is not an input
+    assert base != module_rank.table_fingerprint(_stat(101, 10), _stat(200, 20))
+    assert base != module_rank.table_fingerprint(_stat(100, 11), _stat(200, 20))
+    assert base != module_rank.table_fingerprint(_stat(100, 10), _stat(201, 20))
+    assert '/' not in base and str(__import__('os').getpid()) not in base.split('-')[0]
+    monkeypatch.setattr(module_rank, 'TABLE_FORMAT', module_rank.TABLE_FORMAT + 1)
+    module_rank.table_version.cache_clear()
+    try:
+        assert module_rank.table_fingerprint(_stat(100, 10), _stat(200, 20)) != base
+    finally:
+        monkeypatch.undo()
+        module_rank.table_version.cache_clear()
+    assert module_rank.table_fingerprint(_stat(100, 10), _stat(200, 20)) == base
+
+
 # ---- the route ----
 
 _ROUTE_WANTED = {'_MODULE_RANK_STORE', '_MODULE_RANK_LOCK', '_MODULE_RANK_HELP_TOPICS', '_module_rank_store', '_module_rank_means',

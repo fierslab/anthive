@@ -4375,15 +4375,21 @@ def _module_rank_warm_ids(mode: str, priority: Sequence[str]) -> List[str]:
 
 
 def _warm_module_ranks(db_ids: Sequence[str], workers: int, pause: float) -> int:
-    """Load or build the rank tables of ``db_ids`` with at most ``workers`` at once; returns how many are ready."""
+    """Load or build the rank tables of ``db_ids`` with at most ``workers`` at once; returns how many are ready.
+
+    ``pause`` follows a build only: a table read from ``<tmp_dir>/module_rank`` or a dataset without a score
+    sidecar costs milliseconds, and pausing after each of them made a restart with every table cached take
+    datasets x pause (2.46.4: 153 x 0.5 s = 77 s).
+    """
     def one(db_id: str) -> bool:
         _lower_thread_priority()
+        status = {'built': False}
         try:
-            means, _ = _module_rank_means(db_id)
+            means, _ = _module_rank_means(db_id, status)
         except Exception as exc:  # noqa: BLE001
             log.debug("module rank warm-up %s: %s", db_id, exc)
             means = None
-        if pause:
+        if pause and status['built']:
             time.sleep(pause)
         return means is not None
 
@@ -13488,11 +13494,12 @@ def _module_rank_store() -> module_rank_lib.ModuleRankStore:
         return _MODULE_RANK_STORE
 
 
-def _module_rank_means(db_id: str) -> Tuple[Optional[Any], str]:
+def _module_rank_means(db_id: str, status: Optional[Dict[str, bool]] = None) -> Tuple[Optional[Any], str]:
     """Score means per source, module and cell type group of one dataset, or (None, reason).
 
     Built once from the score sidecar and the dataset's ``ant_cell_type`` and cached on disk until the
-    sidecar or the duckdb changes.
+    sidecar, the duckdb or the table code changes (``module_rank.table_fingerprint``). ``status['built']`` says
+    whether this call built the table (False: it came from memory or ``<tmp_dir>/module_rank``).
     """
     db_url = registry.get_database_path(db_id)
     if db_url.startswith('s3://'):
@@ -13503,7 +13510,7 @@ def _module_rank_means(db_id: str) -> Tuple[Optional[Any], str]:
         duckdb_stat = Path(db_url.replace('file://', '')).stat()
     except OSError:
         return None, 'no per-cell scores for this dataset'
-    fingerprint = f'{sidecar_stat.st_mtime_ns}-{sidecar_stat.st_size}-{duckdb_stat.st_mtime_ns}'
+    fingerprint = module_rank_lib.table_fingerprint(sidecar_stat, duckdb_stat)
 
     def build():
         conn = connection_pool.get_connection(db_url)
@@ -13512,7 +13519,10 @@ def _module_rank_means(db_id: str) -> Tuple[Optional[Any], str]:
         finally:
             connection_pool.return_connection(db_url, conn)
 
-    return _module_rank_store().get(db_id, fingerprint, build), ''
+    means, built = _module_rank_store().get_with_status(db_id, fingerprint, build)
+    if status is not None:
+        status['built'] = built
+    return means, ''
 
 
 @app.get("/genesets/{study}/{experiment}/{name}/rank", tags=["genesets"])

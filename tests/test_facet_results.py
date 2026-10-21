@@ -1428,8 +1428,10 @@ def _warmup_namespace(calls: List[Any], fail: bool = False, hidden: frozenset = 
         calls.append(('donor', facet, gene, cell_type, dataset_access.current_hidden()))
         return {}
 
-    def rank_means(db_id):
+    def rank_means(db_id, status=None):
         calls.append(('rank', db_id))
+        if status is not None:
+            status['built'] = db_id == 'B/b'                 # A/a comes from the disk cache, B/b is built
         return (object(), '') if db_id != 'C/c' else (None, 'no per-cell scores for this dataset')
 
     namespace: Dict[str, Any] = {
@@ -1518,6 +1520,18 @@ def test_warmup_module_ranks_modes(warm_env):
     assert namespace['_module_rank_warm_ids']('priority', ['C/c', 'Z/z']) == ['C/c']
     assert namespace['_module_rank_warm_ids']('all', ['C/c']) == ['C/c', 'A/a', 'B/b']
     assert namespace['_warm_module_ranks'](['A/a', 'C/c'], 2, 0) == 1        # C/c has no sidecar
+
+
+def test_warmup_module_ranks_pause_only_after_a_build(warm_env):
+    """2.46.4 paused after every dataset, also after a table read from <tmp_dir>/module_rank or a dataset without a
+    sidecar: a restart with every table cached took datasets x pause (153 x 0.5 s = 77 s on intern)."""
+    namespace = _warmup_namespace([])
+    started = time.monotonic()
+    assert namespace['_warm_module_ranks'](['A/a', 'C/c'] * 5, 1, 0.3) == 5     # cached or no sidecar: no pause
+    assert time.monotonic() - started < 0.3
+    started = time.monotonic()
+    assert namespace['_warm_module_ranks'](['A/a', 'B/b'], 1, 0.3) == 2         # one build: one pause
+    assert 0.3 <= time.monotonic() - started < 0.6
 
 
 def test_warmup_failure_is_logged_not_raised(warm_env, caplog):
