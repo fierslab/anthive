@@ -1057,6 +1057,10 @@ values of every column, donor columns included, as it did before. Plottable colu
 
 ## ui switches: facets, caveats, API, MCP, jupyter (public mirrors, 2026-10-21; jupyter 2.47.1)
 
+`ui.caveats: serious` (2.47.1): `ui.caveats` stays true for the pages, and `browser._shown_caveats` filters every
+caveat list a page shows through `metadata.caveats_for_mode(caveats, _caveats_mode())` (level high and the known
+defect kinds only). Any new place that shows caveats must go through `_shown_caveats`.
+
 A site can switch parts of the UI off (`ui:` in anthive.yaml, rendered from site.yaml by ant-stack;
 `config.get_ui_settings`). `browser._ui()` reads it once (tests set `browser._ui_cfg`; both web test files have an
 autouse fixture that switches everything on), the Jinja global `ui` gives `{% if ui.facets %}` and friends, and

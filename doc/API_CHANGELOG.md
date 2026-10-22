@@ -33,6 +33,13 @@ the spec drifting away from the running code.
 
 Patch release with three additions approved for 2.47.1; nothing is removed or renamed.
 
+### ui.caveats: serious
+
+- `ui.caveats` (site.yaml, anthive.yaml, env `ANTHIVE_UI_CAVEATS`) takes `serious` besides true and false: the
+  web UI then shows only caveats of level `high` and known defects (kinds `contamination`, `ambient_rna`,
+  `integration_artifact`, `wrong_var_names`; `metadata.SERIOUS_CAVEAT_KINDS`) and hides the rest. The REST API
+  and MCP keep returning every caveat. `config.get_caveats_mode` gives `all`, `serious` or `off`.
+
 ### ui.jupyter: a site without JupyterLite
 
 - New `ui.jupyter` switch (site.yaml and anthive.yaml `ui:`, env `ANTHIVE_UI_JUPYTER`, default true). With

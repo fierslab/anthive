@@ -1106,13 +1106,29 @@ def get_ui_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, bool]:
     settings: Dict[str, bool] = {}
     for name in UI_SWITCHES:
         env_value = os.environ.get(f'ANTHIVE_UI_{name.upper()}', '').strip()
-        if env_value:
+        raw = env_value if env_value else block.get(name)
+        if name == 'caveats' and str(raw).strip().lower() == 'serious':
+            settings[name] = True              # the caveat pages stay; get_caveats_mode filters what they show
+        elif env_value:
             settings[name] = _ui_flag(env_value, f'ANTHIVE_UI_{name.upper()}')
         elif block.get(name) is None:
             settings[name] = True
         else:
             settings[name] = _ui_flag(block[name], f'ui.{name}')
     return settings
+
+
+def get_caveats_mode(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """``ui.caveats`` as a mode (2.47.1): ``all`` (true, default), ``serious`` (only caveats of level high and
+    known defects, ``metadata.is_serious_caveat``) or ``off`` (false). Env ``ANTHIVE_UI_CAVEATS`` wins."""
+    cfg = cfg if cfg is not None else load_config()
+    block = cfg.get('ui') if isinstance(cfg.get('ui'), dict) else {}
+    raw = os.environ.get('ANTHIVE_UI_CAVEATS', '').strip() or block.get('caveats')
+    if raw is None:
+        return 'all'
+    if str(raw).strip().lower() == 'serious':
+        return 'serious'
+    return 'all' if _ui_flag(raw, 'ui.caveats') else 'off'
 
 
 _COORDINATE_MODES = ('auto', 'always', 'never')

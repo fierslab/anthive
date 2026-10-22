@@ -279,8 +279,11 @@ def validate_site(site: dict, path: Path) -> dict:
         value = ui.get(key, True)
         if value is None:
             value = ui[key] = True
+        if key == 'caveats' and value == 'serious':
+            continue                      # 2.47.1: only caveats of level high and known defects
         if not isinstance(value, bool):
-            raise SiteError(f"ui.{key} must be true or false, not {value!r}")
+            raise SiteError(f"ui.{key} must be true or false" + (" or serious" if key == 'caveats' else '')
+                            + f", not {value!r}")
     site['_path'] = path
     site['_h5adstore'] = _abs(site['data'].get('h5adstore'), 'data.h5adstore')
     site['_genesetstore'] = _abs(site['data'].get('genesetstore'), 'data.genesetstore', False)
@@ -552,9 +555,15 @@ UI_SWITCHES = ('facets', 'caveats', 'api', 'mcp', 'jupyter')
 
 
 def ui_settings(site: dict) -> dict[str, bool]:
-    """site.yaml ui: block with defaults (every part on)."""
+    """site.yaml ui: block with defaults (every part on); ``caveats: serious`` counts as on (see caveats_mode)."""
     block = site.get('ui') or {}
     return {key: bool(block.get(key, True)) for key in UI_SWITCHES}
+
+
+def caveats_mode(site: dict) -> str:
+    """ui.caveats as all (true), serious (only level high and known defects) or off (false)."""
+    value = (site.get('ui') or {}).get('caveats', True)
+    return 'serious' if value == 'serious' else ('all' if value else 'off')
 
 
 def mcp_enabled(site: dict) -> bool:
@@ -702,6 +711,8 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
     cfg['facets_visible'] = [str(f) for f in (site['site'].get('facets_visible') or [])]
     # parts of the web UI (web, api and mcp read it; harmless for the other roles)
     cfg['ui'] = ui_settings(site)
+    if caveats_mode(site) == 'serious':
+        cfg['ui']['caveats'] = 'serious'
     lib = site.get('library') or {}
     cfg.update({
         'library_upload_groups': [str(g) for g in (lib.get('upload_groups') or ['admins'])],
@@ -2037,6 +2048,9 @@ def check(site: dict, running: bool = False) -> list[str]:
 def _check_ui(site: dict) -> None:
     """Say which parts of the web UI are off and what that means."""
     ui = ui_settings(site)
+    if caveats_mode(site) == 'serious':
+        _say("ui.caveats is serious: visitors see only caveats of level high and known defects (contamination, "
+             "ambient RNA, integration artifacts, wrong gene names); the REST API and MCP still serve every caveat")
     off = [key for key, on in ui.items() if not on]
     if not off:
         return

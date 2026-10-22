@@ -48,6 +48,7 @@ def _all_facets_visible(monkeypatch):
     monkeypatch.setattr(browser, "_facets_visible_cfg", [[]])
     # every part of the UI on (a local anthive.yaml with ui: switches must not change the results)
     monkeypatch.setattr(browser, "_ui_cfg", {"facets": True, "caveats": True, "api": True, "mcp": True})
+    monkeypatch.setattr(browser, "_caveats_mode_cfg", ["all"])
 
 
 # ── unit tests: _as_list ───────────────────────────────────────────────────────

@@ -35,6 +35,7 @@ def make_client(monkeypatch):
 
     def build(**off):
         monkeypatch.setattr(browser, '_ui_cfg', {**ALL_ON, **off})
+        monkeypatch.setattr(browser, '_caveats_mode_cfg', ['all'])
         app = FastAPI()
         app.state.api_url = 'http://testapi'
         app.state.reports = []
@@ -305,3 +306,41 @@ def test_jupyter_off_hides_notebook_buttons_and_links_but_keeps_the_api(make_cli
     assert 'href="/jupyter' not in api_guide
     on = make_client()
     assert 'href="/jupyter/"' in on.get('/about').text and 'id="ds-open-notebook"' in on.get('/browse/GroupA/ds1').text
+
+
+def _with_a_note_caveat(api_url, path, **kwargs):
+    """ds1's info with a low-level note next to its contamination caveat (a known defect)."""
+    payload = _fake_api_get(api_url, path, **kwargs)
+    if path.endswith('GroupA/ds1/info'):
+        payload = dict(payload, caveats=list(payload.get('caveats') or []) + [
+            {'level': 'low', 'kind': 'note', 'message': 'donor ages rounded to five years'}])
+    return payload
+
+
+def test_caveats_serious_shows_only_high_and_known_defects(make_client, monkeypatch):
+    client = make_client()
+    monkeypatch.setattr(browser, '_api_get', _with_a_note_caveat)
+    monkeypatch.setattr(browser, '_caveats_mode_cfg', ['serious'])
+    page = client.get('/browse/GroupA/ds1').text
+    assert 'id="tab-btn-caveats"' in page                         # the tab stays
+    assert 'co-express astrocyte markers' in page                 # contamination: a known defect
+    assert 'donor ages rounded' not in page                        # a note is hidden
+    monkeypatch.setattr(browser, '_caveats_mode_cfg', ['all'])
+    assert 'donor ages rounded' in client.get('/browse/GroupA/ds1').text
+
+
+def test_caveats_mode_from_the_config(monkeypatch):
+    import config
+    import metadata
+    monkeypatch.delenv('ANTHIVE_UI_CAVEATS', raising=False)
+    assert config.get_caveats_mode({'ui': {'caveats': 'serious'}}) == 'serious'
+    assert config.get_ui_settings({'ui': {'caveats': 'serious'}})['caveats'] is True
+    assert config.get_caveats_mode({'ui': {'caveats': False}}) == 'off'
+    assert config.get_caveats_mode({}) == 'all'
+    monkeypatch.setenv('ANTHIVE_UI_CAVEATS', 'serious')
+    assert config.get_caveats_mode({'ui': {'caveats': True}}) == 'serious'
+    high = {'level': 'high', 'kind': 'note'}
+    defect = {'level': 'low', 'kind': 'wrong_var_names'}
+    note = {'level': 'medium', 'kind': 'small_n'}
+    assert metadata.caveats_for_mode([high, defect, note], 'serious') == [high, defect]
+    assert metadata.caveats_for_mode([high, note], 'off') == []

@@ -163,7 +163,10 @@ ui:
                      # per donor plots and the facet help
   caveats: true      # Caveats tab and caveat markers on dataset, collection and plot pages.
                      # Caveats carry data-quality warnings (curation decisions, known
-                     # defects): with false, visitors see the data without them
+                     # defects): with false, visitors see the data without them;
+                     # serious (since 2.47.1) shows only level-high caveats and known
+                     # defects (contamination, ambient RNA, integration artifacts, wrong
+                     # gene names) and hides the notes
   api: true          # API page, API links, code snippets and notebook buttons; false also
                      # hides /api/docs and /api/redoc from visitors who are not signed in
   mcp: true          # MCP account page, MCP links and MCP help; false also stops the mcp

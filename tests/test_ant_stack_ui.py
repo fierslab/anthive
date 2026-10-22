@@ -242,3 +242,16 @@ def test_caddy_serves_jupyter_only_when_on(tmp_path, ant_stack, jupyter_on, caps
     capsys.readouterr()
     ant_stack._check_ui(site)
     assert ('ui.jupyter is false' in capsys.readouterr().out) is (not jupyter_on)
+
+
+def test_ui_caveats_serious_is_rendered_and_checked(tmp_path, ant_stack, capsys):
+    site = _site(ant_stack, tmp_path, auth={'mode': 'none'}, ui={'caveats': 'serious'})
+    assert site['_key_problems'] == [] and ant_stack.caveats_mode(site) == 'serious'
+    ant_stack.ensure_secrets(site)
+    stack = ant_stack.render(site, quiet=True)                      # the strict render check accepts it
+    assert _rendered(stack)['ui']['caveats'] == 'serious'
+    capsys.readouterr()
+    ant_stack._check_ui(site)
+    assert 'ui.caveats is serious' in capsys.readouterr().out
+    with pytest.raises(ant_stack.SiteError, match='true or false or serious'):
+        _site(ant_stack, tmp_path, ui={'caveats': 'some'})

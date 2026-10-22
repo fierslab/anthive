@@ -266,6 +266,28 @@ class _UiFlags:
 
 templates.env.globals['ui'] = _UiFlags()
 
+_caveats_mode_cfg: List[str] = []
+
+
+def _caveats_mode() -> str:
+    """``ui.caveats`` as all, serious or off (read once; tests set ``_caveats_mode_cfg``)."""
+    if not _caveats_mode_cfg:
+        try:
+            from config import get_caveats_mode, load_config  # noqa: PLC0415
+            _caveats_mode_cfg.append(get_caveats_mode(load_config()))
+        except Exception:  # noqa: BLE001 - config unavailable: follow the ui switch
+            _caveats_mode_cfg.append('all')
+    if not _ui()['caveats']:
+        return 'off'
+    return _caveats_mode_cfg[0]
+
+
+def _shown_caveats(caveats: Any) -> List[Dict[str, Any]]:
+    """The caveats a page shows: all, only the serious ones (``ui.caveats: serious``: level high and known
+    defects), or none (``ui.caveats: false``)."""
+    from metadata import caveats_for_mode  # noqa: PLC0415
+    return caveats_for_mode(caveats, _caveats_mode())
+
 
 def _require_ui(part: str):
     """Route dependency: 404 when ``part`` is switched off on this site."""
@@ -2427,7 +2449,7 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
             # Caveats summary → ⚠ badge next to the dataset name; folder.html
             # only needs (n, max_level), not the full body (that lives on the
             # dataset page).
-            'caveats_summary': _summarize_caveats(db.get('caveats') if _ui()['caveats'] else None),
+            'caveats_summary': _summarize_caveats(_shown_caveats(db.get('caveats')) or None),
             # is_secondary: true when the dataset contains cells that also
             # appear in other deposits (re-aggregated collection). Sourced from
             # the per-dataset .md frontmatter via the REST API. Defensive .get()
@@ -3054,7 +3076,7 @@ async def donor_plot_view(request: Request, folder_browse_id: str, dataset_brows
         print(f"API error: {error}")
         return _error_page(request, f"Dataset '{db_id}' not found", 404)
     collection = db.get('collection') or {}
-    caveats = (db.get('caveats') or []) if _ui()['caveats'] else []
+    caveats = _shown_caveats(db.get('caveats'))   # ui.caveats: all, serious or none
     subject = gene or module.rpartition('/')[2] or ''
     query = {'cell_type': cell_type, 'db_id': db_id}
     if gene:
@@ -3127,7 +3149,7 @@ async def plot_view(request: Request, folder_browse_id: str,
     # dataset.html shows, above the plot preview. A caveat like SP4/MPF's
     # astro-doublets applies directly to the plot the user is about to look
     # at; hiding it on the dataset overview page is dangerous.
-    caveats = (db.get('caveats') or []) if _ui()['caveats'] else []
+    caveats = _shown_caveats(db.get('caveats'))   # ui.caveats: all, serious or none
     caveats_summary = _summarize_caveats(caveats)
     plot_meta = {
         'embeddings':  sorted(list((db.get('embeddings') or {}).keys())),
@@ -3442,7 +3464,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     # near the top of the dataset page. The Python side reduces to a max
     # severity so the card's accent colour follows the highest-level entry
     # (cleaner than doing a max-reduce in Jinja).
-    caveats = (db.get('caveats') or []) if _ui()['caveats'] else []   # ui.caveats false: none shown
+    caveats = _shown_caveats(db.get('caveats'))   # ui.caveats: all, serious or none
     caveats_summary = _summarize_caveats(caveats)
 
     # Unified access + publication-status icon (shape=access, colour=pub).

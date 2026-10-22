@@ -15,9 +15,9 @@ After the 2026-06 reorgs, the consumers live under:
 
 | Module | Role |
 | --- | --- |
-| `metadata.py` | parse/write **anthive-catalog** fields in `.md` YAML frontmatter (id, sha256, n_obs, layer_stats, obscat_include, default_layer). Legacy `ANNOTATION_FIELDS` / `validate_annotation_field()` kept for backward-compat — **deprecated, use `mus.py`** |
+| `metadata.py` | parse/write **anthive-catalog** fields in `.md` YAML frontmatter (id, sha256, n_obs, layer_stats, obscat_include, default_layer); caveat vocabulary and `caveats_for_mode` / `is_serious_caveat` (`ui.caveats: serious`, 2.47.1). Legacy `ANNOTATION_FIELDS` / `validate_annotation_field()` kept for backward-compat — **deprecated, use `mus.py`** |
 | `mus.py` | **(post-2026-06)** read `<basename>.h5ad.mus` sidecars + `.env` folder cascade — the new home for experimental annotation (organism, tissue, cell_type, technology, suspension_type, …). Vocabulary at codeberg.org/mfiers/mus |
-| `config.py` | load `anthive.yaml` (S3 creds, API host/port); `get_ui_settings` = the `ui:` switches (facets, caveats, api, mcp, jupyter) of a public mirror |
+| `config.py` | load `anthive.yaml` (S3 creds, API host/port); `get_ui_settings` = the `ui:` switches (facets, caveats, api, mcp, jupyter) of a public mirror, `get_caveats_mode` (all, serious, off) |
 | `anthive_db.py` | DuckDB query layer (`AnthiveDB`) + `AnnotationWriter` + pending-state helpers |
 | `h5adstore.py` | resolve a `db_id` (`group/file`) to files on disk (`find_h5ad`, `H5adEntry`) |
 | `h5ad_utils.py` | `load_h5ad`, dtype/layer inspection |

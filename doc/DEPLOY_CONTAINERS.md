@@ -999,7 +999,7 @@ auth:
   mode: none
 ui:
   facets: false      # Facet tabs, /facets pages, facet DE on gene and gene set pages, per donor plots, facet help
-  caveats: false     # Caveats tab and caveat markers (see the warning below)
+  caveats: false     # Caveats tab and caveat markers (see the warning below); serious: only the serious ones
   api: false         # API page, API links, code snippets and notebook buttons
   mcp: false         # MCP account page, MCP links and MCP help; no mcp service
   jupyter: false     # JupyterLite: no notebook buttons or links, /jupyter/ answers 404 (since 2.47.1)
@@ -1013,6 +1013,7 @@ What each switch does:
 | --- | --- | --- |
 | `ui.facets: false` | the `facets` menu entry, the Facet tab group (Facet, Gene, GS) of the dataset page, the Facet DE tab of gene and gene set pages, the "facet" label on `ant_*` column names, facet sections, topics and glossary terms on the help page | `/facets`, `/facets/<name>` and the per donor plot pages answer 404. The REST API keeps its facet endpoints (`/api/facets/...`, `/api/databases/<id>/facet-tests`) for vark and pyvark |
 | `ui.caveats: false` | the Caveats tab of the dataset page, the caveat mark in collection lists, the caveat button of plot pages, the caveats topic on the help page | nothing: the REST API and MCP still return caveats (`/api/databases/<id>/info`, `get_dataset_context`) |
+| `ui.caveats: serious` (since 2.47.1) | caveats of level low and medium that record no known defect (notes, small n, missing metadata, donor overlap, derived from); the Caveats tab, the markers and the plot button stay for caveats of level high and for known defects (contamination, ambient RNA, integration artifacts, wrong gene names) | nothing: the REST API and MCP still return every caveat |
 | `ui.api: false` | the API entry in the user menu, the changelog link of the version button, the notebook buttons, the REST API and notebook links on the about page, the programmatic access section of the help page | `/api-guide` answers 404; `/api/docs` and `/api/redoc` answer 404 to visitors who are not signed in. The REST API itself, `/api/openapi.json` and `/api/version` stay: the web UI calls the API from the browser, and the notebooks, vark and pyvark need it. JupyterLite (`/jupyter/`) is still served unless `ui.jupyter: false`; nothing on the site links to it |
 | `ui.mcp: false` | the "Connect an MCP client" menu entry and every mention of MCP on the help, about and API pages | `/account/mcp` answers 404, the API reports MCP links as disabled, the mcp container is not started (even with `services.mcp: true`) and `/mcp` answers a JSON 404 |
 | `ui.jupyter: false` (since 2.47.1) | the notebook buttons of plot and dataset pages, the notebooks link of the about page, the JupyterLite passages of the help and API pages | Caddy answers `/jupyter` and `/jupyter/...` with 404 (`stack/caddy/jupyter.caddy` from `config/caddy-jupyter.off`): the JupyterLite build is not served at all. `/api/notebook/...` (the notebook files the API generates) stays |
@@ -1021,6 +1022,8 @@ What each switch does:
 > known defects of a dataset (for example a broken embedding or contaminated
 > cells). With `ui.caveats: false` visitors of the site see the data without
 > those warnings. `ant-stack check` prints a warning when the switch is off.
+> `ui.caveats: serious` is the middle way for a public site: the warnings that
+> change how data may be used stay visible, the curation notes do not.
 
 `ant-stack check` lists the parts that are off (`ui: switched off: ...`) and
 the plan shows them on the `ui off` line. After a change, `ant-stack up`

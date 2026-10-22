@@ -601,6 +601,27 @@ CAVEAT_KINDS = (
 )
 
 
+#: caveat kinds that record a known defect of the data (shown also with ``ui.caveats: serious``)
+SERIOUS_CAVEAT_KINDS = ('contamination', 'ambient_rna', 'integration_artifact', 'wrong_var_names')
+#: ``ui.caveats`` modes: every caveat, only serious ones (level high or a known defect), none
+CAVEAT_MODES = ('all', 'serious', 'off')
+
+
+def is_serious_caveat(caveat: Any) -> bool:
+    """A caveat a public site still shows with ``ui.caveats: serious``: level high, or a known defect."""
+    return isinstance(caveat, dict) and (caveat.get('level') == 'high' or caveat.get('kind') in SERIOUS_CAVEAT_KINDS)
+
+
+def caveats_for_mode(caveats: Any, mode: str) -> list:
+    """The caveats a page shows in ``mode`` (``all``, ``serious``, ``off``)."""
+    items = [caveat for caveat in (caveats or []) if isinstance(caveat, dict)]
+    if mode == 'off':
+        return []
+    if mode == 'serious':
+        return [caveat for caveat in items if is_serious_caveat(caveat)]
+    return items
+
+
 def get_caveats(yaml_dict: Dict[str, Any]) -> list:
     """Return the validated top-level ``caveats:`` list from a .md's YAML.
 
