@@ -110,7 +110,7 @@
             #topbar .topbar-spacer { display: none; }
             #topbar .topbar-menu nav { flex-direction: column; align-items: stretch; gap: 0; }
             #topbar .topbar-menu nav > a { font-size: 15px; padding: 10px 2px; border-bottom: 1px solid rgba(255,255,255,.12); }
-            /* Utility row: version + Help + API on one line, then the account items. */
+            /* Utility row: version + Help on one line, then the account items (API among them). */
             #topbar .topbar-menu nav.topbar-util { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 0 18px; padding-top: 4px; }
             #topbar .topbar-menu nav.topbar-util > a { border-bottom: 0; }
             #topbar .topbar-menu nav.topbar-util > .version-pill { padding: 0 7px; font-size: 11px; }
@@ -127,8 +127,6 @@
             #topbar .topbar-auth .dropdown-menu a:hover { background: transparent; color: var(--bar-link-hover) !important; }
             #topbar .topbar-auth .dropdown-menu .dropdown-header { color: rgba(255,255,255,.65); border-bottom: 0; padding: 6px 2px 2px; }
             #topbar .topbar-auth .dropdown-menu .dropdown-header strong { color: #ffffff; }
-            /* API is already in the utility row. */
-            #topbar .topbar-auth #api-menu-link { display: none; }
         }
         #topbar nav > a, #topbar nav .dropdown-toggle { color: var(--bar-link); font-size: 13px; }
         #topbar nav > a:hover, #topbar nav .dropdown-toggle:hover { color: var(--bar-link-hover); text-decoration: none; }
@@ -199,7 +197,7 @@
         .dropdown-menu .dropdown-header strong { color: var(--text); font-weight: 600; letter-spacing: 0; text-transform: none; font-size: 11px; }
         #topbar .topbar-auth .dropdown-toggle { color: var(--bar-link); }
         #topbar .topbar-auth .dropdown-toggle:hover { color: var(--bar-link-hover); }
-        /* Right-hand utility cluster (Help / API / dropdown). */
+        /* Right-hand utility cluster (version / Help / dropdown). */
         #topbar .topbar-util { display: flex; align-items: center; gap: 16px; }
         #topbar .topbar-util > a { color: var(--bar-link); font-size: 13px; }
         #topbar .topbar-util > a:hover { color: var(--bar-link-hover); text-decoration: none; }
@@ -786,12 +784,13 @@
             {% endif %}
         </nav>
         <span class="topbar-spacer"></span>
-        {# Right-hand utility cluster: Help + API + user dropdown.
+        {# Right-hand utility cluster: version + Help + user dropdown.
            - Help: on-site cheat-sheet at /help.
-           - API: the /api-guide page (login, curl, pyvark, vark), which links
-             on to the Swagger UI at /api/docs. Also in the user dropdown.
-           - Dropdown: always shows Preferences (localStorage, no SSO needed);
-             the "signed in as" header + Logout only appear behind Authelia. #}
+           - Dropdown: rendered in every auth mode (auth.mode none included).
+             Always shows API (the /api-guide page, when ui.api is on) and
+             Preferences (localStorage, no SSO needed); the "signed in as"
+             header, MCP links, issue tracker and Logout only appear behind
+             Authelia. API is not a top-level item any more. #}
         {% set _auth_user = request.headers.get('remote-name') or request.headers.get('remote-user') %}
         {% set _groups = (request.headers.get('remote-groups') or '').split(',') | map('trim') | list %}
         <nav class="topbar-util" aria-label="Help and account">
@@ -802,7 +801,6 @@
             <span class="version-pill{% if not _ver.ok %} version-unconfirmed{% endif %}" id="stack-version" title="{{ _ver.title | replace(' Click for the changelog.', '') }}"><span class="v-prefix">v</span>{{ _ver.shown }}</span>
             {% endif %}
             <a href="/help" title="What's here & how to use it">Help</a>
-            {% if ui.api %}<a href="/api-guide" id="topbar-api-link" title="Use the REST API: signing in, first steps, pyvark and vark">API</a>{% endif %}
             <span class="dropdown topbar-auth">
                 <span class="dropdown-toggle" id="user-menu-toggle" tabindex="0" role="button" aria-haspopup="menu" aria-expanded="false" title="{% if _auth_user %}signed in{% if request.headers.get('remote-email') %} - {{ request.headers.get('remote-email') }}{% endif %}{% else %}account &amp; preferences{% endif %}">👤{% if _auth_user %} {{ _auth_user }}{% endif %}</span>
                 <span class="dropdown-menu right">
@@ -847,7 +845,7 @@
     })();
     (function () {
         // Narrow-screen menu button: opens the panel with the nav links, Help,
-        // API, version and account items. Outside click, Escape, following a
+        // version and account items (API among them). Outside click, Escape, following a
         // link or widening the window past the breakpoint closes it.
         var bar = document.getElementById('topbar');
         var btn = document.getElementById('nav-toggle');

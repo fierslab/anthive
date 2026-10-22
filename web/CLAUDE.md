@@ -83,7 +83,7 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | `/admin/feedback` | chat-feedback triage (admin) | `admin_feedback.html` |
 | `/account/mcp` | the signed-in user's named MCP links: add (with label) / show / copy / rotate / revoke each, the "Set up with one paste" agent prompt (`#mcp-paste`), client setup snippets for a chosen link; admins also get the "All users' links" section (`#all`). 401 without `Remote-User` | `account_mcp.html` |
 | `/admin/mcp-links` | 307 redirect to `/account/mcp#all` | none |
-| `/api-guide` | how to use the REST API: login (basic auth on /api, netrc, env vars), curl first steps, pyvark, vark, admin-only endpoints and limits, API version; links on to `/api/docs`. Target of the top-bar `API` link (`#topbar-api-link`) and the user-menu entry (`#api-menu-link`). Examples use `mcp.public_base_url` or the request host, always https; text adapts to `auth.mode` | `api_guide.html` |
+| `/api-guide` | how to use the REST API: login (basic auth on /api, netrc, env vars), curl first steps, pyvark, vark, admin-only endpoints and limits, API version; links on to `/api/docs`. Target of the user-menu entry `API` (`#api-menu-link`); the top bar has no API link (removed 2026-10-22, the dropdown renders in every auth mode, so the page stays reachable on auth.mode none too). Examples use `mcp.public_base_url` or the request host, always https; text adapts to `auth.mode` | `api_guide.html` |
 | `/papers/{citekey}` | one library paper: record, summary/topics (draft markers), linked datasets grouped by role with the reason, related papers grouped by kind with evidence, PDF + BibTeX | `paper.html` |
 | `/library` | all library papers, client-side search + role/year/cohort/cell-type filters | `library.html` |
 | `/donor-groups` | every donor group (`GET /donor-groups`) with its datasets marked primary data / reanalysis / unresolved, `#dg-<slug>` anchors; linked from the dataset lineage row, `/facets` and the help page | `donor_groups.html` |
@@ -538,7 +538,7 @@ and `index.md` files, so no body is trusted. Plot thumbnails survive as `<img sr
   without per-route context.
 - **Topbar on narrow screens (<= 640px)** is one row: logo plus a menu button
   (`#nav-toggle`, `aria-controls="topbar-menu"`, `aria-expanded`). The nav
-  links, version, Help, API and the flattened user menu live in
+  links, version, Help and the flattened user menu (with API) live in
   `#topbar-menu`, which is `display: contents` on desktop (so the desktop row
   is unchanged) and a drop-down panel on phones. Escape, an outside click, a
   link click or widening past 640px closes it. There is no top-bar gene search
@@ -1067,7 +1067,7 @@ through the route dependency `_require_ui('<part>')`.
   `/browse/{g}/{d}/plot/donor`.
 - **caveats**: `caveats` is emptied in `dataset_view`, `plot_view`, `donor_plot_view` and the collection listing
   (`caveats_summary`), and the Caveats tab and panel are not rendered (not even the empty one).
-- **api**: no API link in the top bar or user menu, the version pill is a plain span (no changelog link), no
+- **api**: no API entry in the user menu, the version pill is a plain span (no changelog link), no
   notebook buttons (dataset page, plot page; the plot script uses `?.addEventListener`), no REST/notebook links
   on /about, no MCP-free AI/programmatic sections in help. 404: `/api-guide`.
 - **mcp**: no `#mcp-menu-link`, no MCP text on help, /about or the API page. 404: `/account/mcp`, `/admin/mcp-links`.
