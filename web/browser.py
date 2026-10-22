@@ -2726,7 +2726,9 @@ def _artefact_view(request: Request, detail: Dict[str, Any], version_payload: Op
     rows = []
     for entry in versions:
         rows.append({**entry, 'is_shown': entry.get('version') == shown.get('version'),
-                     'purge_reason': safe_markdown.plain(entry.get('purge_reason'))})
+                     'purge_reason': safe_markdown.plain(entry.get('purge_reason')),
+                     'delete_reason': safe_markdown.plain(entry.get('delete_reason'))})
+    purge = shown.get('purge') if isinstance(shown.get('purge'), dict) else None
     group_id, scope, artefact_id = detail.get('group_id'), detail.get('scope'), detail.get('artefact_id')
     return {
         'title': safe_markdown.plain(manifest.get('title') or detail.get('title')) or artefact_id,
@@ -2749,6 +2751,8 @@ def _artefact_view(request: Request, detail: Dict[str, Any], version_payload: Op
         'de_tables': [{'study_id': t.get('study_id'), 'file': t.get('file'), 'contrast': t.get('de_contrast'),
                        'method': t.get('de_method')} for t in (manifest.get('de') or {}).get('tables') or []],
         'may_purge': _may_purge(request, owner, recorded.get('uploaded_by')),
+        'shown_purge': ({'purged': purge.get('purged'), 'purged_by': purge.get('purged_by'),
+                         'purge_reason': safe_markdown.plain(purge.get('purge_reason'))} if purge else None),
         'api_base': f"/api/artefacts/{url_quote(str(group_id))}/{url_quote(str(scope))}/{url_quote(str(artefact_id))}",
     }
 

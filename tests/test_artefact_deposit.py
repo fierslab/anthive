@@ -428,35 +428,84 @@ def test_yaml_injection_in_collection_fields_stays_data(tmp_path, clock):
 # ── purge requests ────────────────────────────────────────────────────────────
 
 def test_purge_request_rules(tmp_path, clock):
+    """Two-stage purge (design 5.3): the latest version is refused, a soft purge needs a reason, the same request
+    is idempotent, another waiting action is busy, unpurge and delete need the right state and delete needs an
+    admin and the typed reference."""
     from tests.artefact_helpers import write_artefact
     service, _s3 = make_service(tmp_path, clock)
     write_artefact(tmp_path / 'store', 'Public2021', 'PU1', 'pub', 'figure', 'volcano',
                    [{'files': {'v.png': PNG}}, {'files': {'v.png': PNG + b'2'}}], owner='otto')
     ctx = context(service.store_root)
 
-    def purge(identity, body, version='v1'):
-        return service.request_purge(identity, ctx, 'PU1', 'pub', 'volcano', version, body)
-    good = {'reason': 'wrong contrast', 'confirm': 'PU1/pub/volcano@v1'}
+    def call(method, identity, body, version='v1'):
+        return getattr(service, method)(identity, ctx, 'PU1', 'pub', 'volcano', version, body)
+    good = {'reason': 'wrong contrast'}
     with pytest.raises(dd.DepositError) as caught:
-        purge(dd.Identity(user='mallory'), good)
+        call('request_purge', dd.Identity(user='mallory'), good)
     assert caught.value.status == 403
-    for body, word in (({'reason': 'x', 'confirm': 'PU1/pub/volcano@v1'}, 'invalid'),
-                       ({'reason': 'wrong contrast', 'confirm': 'PU1/pub/volcano@v2'}, 'confirm_mismatch'),
-                       (None, 'invalid')):
+    for body, word in (({'reason': 'x'}, 'invalid'), (None, 'invalid')):
         with pytest.raises(dd.DepositError) as caught:
-            purge(OTHER, body)
+            call('request_purge', OTHER, body)
         assert caught.value.body['status'] == word
     with pytest.raises(dd.DepositError) as caught:
-        purge(OTHER, good, version='v9')
+        call('request_purge', OTHER, good, version='v9')
     assert caught.value.status == 404
-    answer = purge(dd.Identity(user='alice'), good)                 # alice uploaded v1 (write_artefact records alice)
-    assert answer['state'] == 'purge_requested'
-    with pytest.raises(dd.DepositError) as caught:
-        purge(ADMIN, good)
+    with pytest.raises(dd.DepositError) as caught:                 # the latest version: never, not even an admin
+        call('request_purge', ADMIN, good, version='v2')
+    assert caught.value.status == 409 and caught.value.body['status'] == 'latest_version'
+    assert call('request_unpurge', ADMIN, {}, version='v2')['changed'] is False       # live already: idempotent
+    with pytest.raises(dd.DepositError) as caught:                 # a live version is not deleted
+        call('request_delete', ADMIN, {'reason': 'wrong contrast', 'confirm': 'PU1/pub/volcano@v1'})
+    assert caught.value.status == 409 and caught.value.body['status'] == 'not_purged'
+    answer = call('request_purge', dd.Identity(user='alice'), good)  # alice uploaded v1 (write_artefact records alice)
+    assert answer['state'] == 'requested' and answer['action'] == 'soft' and answer['changed'] is True
+    again = call('request_purge', ADMIN, good)                       # the same request, still waiting
+    assert again['request_id'] == answer['request_id'] and again['state'] == 'requested'
+    with pytest.raises(dd.DepositError) as caught:                   # another action while one waits
+        call('request_unpurge', ADMIN, {})
     assert caught.value.body['status'] == 'busy'
     rows = service.purges(ADMIN)
     assert rows[0]['ref'] == 'PU1/pub/volcano' and rows[0]['version'] == 1 and rows[0]['state'] == 'requested'
+    assert rows[0]['action'] == 'soft' and service.purges(ADMIN, action='hard') == []
     assert service.purges(dd.Identity(user='nobody')) == []
+
+
+def test_unpurge_and_delete_rules_on_a_purged_version(tmp_path, clock):
+    from tests.artefact_helpers import write_artefact
+    service, _s3 = make_service(tmp_path, clock)
+    write_artefact(tmp_path / 'store', 'Public2021', 'PU1', 'pub', 'figure', 'volcano',
+                   [{'files': {'v.png': PNG}, 'state': 'purged', 'purged_by': 'alice'}, {'files': {'v.png': PNG + b'2'}}],
+                   owner='otto')
+    ctx = context(service.store_root)
+
+    def call(method, identity, body):
+        return getattr(service, method)(identity, ctx, 'PU1', 'pub', 'volcano', 'v1', body)
+    done = call('request_purge', OTHER, {'reason': 'wrong contrast'})
+    assert done == {'ref': 'PU1/pub/volcano', 'version': 1, 'action': 'soft', 'state': 'done', 'changed': False,
+                    'version_state': 'purged', 'message': 'PU1/pub/volcano@v1 is already purged'}
+    with pytest.raises(dd.DepositError) as caught:                   # only admins delete
+        call('request_delete', OTHER, {'reason': 'wrong contrast', 'confirm': 'PU1/pub/volcano@v1'})
+    assert caught.value.status == 403
+    with pytest.raises(dd.DepositError) as caught:
+        call('request_delete', ADMIN, {'reason': 'wrong contrast', 'confirm': 'PU1/pub/volcano@v2'})
+    assert caught.value.body['status'] == 'confirm_mismatch'
+    assert call('request_unpurge', OTHER, {})['action'] == 'unpurge'      # the owner reverses it
+    with pytest.raises(dd.DepositError) as caught:
+        call('request_delete', ADMIN, {'reason': 'wrong contrast', 'confirm': 'PU1/pub/volcano@v1'})
+    assert caught.value.body['status'] == 'busy'
+
+
+def test_old_purge_requests_become_hard_purges(tmp_path, clock):
+    """The action column is added to a table of the one-stage purge: its rows were hard purges."""
+    import sqlite3
+    db = tmp_path / 'old.sqlite'
+    conn = sqlite3.connect(db)
+    conn.executescript(rules.PURGE_SCHEMA)
+    conn.execute("INSERT INTO artefact_purges (ref, version, group_folder, scope, kind, artefact_id, requested_by, "
+                 "state) VALUES ('PU1/pub/x', 1, 'Public2021', 'pub', 'figure', 'x', 'alice', 'done')")
+    rules.ensure_purge_schema(conn)
+    rules.ensure_purge_schema(conn)                       # idempotent
+    assert conn.execute('SELECT action FROM artefact_purges').fetchall() == [('hard',)]
 
 
 def test_purge_of_an_invisible_artefact_is_a_404(tmp_path, clock):

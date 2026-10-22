@@ -51,10 +51,28 @@ def _setup(tmp_path, clock, update_policy='own', **kwargs):
 
 
 def _purge(service, identity, artefact_id, version):
+    """Stage 1 (soft) of the two-stage purge."""
     ctx = context(service.store_root, artefacts.Viewer(sees_internal=True, is_admin=identity.is_admin,
                                                        user=identity.user))
-    return service.request_purge(identity, ctx, 'PU1', 'int', artefact_id, f'v{version}',
-                                 {'reason': 'wrong numbers', 'confirm': f'PU1/int/{artefact_id}@v{version}'})
+    return service.request_purge(identity, ctx, 'PU1', 'int', artefact_id, f'v{version}', {'reason': 'wrong numbers'})
+
+
+def _delete_for_good(service, publisher, s3, identity, artefact_id, version):
+    """Soft purge by ``identity``, then an admin's hard purge, each carried out by the watcher."""
+    _purge(service, identity, artefact_id, version)
+    publisher.poll(listing(s3))
+    ctx = context(service.store_root, artefacts.Viewer(sees_internal=True, is_admin=True, user='root'))
+    service.request_delete(ADMIN, ctx, 'PU1', 'int', artefact_id, f'v{version}',
+                           {'reason': 'wrong numbers', 'confirm': f'PU1/int/{artefact_id}@v{version}'})
+    publisher.poll(listing(s3))
+    return service.purges(ADMIN)[0]
+
+
+def _newer(service, s3, publisher, clock, identity, artefact_id, follows, study='other_study'):
+    """A newer version importing another study, so the older one may be purged (never the latest)."""
+    deposit(service, s3, identity, de_files(study), artefact_id=artefact_id, new_version_of=follows,
+            change_note='another contrast', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
 
 
 def _legacy_body(files):
@@ -101,16 +119,16 @@ def test_update_policy_any_lets_every_member_add_de_tables(tmp_path, clock):
     assert watch_row(db, answer['deposit_id'])['state'] == 'live'
 
 
-def test_the_alias_on_a_fully_purged_artefact_follows_the_purged_version(tmp_path, clock):
+def test_the_alias_after_a_deleted_older_version_follows_the_latest(tmp_path, clock):
     service, s3, publisher, db, _api = _setup(tmp_path, clock)
     deposit(service, s3, ANALYST, de_files(), artefact_id='treated-vs-control', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
-    _purge(service, ANALYST, 'treated-vs-control', 1)
-    publisher.poll(listing(s3))
-    assert service.purges(ADMIN)[0]['state'] == 'done' and _studies(tmp_path) == {}
+    _newer(service, s3, publisher, clock, ANALYST, 'treated-vs-control', 1)
+    assert _delete_for_good(service, publisher, s3, ANALYST, 'treated-vs-control', 1)['state'] == 'done'
+    assert _studies(tmp_path) == {'other_study': len(GENES)}
     files = de_files()
     answer = service.create(ANALYST, _legacy_body(files), context(service.store_root))
-    assert answer['artefact']['new_version_of'] == 1
+    assert answer['artefact']['new_version_of'] == 2
     # a 2.46 client cannot declare software: no provenance warning it could never fix
     assert not any('declared.software' in warning for warning in answer['warnings'])
     upload(s3, answer, files)
@@ -118,7 +136,7 @@ def test_the_alias_on_a_fully_purged_artefact_follows_the_purged_version(tmp_pat
     poll_until_final(publisher, s3, clock)
     row = watch_row(db, answer['deposit_id'])
     assert row['state'] == 'live', row.get('error')
-    assert _studies(tmp_path) == {'treated_vs_control': len(GENES)}
+    assert _studies(tmp_path) == {'treated_vs_control': len(GENES), 'other_study': len(GENES)}
 
 
 def test_a_client_cannot_relax_provenance_with_alias_of(tmp_path, clock):
@@ -129,75 +147,75 @@ def test_a_client_cannot_relax_provenance_with_alias_of(tmp_path, clock):
     assert caught.value.status == 422 and 'provenance' in str(caught.value.body)
 
 
-# ── N2: a purge settles a study by who wrote the rows the dataset serves now ───────────────────────────────
+# ── N2: a hard purge settles a study by who wrote the rows the dataset serves now ──────────────────────────
 
-def test_purging_the_replacing_version_restores_the_older_versions_table(tmp_path, clock):
+def test_deleting_the_replacing_version_restores_the_older_versions_table(tmp_path, clock):
     service, s3, publisher, _db, _api = _setup(tmp_path, clock)
     deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
     deposit(service, s3, ANALYST, de_files(table=deseq2_table(GENES[:15], scale=9)), artefact_id='tvc',
             new_version_of=1, change_note='wrong v2', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
-    assert _studies(tmp_path) == {'treated_vs_control': 15}
-    _purge(service, ANALYST, 'tvc', 2)
-    publisher.poll(listing(s3))
-    assert service.purges(ADMIN)[0]['state'] == 'done'
-    assert _studies(tmp_path) == {'treated_vs_control': len(GENES)}           # v1's rows are served again
+    _newer(service, s3, publisher, clock, ANALYST, 'tvc', 2)
+    assert _studies(tmp_path) == {'treated_vs_control': 15, 'other_study': len(GENES)}
+    assert _delete_for_good(service, publisher, s3, ANALYST, 'tvc', 2)['state'] == 'done'
+    assert _studies(tmp_path) == {'treated_vs_control': len(GENES), 'other_study': len(GENES)}   # v1's rows again
     md = (tmp_path / 'store' / MD).read_text()
     assert 'restored from PU1/int/tvc@v1' in md and 'de_study_removed' in md
 
 
-def test_purging_an_artefact_leaves_a_study_another_artefact_replaced(tmp_path, clock):
+def test_deleting_an_artefact_version_leaves_a_study_another_artefact_replaced(tmp_path, clock):
     service, s3, publisher, _db, _api = _setup(tmp_path, clock)
     deposit(service, s3, ANALYST, de_files(), artefact_id='first', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
     deposit(service, s3, ADMIN, de_files(table=deseq2_table(GENES[:12])), artefact_id='third', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
-    assert _studies(tmp_path) == {'treated_vs_control': 12}
-    _purge(service, ANALYST, 'first', 1)
-    publisher.poll(listing(s3))
-    assert service.purges(ADMIN)[0]['state'] == 'done'
-    assert _studies(tmp_path) == {'treated_vs_control': 12}                   # 'third' keeps its study
+    _newer(service, s3, publisher, clock, ANALYST, 'first', 1)
+    assert _studies(tmp_path)['treated_vs_control'] == 12
+    assert _delete_for_good(service, publisher, s3, ANALYST, 'first', 1)['state'] == 'done'
+    assert _studies(tmp_path)['treated_vs_control'] == 12                     # 'third' keeps its study
 
 
-def test_purging_an_older_version_keeps_the_newer_versions_rows(tmp_path, clock):
+def test_deleting_an_older_version_keeps_the_newer_versions_rows(tmp_path, clock):
     service, s3, publisher, _db, _api = _setup(tmp_path, clock)
     deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
     deposit(service, s3, ANALYST, de_files(table=deseq2_table(GENES[:15])), artefact_id='tvc', new_version_of=1,
             change_note='v2', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
-    _purge(service, ANALYST, 'tvc', 1)
-    publisher.poll(listing(s3))
-    assert service.purges(ADMIN)[0]['state'] == 'done'
+    assert _delete_for_good(service, publisher, s3, ANALYST, 'tvc', 1)['state'] == 'done'
     assert _studies(tmp_path) == {'treated_vs_control': 15}
 
 
-def test_rows_nobody_recorded_stop_the_purge_for_an_admin(tmp_path, clock):
+def test_rows_nobody_recorded_stop_the_hard_purge_for_an_admin(tmp_path, clock):
     service, s3, publisher, _db, _api = _setup(tmp_path, clock)
     deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
+    _newer(service, s3, publisher, clock, ANALYST, 'tvc', 1)
     connection = duckdb.connect(str(tmp_path / 'store' / 'Public2021' / 'int.duckdb'))
     connection.execute("UPDATE __de SET log2fc = log2fc + 1 WHERE study_id = 'treated_vs_control'")  # a hand edit
     connection.close()
-    _purge(service, ANALYST, 'tvc', 1)
-    publisher.poll(listing(s3))
-    purge = service.purges(ADMIN)[0]
+    purge = _delete_for_good(service, publisher, s3, ANALYST, 'tvc', 1)
     assert purge['state'] == 'needs_decision' and 'no de_table version recorded' in purge['detail']
-    assert _studies(tmp_path) == {'treated_vs_control': len(GENES)}
+    assert _studies(tmp_path)['treated_vs_control'] == len(GENES)
 
 
-def test_a_de_table_of_an_inactive_dataset_is_purged_and_the_removal_deferred(tmp_path, clock):
+def test_a_de_table_of_an_inactive_dataset_is_deleted_and_the_removal_deferred(tmp_path, clock):
     service, s3, publisher, _db, _api = _setup(tmp_path, clock)
     deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
-    (tmp_path / 'store' / 'Public2021' / 'int.inactive').write_text('retired for the test\n')
+    _newer(service, s3, publisher, clock, ANALYST, 'tvc', 1)
     _purge(service, ANALYST, 'tvc', 1)
+    publisher.poll(listing(s3))
+    (tmp_path / 'store' / 'Public2021' / 'int.inactive').write_text('retired for the test\n')
+    ctx = context(service.store_root, artefacts.Viewer(sees_internal=True, is_admin=True, user='root'))
+    service.request_delete(ADMIN, ctx, 'PU1', 'int', 'tvc', 'v1', {'reason': 'wrong numbers',
+                                                                 'confirm': 'PU1/int/tvc@v1'})
     publisher.poll(listing(s3))
     purge = service.purges(ADMIN)[0]
     assert purge['state'] == 'done' and 'deferred' in purge['detail']
     version = [entry for entry in _head(tmp_path, 'tvc')['versions'] if entry['version'] == 1][0]
-    assert version['state'] == 'purged' and version['de_removal_deferred'] == ['treated_vs_control']
+    assert version['state'] == 'deleted' and version['de_removal_deferred'] == ['treated_vs_control']
     assert not [key for key in s3.keys(CATALOG) if '/tvc/v1/files/' in key]
 
 
@@ -366,7 +384,7 @@ def test_migration_skips_tables_of_retired_datasets(tmp_path, clock):
     assert rows['res_TvsC.tsv'].skip.startswith('target dataset retired (Public2021/_deleted_2026-10-05/)')
 
 
-def test_migration_links_a_hand_imported_study_and_its_purge_removes_it(tmp_path, clock):
+def test_migration_links_a_hand_imported_study_and_its_hard_purge_removes_it(tmp_path, clock):
     import artefact_migrate
     service, s3, publisher, _db, _api = _setup(tmp_path, clock)
     store = _migration_store(tmp_path)
@@ -378,10 +396,9 @@ def test_migration_links_a_hand_imported_study_and_its_purge_removes_it(tmp_path
     assert artefact_migrate.apply(store, items, s3, 'bucket', CATALOG, log=lambda message: None) == \
         ['PU1/int/treated-vs-control']
     service.store.set_owner('PU1/int', 'ana', 'root')
-    _purge(service, ADMIN, 'treated-vs-control', 1)
-    publisher.poll(listing(s3))
-    assert service.purges(ADMIN)[0]['state'] == 'done'
-    assert _studies(tmp_path) == {}
+    _newer(service, s3, publisher, clock, ADMIN, 'treated-vs-control', 1)
+    assert _delete_for_good(service, publisher, s3, ADMIN, 'treated-vs-control', 1)['state'] == 'done'
+    assert _studies(tmp_path) == {'other_study': len(GENES)}
 
 
 def test_migration_matches_study_ids_exactly(tmp_path):

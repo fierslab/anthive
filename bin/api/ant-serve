@@ -17090,8 +17090,10 @@ def get_artefact(request: Request, group_id: str, scope: str, artefact_id: str):
 
 @app.get("/artefacts/{group_id}/{scope}/{artefact_id}/versions", tags=["artefacts"])
 def get_artefact_versions(request: Request, group_id: str, scope: str, artefact_id: str):
-    """Every version; purged ones as tombstones ``{version, state: "purged", published, purged, purged_by,
-    purge_reason}`` (``purged_by`` is "an admin" for non-admins when an admin purged)."""
+    """Every version: live and soft-purged ones ``{version, state, published}`` (a purged one adds ``purged,
+    purged_by, purge_reason`` and stays downloadable), deleted ones as tombstones ``{version, state: "deleted",
+    published, purged, purged_by, purge_reason, deleted, deleted_by, delete_reason}`` (who is "an admin" for
+    non-admins when an admin did it)."""
     import artefacts as artefacts_lib  # noqa: PLC0415
     try:
         service, viewer, entry = _artefact_resolve(request, group_id, scope, artefact_id)
@@ -17102,8 +17104,9 @@ def get_artefact_versions(request: Request, group_id: str, scope: str, artefact_
 
 @app.get("/artefacts/{group_id}/{scope}/{artefact_id}/{version}", tags=["artefacts"])
 def get_artefact_version(request: Request, group_id: str, scope: str, artefact_id: str, version: str):
-    """One version (``v<N>`` or ``latest``): ``{ref, version, state, latest, manifest, files}``.
-    410 ``purged`` with the tombstone for a purged version."""
+    """One version (``v<N>`` or ``latest``): ``{ref, version, state, latest, purge, manifest, files}``
+    (``purge``: ``{purged, purged_by, purge_reason}`` of a soft-purged version, else null). 410 ``deleted`` with
+    the tombstone for a deleted version."""
     import artefacts as artefacts_lib  # noqa: PLC0415
     try:
         service, viewer, entry = _artefact_resolve(request, group_id, scope, artefact_id)
@@ -17674,28 +17677,68 @@ def dataset_deposit_create(request: Request, body: Any = Body(None)):
                          status_code=201, kinds=('dataset',))
 
 
+def _purge_call(request: Request, method: str, group_id: str, scope: str, artefact_id: str, version: str,
+                body: Any):
+    """A purge, unpurge or delete request (design 5.3): 202 when recorded (or already waiting), 200 with
+    ``state: "done", changed: false`` when the version is already in that state."""
+    from dataset_deposit import DepositError  # noqa: PLC0415
+    identity, forbidden = _signed_in_identity(request)
+    if forbidden is not None:
+        return forbidden
+    try:
+        answer = getattr(_deposit_service(), method)(identity, _artefact_context(request), group_id, scope,
+                                                     artefact_id, version, body)
+    except DepositError as exc:
+        return JSONResponse(exc.body, status_code=exc.status, headers=exc.headers or None)
+    return JSONResponse(answer, status_code=202 if answer.get('state') == 'requested' else 200)
+
+
 @app.post("/artefacts/{group_id}/{scope}/{artefact_id}/{version}/purge", tags=["artefacts"],
           include_in_schema=False)
 def purge_artefact_version(request: Request, group_id: str, scope: str, artefact_id: str, version: str,
                            body: Any = Body(None)):
-    """Purge one version ``{reason, confirm: "<ref>@v<N>"}``: the uploader of that version, the artefact's
-    owner or an admin. 202 ``{ref, version, state: "purge_requested"}``; the watcher deletes the files and the
-    version becomes a tombstone. An artefact the caller cannot see is a 404. Any signed-in caller may ask; the
-    service admits only the version's uploader, the artefact's owner and admins (also an uploader who has left
-    the upload groups, for their own versions)."""
-    return _owner_call(request, lambda service, identity: service.request_purge(
-        identity, _artefact_context(request), group_id, scope, artefact_id, version, body), status_code=202)
+    """Purge one version ``{reason}`` (soft, design 5.3): the version's uploader, the artefact's owner or an
+    admin. The latest version is refused (409 ``latest_version``): a newer live version must exist. The watcher
+    marks the version ``purged`` (who, when, why); its files stay listed and downloadable. 202 ``{ref, version,
+    action: "soft", state: "requested", changed: true, request_id, requested, next}``; 200 ``{..., state: "done",
+    changed: false, version_state}`` when it is purged already. An artefact the caller cannot see is a 404."""
+    return _purge_call(request, 'request_purge', group_id, scope, artefact_id, version, body)
+
+
+@app.post("/artefacts/{group_id}/{scope}/{artefact_id}/{version}/unpurge", tags=["artefacts"],
+          include_in_schema=False)
+def unpurge_artefact_version(request: Request, group_id: str, scope: str, artefact_id: str, version: str,
+                             body: Any = Body(None)):
+    """Unpurge a purged version ``{reason?}``: the same people as for the purge. Same answers (action
+    ``unpurge``); 409 ``not_purged`` for a version that is not purged and not live."""
+    return _purge_call(request, 'request_unpurge', group_id, scope, artefact_id, version, body)
+
+
+@app.post("/artefacts/{group_id}/{scope}/{artefact_id}/{version}/delete", tags=["artefacts"],
+          include_in_schema=False)
+def delete_artefact_version(request: Request, group_id: str, scope: str, artefact_id: str, version: str,
+                            body: Any = Body(None)):
+    """Admins: delete a purged (or failed) version permanently ``{reason, confirm: "<ref>@v<N>"}``. The watcher
+    deletes its files from S3 and the store (a de_table's studies leave the dataset) and a tombstone stays.
+    Same answers (action ``hard``); 403 for non-admins, 409 ``not_purged`` for a live version."""
+    return _purge_call(request, 'request_delete', group_id, scope, artefact_id, version, body)
 
 
 @app.get("/artefacts/purges", tags=["artefacts"], include_in_schema=False)
-def artefact_purges(request: Request, state: Optional[str] = Query(None, description="requested, purging, done, "
-                                                                                      "needs_decision, failed")):
-    """Purge requests: your own (admins: everyone's), newest first, ``{purges: [{ref, version, state, reason,
-    requested, updated, requested_by, detail}]}``; ``detail`` says why one needs a decision."""
+def artefact_purges(request: Request,
+                    state: Optional[str] = Query(None, description="requested, purging, done, needs_decision, failed"),
+                    action: Optional[str] = Query(None, description="soft, unpurge, hard")):
+    """Purge, unpurge and delete requests: your own (admins: everyone's), newest first, ``{purges: [{id, ref,
+    version, action, state, reason, requested, updated, requested_by, detail}]}``; ``detail`` says why one needs a
+    decision. Requests made before the two-stage purge are ``action: "hard"``."""
     if state is not None and state not in ('requested', 'purging', 'done', 'needs_decision', 'failed'):
         return JSONResponse({'status': 'invalid_state', 'message': 'state is requested, purging, done, '
                                                                    'needs_decision or failed'}, status_code=422)
-    return _owner_call(request, lambda service, identity: {'purges': service.purges(identity, state=state)})
+    if action is not None and action not in ('soft', 'unpurge', 'hard'):
+        return JSONResponse({'status': 'invalid_action', 'message': 'action is soft, unpurge or hard'},
+                            status_code=422)
+    return _owner_call(request, lambda service, identity: {'purges': service.purges(identity, state=state,
+                                                                                     action=action)})
 
 
 @app.get("/datasets/deposit/groups/{data_project}", tags=["datasets-deposit"], include_in_schema=False)

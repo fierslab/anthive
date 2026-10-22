@@ -29,7 +29,8 @@ SERVE_PATH = REPO_ROOT / 'bin' / 'api' / 'ant-serve'
 _SERVE_WANTED = {'_require_dataset_uploader', '_deposit_call', '_caller_is_admin',
                  '_require_admin', 'dataset_deposit_vocab', 'dataset_deposit_create', 'dataset_deposit_status',
                  'dataset_deposit_complete', 'dataset_deposit_withdraw', 'dataset_deposit_list',
-                 'purge_artefact_version', '_deposit_rights', '_signed_in_identity', '_owner_call', 'artefact_purges'}
+                 'purge_artefact_version', '_deposit_rights', '_signed_in_identity', '_owner_call', 'artefact_purges',
+                 '_purge_call', 'unpurge_artefact_version', 'delete_artefact_version'}
 
 ANALYST = {'Remote-User': 'ana', 'Remote-Groups': 'users,analysts', 'Remote-Email': 'ana@example.org'}
 ANALYST2 = {'Remote-User': 'otto', 'Remote-Groups': 'analysts'}
@@ -162,17 +163,45 @@ def test_an_analyst_follows_their_own_deposit_only(tmp_path, monkeypatch):
 def test_purge_route_rights(tmp_path, monkeypatch):
     from tests.artefact_helpers import write_artefact
     client, service, _s3 = serve(tmp_path, monkeypatch)
-    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'figure', 'volcano', [{'files': {'v.png': PNG}}],
-                   owner='ana')
-    body = {'reason': 'wrong contrast', 'confirm': 'PU1/int/volcano@v1'}
+    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'figure', 'volcano',
+                   [{'files': {'v.png': PNG}}, {'files': {'v.png': PNG + b'2'}}], owner='ana')
+    body = {'reason': 'wrong contrast'}
     path = '/artefacts/PU1/int/volcano/v1/purge'
     assert client.post(path, headers=USER, json=body).status_code == 403
     assert client.post(path, headers={}, json=body).status_code == 403
     assert client.post(path, headers=ANALYST2, json=body).status_code == 403   # not uploader, owner or admin
-    assert client.post(path, headers=ANALYST, json={**body, 'confirm': 'x'}).status_code == 422
+    assert client.post(path, headers=ANALYST, json={'reason': 'x'}).status_code == 422
+    latest = client.post('/artefacts/PU1/int/volcano/v2/purge', headers=ADMIN, json=body)
+    assert latest.status_code == 409 and latest.json()['status'] == 'latest_version'
     response = client.post(path, headers=ANALYST, json=body)
-    assert response.status_code == 202 and response.json()['state'] == 'purge_requested'
+    assert response.status_code == 202 and response.json()['state'] == 'requested'
+    assert response.json()['action'] == 'soft' and isinstance(response.json()['request_id'], int)
+    assert client.post(path, headers=ANALYST, json=body).json()['request_id'] == response.json()['request_id']
     assert client.post('/artefacts/PU1/int/nothing/v1/purge', headers=ADMIN, json=body).status_code == 404
+
+
+def test_unpurge_and_delete_routes(tmp_path, monkeypatch):
+    from tests.artefact_helpers import write_artefact
+    client, service, _s3 = serve(tmp_path, monkeypatch)
+    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'figure', 'volcano',
+                   [{'files': {'v.png': PNG}, 'state': 'purged'}, {'files': {'v.png': PNG + b'2'}}], owner='ana')
+    base = '/artefacts/PU1/int/volcano/v1'
+    again = client.post(f'{base}/purge', headers=ANALYST, json={'reason': 'wrong contrast'})
+    assert again.status_code == 200 and again.json()['state'] == 'done' and again.json()['changed'] is False
+    hard = {'reason': 'remove for good', 'confirm': 'PU1/int/volcano@v1'}
+    refused = client.post(f'{base}/delete', headers=ANALYST, json=hard)        # the owner is not an admin
+    assert refused.status_code == 403
+    deleted = client.post(f'{base}/delete', headers=ADMIN, json=hard)
+    assert deleted.status_code == 202 and deleted.json()['action'] == 'hard'
+    busy = client.post(f'{base}/unpurge', headers=ANALYST, json={})
+    assert busy.status_code == 409 and busy.json()['status'] == 'busy'
+    rows = client.get('/artefacts/purges?action=hard', headers=ADMIN).json()['purges']
+    assert [(row['action'], row['state']) for row in rows] == [('hard', 'requested')]
+    assert client.get('/artefacts/purges?action=bogus', headers=ADMIN).status_code == 422
+    with service.store._lock:
+        service.store.conn.execute('DELETE FROM artefact_purges')
+    unpurged = client.post(f'{base}/unpurge', headers=ANALYST, json={})
+    assert unpurged.status_code == 202 and unpurged.json()['action'] == 'unpurge'
 
 
 def test_new_routes_are_hidden_from_the_schema():
@@ -186,9 +215,9 @@ def test_new_routes_are_hidden_from_the_schema():
 def test_a_former_uploader_may_purge_their_own_version(tmp_path, monkeypatch):
     from tests.artefact_helpers import write_artefact
     client, service, _s3 = serve(tmp_path, monkeypatch)
-    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'figure', 'volcano', [{'files': {'v.png': PNG}}],
-                   owner='ana')
-    body = {'reason': 'wrong contrast', 'confirm': 'PU1/int/volcano@v1'}
+    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'figure', 'volcano',
+                   [{'files': {'v.png': PNG}}, {'files': {'v.png': PNG + b'2'}}], owner='ana')
+    body = {'reason': 'wrong contrast'}
     former = {'Remote-User': 'ana', 'Remote-Groups': 'users'}            # left the analysts group
     assert client.post('/artefacts/PU1/int/volcano/v1/purge', headers=USER, json=body).status_code == 403
     response = client.post('/artefacts/PU1/int/volcano/v1/purge', headers=former, json=body)
@@ -198,10 +227,9 @@ def test_a_former_uploader_may_purge_their_own_version(tmp_path, monkeypatch):
 def test_purge_requests_are_listed_for_the_requester_and_admins(tmp_path, monkeypatch):
     from tests.artefact_helpers import write_artefact
     client, service, _s3 = serve(tmp_path, monkeypatch)
-    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'figure', 'volcano', [{'files': {'v.png': PNG}}],
-                   owner='ana')
-    client.post('/artefacts/PU1/int/volcano/v1/purge', headers=ANALYST,
-                json={'reason': 'wrong contrast', 'confirm': 'PU1/int/volcano@v1'})
+    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'figure', 'volcano',
+                   [{'files': {'v.png': PNG}}, {'files': {'v.png': PNG + b'2'}}], owner='ana')
+    client.post('/artefacts/PU1/int/volcano/v1/purge', headers=ANALYST, json={'reason': 'wrong contrast'})
     with service.store._lock:
         service.store.conn.execute("UPDATE artefact_purges SET state = 'needs_decision', detail = 'kept: sha differs'")
     mine = client.get('/artefacts/purges', headers=ANALYST).json()['purges']

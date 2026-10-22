@@ -51,10 +51,14 @@ ARTEFACT_ROUTES = {
     '/artefacts/{group_id}/{scope}/{artefact_id}/{version}/files/{name:path}': 'download_artefact_file',
     '/artefacts/{group_id}/{scope}/{artefact_id}/{version}/preview/{name:path}': 'get_artefact_preview',
     '/artefacts/{group_id}/{scope}/{artefact_id}/{version}/purge': 'purge_artefact_version',
+    '/artefacts/{group_id}/{scope}/{artefact_id}/{version}/unpurge': 'unpurge_artefact_version',
+    '/artefacts/{group_id}/{scope}/{artefact_id}/{version}/delete': 'delete_artefact_version',
     '/artefacts/purges': 'artefact_purges',
 }
 #: routes not lifted into the read-route harness (tested in tests/test_artefact_deposit_api.py)
-WRITE_ROUTES = {'/artefacts/{group_id}/{scope}/{artefact_id}/{version}/purge'}
+WRITE_ROUTES = {'/artefacts/{group_id}/{scope}/{artefact_id}/{version}/purge',
+                '/artefacts/{group_id}/{scope}/{artefact_id}/{version}/unpurge',
+                '/artefacts/{group_id}/{scope}/{artefact_id}/{version}/delete'}
 #: routes about the caller's own purge requests (no artefact is resolved; the service filters by requester)
 OWN_ROUTES = {'/artefacts/purges'}
 
@@ -119,7 +123,7 @@ def _build_store(store: Path) -> Dict[str, Any]:
     # a purged artefact of a public dataset, purged by an admin
     made['PU1/pub/gone-fig'] = write_artefact(
         store, 'Public2021', 'PU1', 'pub', 'figure', 'gone-fig',
-        [{'files': {'a.png': b'x'}, 'state': 'purged', 'purged_by': 'root', 'purged_by_admin': True}])
+        [{'files': {'a.png': b'x'}, 'state': 'deleted', 'purged_by': 'root', 'purged_by_admin': True}])
     return made
 
 
@@ -227,7 +231,7 @@ def test_every_artefact_route_is_known_and_checks_access():
         if path == '/artefacts':
             assert '_artefact_policy()' in source and '_artefact_viewer(request)' in source
         elif path in WRITE_ROUTES:          # the service resolves the artefact with the caller's view
-            assert 'request_purge(' in source and '_artefact_context(request)' in source
+            assert '_purge_call(request, ' in source and 'group_id, scope, artefact_id, version, body' in source
         elif path in OWN_ROUTES:            # a signed-in caller, the requester's own rows (admins: all)
             assert '_owner_call(' in source and 'service.purges(identity' in source
         else:
@@ -344,18 +348,21 @@ def test_detail_versions_and_manifest_payloads(client):
     assert client.get('/artefacts/PU1/pub/fig-public/v3').status_code == 404
 
 
-def test_purged_versions_are_tombstones(client):
+def test_deleted_versions_are_tombstones(client):
     response = client.get('/artefacts/PU1/pub/gone-fig/v1')
-    assert response.status_code == 410 and response.json()['status'] == 'purged'
+    assert response.status_code == 410 and response.json()['status'] == 'deleted'
     assert response.json()['tombstone']['purged_by'] == 'an admin'
+    assert response.json()['tombstone']['deleted_by'] == 'an admin'
     admin = client.get('/artefacts/PU1/pub/gone-fig/v1', headers=ADMIN).json()
-    assert admin['tombstone']['purged_by'] == 'root'
+    assert admin['tombstone']['purged_by'] == 'root' and admin['tombstone']['deleted_by'] == 'root'
     assert client.get('/artefacts/PU1/pub/gone-fig/v1/files/a.png').status_code == 410
     versions = client.get('/artefacts/PU1/pub/gone-fig/versions').json()['versions']
-    assert versions == [{'version': 1, 'state': 'purged', 'published': '2026-10-16', 'purged': '2026-10-17',
-                         'purged_by': 'an admin', 'purge_reason': None}]      # anonymous: no reason
+    assert versions == [{'version': 1, 'state': 'deleted', 'published': '2026-10-16', 'purged': '2026-10-17',
+                         'purged_by': 'an admin', 'purge_reason': None, 'deleted': '2026-10-18',
+                         'deleted_by': 'an admin', 'delete_reason': None}]    # anonymous: no reasons
     signed = client.get('/artefacts/PU1/pub/gone-fig/versions', headers=USER).json()['versions']
     assert signed[0]['purge_reason'] == 'wrong contrast' and signed[0]['purged_by'] == 'an admin'
+    assert signed[0]['delete_reason'] == 'removed for good'
     assert 'PU1/pub/gone-fig' not in _listed(client, ANON)
     assert 'PU1/pub/gone-fig' in _listed(client, ANON, include_purged='true')
 

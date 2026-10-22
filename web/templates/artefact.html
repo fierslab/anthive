@@ -16,6 +16,8 @@
   .art-files td.num, .art-versions td.num { text-align: right; white-space: nowrap; }
   .art-preview { max-width: 100%; max-height: 360px; border: 1px solid var(--border); border-radius: 4px; margin: 6px 0; }
   .art-purge { margin-top: 6px; font-size: 12.5px; }
+  .art-versions tr.art-purged td { color: var(--text-muted); }
+  .art-versions tr.art-purged td:first-child a { color: var(--text-muted); }
   .art-purge input[type=text] { width: min(420px, 100%); }
   .art-purge .msg { margin-left: 8px; }
   .art-tag { display: inline-block; font-size: 10px; padding: 0 5px; border-radius: 3px; margin-left: 6px;
@@ -39,7 +41,9 @@
   {% endcall %}
 
   {% if purged_version %}
-  <p class="muted">Version v{{ purged_version.version }} was purged on {{ purged_version.purged }}{% if purged_version.purged_by %} by {{ purged_version.purged_by }}{% endif %}{% if purged_version.purge_reason %}: {{ purged_version.purge_reason }}{% endif %}.</p>
+  <p class="muted">Version v{{ purged_version.version }} was deleted permanently{% if purged_version.deleted %} on {{ purged_version.deleted }}{% endif %}{% if purged_version.deleted_by %} by {{ purged_version.deleted_by }}{% endif %}{% if purged_version.delete_reason %}: {{ purged_version.delete_reason }}{% endif %}. Its files are gone.</p>
+  {% elif a.shown_purge %}
+  <p class="muted" id="art-shown-purged">This version was purged on {{ a.shown_purge.purged }}{% if a.shown_purge.purged_by %} by {{ a.shown_purge.purged_by }}{% endif %}{% if a.shown_purge.purge_reason %}: {{ a.shown_purge.purge_reason }}{% endif %}. Its files stay available.</p>
   {% endif %}
 
   {% if a.description_html %}<div class="md-body">{{ a.description_html|safe }}</div>{% endif %}
@@ -92,58 +96,88 @@
     <dt>Reference</dt><dd class="mono">{{ a.ref }}</dd>
   </dl>
 
-  <h2 class="section-head">Versions</h2>
+  <h2 class="section-head">Versions {{ doc_toggle('art-purge-help', 'About purging a version') }}</h2>
+  {% call doc_block('About purging a version', id='art-purge-help') %}
+    <p>An older version can be purged by its uploader, the owner of the artefact or an admin: it stays listed and
+    downloadable, greyed out with who purged it, when and why, and the purge can be undone. The latest version is
+    never purged; deposit a newer version first. Only an admin deletes a purged version permanently: its files are
+    removed and a short record of the version stays. A purged DE table stays in the dataset until it is deleted.</p>
+  {% endcall %}
   <div class="table-wrap">
   <table class="card-table art-versions">
     <thead><tr><th>Version</th><th>State</th><th>Published</th><th></th></tr></thead>
     <tbody>
     {% for v in a.versions %}
-      <tr{% if v.is_shown %} class="row-current"{% endif %}>
-        <td data-label="Version">{% if v.state == 'live' and not v.is_shown %}<a href="?version={{ v.version }}">v{{ v.version }}</a>{% else %}v{{ v.version }}{% endif %}{% if v.version == a.latest %} <span class="muted">(latest)</span>{% endif %}</td>
-        <td data-label="State">{{ v.state }}{% if v.state == 'purged' %} on {{ v.purged }}{% if v.purged_by %} by {{ v.purged_by }}{% endif %}{% if v.purge_reason %}: {{ v.purge_reason }}{% endif %}{% endif %}</td>
+      <tr class="{% if v.is_shown %}row-current{% endif %}{% if v.state in ('purged', 'deleted') %} art-purged{% endif %}" data-state="{{ v.state }}">
+        <td data-label="Version">{% if v.state in ('live', 'purged') and not v.is_shown %}<a href="?version={{ v.version }}">v{{ v.version }}</a>{% else %}v{{ v.version }}{% endif %}{% if v.version == a.latest %} <span class="muted">(latest)</span>{% endif %}</td>
+        <td data-label="State">{% if v.state == 'purged' %}purged by {{ v.purged_by or 'a member' }} on {{ v.purged }}{% if v.purge_reason %}: {{ v.purge_reason }}{% endif %}{% elif v.state == 'deleted' %}deleted{% if v.deleted %} on {{ v.deleted }}{% endif %}{% if v.deleted_by %} by {{ v.deleted_by }}{% endif %}{% if v.delete_reason %}: {{ v.delete_reason }}{% endif %}{% else %}{{ v.state }}{% endif %}</td>
         <td data-label="Published">{{ v.published or '' }}</td>
-        <td>{% if a.may_purge and v.state == 'live' %}<button type="button" class="btn-link art-purge-open" data-version="{{ v.version }}">purge</button>{% endif %}</td>
+        <td>{% if a.may_purge and v.state == 'live' and a.latest and v.version != a.latest %}<button type="button" class="btn-link art-purge-open" data-version="{{ v.version }}">purge</button>{% endif %}{% if a.may_purge and v.state == 'purged' %}<button type="button" class="btn-link art-unpurge" data-version="{{ v.version }}">unpurge</button>{% endif %}{% if is_admin and v.state in ('purged', 'failed') %} <button type="button" class="btn-link art-delete-open" data-version="{{ v.version }}">delete permanently</button>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
   </table>
   </div>
 
-  {% if a.may_purge %}
+  {% if a.may_purge or is_admin %}
   <form class="art-purge" id="art-purge-form" hidden>
-    <p>Purging deletes the files of version <strong id="art-purge-v"></strong> for good; the version stays listed as
-    purged with your reason. Type <span class="mono" id="art-purge-ref"></span> to confirm.</p>
-    <label>Reason <input type="text" name="reason" minlength="5" maxlength="500" required></label><br>
-    <label>Confirm <input type="text" name="confirm" required autocomplete="off"></label>
+    <p>Purge version <strong id="art-purge-v"></strong>: it stays listed and downloadable, greyed out with your
+    reason, and the purge can be undone.</p>
+    <label>Reason <input type="text" name="reason" minlength="5" maxlength="500" required></label>
     <button type="submit">Request the purge</button><span class="msg muted" role="status"></span>
   </form>
+  <form class="art-purge" id="art-delete-form" hidden>
+    <p>Delete version <strong id="art-delete-v"></strong> permanently: its files are removed from the object store and
+    the store and cannot be brought back. Type <span class="mono" id="art-delete-ref"></span> to confirm.</p>
+    <label>Reason <input type="text" name="reason" minlength="5" maxlength="500" required></label><br>
+    <label>Confirm <input type="text" name="confirm" required autocomplete="off"></label>
+    <button type="submit">Delete permanently</button><span class="msg muted" role="status"></span>
+  </form>
+  <p class="art-purge muted" id="art-unpurge-msg" role="status" hidden></p>
   <script>
   (function () {
-    var form = document.getElementById('art-purge-form');
-    if (!form) return;
-    var base = {{ a.api_base|tojson }}, ref = {{ a.ref|tojson }}, version = null;
-    document.querySelectorAll('.art-purge-open').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        version = btn.getAttribute('data-version');
-        document.getElementById('art-purge-v').textContent = 'v' + version;
-        document.getElementById('art-purge-ref').textContent = ref + '@v' + version;
-        form.hidden = false;
-        form.querySelector('input[name=reason]').focus();
-      });
-    });
-    form.addEventListener('submit', function (event) {
-      event.preventDefault();
-      var msg = form.querySelector('.msg');
+    var base = {{ a.api_base|tojson }}, ref = {{ a.ref|tojson }};
+    var done = {purge: 'Requested. The version shows as purged after the next publication run.',
+                unpurge: 'Requested. The version is live again after the next publication run.',
+                'delete': 'Requested. The version is deleted after the next publication run.'};
+    function send(action, version, payload, msg) {
+      msg.hidden = false;
       msg.textContent = 'sending';
-      fetch(base + '/v' + encodeURIComponent(version) + '/purge', {
+      fetch(base + '/v' + encodeURIComponent(version) + '/' + action, {
         method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({reason: form.reason.value, confirm: form.confirm.value})
+        body: JSON.stringify(payload)
       }).then(function (response) {
         return response.json().catch(function () { return {}; }).then(function (body) {
-          msg.textContent = response.ok ? 'Requested. The version shows as purged after the next publication run.'
+          msg.textContent = response.ok ? (body.changed === false ? (body.message || 'nothing to do') : done[action])
                                         : (body.message || body.detail || ('refused (' + response.status + ')'));
         });
       }).catch(function () { msg.textContent = 'the request failed; try again'; });
+    }
+    function wire(openClass, formId, labelId, refId, action) {
+      var form = document.getElementById(formId), version = null;
+      if (!form) return;
+      document.querySelectorAll(openClass).forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          version = btn.getAttribute('data-version');
+          document.getElementById(labelId).textContent = 'v' + version;
+          if (refId) document.getElementById(refId).textContent = ref + '@v' + version;
+          form.hidden = false;
+          form.querySelector('input[name=reason]').focus();
+        });
+      });
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var payload = {reason: form.reason.value};
+        if (form.confirm) payload.confirm = form.confirm.value;
+        send(action, version, payload, form.querySelector('.msg'));
+      });
+    }
+    wire('.art-purge-open', 'art-purge-form', 'art-purge-v', null, 'purge');
+    wire('.art-delete-open', 'art-delete-form', 'art-delete-v', 'art-delete-ref', 'delete');
+    document.querySelectorAll('.art-unpurge').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        send('unpurge', btn.getAttribute('data-version'), {}, document.getElementById('art-unpurge-msg'));
+      });
     });
   })();
   </script>

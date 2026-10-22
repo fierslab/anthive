@@ -1021,9 +1021,13 @@ These rules come from the site audit (Fable, 2026-10-13) with Mark's overrides. 
   (`artefact.html`, `?version=N` for an older version, the tombstone for a purged one). Shared table macro in
   `_artefacts.html`. Downloads stays raw h5ad + static only; artefacts never appear there.
 - Every fetch is `_api_get_as_user` (identity headers kept): the API decides visibility, redacts `made_from`
-  ("made from a dataset you cannot see") and logins. The purge form (`#art-purge-form`, POST
-  `/api/artefacts/.../v{N}/purge` with reason + typed ref) shows only to the artefact owner, the version's uploader
-  and admins (`_may_purge`); the API is the authority.
+  ("made from a dataset you cannot see") and logins. Two-stage purge (2.47, design 4.4): the purge button sits on
+  live versions other than the latest (`#art-purge-form`, POST `/api/artefacts/.../v{N}/purge` with a reason),
+  purged versions are greyed (`tr.art-purged`, "purged by X on D: reason", still linked and downloadable) with an
+  unpurge button (`.art-unpurge`, POST `.../unpurge`), and admins get "delete permanently" on purged and failed
+  versions (`#art-delete-form`, POST `.../delete` with reason + typed ref). Purge controls show to the artefact
+  owner, the latest version's uploader and admins (`_may_purge`); the API is the authority. A shown purged
+  version carries `#art-shown-purged`; a deleted one the tombstone line. Help box `art-purge-help`.
 - **Depositor text is never rendered raw**: titles through `safe_markdown.plain`, descriptions and change notes
   through `safe_markdown.render` (`lib/safe_markdown.py`: markdown-it-py with raw HTML off, allowlist
   re-serialisation, http(s)/mailto/relative links only, no backslashes, `rel=nofollow noopener noreferrer`,

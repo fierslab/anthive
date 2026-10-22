@@ -97,7 +97,7 @@ def test_the_review_probe_purge_without_content_type_is_refused(tmp_path, monkey
     from tests.test_artefact_deposit_api import ANALYST, serve
     client, service, _s3 = serve(tmp_path, monkeypatch)
     client.app.add_middleware(_guard_namespace()['_CrossSiteGuard'])
-    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'figure', 'volcano', [{'files': {'v.png': PNG}}],
+    write_artefact(service.store_root, 'Public2021', 'PU1', 'int', 'figure', 'volcano', [{'files': {'v.png': PNG}}, {'files': {'v.png': PNG + b'2'}}],
                    owner='ana')
     raw = json.dumps({'reason': 'csrf from another site', 'confirm': 'PU1/int/volcano@v1'}).encode()
     path = '/artefacts/PU1/int/volcano/v1/purge'

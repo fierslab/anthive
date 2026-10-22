@@ -111,7 +111,7 @@ def test_list_artefacts_sends_owner_purged_and_cursor_as_declared():
     params = calls[0][1]
     assert set(params) <= _route_params('/artefacts')
     assert (params['owner'], params['include_purged'], params['cursor']) == ('ana', 'true', 'c1')
-    assert 'owner "ana"' in text and 'every version purged' in text and 'cursor="c2"' in text
+    assert 'owner "ana"' in text and 'no live version' in text and 'cursor="c2"' in text
 
 
 def test_list_facets_and_get_facet():

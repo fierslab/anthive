@@ -146,9 +146,23 @@ def test_artefact_route_on_the_real_bucket(tmp_path):
         assert client.get_object(Bucket=bucket, Key=base + 'files/volcano.png')['Body'].read() == png
         other = delivery.url.replace('volcano.png', 'panels/b.pdf')
         assert _http('GET', other)[0] == 403
-        # 4. purge
+        # 4. a second version, then the two-stage purge of v1: soft (files kept), then an admin's delete
+        v2_files = {'volcano.png': png + b'2'}
+        v2 = service.create(helpers.ANALYST, helpers.artefact_body(
+            v2_files, scope='int', made_from=[{'db_id': 'PU1/int', 'dataset_version': '1.0.0'}], new_version_of=1,
+            change_note='second version'), ctx)
+        for entry in v2['files']:
+            assert _http('PUT', entry['url'], v2_files[entry['name']], entry['headers'])[0] == 200
+        assert service.complete(helpers.ANALYST, v2['deposit_id'])['state'] == 'uploaded'
+        for _ in range(3):
+            clock[0] += 10
+            publisher.poll(_listing(client, bucket))
         service.request_purge(helpers.ADMIN, helpers.context(store_root), 'PU1', 'int', 'volcano', 'v1',
-                              {'reason': 'end to end test', 'confirm': 'PU1/int/volcano@v1'})
+                              {'reason': 'end to end test'})
+        publisher.poll(_listing(client, bucket))
+        assert [key for key in _keys(client, bucket, base)]                       # soft: nothing deleted
+        service.request_delete(helpers.ADMIN, helpers.context(store_root), 'PU1', 'int', 'volcano', 'v1',
+                               {'reason': 'end to end test', 'confirm': 'PU1/int/volcano@v1'})
         publisher.poll(_listing(client, bucket))
         assert not [key for key in _keys(client, bucket, base)]
         assert service.purges(helpers.ADMIN)[0]['state'] == 'done'
@@ -179,10 +193,10 @@ def test_artefact_route_on_the_real_bucket(tmp_path):
         assert de_row['state'] == 'live', de_row['error']
         assert 'artefact PU1/int/tvc@v1' in (store_root / 'Public2021' / 'int.md').read_text()
         client.head_object(Bucket=bucket, Key=f'{CATALOG}Public2021/int.de.parquet')
-        service.request_purge(helpers.ADMIN, helpers.context(store_root), 'PU1', 'int', 'tvc', 'v1',
-                              {'reason': 'end to end test', 'confirm': 'PU1/int/tvc@v1'})
-        publisher.poll(_listing(client, bucket))
-        assert 'removed: purged artefact PU1/int/tvc@v1' in (store_root / 'Public2021' / 'int.md').read_text()
+        with pytest.raises(Exception) as caught:                               # the latest version stays
+            service.request_purge(helpers.ADMIN, helpers.context(store_root), 'PU1', 'int', 'tvc', 'v1',
+                                  {'reason': 'end to end test'})
+        assert caught.value.body['status'] == 'latest_version'
     finally:
         after = set().union(*(_keys(client, bucket, prefix) for prefix in TEST_PREFIXES))
         created_keys = sorted(after - before)

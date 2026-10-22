@@ -145,7 +145,7 @@ def test_head_record_round_trip_and_dates():
     text = artefacts.render_head_record(_head())
     assert text.startswith('---\n') and text.endswith('---\n')
     parsed = artefacts.parse_head_record(text)
-    assert parsed == _head()
+    assert parsed == {**_head(), 'states': 2}
     unquoted = text.replace("'2026-10-14'", '2026-10-14')
     assert artefacts.parse_head_record(unquoted)['created'] == '2026-10-14'     # YAML dates come back as text
     path = artefacts.ArtefactPath('Sun2026', 'SLM', 'figure', 'ab')
@@ -305,12 +305,12 @@ def _store(tmp_path):
 def test_index_reads_valid_artefacts(tmp_path):
     registry = _store(tmp_path)
     write_artefact(tmp_path, FOLDER, GID, 'pub', 'figure', 'volcano',
-                   [{'files': {'v.png': b'one'}, 'state': 'purged'}, {'files': {'v.png': b'two', 'p/a.png': b'3'}}])
+                   [{'files': {'v.png': b'one'}, 'state': 'deleted'}, {'files': {'v.png': b'two', 'p/a.png': b'3'}}])
     index = artefacts.ArtefactIndex.build(tmp_path, registry)
     assert index.problems == []
     entry = index.get(GID, 'pub', 'volcano')
     assert entry.latest == 2 and entry.live_versions == [2] and entry.db_id == f'{GID}/pub'
-    assert entry.versions[1].state == 'purged' and entry.versions[1].manifest is None
+    assert entry.versions[1].state == 'deleted' and entry.versions[1].manifest is None
     assert entry.ref == f'{GID}/pub/volcano'
 
 
@@ -702,9 +702,9 @@ def test_caller_keys():
 def test_versions_purged_and_latest(tmp_path):
     registry = _store(tmp_path)
     write_artefact(tmp_path, FOLDER, GID, 'pub', 'figure', 'gone',
-                   [{'files': {'a.png': b'1'}, 'state': 'purged', 'purged_by': 'root', 'purged_by_admin': True}])
+                   [{'files': {'a.png': b'1'}, 'state': 'deleted', 'purged_by': 'root', 'purged_by_admin': True}])
     write_artefact(tmp_path, FOLDER, GID, 'pub', 'figure', 'two',
-                   [{'files': {'a.png': b'1'}, 'state': 'purged'}, {'files': {'a.png': b'2'}}])
+                   [{'files': {'a.png': b'1'}, 'state': 'deleted'}, {'files': {'a.png': b'2'}}])
     index = artefacts.ArtefactIndex.build(tmp_path, registry)
     service = _service(tmp_path)
     gone, two = index.get(GID, 'pub', 'gone'), index.get(GID, 'pub', 'two')
@@ -723,7 +723,7 @@ def test_versions_purged_and_latest(tmp_path):
             service.version_of(two, label, USER)
         assert caught.value.status == 404
     payload = service.versions_payload(two, USER)
-    assert [v['state'] for v in payload['versions']] == ['purged', 'live']
+    assert [v['state'] for v in payload['versions']] == ['deleted', 'live']
     assert payload['versions'][0]['purged_by'] == 'alice'
 
 
@@ -923,3 +923,40 @@ def test_presign_ttl_comes_from_the_settings(tmp_path):
                                         s3_factory=HeadOnly)
     delivery = service.deliver(entry, entry.versions[2], 'v.pdf', 'k')
     assert parse_qs(urlsplit(delivery.url).query)['X-Amz-Expires'] == ['60']
+
+
+# ── two-stage purge (2.47.0, design 5.3) ─────────────────────────────────────
+
+def test_a_legacy_head_record_reads_its_purges_as_deletions():
+    """Purges done before the two-stage purge (no ``states: 2``) stay tombstones: purged -> deleted."""
+    import yaml
+    legacy = '---\n' + yaml.safe_dump(_head(), sort_keys=False) + '---\n'
+    parsed = artefacts.parse_head_record(legacy)
+    first = parsed['versions'][0]
+    assert parsed['states'] == 2 and first['state'] == 'deleted'
+    assert first['deleted'] == '2026-10-16' and first['deleted_by'] == 'jdoe' and first['delete_reason'] == 'wrong'
+    assert artefacts.validate_head_record(parsed, artefacts.ArtefactPath('Sun2026', 'SLM', 'figure', 'ab')) == []
+    purging = yaml.safe_load(yaml.safe_dump(_head()))
+    purging['versions'][0]['state'] = 'purging'
+    assert artefacts.parse_head_record('---\n' + yaml.safe_dump(purging) + '---\n')['versions'][0]['state'] == 'deleting'
+
+
+def test_a_soft_purged_version_stays_listed_and_downloadable_but_is_never_the_latest(tmp_path):
+    registry = _store(tmp_path)
+    write_artefact(tmp_path, FOLDER, GID, 'pub', 'figure', 'soft',
+                   [{'files': {'a.png': b'1'}, 'state': 'purged', 'purged_by': 'root', 'purged_by_admin': True},
+                    {'files': {'a.png': b'2'}}])
+    index = artefacts.ArtefactIndex.build(tmp_path, registry)
+    entry = index.get(GID, 'pub', 'soft')
+    service = _service(tmp_path)
+    assert entry.latest == 2 and entry.live_versions == [2]
+    assert entry.versions[1].servable and entry.versions[1].manifest is not None
+    assert service.version_of(entry, 'v1', USER).number == 1                 # downloadable
+    payload = service.versions_payload(entry, USER)
+    assert payload['versions'][0] == {'version': 1, 'state': 'purged', 'published': '2026-10-16',
+                                      'purged': '2026-10-17', 'purged_by': 'an admin',
+                                      'purge_reason': 'wrong contrast'}
+    assert service.versions_payload(entry, ADMIN)['versions'][0]['purged_by'] == 'root'
+    one = service.version_payload(entry, entry.versions[1], USER)
+    assert one['state'] == 'purged' and one['purge']['purged'] == '2026-10-17' and one['files']
+    assert service.version_payload(entry, entry.versions[2], USER)['purge'] is None

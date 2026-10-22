@@ -418,60 +418,116 @@ def _live_two_versions(tmp_path, clock):
 
 
 def _purge(service, identity, version=1):
+    """Stage 1 (soft): mark the version purged."""
     return service.request_purge(identity, context(service.store_root), 'PU1', 'int', 'volcano', f'v{version}',
-                                 {'reason': 'wrong contrast', 'confirm': f'PU1/int/volcano@v{version}'})
+                                 {'reason': 'wrong contrast'})
 
 
-def test_purge_deletes_exactly_the_listed_keys_and_leaves_a_tombstone(tmp_path, clock):
+def _delete(service, version=1):
+    """Stage 2 (an admin's hard purge) of a purged version."""
+    return service.request_delete(ADMIN, context(service.store_root), 'PU1', 'int', 'volcano', f'v{version}',
+                                  {'reason': 'remove for good', 'confirm': f'PU1/int/volcano@v{version}'})
+
+
+def _committed(git, text):
+    return any(text in ' '.join(cmd) for cmd in git.commands if 'commit' in cmd)
+
+
+def test_a_soft_purge_keeps_the_files_and_the_downloads(tmp_path, clock):
+    service, s3, publisher, db, git = _live_two_versions(tmp_path, clock)
+    base = f'{CATALOG}Public2021/static/artefacts/int/figure/volcano/'
+    before = {key for key in s3.objects if key.startswith(base + 'v1/')}
+    _purge(service, ANALYST)
+    publisher.poll(listing(s3))
+    assert {key for key in s3.objects if key.startswith(base + 'v1/')} == before      # nothing deleted
+    assert (tmp_path / 'store' / 'Public2021/static/artefacts/int/figure/volcano/v1/files/volcano.png').is_file()
+    entry = _index(tmp_path).get('PU1', 'int', 'volcano')
+    assert entry.versions[1].state == 'purged' and entry.versions[1].purged_by == 'ana'
+    assert entry.versions[1].purge_reason == 'wrong contrast' and entry.versions[1].servable and entry.latest == 2
+    reader = artefacts.ArtefactService(tmp_path / 'store', {})
+    viewer = artefacts.Viewer(sees_internal=True, user='alice')
+    assert reader.version_of(entry, 'v1', viewer).number == 1                          # still downloadable
+    assert service.purges(ADMIN)[0]['state'] == 'done' and service.purges(ADMIN)[0]['action'] == 'soft'
+    assert _committed(git, 'purge PU1/int/volcano@v1 (files kept)')
+    assert not any(call[0] == 'delete' and call[1].startswith(CATALOG) for call in s3.calls)
+
+
+def test_the_latest_version_cannot_be_purged_and_unpurge_restores(tmp_path, clock):
+    service, s3, publisher, db, _git = _live_two_versions(tmp_path, clock)
+    with pytest.raises(dd.DepositError) as caught:
+        _purge(service, ANALYST, 2)
+    assert caught.value.status == 409 and caught.value.body['status'] == 'latest_version'
+    _purge(service, ANALYST, 1)
+    publisher.poll(listing(s3))
+    assert _index(tmp_path).get('PU1', 'int', 'volcano').versions[1].state == 'purged'
+    service.request_unpurge(ANALYST, context(service.store_root), 'PU1', 'int', 'volcano', 'v1', {})
+    publisher.poll(listing(s3))
+    entry = _index(tmp_path).get('PU1', 'int', 'volcano')
+    assert entry.versions[1].state == 'live' and entry.versions[1].purged is None and entry.latest == 2
+    head = (tmp_path / 'store' / 'Public2021/static/artefacts/int/figure/volcano/artefact.md').read_text()
+    assert 'unpurged_by: ana' in head and 'states: 2' in head
+    assert [row['action'] for row in service.purges(ADMIN)] == ['unpurge', 'soft']
+
+
+def test_the_watcher_refuses_a_soft_purge_of_the_latest_version(tmp_path, clock):
+    """Under the artefact lock the watcher checks again (the newer version could have gone meanwhile)."""
+    service, s3, publisher, db, _git = _live_two_versions(tmp_path, clock)
+    row = {'ref': 'PU1/int/volcano', 'version': 2, 'group_folder': 'Public2021', 'scope': 'int', 'kind': 'figure',
+           'artefact_id': 'volcano', 'requested_by': 'ana', 'reason': 'wrong contrast', 'by_admin': 0}
+    state, detail = publisher.soft_purge(row)
+    assert state == 'failed' and detail.startswith('latest_version')
+
+
+def test_an_admin_hard_purge_deletes_exactly_the_listed_keys_and_leaves_a_tombstone(tmp_path, clock):
     service, s3, publisher, db, git = _live_two_versions(tmp_path, clock)
     base = f'{CATALOG}Public2021/static/artefacts/int/figure/volcano/'
     stray = base + 'v1/files/not-in-the-manifest.png'
     s3.put(stray, b'x', metadata={'sha256': 'd' * 64})
-    _purge(service, ADMIN)
+    _purge(service, ANALYST)
+    publisher.poll(listing(s3))
+    with pytest.raises(dd.DepositError) as caught:                     # not by the owner
+        service.request_delete(ANALYST, context(service.store_root), 'PU1', 'int', 'volcano', 'v1',
+                               {'reason': 'remove for good', 'confirm': 'PU1/int/volcano@v1'})
+    assert caught.value.status == 403
+    _delete(service)
     publisher.poll(listing(s3))
     assert stray in s3.objects                                        # no listing of the prefix decides a delete
     assert not any(key.startswith(base + 'v1/') and key != stray for key in s3.objects)
     assert base + 'v2/manifest.json' in s3.objects and base + 'v2/files/volcano.png' in s3.objects
     assert not (tmp_path / 'store' / 'Public2021/static/artefacts/int/figure/volcano/v1').exists()
     entry = _index(tmp_path).get('PU1', 'int', 'volcano')
-    assert entry.versions[1].state == 'purged' and entry.versions[1].purged_by == 'root'
-    assert entry.versions[1].purged_by_admin and entry.latest == 2
+    assert entry.versions[1].state == 'deleted' and entry.versions[1].deleted_by == 'root'
+    assert entry.versions[1].deleted_by_admin and entry.versions[1].purged_by == 'ana' and entry.latest == 2
     tombstone = artefacts.tombstone(entry.versions[1], artefacts.Viewer(sees_internal=True, user='alice'))
-    assert tombstone['purged_by'] == 'an admin' and tombstone['purge_reason'] == 'wrong contrast'
+    assert tombstone['deleted_by'] == 'an admin' and tombstone['delete_reason'] == 'remove for good'
+    assert tombstone['purge_reason'] == 'wrong contrast' and tombstone['state'] == 'deleted'
     deleted = [call[1] for call in s3.calls if call[0] == 'delete' and call[1].startswith(CATALOG)]
     assert all(key.startswith(base + 'v1/') for key in deleted) and len(deleted) == 3   # 2 files + manifest
     assert all(call[0] != 'delete_objects' for call in s3.calls)
-    assert service.purges(ADMIN)[0]['state'] == 'done'
+    assert service.purges(ADMIN)[0]['state'] == 'done' and service.purges(ADMIN)[0]['action'] == 'hard'
     assert any(row['outcome'] == 'deleted' for row in db.deletions())
-    assert any('purge PU1/int/volcano@v1' in ' '.join(cmd) for cmd in git.commands if 'commit' in cmd)
+    assert _committed(git, 'delete PU1/int/volcano@v1 permanently')
 
 
-def test_purge_keeps_a_key_whose_sha256_differs(tmp_path, clock):
-    service, s3, publisher, db, git = _live_two_versions(tmp_path, clock)
+def test_a_hard_purge_keeps_a_key_whose_sha256_differs(tmp_path, clock):
+    service, s3, publisher, db, _git = _live_two_versions(tmp_path, clock)
     key = f'{CATALOG}Public2021/static/artefacts/int/figure/volcano/v1/files/volcano.png'
     s3.objects[key]['metadata']['sha256'] = 'c' * 64
     _purge(service, ADMIN)
     publisher.poll(listing(s3))
+    _delete(service)
+    publisher.poll(listing(s3))
     assert key in s3.objects
     assert service.purges(ADMIN)[0]['state'] == 'needs_decision'
     entry = _index(tmp_path).get('PU1', 'int', 'volcano')
-    assert entry.versions[1].state == 'purging'                      # not purged; an admin looks
+    assert entry.versions[1].state == 'deleting'                     # not deleted; an admin looks
 
 
-def test_the_uploader_purges_the_last_version(tmp_path, clock):
-    service, s3, publisher, db, _git = _live_two_versions(tmp_path, clock)
-    _purge(service, ANALYST, 2)
-    publisher.poll(listing(s3))
-    _purge(service, ANALYST, 1)
-    publisher.poll(listing(s3))
-    entry = _index(tmp_path).get('PU1', 'int', 'volcano')
-    assert entry.latest is None and entry.versions[2].purged_by == 'ana' and not entry.versions[2].purged_by_admin
-    assert not any(key.endswith('/files/volcano.png') for key in s3.objects)
-
-
-def test_a_purge_after_a_kill_finishes(tmp_path, clock, monkeypatch):
+def test_a_hard_purge_after_a_kill_finishes(tmp_path, clock, monkeypatch):
     service, s3, publisher, db, _git = _live_two_versions(tmp_path, clock)
     _purge(service, ADMIN)
+    publisher.poll(listing(s3))
+    _delete(service)
     real = publisher._guarded_delete
     calls = {'n': 0}
 
@@ -488,7 +544,7 @@ def test_a_purge_after_a_kill_finishes(tmp_path, clock, monkeypatch):
     fresh, _db, _git2, _api = make_publisher(tmp_path, s3, clock)
     fresh.poll(listing(s3))
     assert service.purges(ADMIN)[0]['state'] == 'done'
-    assert _index(tmp_path).get('PU1', 'int', 'volcano').versions[1].state == 'purged'
+    assert _index(tmp_path).get('PU1', 'int', 'volcano').versions[1].state == 'deleted'
 
 
 # ── wiring into the watch route ───────────────────────────────────────────────

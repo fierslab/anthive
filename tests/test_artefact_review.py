@@ -113,13 +113,22 @@ def test_tombstone_hides_logins_and_reason_from_anonymous(tmp_path, clock):
     deposit(service, s3, ANALYST, {'volcano.png': PNG + b'2'}, scope='pub', new_version_of=1, change_note='v2')
     poll_until_final(publisher, s3, clock)
     service.request_purge(ANALYST, context(service.store_root), 'PU1', 'pub', 'volcano', 'v1',
-                          {'reason': 'contains a typo in the title', 'confirm': 'PU1/pub/volcano@v1'})
+                          {'reason': 'contains a typo in the title'})
     publisher.poll(listing(s3))
     index, _policy = _fresh(tmp_path)
     version = index.get('PU1', 'pub', 'volcano').versions[1]
-    anonymous = artefacts.tombstone(version, ANONYMOUS)
+    anonymous = artefacts.purge_mark(version, ANONYMOUS)
     assert anonymous['purged_by'] == 'a member' and anonymous['purge_reason'] is None
-    assert artefacts.tombstone(version, MEMBER)['purge_reason'] == 'contains a typo in the title'
+    assert artefacts.purge_mark(version, MEMBER)['purge_reason'] == 'contains a typo in the title'
+    admin_ctx = context(service.store_root, artefacts.Viewer(sees_internal=True, is_admin=True, user='root'))
+    service.request_delete(ADMIN, admin_ctx, 'PU1', 'pub', 'volcano', 'v1',
+                           {'reason': 'removed for good', 'confirm': 'PU1/pub/volcano@v1'})
+    publisher.poll(listing(s3))
+    version = _fresh(tmp_path)[0].get('PU1', 'pub', 'volcano').versions[1]
+    anonymous = artefacts.tombstone(version, ANONYMOUS)
+    assert anonymous['deleted_by'] == 'an admin' and anonymous['delete_reason'] is None
+    assert anonymous['purge_reason'] is None and anonymous['purged_by'] == 'a member'
+    assert artefacts.tombstone(version, MEMBER)['delete_reason'] == 'removed for good'
 
 
 # ── S3: a failed placement reserves its number, never blocks the next deposit, and an admin cleans it up ────
@@ -149,16 +158,20 @@ def test_a_failed_placement_does_not_block_a_later_deposit(tmp_path, clock, monk
     assert entry.latest == 2                                 # the failed number is never reused
     assert entry.versions[1].state == 'failed' and entry.versions[2].state == 'live'
 
-    with pytest.raises(dd.DepositError) as caught:          # only an admin cleans up a failed version
+    with pytest.raises(dd.DepositError) as caught:          # a failed version is never soft-purged
         service.request_purge(ANALYST, context(service.store_root), 'PU1', 'int', 'volcano', 'v1',
-                              {'reason': 'clean up', 'confirm': 'PU1/int/volcano@v1'})
+                              {'reason': 'clean up'})
+    assert caught.value.body['status'] == 'failed_version'
+    with pytest.raises(dd.DepositError) as caught:          # only an admin deletes it
+        service.request_delete(ANALYST, context(service.store_root), 'PU1', 'int', 'volcano', 'v1',
+                               {'reason': 'clean up', 'confirm': 'PU1/int/volcano@v1'})
     assert caught.value.status == 403
     admin_ctx = context(service.store_root, artefacts.Viewer(sees_internal=True, is_admin=True, user='root'))
-    service.request_purge(ADMIN, admin_ctx, 'PU1', 'int', 'volcano', 'v1',
-                          {'reason': 'clean up the failed publication', 'confirm': 'PU1/int/volcano@v1'})
+    service.request_delete(ADMIN, admin_ctx, 'PU1', 'int', 'volcano', 'v1',
+                           {'reason': 'clean up the failed publication', 'confirm': 'PU1/int/volcano@v1'})
     publisher.poll(listing(s3))
     index, _policy = _fresh(tmp_path)
-    assert index.get('PU1', 'int', 'volcano').versions[1].state == 'purged'
+    assert index.get('PU1', 'int', 'volcano').versions[1].state == 'deleted'
     assert [key for key in s3.keys(VOLCANO) if '/v1/' in key] == []
 
 
@@ -181,10 +194,15 @@ def test_stripped_sha_metadata_stops_purge(tmp_path, clock):
     publisher, _db, _git, _api = make_publisher(tmp_path, s3, clock)
     deposit(service, s3, ANALYST, {'volcano.png': PNG}, **INTERNAL)
     poll_until_final(publisher, s3, clock)
+    deposit(service, s3, ANALYST, {'volcano.png': PNG + b'2'}, new_version_of=1, change_note='v2', **INTERNAL)
+    poll_until_final(publisher, s3, clock)
     key = f'{VOLCANO}v1/files/volcano.png'
     s3.objects[key]['metadata'] = {'mtime': '1'}
-    service.request_purge(ANALYST, context(service.store_root), 'PU1', 'int', 'volcano', 'v1',
-                          {'reason': 'old one', 'confirm': 'PU1/int/volcano@v1'})
+    service.request_purge(ANALYST, context(service.store_root), 'PU1', 'int', 'volcano', 'v1', {'reason': 'old one'})
+    publisher.poll(listing(s3))
+    admin_ctx = context(service.store_root, artefacts.Viewer(sees_internal=True, is_admin=True, user='root'))
+    service.request_delete(ADMIN, admin_ctx, 'PU1', 'int', 'volcano', 'v1',
+                           {'reason': 'old one', 'confirm': 'PU1/int/volcano@v1'})
     publisher.poll(listing(s3))
     assert service.purges(ADMIN)[0]['state'] == 'needs_decision'
     assert key in s3.objects

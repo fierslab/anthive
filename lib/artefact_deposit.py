@@ -375,6 +375,18 @@ CREATE TABLE IF NOT EXISTS artefact_purges (
 CREATE UNIQUE INDEX IF NOT EXISTS artefact_purges_open ON artefact_purges(ref, version)
     WHERE state IN ('requested', 'purging');
 """
+#: what a purge request asks (2.47.0 two-stage purge, design 5.3): ``soft`` marks the version purged (files kept),
+#: ``unpurge`` reverses it, ``hard`` (admins) deletes a purged version. Rows written before the column existed
+#: were hard purges and stay so (the column's default).
+PURGE_ACTIONS = ('soft', 'unpurge', 'hard')
+
+
+def ensure_purge_schema(conn: Any) -> None:
+    """The purge request table with its ``action`` column (added to an older table with default ``hard``)."""
+    conn.executescript(PURGE_SCHEMA)
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(artefact_purges)')}
+    if 'action' not in columns:
+        conn.execute("ALTER TABLE artefact_purges ADD COLUMN action TEXT NOT NULL DEFAULT 'hard'")
 
 
 class ArtefactDepositService(DepositService):
@@ -388,7 +400,7 @@ class ArtefactDepositService(DepositService):
         super().__init__(*args, **kwargs)
         self.artefact_settings = dict(artefact_settings or {})
         with self.store._lock:
-            self.store.conn.executescript(PURGE_SCHEMA)
+            ensure_purge_schema(self.store.conn)
 
     # switches --------------------------------------------------------------
     @property
@@ -616,7 +628,7 @@ class ArtefactDepositService(DepositService):
                                                                         include_orphans=identity.is_admin):
             # an artefact the caller cannot see answers like one that does not exist, and its id stays taken
             raise DepositError(404, 'not_found', f'no artefact {ref}')
-        if existing is not None and not any(v.state in ('live', 'purging', 'purged')
+        if existing is not None and not any(v.state in ('live', 'purged', 'deleting', 'deleted')
                                             for v in existing.versions.values()):
             existing = None                 # only failed or reserved numbers: no version was ever published
         if existing is None:
@@ -1013,12 +1025,36 @@ class ArtefactDepositService(DepositService):
     # purge -----------------------------------------------------------------
     def request_purge(self, identity: Identity, context: ArtefactContext, group_id: str, scope: str,
                       artefact_id: str, version_label: str, body: Any) -> Dict[str, Any]:
-        """``POST /artefacts/{group_id}/{scope}/{artefact_id}/v{N}/purge`` (design 4.4): record the request;
-        the watcher carries it out. The uploader of that version, the artefact's owner or an admin."""
+        """``POST /artefacts/{group_id}/{scope}/{artefact_id}/v{N}/purge`` (design 5.3, stage 1): ask the watcher
+        to mark the version purged (files kept). The uploader of that version, the artefact's owner or an admin;
+        never the latest version."""
+        return self._purge_request(identity, context, group_id, scope, artefact_id, version_label, body, 'soft')
+
+    def request_unpurge(self, identity: Identity, context: ArtefactContext, group_id: str, scope: str,
+                        artefact_id: str, version_label: str, body: Any) -> Dict[str, Any]:
+        """``POST .../v{N}/unpurge``: make a purged version live again. The same people as for the purge."""
+        return self._purge_request(identity, context, group_id, scope, artefact_id, version_label, body, 'unpurge')
+
+    def request_delete(self, identity: Identity, context: ArtefactContext, group_id: str, scope: str,
+                       artefact_id: str, version_label: str, body: Any) -> Dict[str, Any]:
+        """``POST .../v{N}/delete`` (admins, stage 2): delete a purged version permanently (files, local copies,
+        de_table studies; a tombstone stays)."""
+        return self._purge_request(identity, context, group_id, scope, artefact_id, version_label, body, 'hard')
+
+    def _purge_request(self, identity: Identity, context: ArtefactContext, group_id: str, scope: str,
+                       artefact_id: str, version_label: str, body: Any, action: str) -> Dict[str, Any]:
+        """Record a purge, unpurge or delete request; the watcher carries it out under the artefact lock.
+
+        Idempotent: a version already in the requested state answers ``state: "done"`` with ``changed: false``;
+        the same request still waiting answers with that request. Another action waiting is a 409 ``busy``.
+        """
         self._require_artefacts_active()
+        verb = {'soft': 'purge', 'unpurge': 'unpurge', 'hard': 'delete'}[action]
         if self.settings.central_watcher:
-            raise DepositError(409, 'central_watcher', 'this site sends its deposits to a central watcher: ask an '
-                               'admin of the central site to purge the version')
+            raise DepositError(409, 'central_watcher', f'this site sends its deposits to a central watcher: ask an '
+                               f'admin of the central site to {verb} the version')
+        if action == 'hard' and not identity.is_admin:
+            raise DepositError(403, 'forbidden', 'only admins delete a version permanently; purge it instead')
         service = artefacts.ArtefactService(context.store_root, {})
         try:
             entry = service.resolve(context.index, context.policy, context.viewer, group_id, scope, artefact_id)
@@ -1032,23 +1068,45 @@ class ArtefactDepositService(DepositService):
         if version is None:
             raise DepositError(404, 'not_found', f'no version {str(version_label)[:20]} of {entry.ref}')
         ref = f'{entry.ref}@v{number}'
-        if version.state == 'purged':
-            raise DepositError(409, 'purged', f'{ref} is already purged')
-        if version.state == 'reserved':
-            raise DepositError(409, 'busy', f'{ref} is being published right now')
-        if version.state == 'failed' and not identity.is_admin:
-            raise DepositError(403, 'forbidden', f'{ref} is a failed publication: an admin cleans it up')
         uploader = ((version.manifest or {}).get('recorded') or {}).get('uploaded_by')
         if not (identity.is_admin or artefacts.owned_by(uploader, identity.user)
                 or artefacts.owned_by(entry.owner, identity.user)):
             raise DepositError(403, 'forbidden', f'only the uploader of {ref}, the owner of the artefact or an admin '
-                                                 f'may purge it')
+                                                 f'may {verb} it')
+        waiting = self.store._rows("SELECT * FROM artefact_purges WHERE UPPER(ref) = UPPER(?) AND version = ? AND "
+                                   "state IN ('requested', 'purging')", (entry.ref, number))
+        if waiting:
+            if (waiting[0].get('action') or 'hard') == action:
+                return self._purge_answer(waiting[0], entry.ref, number, action)
+            raise DepositError(409, 'busy', f'a {waiting[0].get("action")} request of {ref} is waiting for the watcher')
+        done = {'soft': ('purged',), 'unpurge': ('live',), 'hard': ('deleted',)}[action]
+        if version.state in done:
+            return {'ref': entry.ref, 'version': number, 'action': action, 'state': 'done', 'changed': False,
+                    'version_state': version.state, 'message': f'{ref} is already {version.state}'}
+        if version.state == 'reserved':
+            raise DepositError(409, 'busy', f'{ref} is being published right now')
+        if version.state in ('deleting', 'deleted'):
+            raise DepositError(409, 'deleted', f'{ref} is deleted (or being deleted) permanently')
+        if action == 'soft':
+            if version.state == 'failed':
+                raise DepositError(409, 'failed_version', f'{ref} is a failed publication: an admin deletes it '
+                                                          f'(POST .../delete)')
+            newer = [other for other, item in entry.versions.items() if other > number and item.is_live]
+            if not newer:
+                raise DepositError(409, 'latest_version', f'{ref} is the latest version of {entry.ref} and cannot be '
+                                                          f'purged; deposit a newer version first')
+        if action == 'unpurge' and version.state != 'purged':
+            raise DepositError(409, 'not_purged', f'{ref} is {version.state}: only a purged version is unpurged')
+        if action == 'hard' and version.state not in ('purged', 'failed'):
+            raise DepositError(409, 'not_purged', f'{ref} is {version.state}: purge it first, then delete it')
         if not isinstance(body, dict):
-            raise DepositError(422, 'invalid', 'the body is {"reason": ..., "confirm": "<ref>@v<N>"}')
+            raise DepositError(422, 'invalid', 'the body is {"reason": ...}' + (', "confirm": "<ref>@v<N>"}'
+                                                                               if action == 'hard' else ''))
         reason = clean_note(body.get('reason'), 500)
-        if len(reason) < 5:
-            raise DepositError(422, 'invalid', 'reason: why the version is purged (at least 5 characters)')
-        if body.get('confirm') != ref:
+        if action != 'unpurge' and len(reason) < 5:
+            raise DepositError(422, 'invalid', f'reason: why the version is {"deleted" if action == "hard" else "purged"} '
+                                               f'(at least 5 characters)')
+        if action == 'hard' and body.get('confirm') != ref:
             raise DepositError(422, 'confirm_mismatch', f'type the reference to confirm: "confirm": "{ref}"')
         busy = self.store._rows(
             "SELECT id FROM deposits WHERE deposit_kind = 'artefact' AND UPPER(artefact_ref) = UPPER(?) AND "
@@ -1059,24 +1117,36 @@ class ArtefactDepositService(DepositService):
         now = self.clock()
         try:
             with self.store._lock:
-                self.store.conn.execute(
+                cursor = self.store.conn.execute(
                     'INSERT INTO artefact_purges (ref, version, group_folder, scope, kind, artefact_id, requested_by, '
-                    'by_admin, reason, state, requested, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    'by_admin, reason, state, requested, updated, action) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (entry.ref, number, entry.path.group, entry.path.scope, entry.path.kind, entry.path.artefact_id,
-                     identity.user, int(identity.is_admin), reason, 'requested', now, now))
+                     identity.user, int(identity.is_admin), reason, 'requested', now, now, action))
+                request_id = cursor.lastrowid
         except sqlite3.IntegrityError:
-            raise DepositError(409, 'busy', f'a purge of {ref} is already requested')
-        return {'ref': entry.ref, 'version': number, 'state': 'purge_requested',
-                'next': 'the watcher purges the version on its next poll; the version then shows as purged'}
+            raise DepositError(409, 'busy', f'another request of {ref} is waiting for the watcher')
+        row = self.store._rows('SELECT * FROM artefact_purges WHERE id = ?', (request_id,))[0]
+        return self._purge_answer(row, entry.ref, number, action)
 
-    def purges(self, identity: Identity, state: Optional[str] = None) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _purge_answer(row: Dict[str, Any], ref: str, number: int, action: str) -> Dict[str, Any]:
+        after = {'soft': 'shows as purged (files kept)', 'unpurge': 'is live again',
+                 'hard': 'is deleted permanently (a tombstone stays)'}[action]
+        return {'ref': ref, 'version': number, 'action': action, 'state': 'requested', 'changed': True,
+                'request_id': row['id'], 'requested': _iso(row['requested']),
+                'next': f'the watcher carries it out on its next poll; the version then {after}'}
+
+    def purges(self, identity: Identity, state: Optional[str] = None,
+               action: Optional[str] = None) -> List[Dict[str, Any]]:
         rows = self.store._rows('SELECT * FROM artefact_purges ORDER BY id DESC LIMIT 500')
-        return [{'ref': row['ref'], 'version': row['version'], 'state': row['state'], 'reason': row['reason'],
+        return [{'id': row['id'], 'ref': row['ref'], 'version': row['version'], 'action': row.get('action') or 'hard',
+                 'state': row['state'], 'reason': row['reason'],
                  'requested': _iso(row['requested']), 'updated': _iso(row['updated']),
                  'requested_by': row['requested_by'] if identity.is_admin or row['requested_by'] == identity.user
                  else ('an admin' if row['by_admin'] else row['requested_by']), 'detail': row['detail']}
                 for row in rows if identity.is_admin or row['requested_by'] == identity.user
-                if state is None or row['state'] == state]
+                if (state is None or row['state'] == state)
+                and (action is None or (row.get('action') or 'hard') == action)]
 
     # de_only alias ---------------------------------------------------------
     def create_de_only_alias(self, identity: Identity, body: Dict[str, Any], context: Optional[ArtefactContext]
@@ -1193,7 +1263,7 @@ def version_followed(entry: Any) -> Optional[int]:
         return None
     if entry.latest is not None:
         return entry.latest
-    published = [number for number, version in entry.versions.items() if version.state in ('live', 'purging', 'purged')]
+    published = [number for number, version in entry.versions.items() if version.state in ('live', 'purged', 'deleting', 'deleted')]
     return max(published) if published else None
 
 

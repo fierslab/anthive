@@ -41,6 +41,8 @@ DETAIL = {'ref': 'S20/SIE/de-arm', 'kind': 'de_table', 'db_id': 'S20/SIE', 'late
 VERSIONS = {'versions': [{'version': 1, 'state': 'purged', 'purged': '2026-10-10', 'purged_by': 'an admin',
                           'purge_reason': 'wrong sidecar'},
                          {'version': 2, 'state': 'live', 'published': '2026-10-12'}]}
+DELETED = {'version': 0, 'state': 'deleted', 'deleted': '2026-10-09', 'deleted_by': 'an admin',
+           'delete_reason': 'duplicate'}
 
 
 def _load(responses: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Tuple[str, Dict[str, Any]]]]:
@@ -126,7 +128,8 @@ def test_get_artefact_marks_depositor_text_and_keeps_hidden_sources_hidden():
     assert 'depositor\'s DE table: study "DE_ARM_vs_HM1", contrast "ARM_vs_HM1", method "DESeq2"' in text
     assert 'https://anthive.example.org/api/artefacts/S20/SIE/de-arm/v2/files/de/table.tsv.gz' in text
     assert 'X-Amz' not in text and 'Signature' not in text
-    assert 'v1 purged 2026-10-10 by an admin, reason (depositor\'s text) "wrong sidecar"' in text
+    assert ('v1 purged 2026-10-10 by an admin (withdrawn, files still downloadable), reason (depositor\'s text) '
+            '"wrong sidecar"') in text
     assert 'depositor\'s code repository: "https://gitlab.example/x", commit "abc"' in text
     assert 'depositor\'s software: "DESeq2" version "1.44"' in text
     # server facts come before any depositor text
@@ -134,14 +137,20 @@ def test_get_artefact_marks_depositor_text_and_keeps_hidden_sources_hidden():
     assert [path for path, _ in calls] == ['/artefacts/S20/SIE/de-arm', '/artefacts/S20/SIE/de-arm/versions']
 
 
-def test_get_artefact_reads_an_older_version_and_reports_a_purged_one():
-    older = {**DETAIL, 'version': 1}
-    namespace, calls = _load({'/artefacts/S20/SIE/de-arm': DETAIL, '/artefacts/S20/SIE/de-arm/versions': VERSIONS,
+def test_get_artefact_reads_an_older_version_and_reports_purged_and_deleted_ones():
+    versions = {'versions': [DELETED] + VERSIONS['versions']}
+    namespace, calls = _load({'/artefacts/S20/SIE/de-arm': DETAIL, '/artefacts/S20/SIE/de-arm/versions': versions,
                               '/artefacts/S20/SIE/de-arm/v3': {'version': 3, 'manifest': {}, 'files': []},
-                              '/artefacts/S20/SIE/de-arm/v1': StatusError(410, '{"status": "purged"}')})
+                              '/artefacts/S20/SIE/de-arm/v1': {**DETAIL, 'version': 1, 'state': 'purged',
+                                                               'purge': {'purged': '2026-10-10',
+                                                                         'purged_by': 'an admin',
+                                                                         'purge_reason': 'wrong sidecar'}},
+                              '/artefacts/S20/SIE/de-arm/v0': StatusError(410, '{"status": "deleted"}')})
     assert 'showing v3 of latest v2' in _run(namespace['get_artefact']('S20/SIE/de-arm@v3'))
-    assert 'is purged' in _run(namespace['get_artefact']('S20/SIE/de-arm', version=1))
-    assert older['version'] == 1
+    purged = _run(namespace['get_artefact']('S20/SIE/de-arm', version=1))
+    assert 'this version is PURGED (withdrawn by an admin on 2026-10-10; files still downloadable' in purged
+    assert '- v0 deleted permanently 2026-10-09 by an admin (files gone), reason "duplicate"' in purged
+    assert 'was deleted permanently' in _run(namespace['get_artefact']('S20/SIE/de-arm', version=0))
 
 
 def test_artefact_uploaders_may_follow_deposits():

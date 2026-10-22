@@ -371,39 +371,50 @@ def test_a_kill_around_the_import_never_imports_twice(tmp_path, clock, monkeypat
 # ── purge ─────────────────────────────────────────────────────────────────────
 
 def _purge(service, identity, artefact_id, version):
+    """Stage 1 (soft): mark the version purged; its study stays in the dataset."""
     return service.request_purge(identity, context(service.store_root), 'PU1', 'int', artefact_id, f'v{version}',
-                                 {'reason': 'wrong contrast', 'confirm': f'PU1/int/{artefact_id}@v{version}'})
+                                 {'reason': 'wrong contrast'})
 
 
-def test_purging_a_de_table_removes_its_study_with_a_caveat(tmp_path, clock):
+def _delete(service, artefact_id, version):
+    """Stage 2 (an admin's hard purge): files and the study go."""
+    return service.request_delete(ADMIN, context(service.store_root), 'PU1', 'int', artefact_id, f'v{version}',
+                                  {'reason': 'remove for good', 'confirm': f'PU1/int/{artefact_id}@v{version}'})
+
+
+def _two_studies(tmp_path, clock):
+    """tvc v1 imports treated_vs_control, tvc v2 imports other_study (both stay in the dataset)."""
     service, s3, publisher, db, git, api = _setup(tmp_path, clock)
     deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
-    deposit(service, s3, ANALYST, de_files('other_study'), artefact_id='other', **DE_INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    deposit(service, s3, ANALYST, de_files('other_study'), artefact_id='tvc', new_version_of=1,
+            change_note='another contrast', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
     assert set(_studies(tmp_path)) == {'treated_vs_control', 'other_study'}
+    return service, s3, publisher, db, git, api
+
+
+def test_a_soft_purge_keeps_the_study_and_the_hard_purge_removes_it_with_a_caveat(tmp_path, clock):
+    service, s3, publisher, db, git, api = _two_studies(tmp_path, clock)
+    version_before = _md(tmp_path)['version']
     _purge(service, ANALYST, 'tvc', 1)
+    publisher.poll(listing(s3))
+    assert service.purges(ADMIN)[0]['state'] == 'done'
+    assert set(_studies(tmp_path)) == {'treated_vs_control', 'other_study'}      # the study stays
+    assert _md(tmp_path)['version'] == version_before                            # nothing changed in the dataset
+    assert context(tmp_path / 'store').index.get('PU1', 'int', 'tvc').versions[1].state == 'purged'
+    _delete(service, 'tvc', 1)
     publisher.poll(listing(s3))
     assert service.purges(ADMIN)[0]['state'] == 'done'
     assert set(_studies(tmp_path)) == {'other_study'}
     meta = _md(tmp_path)
-    assert 'DE study treated_vs_control removed: purged artefact PU1/int/tvc@v1' in meta['changelog'][-1]['changes'][0]
-    assert any('purged artefact PU1/int/tvc@v1' in caveat['message'] for caveat in meta['caveats'])
-    assert context(tmp_path / 'store').index.get('PU1', 'int', 'tvc').versions[1].state == 'purged'
+    assert ('DE study treated_vs_control removed: artefact PU1/int/tvc@v1 deleted permanently'
+            in meta['changelog'][-1]['changes'][0])
+    assert any('artefact PU1/int/tvc@v1 deleted permanently' in caveat['message'] for caveat in meta['caveats'])
+    assert context(tmp_path / 'store').index.get('PU1', 'int', 'tvc').versions[1].state == 'deleted'
 
 
-def test_purging_the_last_study_removes_the_sidecar(tmp_path, clock):
-    service, s3, publisher, db, git, api = _setup(tmp_path, clock)
-    deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
-    poll_until_final(publisher, s3, clock)
-    assert (tmp_path / 'store' / 'Public2021' / 'int.de.parquet').exists()
-    _purge(service, ADMIN, 'tvc', 1)
-    publisher.poll(listing(s3))
-    assert _studies(tmp_path) == {}
-    assert not (tmp_path / 'store' / 'Public2021' / 'int.de.parquet').exists()
-    assert f'{CATALOG}Public2021/int.de.parquet' not in s3.objects
-
-
-def test_purging_an_old_version_keeps_the_study_a_newer_one_imported(tmp_path, clock):
+def test_deleting_an_old_version_keeps_the_study_a_newer_one_imported(tmp_path, clock):
     service, s3, publisher, db, git, api = _setup(tmp_path, clock)
     deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
     poll_until_final(publisher, s3, clock)
@@ -413,16 +424,17 @@ def test_purging_an_old_version_keeps_the_study_a_newer_one_imported(tmp_path, c
     version_before = _md(tmp_path)['version']
     _purge(service, ANALYST, 'tvc', 1)
     publisher.poll(listing(s3))
+    _delete(service, 'tvc', 1)
+    publisher.poll(listing(s3))
     assert _studies(tmp_path) == {'treated_vs_control': 15}
     assert _md(tmp_path)['version'] == version_before                  # nothing removed, no bump
 
 
-def test_a_kill_after_the_study_removal_finishes_the_purge(tmp_path, clock, monkeypatch):
-    service, s3, publisher, db, git, api = _setup(tmp_path, clock)
-    deposit(service, s3, ANALYST, de_files(), artefact_id='tvc', **DE_INTERNAL)
-    poll_until_final(publisher, s3, clock)
+def test_a_kill_after_the_study_removal_finishes_the_hard_purge(tmp_path, clock, monkeypatch):
+    service, s3, publisher, db, git, api = _two_studies(tmp_path, clock)
     _purge(service, ADMIN, 'tvc', 1)
-    real = publisher._guarded_delete
+    publisher.poll(listing(s3))
+    _delete(service, 'tvc', 1)
 
     def dies(*args, **kwargs):
         raise Killed()
@@ -430,12 +442,12 @@ def test_a_kill_after_the_study_removal_finishes_the_purge(tmp_path, clock, monk
     with pytest.raises(Killed):
         publisher.poll(listing(s3))
     monkeypatch.undo()
-    assert _studies(tmp_path) == {}
+    assert set(_studies(tmp_path)) == {'other_study'}
     fresh, _db, _git, _api = make_publisher(tmp_path, s3, clock)
     fresh.poll(listing(s3))
     assert service.purges(ADMIN)[0]['state'] == 'done'
     meta = _md(tmp_path)
-    assert sum('removed: purged artefact' in entry['changes'][0] for entry in meta['changelog']) == 1
+    assert sum('deleted permanently' in entry['changes'][0] for entry in meta['changelog']) == 1
 
 
 # ── migration of de_sources ───────────────────────────────────────────────────

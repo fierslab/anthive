@@ -12,7 +12,8 @@ import time
 import pytest
 
 import artefact_sync
-from tests.artefact_deposit_helpers import (ANALYST, CATALOG, PNG, BUCKET, context, deposit, listing,
+import artefacts
+from tests.artefact_deposit_helpers import (ADMIN, ANALYST, CATALOG, PNG, BUCKET, context, deposit, listing,
                                             make_publisher, make_service, poll_until_final)
 
 INTERNAL = {'scope': 'int', 'made_from': [{'db_id': 'PU1/int', 'dataset_version': '1.0.0'}]}
@@ -100,14 +101,20 @@ def test_purged_versions_are_deleted_locally(tmp_path, clock):
     deposit(service, s3, ANALYST, {'volcano.png': PNG + b'2'}, new_version_of=1, change_note='v2', **INTERNAL)
     poll_until_final(publisher, s3, clock)
     service.request_purge(ANALYST, context(service.store_root), 'PU1', 'int', 'volcano', 'v1',
-                          {'reason': 'an old version', 'confirm': 'PU1/int/volcano@v1'})
+                          {'reason': 'an old version'})
     publisher.poll(listing(s3))
-    for name in ('artefact.md',):                       # the checkout catches up (git pull)
-        rel = 'Public2021/static/artefacts/int/figure/volcano/' + name
-        shutil.copy2(tmp_path / 'store' / rel, second / rel)
+    head_rel = 'Public2021/static/artefacts/int/figure/volcano/artefact.md'
+    shutil.copy2(tmp_path / 'store' / head_rel, second / head_rel)        # the checkout catches up (git pull)
     v2 = 'Public2021/static/artefacts/int/figure/volcano/v2/manifest.json'
     (second / v2).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(tmp_path / 'store' / v2, second / v2)
+    soft = artefact_sync.plan(second, s3, BUCKET, CATALOG, INLINE_MAX)
+    assert {action.action for action in soft} == {'download'}                # a soft-purged version keeps its files
+    admin = context(service.store_root, artefacts.Viewer(sees_internal=True, is_admin=True, user='root'))
+    service.request_delete(ADMIN, admin, 'PU1', 'int', 'volcano', 'v1',
+                           {'reason': 'an old version', 'confirm': 'PU1/int/volcano@v1'})
+    publisher.poll(listing(s3))
+    shutil.copy2(tmp_path / 'store' / head_rel, second / head_rel)
     actions = artefact_sync.plan(second, s3, BUCKET, CATALOG, INLINE_MAX)
     assert {action.action for action in actions} == {'delete', 'download'}
     artefact_sync.apply(actions, second, s3, BUCKET, log=lambda message: None)
@@ -162,7 +169,7 @@ def test_a_symlinked_purged_version_is_never_followed_by_the_delete(tmp_path):
     (outside / 'files' / 'thesis.txt').write_text('years of work')
     write_index_md(store, 'Public2021', group='Public2021', group_id='PU1')
     info = write_artefact(store, 'Public2021', 'PU1', 'int', 'figure', 'volcano',
-                          [{'files': {'v.png': b'\x89PNG'}, 'state': 'purged'}, {'files': {'w.png': b'\x89PNG2'}}])
+                          [{'files': {'v.png': b'\x89PNG'}, 'state': 'deleted'}, {'files': {'w.png': b'\x89PNG2'}}])
     v1 = info['root'] / 'v1'
     shutil.rmtree(v1, ignore_errors=True)
     os.symlink(outside, v1)

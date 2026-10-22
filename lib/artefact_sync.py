@@ -11,7 +11,7 @@ What a pull does, driven by the local head records and manifests:
   sha256 the manifest records;
 * other files only when ``--artefacts PATTERN`` selects their artefact (``fnmatch`` against
   ``<group_id>/<scope>/<artefact_id>`` and ``...@v<N>``), with the same check;
-* the local files and previews of purged versions are deleted;
+* the local files and previews of deleted versions (an admin's hard purge) are deleted; soft-purged versions keep theirs;
 * a live version whose manifest is not in the checkout yet (or does not match the head record) is skipped
   with a note: pull the h5adstore repository first.
 
@@ -145,13 +145,13 @@ def plan(store_root: Path, s3: Any, bucket: str, catalog_prefix: str, inline_max
         for entry in head.get('versions') or []:
             number = int(entry['version'])
             version_dir = store_root / str(path.version_rel(number))
-            if entry.get('state') == 'purged':
+            if entry.get('state') == 'deleted':
                 for folder in (version_dir / artefacts.FILES_DIR, version_dir / artefacts.PREVIEW_DIR):
                     if folder.exists():
                         actions.append(Action('delete', str(folder.relative_to(store_root)),
-                                              reason=f'{ref}@v{number} is purged'))
+                                              reason=f'{ref}@v{number} is deleted'))
                 continue
-            if entry.get('state') != 'live':
+            if entry.get('state') not in ('live', 'purged'):     # a soft-purged version keeps its files
                 continue
             try:
                 manifest_path = checked_path(store_root, str(path.manifest_rel(number)))

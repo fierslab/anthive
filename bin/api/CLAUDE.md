@@ -235,8 +235,9 @@ and `lib/config.py` (anthive.yaml loader).
   and passes `_artefact_context(request)` (registry, index, policy, viewer); `_require_dataset_uploader(kinds=...)`
   counts `artefacts_upload_groups` (plus dataset uploaders) and `collections_create_groups` only where
   `artefacts_enabled` is on, admins always there; the generic routes accept all three kinds (the service shows a
-  caller only their own deposits). `POST /artefacts/{gid}/{scope}/{id}/{version}/purge` records a purge request
-  (202); the watcher carries it out. Tests: `tests/test_artefact_deposit_api.py` (rights matrix).
+  caller only their own deposits). Two-stage purge (design 4.4): `POST .../{version}/purge` (soft, never the
+  latest), `.../unpurge` and `.../delete` (admins) record a request through `_purge_call` (202 recorded, 200
+  `state: done, changed: false` when nothing is left to do); the watcher carries them out under the artefact lock. Tests: `tests/test_artefact_deposit_api.py` (rights matrix).
 - **Collections and artefacts over MCP** (2.47): `list_collections` (`GET /collections`), `list_artefacts`, `get_artefact`,
   open to every caller (the API decides visibility; no role gate). Depositor text is labelled as such, download links are
   `public_api_url` + the API download route, never a signed URL. `_deposit_groups` adds `artefacts_upload_groups` and

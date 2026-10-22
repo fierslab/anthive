@@ -70,7 +70,7 @@ def write_artefact(store: Path, folder: str, group_id: str, scope: str, kind: st
                    versions: Sequence[Dict[str, Any]], owner: str = 'alice', local_files: bool = True,
                    previews: bool = False) -> Dict[str, Any]:
     """Write one artefact. Each ``versions`` item: ``files`` ({name: bytes}), optional ``access``, ``state``
-    (live / purged / purging), ``purged_by``, ``purged_by_admin``, ``manifest`` overrides. Returns
+    (live / purged = soft, files kept / deleted = tombstone), ``purged_by``, ``purged_by_admin``, ``manifest`` overrides. Returns
     ``{'path': ArtefactPath, 'manifests': {n: dict}, 'files': {n: {name: bytes}}}``."""
     path = artefacts.ArtefactPath(folder, scope, kind, artefact_id)
     root = store / str(path.rel)
@@ -85,11 +85,14 @@ def write_artefact(store: Path, folder: str, group_id: str, scope: str, kind: st
         raw = (json.dumps(manifest, indent=2) + '\n').encode()
         entry: Dict[str, Any] = {'version': number, 'state': state,
                                  'manifest_sha256': hashlib.sha256(raw).hexdigest(), 'published': '2026-10-16'}
-        if state == 'purged':
+        if state in ('purged', 'deleted'):
             entry.update({'purged': '2026-10-17', 'purged_by': spec.get('purged_by', owner),
                           'purge_reason': 'wrong contrast'})
             if spec.get('purged_by_admin'):
                 entry['purged_by_admin'] = True
+        if state == 'deleted':                      # a tombstone: no files, no manifest
+            entry.update({'deleted': '2026-10-18', 'deleted_by': spec.get('deleted_by', 'root'),
+                          'delete_reason': 'removed for good', 'deleted_by_admin': True})
         else:
             version_dir = root / f'v{number}'
             (version_dir / 'files').mkdir(parents=True, exist_ok=True)

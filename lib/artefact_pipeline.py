@@ -381,7 +381,7 @@ class ArtefactPublisher:
             return counts
         self._store = store
         try:
-            store.conn.executescript(rules.PURGE_SCHEMA)
+            rules.ensure_purge_schema(store.conn)
             for state, number in self.process_purges(store).items():
                 counts[f'purge_{state}'] = counts.get(f'purge_{state}', 0) + number
             records = store._rows("SELECT * FROM deposits WHERE deposit_kind IN ('artefact', 'collection') AND "
@@ -938,7 +938,7 @@ class ArtefactPublisher:
         lock = self._scope_lock_path(path, scope_md)
         with writer_lock(lock, timeout=600):
             head = self._read_head(path)
-            published = [v for v in (head or {}).get('versions') or [] if v['state'] in ('live', 'purging', 'purged')]
+            published = [v for v in (head or {}).get('versions') or [] if v['state'] in ('live', 'purged', 'deleting', 'deleted')]
             if head is not None and published:
                 live = [v['version'] for v in head['versions'] if v['state'] == 'live']
                 latest = max(live) if live else max(v['version'] for v in published)
@@ -1265,7 +1265,7 @@ class ArtefactPublisher:
         if head is None:
             head = {'artefact_id': path.artefact_id, 'kind': path.kind, 'scope': path.scope, 'owner': record['user'],
                     'created': today, 'title': manifest['title'], 'latest': None, 'versions': []}
-        if not any(entry['state'] in ('live', 'purging', 'purged') for entry in head['versions']):
+        if not any(entry['state'] in ('live', 'purged', 'deleting', 'deleted') for entry in head['versions']):
             head = {**head, 'owner': record['user'], 'created': today}   # the first published version: its owner
         versions = [entry for entry in head['versions'] if entry['version'] != number]
         versions.append({'version': number, 'state': 'live', 'manifest_sha256': manifest_sha, 'published': today,
@@ -1406,18 +1406,25 @@ class ArtefactPublisher:
         for row in store._rows("SELECT * FROM artefact_purges WHERE state IN ('requested', 'purging') ORDER BY id"):
             if self.stop_requested():
                 break
+            action = row.get('action') or 'hard'
+            label = {'soft': 'purge', 'unpurge': 'unpurge', 'hard': 'permanent deletion'}.get(action, action)
             try:
-                state, detail = self.purge(row)
+                if action == 'soft':
+                    state, detail = self.soft_purge(row)
+                elif action == 'unpurge':
+                    state, detail = self.unpurge(row)
+                else:
+                    state, detail = self.purge(row)
             except TransientError as exc:
-                self.log(f'artefacts: purge of {row["ref"]}@v{row["version"]} waits: {exc}')
+                self.log(f'artefacts: {label} of {row["ref"]}@v{row["version"]} waits: {exc}')
                 continue
             except Exception as exc:  # noqa: BLE001
                 state, detail = 'needs_decision', f'{type(exc).__name__}: {exc}'
             with store._lock:
                 store.conn.execute('UPDATE artefact_purges SET state = ?, detail = ?, updated = ? WHERE id = ?',
                                    (state, detail[:2000], self.clock(), row['id']))
-            self.db.event(f'purge:{row["ref"]}@v{row["version"]}', state, detail)
-            self.log(f'artefacts: purge of {row["ref"]}@v{row["version"]}: {state} {detail}')
+            self.db.event(f'{action}:{row["ref"]}@v{row["version"]}', state, detail)
+            self.log(f'artefacts: {label} of {row["ref"]}@v{row["version"]} by {row["requested_by"]}: {state} {detail}')
             counts[state] = counts.get(state, 0) + 1
         return counts
 
@@ -1442,16 +1449,25 @@ class ArtefactPublisher:
         self.db.record_deletion(log_key, key, str(head.get('ETag', '')).strip('"'), 'deleted')
         return 'deleted'
 
-    def purge(self, row: Dict[str, Any]) -> Tuple[str, str]:
-        """Design 5.3: mark purging, delete exactly the listed keys (manifest last), local copies, tombstone."""
+    def _purge_target(self, row: Dict[str, Any]) -> Tuple[artefacts.ArtefactPath, int, Optional[Path]]:
         path = artefacts.ArtefactPath(row['group_folder'], row['scope'], row['kind'], row['artefact_id'])
-        number = int(row['version'])
         scope_md = None
         if path.scope != artefacts.GROUP_SCOPE:
             _collections, mds, folders = self._catalog()
             scope_md = next((md for db_id, md in mds.items() if db_id.split('/')[1] == path.scope
                              and folders.get(db_id) == path.group), None)
-        log_key = f'purge:{row["ref"]}@v{number}'
+        return path, int(row['version']), scope_md
+
+    @staticmethod
+    def _with_latest(head: Dict[str, Any]) -> Dict[str, Any]:
+        live = [v['version'] for v in head['versions'] if v['state'] == 'live']
+        return {**head, 'latest': max(live) if live else None}
+
+    def soft_purge(self, row: Dict[str, Any]) -> Tuple[str, str]:
+        """Design 5.3, stage 1: mark a live version ``purged`` (who, when, why) in the head record. Nothing is
+        deleted; the files stay listed and downloadable, a de_table's study stays in the dataset. Refused for the
+        latest version (a newer live version must exist). Under the scope's artefact lock; idempotent."""
+        path, number, scope_md = self._purge_target(row)
         with writer_lock(self._scope_lock_path(path, scope_md), timeout=600):
             head = self._read_head(path)
             entry = next((item for item in (head or {}).get('versions') or [] if item['version'] == number), None)
@@ -1459,14 +1475,67 @@ class ArtefactPublisher:
                 return 'failed', 'no such version in the head record'
             if entry['state'] == 'purged':
                 return 'done', 'already purged'
+            if entry['state'] != 'live':
+                return 'failed', f'v{number} is {entry["state"]}: only a live version can be purged'
+            if not any(v['state'] == 'live' and v['version'] > number for v in head['versions']):
+                return 'failed', 'latest_version: the latest version cannot be purged; deposit a newer version first'
+            entry.update({'state': 'purged', 'purged': _today(), 'purged_by': row['requested_by'],
+                          'purge_reason': row.get('reason') or ''})
+            entry.pop('purged_by_admin', None)
+            if row.get('by_admin'):
+                entry['purged_by_admin'] = True
+            self._write_head(path, self._with_latest(head))
+        warnings: List[str] = []
+        self._rescan_and_check(f'/artefacts/{row["ref"]}/versions', warnings)
+        self._commit([path.head_rel], f'purge {row["ref"]}@v{number} (files kept)\n\nRequested by '
+                     f'{row["requested_by"]}: {row.get("reason") or ""}\n', None, warnings)
+        return 'done', 'purged (files kept)' + (f' ({"; ".join(warnings)})' if warnings else '')
+
+    def unpurge(self, row: Dict[str, Any]) -> Tuple[str, str]:
+        """Design 5.3: a soft-purged version becomes live again (the purge fields go, ``unpurged`` and
+        ``unpurged_by`` record the reversal). Under the scope's artefact lock; idempotent."""
+        path, number, scope_md = self._purge_target(row)
+        with writer_lock(self._scope_lock_path(path, scope_md), timeout=600):
+            head = self._read_head(path)
+            entry = next((item for item in (head or {}).get('versions') or [] if item['version'] == number), None)
+            if head is None or entry is None:
+                return 'failed', 'no such version in the head record'
+            if entry['state'] == 'live':
+                return 'done', 'already live'
+            if entry['state'] != 'purged':
+                return 'failed', f'v{number} is {entry["state"]}: only a purged version can be unpurged'
+            for key in ('purged', 'purged_by', 'purge_reason', 'purged_by_admin'):
+                entry.pop(key, None)
+            entry.update({'state': 'live', 'unpurged': _today(), 'unpurged_by': row['requested_by']})
+            self._write_head(path, self._with_latest(head))
+        warnings: List[str] = []
+        self._rescan_and_check(f'/artefacts/{row["ref"]}/versions', warnings)
+        self._commit([path.head_rel], f'unpurge {row["ref"]}@v{number}\n\nRequested by {row["requested_by"]}'
+                     + (f': {row.get("reason")}' if row.get('reason') else '') + '\n', None, warnings)
+        return 'done', 'live again' + (f' ({"; ".join(warnings)})' if warnings else '')
+
+    def purge(self, row: Dict[str, Any]) -> Tuple[str, str]:
+        """Design 5.3, stage 2 (an admin's hard purge of a purged version): mark deleting, delete exactly the
+        listed keys (manifest last), local copies, the de_table studies, then the tombstone (``deleted``)."""
+        path, number, scope_md = self._purge_target(row)
+        log_key = f'purge:{row["ref"]}@v{number}'
+        with writer_lock(self._scope_lock_path(path, scope_md), timeout=600):
+            head = self._read_head(path)
+            entry = next((item for item in (head or {}).get('versions') or [] if item['version'] == number), None)
+            if head is None or entry is None:
+                return 'failed', 'no such version in the head record'
+            if entry['state'] == 'deleted':
+                return 'done', 'already deleted'
+            stamp = {'deleted': _today(), 'deleted_by': row['requested_by'], 'delete_reason': row.get('reason') or ''}
+            if row.get('by_admin'):
+                stamp['deleted_by_admin'] = True
             if entry['state'] == 'failed':
                 deleted = self.cleanup_failed_version(path, number, log_key)
-                entry.update({'state': 'purged', 'purged': _today(), 'purged_by': row['requested_by'],
-                              'purge_reason': row.get('reason') or ''})
-                if row.get('by_admin'):
-                    entry['purged_by_admin'] = True
+                entry.update({'state': 'deleted', **stamp})
                 self._write_head(path, head)
                 return 'done', f'failed version cleaned up ({len(deleted)} object(s) deleted)'
+            if entry['state'] == 'live':
+                return 'failed', 'not_purged: only a purged version is deleted permanently; purge it first'
             if entry['state'] == 'reserved':
                 return 'needs_decision', 'the version is still reserved by a publication in progress'
             manifest_path = self.store_root / str(path.manifest_rel(number))
@@ -1484,11 +1553,9 @@ class ArtefactPublisher:
                 removal = self._de_remove_for_purge(row, path, number, head, manifest, scope_md)
                 if removal is not None:
                     return 'needs_decision', removal
-            if entry['state'] != 'purging':
-                entry['state'] = 'purging'
-                self._write_head(path, {**head, 'versions': head['versions'],
-                                        'latest': max([v['version'] for v in head['versions']
-                                                       if v['state'] == 'live'], default=None)})
+            if entry['state'] != 'deleting':
+                entry['state'] = 'deleting'
+                self._write_head(path, self._with_latest(head))
             version_prefix = artefacts.s3_key(self.catalog_prefix, path.version_rel(number)) + '/'
             kept = []
             for item in manifest.get('files') or []:
@@ -1512,15 +1579,11 @@ class ArtefactPublisher:
             if version_dir.exists():
                 ensure_inside(version_dir, self._artefacts_root(path.group))
                 shutil.rmtree(version_dir)
-            entry.update({'state': 'purged', 'purged': _today(), 'purged_by': row['requested_by'],
-                          'purge_reason': row.get('reason') or '',
+            entry.update({'state': 'deleted', **stamp,
                           'access': entry.get('access') or manifest.get('access') or 'inherit'})
             if deferred:
                 entry['de_removal_deferred'] = deferred
-            if row.get('by_admin'):
-                entry['purged_by_admin'] = True
-            live = [v['version'] for v in head['versions'] if v['state'] == 'live']
-            self._write_head(path, {**head, 'latest': max(live) if live else None})
+            self._write_head(path, self._with_latest(head))
         warnings: List[str] = []
         commit_paths = [path.head_rel, path.manifest_rel(number)]
         if path.kind == 'de_table' and scope_md is not None:
@@ -1528,12 +1591,12 @@ class ArtefactPublisher:
             commit_paths.append(PurePosixPath(scope_md.relative_to(self.store_root)))
             self._full_rescan(warnings)
         self._rescan_and_check(f'/artefacts/{row["ref"]}/versions', warnings)
-        self._commit(commit_paths, f'purge {row["ref"]}@v{number}\n\nRequested by '
+        self._commit(commit_paths, f'delete {row["ref"]}@v{number} permanently\n\nRequested by '
                      f'{row["requested_by"]}: {row.get("reason") or ""}\n', None, warnings)
         if deferred:
             warnings.append(f'the dataset is not served here: removal of DE study {", ".join(deferred)} is deferred '
                             f'until it is active again (recorded as de_removal_deferred in the head record)')
-        return 'done', 'purged' + (f' ({"; ".join(warnings)})' if warnings else '')
+        return 'done', 'deleted' + (f' ({"; ".join(warnings)})' if warnings else '')
 
     # ── de_table artefacts (phase A3) ────────────────────────────────────────
     def _dataset_genes(self, scope_md: Path) -> Optional[set]:
@@ -1615,7 +1678,7 @@ class ArtefactPublisher:
         """Study ids that live versions of this artefact (other than ``exclude``) imported."""
         owned: set = set()
         for version in (head or {}).get('versions') or []:
-            if version['state'] != 'live' or version['version'] == exclude:
+            if version['state'] not in ('live', 'purged') or version['version'] == exclude:
                 continue
             manifest_path = self.store_root / str(path.manifest_rel(version['version']))
             try:
@@ -1826,7 +1889,7 @@ class ArtefactPublisher:
             except Exception:  # noqa: BLE001 - an unreadable record names no writer
                 continue
             for version in head.get('versions') or []:
-                if version.get('state') not in ('live', 'purging'):
+                if version.get('state') not in ('live', 'purged', 'deleting'):
                     continue
                 try:
                     manifest = json.loads((self.store_root / str(other.manifest_rel(version['version'])))
@@ -1922,7 +1985,7 @@ class ArtefactPublisher:
         if reimport:
             parts.append('DE study ' + ', '.join(f'{study} restored from {base}@v{version}'
                                                   for version, _other, study in reimport))
-        message = '; '.join(parts) + f': purged artefact {ref}' + (f' ({reason})' if reason else '')
+        message = '; '.join(parts) + f': artefact {ref} deleted permanently' + (f' ({reason})' if reason else '')
         caveat = curation_caveat(message, 'de_study_removed', today_iso(), detected_by='ant-ingest-watch')
         work = self.work_root / f'purge_{hashlib.sha1(ref.encode()).hexdigest()[:12]}'
         shutil.rmtree(work, ignore_errors=True)

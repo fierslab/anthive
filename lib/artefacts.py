@@ -90,8 +90,16 @@ CHANGE_NOTE_MAX_CHARS = 2000
 MAX_VERSION = 999999
 ACCESS_VALUES = ('inherit', 'internal')
 #: ``reserved``: a number taken by a publication in progress; ``failed``: a publication that stopped (never
-#: reused, review S3); both are never served
-VERSION_STATES = ('live', 'purging', 'purged', 'reserved', 'failed')
+#: reused, review S3); both are never served. Purge in two stages (2.47.0, design 5.3): ``purged`` is a soft
+#: purge (files kept, still listed and downloadable, marked with who, when and why; reversible), ``deleting``
+#: an admin's hard purge in progress and ``deleted`` its tombstone (files removed).
+VERSION_STATES = ('live', 'purged', 'deleting', 'deleted', 'reserved', 'failed')
+#: head records written before the two-stage purge (no ``states: 2``) used ``purging`` / ``purged`` for what
+#: is now the hard purge; reading one maps them (requests done so far stay tombstones)
+HEAD_STATES_VERSION = 2
+LEGACY_STATE_NAMES = {'purging': 'deleting', 'purged': 'deleted'}
+#: versions whose files exist (published and not removed)
+PUBLISHED_STATES = ('live', 'purged', 'deleting')
 FILE_ROLES = ('main', 'supporting', 'sidecar')
 COLLECTION_KINDS = ('datasets', 'analysis')
 COLLECTION_ACCESS_VALUES = ('internal', 'public')
@@ -324,12 +332,35 @@ def parse_front_matter(text: str) -> Dict[str, Any]:
 
 
 def parse_head_record(text: str) -> Dict[str, Any]:
-    return parse_front_matter(text)
+    """The head record, its version states in the two-stage purge vocabulary (:func:`normalize_head_states`)."""
+    return normalize_head_states(parse_front_matter(text))
+
+
+def normalize_head_states(head: Dict[str, Any]) -> Dict[str, Any]:
+    """A head record without ``states: 2`` predates the two-stage purge: its ``purging`` / ``purged`` versions are
+    hard purges, read as ``deleting`` / ``deleted`` with the deletion fields copied from the purge fields."""
+    if not isinstance(head, dict) or head.get('states') == HEAD_STATES_VERSION:
+        return head
+    versions = head.get('versions')
+    if isinstance(versions, list):
+        for entry in versions:
+            if isinstance(entry, dict) and entry.get('state') in LEGACY_STATE_NAMES:
+                entry['state'] = LEGACY_STATE_NAMES[entry['state']]
+                if entry['state'] == 'deleted':
+                    entry.setdefault('deleted', entry.get('purged'))
+                    entry.setdefault('deleted_by', entry.get('purged_by'))
+                    entry.setdefault('delete_reason', entry.get('purge_reason'))
+                    if entry.get('purged_by_admin') is True:
+                        entry.setdefault('deleted_by_admin', True)
+    head['states'] = HEAD_STATES_VERSION
+    return head
 
 
 def render_head_record(head: Mapping[str, Any]) -> str:
-    """The text of ``artefact.md`` for ``head`` (front matter only, keys in the given order)."""
-    return '---\n' + yaml.safe_dump(dict(head), sort_keys=False, allow_unicode=False, default_flow_style=None) \
+    """The text of ``artefact.md`` for ``head`` (front matter only, keys in the given order; ``states: 2``)."""
+    head = dict(head)
+    head['states'] = HEAD_STATES_VERSION
+    return '---\n' + yaml.safe_dump(head, sort_keys=False, allow_unicode=False, default_flow_style=None) \
         + '---\n'
 
 
@@ -374,7 +405,7 @@ def validate_head_record(head: Mapping[str, Any], expected: ArtefactPath) -> Lis
         if state not in VERSION_STATES:
             problems.append(f'v{number}: invalid state {state!r}')
         sha = entry.get('manifest_sha256')
-        if (state in ('live', 'purging') or sha is not None) and not (isinstance(sha, str) and SHA256_RE.fullmatch(sha)):
+        if (state in PUBLISHED_STATES or sha is not None) and not (isinstance(sha, str) and SHA256_RE.fullmatch(sha)):
             problems.append(f'v{number}: manifest_sha256 missing or malformed')
         if entry.get('access') is not None and entry['access'] not in ACCESS_VALUES:
             problems.append(f'v{number}: access {entry["access"]!r} is not inherit or internal')
@@ -382,6 +413,8 @@ def validate_head_record(head: Mapping[str, Any], expected: ArtefactPath) -> Lis
             problems.append(f'v{number}: published missing')
         if state == 'purged' and not _nonempty_str(entry.get('purged'), 40):
             problems.append(f'v{number}: purged without a date')
+        if state == 'deleted' and not _nonempty_str(entry.get('deleted'), 40):
+            problems.append(f'v{number}: deleted without a date')
         if state == 'live':
             live.append(number)
     latest = head.get('latest')
@@ -623,13 +656,22 @@ class VersionEntry:
     purged_by: Optional[str] = None
     purged_by_admin: bool = False
     purge_reason: Optional[str] = None
+    deleted: Optional[str] = None
+    deleted_by: Optional[str] = None
+    deleted_by_admin: bool = False
+    delete_reason: Optional[str] = None
     access: Optional[str] = None                 # recorded in the head record (kept on tombstones, review C5)
     manifest: Optional[Dict[str, Any]] = None
     problems: List[str] = field(default_factory=list)
 
     @property
     def servable(self) -> bool:
-        return self.state == 'live' and self.manifest is not None and not self.problems
+        """Its files can be downloaded: live, or soft-purged (kept and marked)."""
+        return self.state in ('live', 'purged') and self.manifest is not None and not self.problems
+
+    @property
+    def is_live(self) -> bool:
+        return self.state == 'live' and self.servable
 
 
 @dataclass
@@ -655,13 +697,13 @@ class ArtefactEntry:
 
     @property
     def latest(self) -> Optional[int]:
-        """The highest live version with a valid manifest (None: none)."""
-        servable = [number for number, version in self.versions.items() if version.servable]
-        return max(servable) if servable else None
+        """The highest live version with a valid manifest (None: none). A purged version is never the latest."""
+        live = [number for number, version in self.versions.items() if version.is_live]
+        return max(live) if live else None
 
     @property
     def live_versions(self) -> List[int]:
-        return sorted(number for number, version in self.versions.items() if version.servable)
+        return sorted(number for number, version in self.versions.items() if version.is_live)
 
     @property
     def access_internal(self) -> bool:
@@ -794,9 +836,13 @@ class ArtefactIndex:
                 published=item.get('published'), purged=item.get('purged'),
                 purged_by=item.get('purged_by') if isinstance(item.get('purged_by'), str) else None,
                 purged_by_admin=item.get('purged_by_admin') is True,
-                purge_reason=item.get('purge_reason') if isinstance(item.get('purge_reason'), str) else None)
+                purge_reason=item.get('purge_reason') if isinstance(item.get('purge_reason'), str) else None,
+                deleted=item.get('deleted') if isinstance(item.get('deleted'), str) else None,
+                deleted_by=item.get('deleted_by') if isinstance(item.get('deleted_by'), str) else None,
+                deleted_by_admin=item.get('deleted_by_admin') is True,
+                delete_reason=item.get('delete_reason') if isinstance(item.get('delete_reason'), str) else None)
             versions[number] = version
-            if version.state != 'live':
+            if version.state not in ('live', 'purged'):
                 continue
             manifest_path = store_root / str(path.manifest_rel(number))
             if not manifest_path.is_file() or not _inside(manifest_path, root):
@@ -1061,7 +1107,8 @@ class ArtefactService:
 
     @staticmethod
     def version_of(entry: ArtefactEntry, label: str, viewer: Viewer) -> VersionEntry:
-        """The version a ``v<N>`` / ``latest`` label names. 404 unknown, 410 purged (with the tombstone)."""
+        """The version a ``v<N>`` / ``latest`` label names: a live or soft-purged one. 404 unknown, 410 deleted
+        (with the tombstone), 409 while an admin's hard purge runs."""
         try:
             number = parse_version_label(label)
         except ValueError:
@@ -1069,17 +1116,17 @@ class ArtefactService:
         if number is None:
             number = entry.latest
             if number is None:
-                if entry.versions and all(v.state == 'purged' for v in entry.versions.values()):
-                    raise ArtefactError(410, 'purged', f'every version of {entry.ref} was purged', ref=entry.ref)
+                if entry.versions and all(v.state == 'deleted' for v in entry.versions.values()):
+                    raise ArtefactError(410, 'deleted', f'every version of {entry.ref} was deleted', ref=entry.ref)
                 raise ArtefactService.not_found(entry.group_id, entry.path.scope, entry.path.artefact_id, label)
         version = entry.versions.get(number)
         if version is None:
             raise ArtefactService.not_found(entry.group_id, entry.path.scope, entry.path.artefact_id, label)
-        if version.state == 'purged':
-            raise ArtefactError(410, 'purged', f'{entry.ref}@v{number} was purged', ref=f'{entry.ref}@v{number}',
+        if version.state == 'deleted':
+            raise ArtefactError(410, 'deleted', f'{entry.ref}@v{number} was deleted', ref=f'{entry.ref}@v{number}',
                                 tombstone=tombstone(version, viewer))
-        if version.state == 'purging':
-            raise ArtefactError(409, 'purging', f'{entry.ref}@v{number} is being purged',
+        if version.state == 'deleting':
+            raise ArtefactError(409, 'deleting', f'{entry.ref}@v{number} is being deleted',
                                 ref=f'{entry.ref}@v{number}')
         if not version.servable:
             raise ArtefactService.not_found(entry.group_id, entry.path.scope, entry.path.artefact_id, label)
@@ -1097,7 +1144,7 @@ class ArtefactService:
             if preview is not None:
                 preview = f'{api_path(entry, latest)}/preview/{preview}'
         published = [v.published for v in entry.versions.values() if v.published]
-        purged = [v.purged for v in entry.versions.values() if v.purged]
+        purged = [stamp for v in entry.versions.values() for stamp in (v.purged, v.deleted) if stamp]
         return {
             'ref': entry.ref, 'artefact_id': entry.path.artefact_id, 'kind': entry.path.kind,
             'group_id': entry.group_id, 'scope': entry.path.scope, 'db_id': entry.db_id,
@@ -1129,7 +1176,7 @@ class ArtefactService:
         payload = self.summary(entry, viewer)
         payload.update({
             'created': entry.head.get('created'),
-            'versions': [version_summary(v) for _, v in sorted(entry.versions.items())],
+            'versions': [version_summary(v, viewer) for _, v in sorted(entry.versions.items())],
             'manifest': (redact_manifest(entry.versions[latest].manifest, viewer, policy)
                          if latest is not None else None),
             'files': self.files_payload(entry, latest) if latest is not None else [],
@@ -1139,16 +1186,17 @@ class ArtefactService:
     def versions_payload(self, entry: ArtefactEntry, viewer: Viewer) -> Dict[str, Any]:
         out = []
         for _, version in sorted(entry.versions.items()):
-            if version.state == 'purged':
+            if version.state == 'deleted':
                 out.append(tombstone(version, viewer))
             else:
-                out.append(version_summary(version))
+                out.append(version_summary(version, viewer))
         return {'ref': entry.ref, 'latest': entry.latest, 'versions': out}
 
     def version_payload(self, entry: ArtefactEntry, version: VersionEntry, viewer: Optional[Viewer] = None,
                         policy: Optional['AccessPolicy'] = None) -> Dict[str, Any]:
         return {'ref': format_ref(entry.group_id, entry.path.scope, entry.path.artefact_id, version.number),
                 'version': version.number, 'state': version.state, 'latest': entry.latest,
+                'purge': purge_mark(version, viewer),
                 'manifest': redact_manifest(version.manifest, viewer, policy),
                 'files': self.files_payload(entry, version.number)}
 
@@ -1342,13 +1390,31 @@ def presign_get(client: Any, bucket: str, key: str, filename: str, content_type:
         ExpiresIn=int(ttl), HttpMethod='GET')
 
 
-def version_summary(version: VersionEntry) -> Dict[str, Any]:
+def version_summary(version: VersionEntry, viewer: Optional[Viewer] = None) -> Dict[str, Any]:
+    """One version in a listing. A soft-purged version (``state: "purged"``) stays downloadable and carries
+    ``purged``, ``purged_by`` and ``purge_reason`` (redacted like a tombstone) and ``purgeable: false``."""
     out: Dict[str, Any] = {'version': version.number, 'state': version.state, 'published': version.published}
-    if version.state == 'live' and not version.servable:
+    if version.state in ('live', 'purged') and not version.servable:
         out['state'] = 'unavailable'
-    if version.purged:
-        out['purged'] = version.purged
+    if version.state == 'purged':
+        out.update(purge_mark(version, viewer) or {})
     return out
+
+
+def _who(name: Optional[str], by_admin: bool, viewer: Optional[Viewer]) -> Optional[str]:
+    if viewer is not None and by_admin and not viewer.is_admin:
+        return 'an admin'
+    if not signed_in(viewer):
+        return 'a member'
+    return name
+
+
+def purge_mark(version: VersionEntry, viewer: Optional[Viewer]) -> Optional[Dict[str, Any]]:
+    """``{purged, purged_by, purge_reason}`` of a soft-purged version as ``viewer`` may see it (None otherwise)."""
+    if version.state != 'purged':
+        return None
+    return {'purged': version.purged, 'purged_by': _who(version.purged_by, version.purged_by_admin, viewer),
+            'purge_reason': version.purge_reason if signed_in(viewer) else None}
 
 
 def signed_in(viewer: Optional[Viewer]) -> bool:
@@ -1357,16 +1423,13 @@ def signed_in(viewer: Optional[Viewer]) -> bool:
 
 
 def tombstone(version: VersionEntry, viewer: Viewer) -> Dict[str, Any]:
-    """A purged version as anyone may see it. Who purged is "an admin" for non-admins when an admin did, and
-    "a member" / "an admin" for callers without a sign-in, who also never see the reason."""
-    purged_by = version.purged_by
-    if version.purged_by_admin and not viewer.is_admin:
-        purged_by = 'an admin'
-    elif not signed_in(viewer):
-        purged_by = 'a member'
-    return {'version': version.number, 'state': 'purged', 'published': version.published,
-            'purged': version.purged, 'purged_by': purged_by,
-            'purge_reason': version.purge_reason if signed_in(viewer) else None}
+    """A deleted version (an admin's hard purge) as anyone may see it. Who did it is "an admin" for non-admins
+    when an admin did, and "a member" for callers without a sign-in, who also never see the reasons."""
+    return {'version': version.number, 'state': 'deleted', 'published': version.published,
+            'purged': version.purged, 'purged_by': _who(version.purged_by, version.purged_by_admin, viewer),
+            'purge_reason': version.purge_reason if signed_in(viewer) else None,
+            'deleted': version.deleted, 'deleted_by': _who(version.deleted_by, version.deleted_by_admin, viewer),
+            'delete_reason': version.delete_reason if signed_in(viewer) else None}
 
 
 HIDDEN_DATASET = {'db_id': None, 'dataset_version': None, 'h5ad_sha256': None,

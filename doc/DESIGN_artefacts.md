@@ -354,10 +354,35 @@ yet answers 409 `collection_pending`. Errors: 409 `collection_exists`, 422 `inva
 
 ### 4.4 Purge and admin overrides
 
-- `POST /api/artefacts/{group_id}/{scope}/{artefact_id}/v{N}/purge` with `{reason, confirm:
-  "<ref>@v<N>"}`: the uploader of that version, the artefact's owner or an admin. Answers 202 `{ref, state:
-  "purge_requested"}`; the watcher carries it out (section 5.3) and the tombstone appears. 409 `busy` while a
-  deposit of a newer version of the same artefact is being processed.
+Purge has two stages (Mark, 2026-10-22; section 5.3 for the watcher):
+
+- `POST /api/artefacts/{group_id}/{scope}/{artefact_id}/v{N}/purge` `{reason}` (soft): the uploader of that
+  version, the artefact's owner or an admin. The latest version is never purged (409 `latest_version`): a
+  version becomes purgeable once a newer live version exists. The watcher marks the version `purged` in the
+  head record with who, when and why; nothing is deleted, the version stays listed and downloadable and
+  clients show it greyed out with "purged by X on D: reason". A `de_table` version keeps its study in the
+  dataset.
+- `POST .../v{N}/unpurge` `{reason?}`: the same people; the version is live again (`unpurged`, `unpurged_by`
+  in the head record).
+- `POST .../v{N}/delete` `{reason, confirm: "<ref>@v<N>"}` (admins only, the hard purge): only a purged (or
+  failed) version; the watcher deletes its files from S3 and the store, removes a `de_table`'s studies (with
+  the re-import of an older live version) and leaves the tombstone (`deleted`).
+- Answers: 202 `{ref, version, action: "soft" | "unpurge" | "hard", state: "requested", changed: true,
+  request_id, requested, next}` when recorded or already waiting; 200 `{ref, version, action, state: "done",
+  changed: false, version_state, message}` when the version is in that state already (idempotent). 403
+  `forbidden` (not the uploader, owner or admin; any non-admin on delete), 404 `not_found`, 409
+  `latest_version`, `not_purged` (unpurge or delete of a version that is not purged), `deleted`,
+  `failed_version` (a failed version is deleted, never soft-purged), `busy` (another action on the version waits,
+  a publication runs), `central_watcher`; 422 `invalid` (reason under 5 characters), `confirm_mismatch`.
+- `GET /api/artefacts/purges?state=&action=`: the requests (own; admins all) `{purges: [{id, ref, version,
+  action, state, reason, requested, updated, requested_by, detail}]}`. Requests made before the two-stage purge
+  read `action: "hard"` (the column's default), and head records written before it (no `states: 2`) read their
+  `purged` versions as `deleted`: the purges done so far stay tombstones.
+- Withdrawing a whole artefact (proposal, not built): when only one live version is left the artefact cannot
+  be purged at all. A separate admin route `POST .../{artefact_id}/withdraw {reason}` could mark the head
+  record `withdrawn` (listed with `include_purged`, downloads kept, no new versions), reversible, and an admin
+  hard purge of a withdrawn artefact's last version would then be allowed. Until Mark decides, a wrong last
+  version is replaced by depositing a corrected version and purging the old one.
 - Admins: `GET /api/artefacts?all=true` includes artefacts of hidden and inactive datasets; `POST
   .../{artefact_id}/owner {user, note}` transfers ownership (recorded in the head record and the event log);
   purge of anyone's version; approve, reject and retry of artefact and collection deposits through the
@@ -400,19 +425,34 @@ version. Recovery reads the marker first: files already copied with the right sh
 
 ### 5.3 Purge
 
-The watcher executes purge requests recorded by the API (a `purges` table in the deposit store):
+The watcher executes the requests recorded by the API (the `artefact_purges` table of the deposit store, column
+`action`), one at a time under the scope's artefact lock, and logs each as `artefacts: <purge | unpurge |
+permanent deletion> of <ref>@v<N> by <login>: <state> <detail>`.
 
-1. under the scope's writer lock, the head record marks the version `purging`;
+- `soft`: checks again that the version is live and a newer live version exists (`latest_version` otherwise),
+  marks it `purged` with `purged`, `purged_by`, `purge_reason` (and `purged_by_admin`), writes the head record
+  (local, S3), rescans, commits "purge <ref>@v<N> (files kept)". Nothing else changes.
+- `unpurge`: a `purged` version becomes `live` (the purge fields go, `unpurged` and `unpurged_by` stay), the
+  same writes, commit "unpurge <ref>@v<N>".
+- `hard` (an admin's deletion of a purged or failed version):
+
+1. under the scope's writer lock, the head record marks the version `deleting`;
 2. for each file and preview listed in the version's manifest, HEAD the key, compare the `x-amz-meta-sha256`
    with the manifest, delete that one key, log it in `deletions`. No listing of the prefix decides what is
    deleted, and no batch delete is used;
 3. the manifest goes last, then the local copies;
-4. the head record marks the version `purged` with who, when and why, `latest` moves to the highest live
-   version (or null), the head record is pushed and committed;
+4. the head record marks the version `deleted` with `deleted`, `deleted_by`, `delete_reason` (the soft purge
+   fields stay), `latest` stays the highest live version, the head record is pushed and committed ("delete
+   <ref>@v<N> permanently");
 5. for a `de_table` version whose study is still the one in the dataset, the study is removed by the same
    all-or-nothing duckdb copy as the import, with a dataset patch version and a changelog line ("DE study
-   removed: purged artefact ...") and a caveat, following the rule that every curation decision appears on the
-   dataset page (open question 5).
+   <id> removed: artefact <ref>@v<N> deleted permanently") and a caveat, following the rule that every curation
+   decision appears on the dataset page (open question 5). A soft-purged `de_table` version still counts as the
+   writer of its rows.
+
+Head record states (`states: 2`): `live`, `purged` (soft, servable), `deleting`, `deleted` (tombstone),
+`reserved`, `failed`. `ant sync pull` keeps the files of purged versions and deletes the local copies of
+deleted ones.
 
 A key whose sha256 metadata differs from the manifest is kept and the purge stops at `needs_decision`. If the
 bucket has object versioning, a delete leaves a noncurrent copy; the purge is then not a deletion of the bytes

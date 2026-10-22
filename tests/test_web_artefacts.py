@@ -52,7 +52,12 @@ def _fake(path, artefacts_listing=True, analysis=False):
     if path == '/artefacts/GroupA/ds1/volcano/versions':
         return VERSIONS
     if path == '/artefacts/GroupA/ds1/volcano/v1':
-        raise requests.HTTPError('410 purged')
+        first = VERSIONS['versions'][0]
+        if first['state'] == 'deleted':
+            raise requests.HTTPError('410 deleted')
+        return {'ref': 'GA1/ds1/volcano@v1', 'version': 1, 'state': first['state'], 'latest': 2,
+                'purge': ({key: first[key] for key in ('purged', 'purged_by', 'purge_reason')}
+                          if first['state'] == 'purged' else None), 'manifest': MANIFEST, 'files': FILES}
     if path == '/groups/AN6':
         return {'collection_kind': 'analysis', 'group': 'Atlas2026', 'group_id': 'AN6',
                 'title': 'Atlas <i>analyses</i>', 'authors': ['Mark Fiers'], 'year': 2026, 'access': 'internal',
@@ -134,7 +139,9 @@ def test_the_artefact_page_shows_versions_made_from_and_files(make_client):
     assert 'href="/api/artefacts/GroupA/ds1/volcano/v2/files/volcano.png" download' in html
     assert 'href="/api/artefacts/GroupA/ds1/volcano/v2/files/report.html" download' in html   # active type: a download
     assert 'src="/api/artefacts/GroupA/ds1/volcano/v2/preview/volcano.png.webp"' in html
-    assert 'purged on 2026-10-17 by ana: wrong axis' in html and '<b>wrong' not in html
+    assert 'purged by ana on 2026-10-17: wrong axis' in html and '<b>wrong' not in html
+    assert 'class=" art-purged" data-state="purged"' in html                  # greyed out
+    assert 'href="?version=1"' in html                                       # a purged version stays viewable
     assert 'fixed the axis' in html and 'Ana Lyst' in html and 'python 3.12' in html
 
 
@@ -148,19 +155,47 @@ def test_depositor_text_is_sanitised_on_the_artefact_page(make_client):
     assert 'img src=x' not in body.replace('&lt;img src=x', '')
 
 
-def test_the_purge_form_is_only_for_the_owner_and_admins(make_client):
+def test_purge_controls_never_on_the_latest_and_only_for_the_owner_and_admins(make_client, monkeypatch):
+    monkeypatch.setitem(VERSIONS['versions'][0], 'state', 'live')
     client = make_client()
-    assert 'art-purge-open' not in client.get('/artefacts/GroupA/ds1/volcano').text
-    assert 'art-purge-open' not in client.get('/artefacts/GroupA/ds1/volcano', headers={'Remote-User': 'otto'}).text
+    assert 'btn-link art-purge-open' not in client.get('/artefacts/GroupA/ds1/volcano').text
+    assert 'btn-link art-purge-open' not in client.get('/artefacts/GroupA/ds1/volcano', headers={'Remote-User': 'otto'}).text
     owner = client.get('/artefacts/GroupA/ds1/volcano', headers={'Remote-User': 'ana'}).text
-    assert 'art-purge-open' in owner and 'id="art-purge-form"' in owner
+    assert 'class="btn-link art-purge-open" data-version="1"' in owner and 'id="art-purge-form"' in owner
+    assert 'data-version="2"' not in owner                                    # the latest version: no button
+    assert 'btn-link art-delete-open' not in owner and 'btn-link art-unpurge' not in owner
     admin = client.get('/artefacts/GroupA/ds1/volcano', headers={'Remote-User': 'root', 'Remote-Groups': 'admins'}).text
-    assert 'art-purge-open' in admin
+    assert 'btn-link art-purge-open' in admin and 'btn-link art-delete-open' not in admin       # live: purge it first
 
 
-def test_a_purged_version_shows_its_tombstone(make_client):
+def test_a_purged_version_offers_unpurge_and_for_admins_a_permanent_delete(make_client):
+    client = make_client()
+    owner = client.get('/artefacts/GroupA/ds1/volcano', headers={'Remote-User': 'ana'}).text
+    assert 'class="btn-link art-unpurge" data-version="1"' in owner and 'btn-link art-delete-open' not in owner
+    assert 'btn-link art-purge-open' not in owner
+    admin = client.get('/artefacts/GroupA/ds1/volcano', headers={'Remote-User': 'root', 'Remote-Groups': 'admins'}).text
+    assert 'class="btn-link art-delete-open" data-version="1"' in admin and 'id="art-delete-form"' in admin
+    assert 'name="confirm"' in admin and "'/' + action" in admin
+    assert 'id="art-purge-help"' in admin                                     # help behind the (i)
+    assert 'btn-link art-unpurge' not in client.get('/artefacts/GroupA/ds1/volcano', headers={'Remote-User': 'otto'}).text
+
+
+def test_a_purged_version_page_shows_the_mark_and_keeps_the_files(make_client):
     html = make_client().get('/artefacts/GroupA/ds1/volcano?version=1').text
-    assert 'Version v1 was purged on 2026-10-17 by ana' in html
+    assert 'This version was purged on 2026-10-17 by ana: wrong axis. Its files stay available.' in html
+    assert 'href="/api/artefacts/GroupA/ds1/volcano/v2/files/volcano.png" download' in html
+
+
+def test_a_deleted_version_shows_its_tombstone(make_client, monkeypatch):
+    monkeypatch.setitem(VERSIONS, 'versions', [{
+        'version': 1, 'state': 'deleted', 'published': '2026-10-02', 'purged': '2026-10-17', 'purged_by': 'ana',
+        'purge_reason': 'wrong axis', 'deleted': '2026-10-19', 'deleted_by': 'root', 'delete_reason': 'gone'},
+        VERSIONS['versions'][1]])
+    client = make_client()
+    html = client.get('/artefacts/GroupA/ds1/volcano?version=1').text
+    assert 'Version v1 was deleted permanently on 2026-10-19 by root: gone. Its files are gone.' in html
+    page = client.get('/artefacts/GroupA/ds1/volcano', headers={'Remote-User': 'root', 'Remote-Groups': 'admins'}).text
+    assert 'deleted on 2026-10-19 by root: gone' in page and 'btn-link art-delete-open' not in page
 
 
 def test_unknown_or_malformed_artefacts_are_404(make_client):

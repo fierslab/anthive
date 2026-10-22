@@ -53,16 +53,17 @@ New routes (tag `artefacts`, in the public schema). Errors use the deposit API's
   (admins only, ignored for others) adds artefacts whose dataset is inactive or gone. 422 `invalid_kind`,
   `invalid_db_id`, `invalid_limit`, `invalid_cursor`.
 - `GET /artefacts/{group_id}/{scope}/{artefact_id}`: the summary plus `created`,
-  `versions: [{version, state, published, purged?}]` (`state` is `live`, `purging`, `purged`, or
-  `unavailable` for a live version whose manifest failed its checks), `manifest` (the latest live manifest,
+  `versions: [{version, state, published, ...}]` (`state` is `live`, `purged` (with `purged`, `purged_by`,
+  `purge_reason`), `deleting`, `deleted`, or `unavailable` for a version whose manifest failed its checks; see
+  the two-stage purge below), `manifest` (the latest live manifest,
   schema `anthive.artefact/1`, or null) and `files: [{name, size, sha256, content_type, role, download,
   preview}]` (`download` and `preview` are API paths, never signed URLs).
-- `GET /artefacts/{group_id}/{scope}/{artefact_id}/versions`: `{ref, latest, versions}`; a purged version is
-  a tombstone `{version, state: "purged", published, purged, purged_by, purge_reason}`. `purged_by` reads
-  "an admin" for non-admins when an admin purged it.
+- `GET /artefacts/{group_id}/{scope}/{artefact_id}/versions`: `{ref, latest, versions}`; a deleted version is
+  a tombstone `{version, state: "deleted", published, purged, purged_by, purge_reason, deleted, deleted_by,
+  delete_reason}`. Who did it reads "an admin" for non-admins when an admin did it.
 - `GET /artefacts/{group_id}/{scope}/{artefact_id}/{version}` (`v<N>` or `latest`):
-  `{ref, version, state, latest, manifest, files}`. 410 `purged` with `tombstone` for a purged version, 409
-  `purging` while a purge runs, 404 `not_found` for a version that does not exist.
+  `{ref, version, state, latest, purge, manifest, files}`. 410 `deleted` with `tombstone` for a deleted version,
+  409 `deleting` while it is being deleted, 404 `not_found` for a version that does not exist.
 - `GET /artefacts/{group_id}/{scope}/{artefact_id}/{version}/files/{name}`: 307 to a presigned S3 GET for
   that one object, valid `artefacts_url_ttl_seconds` (300), with `Content-Disposition: attachment` and the
   manifest's content type signed into it; the redirect carries `Cache-Control: no-store, private` and
@@ -156,13 +157,29 @@ prefix, presigned uploads, verified complete, key locks, limits, states and reda
   reasons, the incoming key) and `analysis_index_md` (`required_spec` of an analysis collection's `index.md`:
   group, group_id assigned by the server, `collection_kind: analysis`, title, authors, year; `default_dataset`,
   doi and paper_title not required). `index_md` of dataset deposits is unchanged.
-- `POST /artefacts/{group_id}/{scope}/{artefact_id}/v{N}/purge` `{reason, confirm: "<ref>@v<N>"}` (hidden from
-  the schema): the uploader of that version, the artefact's owner or an admin. 202 `{ref, version, state:
-  "purge_requested"}`. Refusals: 403 `forbidden`, 404 `not_found` (also for an artefact the caller cannot
-  see), 409 `purged` or `busy`, 422 `confirm_mismatch` or `invalid`. The watcher deletes the version's files
-  and manifest (each key listed in the manifest, HEAD-compared with its sha256, one at a time; a key whose
-  sha256 differs is kept and the purge stops for an admin) and marks the version purged; non-admins see "an
-  admin" as `purged_by` when an admin purged.
+- Purge in two stages (hidden from the schema; design 4.4 and 5.3):
+  - `POST /artefacts/{group_id}/{scope}/{artefact_id}/v{N}/purge` `{reason}`: the uploader of that version, the
+    artefact's owner or an admin; never the latest version (409 `latest_version`). The watcher marks the
+    version `purged` (who, when, why); its files stay listed and downloadable.
+  - `POST .../v{N}/unpurge` `{reason?}`: the same people; the version is live again.
+  - `POST .../v{N}/delete` `{reason, confirm: "<ref>@v<N>"}`: admins only, a purged (or failed) version. The
+    watcher deletes the version's files and manifest (each key listed in the manifest, HEAD-compared with its
+    sha256, one at a time; a key whose sha256 differs is kept and the deletion stops for an admin) and leaves a
+    tombstone (`deleted`).
+  - Answers: 202 `{ref, version, action: "soft" | "unpurge" | "hard", state: "requested", changed: true,
+    request_id, requested, next}` (also for the same request still waiting); 200 `{ref, version, action, state:
+    "done", changed: false, version_state, message}` when the version is in that state already. Refusals: 403
+    `forbidden`, 404 `not_found` (also for an artefact the caller cannot see), 409 `latest_version`,
+    `not_purged`, `deleted`, `failed_version`, `busy`; 422 `invalid` or `confirm_mismatch`.
+  - `GET /artefacts/purges?state=&action=`: `{purges: [{id, ref, version, action, state, reason, requested,
+    updated, requested_by, detail}]}`; requests from before the two-stage purge are `action: "hard"`.
+  - Version states: `live`, `purged` (soft: listed and downloadable, with `purged`, `purged_by`,
+    `purge_reason`; never the latest), `deleting`, `deleted` (tombstone `{version, state: "deleted", published,
+    purged, purged_by, purge_reason, deleted, deleted_by, delete_reason}`), `reserved`, `failed`. A deleted
+    version answers 410 `deleted` with the tombstone (409 `deleting` while it runs); a purged one is served,
+    and `GET .../{version}` adds `purge: {purged, purged_by, purge_reason}` (null otherwise). Who did it reads
+    "an admin" for non-admins when an admin did, "a member" without a sign-in, who see no reasons. Head records
+    written before (no `states: 2`) read their `purged` versions as `deleted`.
 
 Publication (the S3 watcher, `ant-ingest-watch`): two identical listings, then hash (a streaming GET pinned to
 the listed ETag, MD5 checked for single-part objects), checks (names, sizes, endings and magic bytes, title,
@@ -194,9 +211,10 @@ Collection deposits create `<Group>/index.md`; a public one is held.
   another artefact or route imported is refused unless an admin deposited it. The manifest's `de` block holds
   per table `{file, sidecar, study_id, rows, genes_matched, sign_convention, de_format, de_term, de_contrast,
   de_method, ...}` and `imported: {study_ids, rows, imported_at, dataset_version_after, replaced, archived}`.
-- Purging a `de_table` version removes its studies from the dataset (all or nothing, a patch version with a
-  changelog line and a caveat `DE study <id> removed: purged artefact <ref>@v<N>`) unless a newer live version
-  of the artefact imported the same study id.
+- A soft purge of a `de_table` version keeps its study in the dataset. Deleting it (an admin's hard purge)
+  removes its studies (all or nothing, a patch version with a changelog line and a caveat `DE study <id>
+  removed: artefact <ref>@v<N> deleted permanently`) unless a newer live version of the artefact imported the
+  same study id; an older live version's table is imported again where it wrote the study first.
 - `deposit_kind: "de_only"` (and a 2.46 DE-only body: `update_of` with files of kind `de`) is taken as a
   `de_table` artefact where artefacts are on, until 2.48.0: the answer adds `alias_of: "de_only"` and a
   warning; the artefact id comes from the first table's name; a table that is already an artefact of the
