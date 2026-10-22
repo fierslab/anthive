@@ -148,7 +148,7 @@ built with the same model. Changing the model means a full index rebuild
       `auth.internal_requires_auth` you need an internal dataset pulled, and
       on an authelia site Caddy refuses every anonymous request, so look from
       inside the network:
-      `docker exec <site.name>-web-1 python -c "import urllib.request; print(urllib.request.urlopen('http://api:8080/databases').read()[:400])"`
+      `docker exec <site.name>-web-1 python -c "import urllib.request,json; print([d['id'] for d in json.load(urllib.request.urlopen('http://api:8080/databases'))['databases']])"`
       carries no identity, so it shows what an anonymous caller gets. Release 2.37.2 found
       four real problems that way, 2.45.0 found that `up` ignored config-only
       changes. After `up`, run the live checks from this checkout against the
