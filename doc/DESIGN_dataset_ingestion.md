@@ -1329,8 +1329,9 @@ deposits are linked) lists `__deposits/*/*/record.json` of the ingestion bucket 
    by) must be listed with the signed ETag (the record waits otherwise); an object whose LastModified is later
    than the record's own was rewritten after the site signed (another key holder re-marked or replaced it):
    the record is refused, keeps its claim, and a waiting deposit the object's mark now names is disputed; no
-   other deposit may claim the objects (an open or waiting deposit of the store, or an earlier authentic record
-   kept in the state file until it is withdrawn, expired or final); and every object must carry the server's
+   other deposit may claim the objects' keys, whatever the ETag (an open or waiting deposit of the store, or an
+   earlier authentic record kept in the state file until it is withdrawn, expired or final; so other bytes put
+   under a waiting deposit's key never free it); and every object must carry the server's
    `x-amz-meta-deposit` mark of this deposit or of the deposit it continues. Withdrawn and expired records of a
    poll are handled first, so they release their claims before the uploads;
 7. update rights (24.5);

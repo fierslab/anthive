@@ -116,6 +116,30 @@ def test_a_site_that_re_marks_the_upload_after_its_owner_was_read_gets_nothing(t
     assert 'claimed by the deposit' in _result(env, 'prod', EVIL)['error']
 
 
+def test_a_key_claimed_by_a_waiting_deposit_cannot_be_taken_with_other_bytes(tmp_path):
+    """Claims are keyed by the incoming key alone: replacing the object (new ETag, own mark) does not free it."""
+    env, service, clock = central(tmp_path)
+    _attacker(env, 'prod')
+    deposit_id = _deposit(env, service)
+    store = _store(env)
+    assert env.watcher.remote.import_records(store, _listed(env))['imported'] == 1   # intern's, waiting
+    honest = _honest_record(env, deposit_id)
+    forged = dict(honest, id=EVIL, user='mallory', files=[])
+    for entry in honest['files']:
+        body = env.s3.objects[entry['key']]['body'] + b'\n'          # other bytes, the attacker's own mark
+        etag = env.s3.put(entry['key'], body, env.clock_value + 1, metadata={'deposit': EVIL})
+        forged['files'].append(dict(entry, etag=etag, size=len(body), staging_key=None, staging_etag=None))
+        if entry['key'] == honest['watch_key']:
+            forged['h5ad_etag'] = etag
+        if entry['key'] == honest['mus_key']:
+            forged['mus_etag'] = etag
+    env.s3.put(f'__deposits/prod/{EVIL}/record.json', dr.sign_record(forged, 'prod', EVIL, 1, 'k1', ATTACKER_SECRET),
+               env.clock_value + 2)
+    env.watcher.remote.import_records(store, _listed(env))
+    assert store.get(EVIL) is None
+    assert f'claimed by the deposit {deposit_id} of intern' in _result(env, 'prod', EVIL)['error']
+
+
 def test_continues_must_name_a_deposit_of_the_same_site(tmp_path):
     env, service, clock = central(tmp_path)
     _attacker(env, 'prod')

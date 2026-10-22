@@ -496,8 +496,9 @@ class DepositStore:
 
     def claims(self, keys: Mapping[str, str], exclude: str) -> List[Dict[str, Any]]:
         """Other deposits (not ``exclude``) that claim one of ``keys`` (incoming key -> ETag): the key is locked
-        by a deposit still uploading or completing, or a completed file of a deposit with that key has the same
-        ETag (whatever that deposit's watch state)."""
+        by a deposit still uploading or completing, or a deposit completing or completed has a file with that
+        key, whatever its ETag and watch state (the caller skips final ones). Keyed by the key alone: another
+        site cannot take a key by putting other bytes there."""
         if not keys:
             return []
         found: Dict[str, Dict[str, Any]] = {}
@@ -509,8 +510,7 @@ class DepositStore:
         for row in self._rows(f"SELECT d.id, d.site_id, d.state, d.watch_state, d.disputed, f.key, f.etag FROM files f JOIN deposits d "
                               f"ON d.id = f.deposit_id WHERE d.state IN ('completing', 'uploaded') AND f.state = 'complete' "
                               f"AND f.key IN ({marks}) AND d.id != ?", list(keys) + [exclude]):
-            if row['etag'] == keys.get(row['key']):
-                found.setdefault(row['id'], {**row, 'open': False})
+            found.setdefault(row['id'], {**row, 'open': False})
         return list(found.values())
 
     def dispute(self, deposit_id: str, reason: str) -> None:

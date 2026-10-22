@@ -266,7 +266,8 @@ class RemoteSites:
            site signed: another key holder re-marked or replaced it. The record is refused, keeps its claim on
            the objects, and a waiting deposit the object's mark now names is disputed: whoever rewrote another
            site's upload gets at most both held, never the upload.
-        4. No other deposit claims one of the objects (key and ETag), outside the chain: a deposit of this store
+        4. No other deposit claims one of the objects' keys (the incoming key alone, whatever the ETag), outside
+           the chain: a deposit of this store
            that is open or still waits, or an earlier authentic record kept in the state file (refused in step 3,
            or imported; until it is withdrawn or expired, or its deposit is final here).
         5. Every object carries the server's deposit mark of this deposit or of a deposit it continues; only then
@@ -309,8 +310,8 @@ class RemoteSites:
         # 3. rewritten after signing
         rewritten = sorted(key for key in objects if float(listed[key][2] or 0) > float(record_mtime or 0))
         if rewritten:
-            for key, etag in objects.items():
-                claims.setdefault(f'{key}\t{etag}', me)
+            for key in objects:
+                claims.setdefault(key, me)
             for key in rewritten:
                 mark = self._mark(key)
                 row = store.get(mark) if mark and mark not in chain else None
@@ -327,20 +328,19 @@ class RemoteSites:
         # 4. claimed by another deposit
         for claim in store.claims(objects, exclude=deposit_id):
             if claim['id'] in chain or claim.get('watch_state') in FINAL_WATCH_STATES:
-                continue        # a final deposit's object was consumed; the same content uploaded anew has the
-                #                 same ETag, so the deposit mark decides
+                continue        # a final deposit's object was consumed or is never used again: its key is free
             owner = f'{claim["id"]}' + (f' of {claim["site_id"]}' if claim.get('site_id') else '')
             what = 'locked by the open deposit' if claim.get('open') else 'claimed by the deposit'
             problems.append(f'{claim["key"]} is {what} {owner}')
-        for key, etag in sorted(objects.items()):
-            holder = claims.get(f'{key}\t{etag}')
+        for key in sorted(objects):
+            holder = claims.get(key)
             if not holder or holder in mine:
                 continue
             holder_site, _, holder_id = holder.partition('/')
             row = store.get(holder_id)
             if row is not None and (row.get('site_id') or '') == holder_site and (
                     row.get('state') in ('withdrawn', 'expired') or row.get('watch_state') in FINAL_WATCH_STATES):
-                del claims[f'{key}\t{etag}']                # its deposit is over: the claim is stale
+                del claims[key]                # its deposit is over: the claim is stale
                 continue
             problems.append(f'{key} is claimed by the deposit {holder_id} of {holder_site}; that site withdraws it '
                             f'first, or an admin of the central site decides')
@@ -354,8 +354,8 @@ class RemoteSites:
                 problems.append(f'{key} does not carry the mark of {deposit_id} (it is not an upload of this deposit)')
         if problems:
             return problems[:20]
-        for key, etag in objects.items():
-            claims.setdefault(f'{key}\t{etag}', me)
+        for key in objects:
+            claims.setdefault(key, me)
         return []
 
     def _mark(self, key: str) -> str:
