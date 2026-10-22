@@ -2246,7 +2246,24 @@ def cmd_init(args: argparse.Namespace) -> int:
     created = ensure_secrets(site)
     for item in created:
         _say(f"created {item}")
-    render(site)
+    # A site that already has a live config (init again, e.g. for a new user): stage, check and promote only
+    # what check accepts, like `up` (2.47.1; before, init promoted whatever it rendered, also a config `up`
+    # would refuse, and a container restarting before the fix read it). The first init has no live config and
+    # nothing running; its render is applied as before, since the guide's later steps (S3 keys, pull) are what
+    # check would still miss at that point, and `up` checks again before it starts anything.
+    with _stack_lock(site):
+        live = (stack_dir(site) / '.env').exists()
+        render(site, quiet=live, apply=False)
+        if live:
+            blocking = [p for p in check(site, running=False) if 'ingest' not in p]
+            if blocking:
+                for problem in blocking:
+                    print(f"  PROBLEM  {problem}")
+                _say("init: secrets and users are in place, but the new config was not applied: it is staged in "
+                     "stack/staging/; fix the problems above, then `ant-stack check` and `ant-stack up`")
+                return 1
+            promote(site)
+            _say(f"rendered {stack_dir(site)}")
     _say("init done; next: `ant-stack check`")
     return 0
 

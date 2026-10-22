@@ -71,6 +71,20 @@ nothing is removed or renamed.
 - `ant-stack check` names the configured incoming prefix (`datasets.incoming_prefix`) in its deposit and
   lifecycle messages instead of a fixed `__incoming/`, and a central-watcher site is no longer told that
   `ant-stack watch` publishes its artefacts.
+- `ant-stack init` on a site with a live config (init again, for example for a new user) stages the render,
+  runs `check` and applies it only when nothing blocks, like `up`. The first init applies its render as before
+  (nothing runs yet; `up` checks).
+- `ant ingest-watch owner set` prints the db id as given (`L24/PHu`, was upper-cased; also in the response of
+  `POST /api/datasets/deposit/owners`) and says that it committed the `.md` when it did, instead of always
+  asking to commit it.
+- No 0-byte `<stem>.duckdb.lock` stays in the store after an obs-columns write, an h5ad merge or any other
+  writer: every taker of the duckdb writer lock goes through the new `lib/duckdb_lock.py`, which removes the
+  lock file on release while still holding it and, after each flock, checks that the path still names the
+  locked file (retrying otherwise), so the removal cannot let two writers in. `ant-merge-h5ad` no longer
+  removes the lock file of another writer when it finds the lock busy.
+- The deployment guide says how to try a deposit by hand: the watcher publishes after two unchanged listings
+  and `settle_seconds`, so a single `ant-stack watch -- --once` right after a deposit publishes nothing; a
+  test run may poll twice with `--settle-seconds 0`.
 
 ---
 

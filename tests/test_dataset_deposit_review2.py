@@ -211,8 +211,11 @@ def test_owner_notes_cannot_inject_front_matter_and_are_versioned_and_committed(
     git('add', '-A')
     git('commit', '-q', '-m', 'init')
     note = "ok\n---\ninjected: true\ncaveats: []\n# '\"{}"
-    service.set_owner(ADMIN, 'OL2/mic', 'alice', note)
-    assert dd.apply_owner_caveats(service.store, store_root, lambda message: None) == 1
+    result = service.set_owner(ADMIN, 'OL2/mic', 'alice', note)
+    assert result['db_id'] == 'OL2/mic'                     # as given, not upper-cased (2.47.1)
+    committed = []
+    assert dd.apply_owner_caveats(service.store, store_root, lambda message: None, committed=committed) == 1
+    assert committed == ['OL2/MIC']                         # the command then does not say "commit the .md"
     from metadata import parse_md_file
     meta = parse_md_file(store_root / 'Old2020' / 'micro.md')[0]
     assert 'injected' not in meta and meta['id'] == 'mic'
@@ -222,8 +225,41 @@ def test_owner_notes_cannot_inject_front_matter_and_are_versioned_and_committed(
     assert '---' not in meta['caveats'][-1]['message']
     log = git('log', '--format=%s', '-1').stdout
     assert 'deposit owner of OL2/MIC: alice' in log
-    assert [line for line in git('status', '--porcelain').stdout.splitlines() if not line.endswith('.lock')] == []
+    assert git('status', '--porcelain', '--ignored').stdout.splitlines() == []   # no .duckdb.lock left (2.47.1)
     assert not list((store_root / 'Old2020').glob('.*owner-partial'))
+
+
+@pytest.mark.parametrize('commit', [True, False])
+def test_owner_set_keeps_the_db_id_case_and_says_whether_it_committed(tmp_path, monkeypatch, capsys, commit):
+    """2.47.1 (scratch-site check): `owner set L24/PHu` printed L24/PHU and always asked to commit the .md,
+    also when it had committed it itself."""
+    import argparse
+    from tests.test_ingest_watch import _watch_cli
+    service = make_service(tmp_path, [1_000_000.0])
+    store_root = service.store_root
+    service.store.close()
+    git = lambda *args: subprocess.run(['git', '-C', str(store_root), *args], capture_output=True, text=True, check=True)
+    git('init', '-q', '-b', 'main')
+    git('config', 'user.email', 't@example.org')
+    git('config', 'user.name', 'Test')
+    git('add', '-A')
+    git('commit', '-q', '-m', 'init')
+    cli = _watch_cli()
+    monkeypatch.setattr(cli.config, 'require_primary', lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli.config, 'get_config', lambda *args, **kwargs: {})
+    monkeypatch.setattr(cli.config, 'get_ingest_state_dir', lambda *args, **kwargs: tmp_path / 'state')
+    monkeypatch.setattr(cli.config, 'get_ingest_watch_settings',
+                        lambda *args, **kwargs: {'git_identity': 'w <w@example.org>', 'store_git_commit': commit})
+    args = argparse.Namespace(item='set', rest=['OL2/mic', 'alice'], by='root', note='', store=str(store_root))
+    assert cli.cmd_owner(args) == 0
+    output = capsys.readouterr().out
+    assert 'alice may now deposit new versions of OL2/mic (' in output
+    if commit:
+        assert '1 caveat(s) written and committed in the store repository' in output
+        assert 'commit the .md' not in output
+        assert git('status', '--porcelain', '--ignored').stdout.splitlines() == []
+    else:
+        assert '1 caveat(s) written; commit the .md in the store repository' in output
 
 
 def test_owner_caveat_leaves_others_staged_changes_alone(tmp_path):
@@ -238,8 +274,9 @@ def test_owner_caveat_leaves_others_staged_changes_alone(tmp_path):
     (store_root / 'Old2020' / 'micro.md').write_text((store_root / 'Old2020' / 'micro.md').read_text() + '\nhand edit\n')
     git('add', 'Old2020/micro.md')
     service.set_owner(ADMIN, 'OL2/mic', 'alice')
-    messages = []
-    dd.apply_owner_caveats(service.store, store_root, messages.append)
+    messages, committed = [], []
+    assert dd.apply_owner_caveats(service.store, store_root, messages.append, committed=committed) == 1
+    assert committed == []
     assert git('log', '--format=%s', '-1').stdout.strip() == 'init'
     assert any('staged changes' in message for message in messages)
 

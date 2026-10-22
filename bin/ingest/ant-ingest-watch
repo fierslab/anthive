@@ -462,10 +462,16 @@ def cmd_owner(args: argparse.Namespace) -> int:
             print(f'ERROR: {exc.body["message"]}', file=sys.stderr)
             return 1
         watch = config.get_ingest_watch_settings(cfg)
+        committed: list = []
         applied = dataset_deposit.apply_owner_caveats(store, store_root, log, git_identity=watch['git_identity'],
-                                                      commit=watch['store_git_commit'])
-        print(f'{result["user"]} may now deposit new versions of {result["db_id"]} '
-              f'({applied} caveat(s) written; commit the .md in the store repository)')
+                                                      commit=watch['store_git_commit'], committed=committed)
+        if not applied:
+            after = 'no caveat written (see above); the watcher retries on its next poll'
+        elif len(committed) == applied:
+            after = f'{applied} caveat(s) written and committed in the store repository'
+        else:
+            after = f'{applied} caveat(s) written; commit the .md in the store repository'
+        print(f'{result["user"]} may now deposit new versions of {result["db_id"]} ({after})')
     finally:
         store.close()
     return 0

@@ -990,6 +990,32 @@ def test_up_applies_nothing_when_check_blocks(tmp_path, ant_stack, monkeypatch):
     assert b'max_obscat_values: 66' in (stack / 'anthive-api.yaml').read_bytes()
 
 
+def test_init_promotes_nothing_when_check_blocks(tmp_path, ant_stack, monkeypatch, capsys):
+    """2.47.1 (scratch-site check): init on a live site stages, checks and promotes like `up`; before, it
+    promoted a render that check (and so `up`) would refuse."""
+    path = _write_site(tmp_path)
+    stack = ant_stack.load_site(path)['_state'] / 'stack'
+    seen: list = []
+    monkeypatch.setattr(ant_stack, 'check', lambda site, running=False: seen.append(running) or ['port in use'])
+    # the first init: nothing runs, no live config; the render is applied without a check (keys and images
+    # come in later steps of the guide; `up` checks)
+    assert ant_stack.cmd_init(argparse.Namespace(site=str(path))) == 0
+    assert seen == [] and (stack / 'anthive-api.yaml').exists()
+    before = (stack / 'anthive-api.yaml').read_bytes()
+    # init again on a live site with a change check refuses: staged, not applied
+    _write_site(tmp_path, anthive={'max_obscat_values': 66})
+    capsys.readouterr()
+    assert ant_stack.cmd_init(argparse.Namespace(site=str(path))) == 1
+    assert seen == [False]
+    assert (stack / 'anthive-api.yaml').read_bytes() == before
+    assert b'max_obscat_values: 66' in (stack / 'staging' / 'anthive-api.yaml').read_bytes()
+    output = capsys.readouterr().out
+    assert 'PROBLEM  port in use' in output and 'was not applied' in output
+    monkeypatch.setattr(ant_stack, 'check', lambda site, running=False: ['the ingest image is missing'])
+    assert ant_stack.cmd_init(argparse.Namespace(site=str(path))) == 0  # as in `up`: ingest problems do not block
+    assert b'max_obscat_values: 66' in (stack / 'anthive-api.yaml').read_bytes()
+
+
 def test_passwd_promotes_only_the_auth_files(tmp_path, ant_stack):
     path = _write_site(tmp_path, auth={'mode': 'basic', 'admins': ['boss'], 'users': [{'name': 'boss'}]})
     site = ant_stack.load_site(path)

@@ -797,11 +797,13 @@ def clean_note(note: Any, limit: int = 300) -> str:
 
 def apply_owner_caveats(store: 'DepositStore', store_root: Path, log: Callable[[str], None] = print,
                         git_identity: str = 'anthive ingest-watch <noreply@anthive.local>',
-                        run: Optional[Callable[..., Any]] = None, commit: bool = True) -> int:
+                        run: Optional[Callable[..., Any]] = None, commit: bool = True,
+                        committed: Optional[List[str]] = None) -> int:
     """Record each owner assignment not yet applied in the dataset's ``.md``: a caveat, a patch version bump
     with a changelog entry (every curation decision), written through verified ``md_edit`` operations to a
     temp file renamed over the ``.md`` under the dataset's writer lock, then a git commit of that file alone
-    (skipped when the store is no git repository or the path has staged changes of someone else)."""
+    (skipped when the store is no git repository or the path has staged changes of someone else). The db ids
+    whose ``.md`` was committed are appended to ``committed`` when given."""
     import os  # noqa: PLC0415
     import subprocess  # noqa: PLC0415
 
@@ -835,30 +837,33 @@ def apply_owner_caveats(store: 'DepositStore', store_root: Path, log: Callable[[
             continue
         store.mark_owner_caveat(row['db_id'])
         applied += 1
-        if commit:
-                _commit_md(store_root, md, f'deposit owner of {row["db_id"]}: {user}\n\n{message}\n', git_identity,
-                       run, log)
+        if commit and _commit_md(store_root, md, f'deposit owner of {row["db_id"]}: {user}\n\n{message}\n',
+                                 git_identity, run, log) and committed is not None:
+            committed.append(row['db_id'])
     return applied
 
 
 def _commit_md(store_root: Path, md: Path, message: str, git_identity: str, run: Callable[..., Any],
-               log: Callable[[str], None]) -> None:
-    """Commit one ``.md`` the route wrote, the way the watcher commits (only that path, never others' staging)."""
+               log: Callable[[str], None]) -> bool:
+    """Commit one ``.md`` the route wrote, the way the watcher commits (only that path, never others' staging).
+    True when it was committed."""
     store_root = Path(store_root)
     if not (store_root / '.git').exists():
         log(f'{store_root} is not a git repository: {md.name} not committed')
-        return
+        return False
     rel = str(md.relative_to(store_root))
     staged = run(['git', '-C', store_root, 'diff', '--cached', '--name-only', '--', rel])
     if staged.returncode != 0 or staged.stdout.strip():
         log(f'{rel}: staged changes of someone else; not committed, commit by hand')
-        return
+        return False
     name, _, email = git_identity.partition('<')
     result = run(['git', '-C', store_root, '-c', f'user.name={name.strip()}', '-c',
                   f'user.email={email.rstrip(">").strip()}', 'commit', '--only', '-m', message, '--', rel])
     if result.returncode != 0:
         log(f'{rel}: git commit failed: {(result.stdout or "") + (result.stderr or "")}'.strip()[:300])
         run(['git', '-C', store_root, 'reset', '-q', '--', rel])
+        return False
+    return True
 
 
 def public_state(record: Dict[str, Any], watch_row: Optional[Dict[str, Any]]) -> str:
@@ -1492,7 +1497,7 @@ class DepositService:
         if find_dataset_md(self.store_root, db_id) is None:
             raise DepositError(404, 'not_found', f'no dataset {db_id} in the store')
         self.store.set_owner(db_id, user, identity.user, clean_note(note))
-        return {'db_id': db_id.upper(), 'user': user, 'assigned_by': identity.user,
+        return {'db_id': db_id, 'user': user, 'assigned_by': identity.user,       # as given (L24/PHu)
                 'caveat': 'written into the dataset .md by the watcher on its next poll'}
 
     def _published_files(self, data_project: str, basename: str,
