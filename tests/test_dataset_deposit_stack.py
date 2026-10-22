@@ -160,6 +160,23 @@ def test_check_central_watcher_site(tmp_path, ant_stack, capsys):
     assert 'intern.keys' in capsys.readouterr().out
 
 
+def test_decision_days_is_rendered_validated_and_checked(tmp_path, ant_stack, capsys):
+    site = _site(tmp_path, ant_stack, services={'dataset_deposit': True}, s3=S3,
+                 datasets={'site_id': 'intern', 'central_watcher': CENTRAL, 'decision_days': 10})
+    ant_stack.ensure_secrets(site)
+    for name, value in (('s3_access_key_id', 'RW'), ('s3_secret_access_key', 'RWS'),
+                        ('s3_ingest_access_key_id', 'ING'), ('s3_ingest_secret_access_key', 'INGS')):
+        _secret(site, name, value)
+    stack = ant_stack.render(site, quiet=True)
+    assert yaml.safe_load((stack / 'anthive-api.yaml').read_text())['datasets_deposit_decision_days'] == 10
+    capsys.readouterr()
+    ant_stack._check_datasets(site)
+    assert 'keeps its staged uploads 10 days' in capsys.readouterr().out
+    for bad in (-1, 'soon', True):
+        with pytest.raises(ant_stack.SiteError, match='decision_days'):
+            _site(tmp_path, ant_stack, datasets={'decision_days': bad})
+
+
 def test_central_watcher_validation(tmp_path, ant_stack):
     with pytest.raises(ant_stack.SiteError, match='watcher_public_keys'):
         _site(tmp_path, ant_stack, datasets={'central_watcher': {'ingestion_bucket': 'x', 'watcher_public_keys': ['abc']}})

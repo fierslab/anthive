@@ -907,6 +907,11 @@ are processed.
 A site with a central watcher cannot send a corrected sidecar for an h5ad that still waits: the depositor
 sends the h5ad again with the corrected sidecar (vark does this).
 
+A deposit the watcher refuses or stops (needs_decision) keeps its uploads in this site's staging folder for
+`datasets.decision_days` after it was completed (default 0: twice `max_open_days`, so 14 days). Then the site
+removes them, the deposit expires, the depositor gets an e-mail (with SMTP configured) and the watcher
+removes its incoming copies. `ant-stack check` prints the number of days in effect.
+
 **On the watcher host** (the central watcher, outside ant-stack): `ingest_watch.incoming_bucket` names the
 ingestion bucket. To keep the data bucket's keys away from it, give the ingestion bucket its own key pair: put
 it in `<ingest_state_dir>/secrets/incoming_s3_access_key_id` and `incoming_s3_secret_access_key` (mode 600;

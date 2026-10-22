@@ -327,6 +327,10 @@ def validate_site(site: dict, path: Path) -> dict:
     key_id = (central or {}).get('key_id')
     if key_id is not None and not re.fullmatch(r'[A-Za-z0-9._-]{1,32}', str(key_id)):
         raise SiteError("datasets.central_watcher.key_id must be a short id such as k1")
+    decision_days = (datasets or {}).get('decision_days')
+    if decision_days is not None and (isinstance(decision_days, bool) or not isinstance(decision_days, (int, float))
+                                      or decision_days < 0):
+        raise SiteError("datasets.decision_days must be a number of days, 0 or more (0: twice max_open_days)")
     artefact_block = site.get('artefacts')
     if artefact_block is not None and not isinstance(artefact_block, dict):
         raise SiteError("artefacts must be a mapping (enabled, upload_groups, max_file_gb, ...)")
@@ -720,7 +724,7 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
     # the api presigns into / reuses from the prefixes the watcher uses: one source for both
     cfg['ingest_watch'] = {'prefix': incoming, 'catalog_prefix': catalog}
     for key in ('max_gb', 'url_ttl_hours', 'max_open_days', 'max_open_per_user', 'max_pending_gb_per_user',
-                'update_policy'):
+                'update_policy', 'decision_days'):
         if datasets.get(key) is not None:
             cfg[f'datasets_deposit_{key}'] = datasets[key]
     central = _central_block(site)
@@ -1623,6 +1627,10 @@ def _check_datasets(site: dict) -> list[str]:
 def _check_central(site: dict, central: dict, groups: str) -> list[str]:
     """A site whose deposits a central watcher on another host ingests (design section 24)."""
     problems: list[str] = []
+    datasets = site.get('datasets') or {}
+    effective = float(datasets.get('decision_days') or 0) or 2 * float(datasets.get('max_open_days') or 7)
+    _say(f"dataset deposits: a deposit in needs_decision keeps its staged uploads {effective:g} days, then it "
+         f"expires and the depositor gets an e-mail (datasets.decision_days)")
     secrets_dir = site['_state'] / 'secrets'
     missing = [name for name in S3_INGEST_KEY_FILES if not _read_secret(secrets_dir / name)]
     if missing:

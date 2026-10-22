@@ -69,10 +69,13 @@ help:
 # own PEP-723 inline deps), so the test runner needs its own. uv resolves
 # these from cache on repeat runs. PYTHONPATH=lib mirrors the sys.path shim
 # the tools use at runtime.
-TEST_DEPS = --with pytest --with 'duckdb>=1.3,<1.6' --with pyyaml --with numpy \
-            --with pandas --with pyarrow --with h5py --with scipy --with scanpy \
+# The packages that write stored files carry the ranges of docker/requirements-app.lock (pandas <3,
+# anndata <0.13, numpy <2.5, h5py <4), so make test runs what production runs; tests/test_h5ad_round_trip.py
+# guards a future cap raise.
+TEST_DEPS = --with pytest --with 'duckdb>=1.3,<1.6' --with pyyaml --with 'numpy>=1.24,<2.5' \
+            --with 'pandas>=2.0,<3.0' --with pyarrow --with 'h5py>=3.8,<4' --with scipy --with scanpy \
             --with fastapi --with httpx --with jinja2 \
-            --with markdown --with markdown-it-py --with requests --with anndata --with bcrypt \
+            --with markdown --with markdown-it-py --with requests --with 'anndata>=0.12.0,<0.13' --with bcrypt \
             --with uvicorn --with matplotlib --with seaborn \
             --with 'bibtexparser>=1.4,<2' --with python-multipart --with tqdm --with boto3 \
             --with nbformat --with cryptography
