@@ -37,7 +37,7 @@ STATE_FILE = 'remote_deposits.json'
 IMPORTED_STATES = ('uploaded', 'withdrawn', 'expired')
 #: deposit kinds whose import needs the right to update the dataset (``update_of``); a plain artefact on a
 #: visible dataset needs none, as on a single host (a de_table artefact does)
-UPDATE_KINDS = ('dataset', 'metadata_update', 'de_only')
+UPDATE_KINDS = ('dataset', 'metadata_update', 'de_only', 'obs_columns')
 #: watch states after which an object a deposit claimed is its own for good
 FINAL_WATCH_STATES = ('live', 'rejected', 'failed')
 

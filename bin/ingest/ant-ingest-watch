@@ -8,6 +8,7 @@
 #   "h5py>=3.0.0,<4",
 #   "numpy>=1.24.0,<2.5",
 #   "markdown-it-py>=3.0.0",
+#   "pandas>=2.0.0,<3.0",
 #   "pyyaml>=6.0",
 # ]
 # ///
@@ -43,6 +44,7 @@ Usage:
     ant ingest-watch owner set <db_id> <user> --by NAME [--note TEXT]   # who may deposit new versions (API)
     ant ingest-watch result-key            # the public key sites trust for this watcher's results (section 24)
     ant ingest-watch sites                 # the sites whose deposits this watcher reads
+    ant ingest-watch merge-pending [--now] [--db-id X]   # merge pending obs columns into the h5ad (section 26)
     ant ingest-watch --once --store /scratch/store --prefix __incoming_test/ \\
         --catalog-prefix __ingest_test_catalog/ --api-url http://127.0.0.1:18850
 """
@@ -273,7 +275,34 @@ def build(args: argparse.Namespace):
                                                                          state_dir, work_root, pipeline.api),
                                    list_s3=s3_client(s3_cfg, LIST_RETRIES, LIST_TIMEOUTS),
                                    remote=remote_sites(cfg, settings, client, incoming_bucket, state_dir))
+    watcher.h5ad_merger = h5ad_merger(settings, state_dir, store_root, client, s3_cfg, pipeline.api)
     return settings, state_dir, db, watcher, store_root
+
+
+def h5ad_merger(settings: dict, state_dir: Path, store_root: Path, client, s3_cfg: dict, api):
+    """The versioned merge of pending obs columns into the h5ad files (lib/h5ad_merge.py, design 26.3)."""
+    import h5ad_merge  # noqa: PLC0415
+
+    try:
+        return h5ad_merge.H5adMerger(
+            store_root=store_root, state_dir=state_dir, s3=client, bucket=s3_cfg['bucket'],
+            catalog_prefix=settings['catalog_prefix'], api=api, log=log, window=settings.get('merge_window') or '',
+            max_load=float(settings.get('merge_max_load') or 8), min_free_gb=float(settings.get('merge_min_free_gb') or 40),
+            git_commit=settings['store_git_commit'], git_push=bool(settings['store_git_push']),
+            git_identity=settings['git_identity'], stop_requested=lambda: _stop,
+            keep_local_versions=bool(settings.get('keep_local_versions', True)), s3_endpoint=s3_cfg.get('endpoint'))
+    except ValueError as exc:
+        sys.exit(f'ERROR: ingest_watch.{exc}')
+
+
+def run_merges(watcher, state_dir: Path, db, now: bool = False, only: Optional[str] = None) -> list:
+    """One pass of the h5ad merge (inside the watcher lock: never during a poll's item, never two at once)."""
+    import h5ad_merge  # noqa: PLC0415
+
+    merger = getattr(watcher, 'h5ad_merger', None)
+    if merger is None:
+        return []
+    return merger.run_pending(now=now, only=only, deposit_pending=h5ad_merge.deposit_pending_check(state_dir, db))
 
 
 def sites_dir(settings: dict, state_dir: Path) -> Path:
@@ -355,7 +384,8 @@ def artefact_publisher(cfg: dict, settings: dict, client, s3_cfg: dict, db, stor
         git_identity=settings['git_identity'], delete_incoming=settings['delete_incoming_after_ingest'],
         notify_settings=settings.get('notify') or {}, stop_requested=lambda: _stop,
         site_id=config.deposit_site_id(cfg), server_version=_server_version(),
-        update_policy=str(config.get_dataset_deposit_settings(cfg).get('update_policy') or 'own'))
+        update_policy=str(config.get_dataset_deposit_settings(cfg).get('update_policy') or 'own'),
+        git_push=bool(settings['store_git_push']))
 
 
 def _server_version() -> str:
@@ -463,26 +493,69 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def merge_status(state_dir: Path, store_root: Path) -> dict:
+    """Datasets with pending obs columns and the last merges (read-only; no S3)."""
+    import h5ad_merge  # noqa: PLC0415
+
+    settings = config.get_ingest_watch_settings(config.get_config())
+    merger = h5ad_merge.H5adMerger(store_root=store_root, state_dir=state_dir, s3=None, bucket='', catalog_prefix='',
+                                   window='', busy=lambda: None)
+    return {'window': settings.get('merge_window') or '', 'pending': merger.pending(),
+            'last_merges': merger.history()[-10:]}
+
+
 def cmd_status(args: argparse.Namespace) -> int:
+    cfg = config.get_config()
     state_dir = config.get_ingest_state_dir()
+    store_root = Path(args.store).resolve() if args.store else config.get_data_folder(cfg).resolve()
     db_path = state_dir / ingest_watch.DB_FILE
     if not db_path.exists():
         print(f'no watch state at {db_path}')
         return 0
     db = ingest_watch.StateDB(db_path)
     rows = ingest_watch.status_rows(db)
+    merges = merge_status(state_dir, store_root)
     if args.json:
-        print(json.dumps({'items': rows, 'deletions': db.deletions(), 'versions': db.versions()}, indent=1,
-                         default=str))
+        print(json.dumps({'items': rows, 'deletions': db.deletions(), 'versions': db.versions(),
+                          'h5ad_merge': merges}, indent=1, default=str))
     else:
         print(ingest_watch.render_status_table(rows))
         deletions = db.deletions()
         if deletions:
             print(f'\n{len(deletions)} incoming key(s) handled after ingest; last: '
                   f'{deletions[-1]["outcome"]} {deletions[-1]["s3_key"]}')
+        window = merges['window'] or 'off (merge-pending --now only)'
+        print(f'\nh5ad merge (window {window}): {len(merges["pending"])} dataset(s) with pending obs columns')
+        for entry in merges['pending']:
+            print(f'  {entry["db_id"]}: {", ".join(entry["columns"])} (since {entry["since"]})')
+        if merges['last_merges']:
+            last = merges['last_merges'][-1]
+            print(f'  last merge: {last["date"]} {last["db_id"]} {last["state"]}'
+                  + (f' {last["version"]}' if last.get('version') else '')
+                  + (f': {last["detail"]}' if last.get('detail') else ''))
         print(f'\nstatus file: {state_dir / ingest_watch.STATUS_FILE}')
     db.close()
     return 0
+
+
+def cmd_merge_pending(args: argparse.Namespace) -> int:
+    """merge-pending [--now] [--db-id X]: merge pending obs columns into the h5ad files (design 26.3)."""
+    settings, state_dir, db, watcher, _store_root = build(args)
+    if settings.get('low_priority', True):
+        lower_priority()
+    signal.signal(signal.SIGTERM, _handle_stop)
+    signal.signal(signal.SIGINT, _handle_stop)
+    try:
+        with ingest_watch.WatchLock(state_dir):
+            results = run_merges(watcher, state_dir, db, now=args.now, only=args.db_id)
+    except ingest_watch.LockBusy as exc:
+        log(str(exc))
+        return 3
+    finally:
+        db.close()
+    if not results:
+        print('nothing merged' + ('' if args.now else ' (outside the merge window? --now merges at once)'))
+    return 1 if any(result.state == 'failed' for result in results) else 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -505,6 +578,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         try:
             with ingest_watch.WatchLock(state_dir):
                 counts = watcher.poll()
+                if not _stop:
+                    try:
+                        for result in run_merges(watcher, state_dir, db):
+                            counts[f'merge_{result.state}'] = counts.get(f'merge_{result.state}', 0) + 1
+                    except Exception as exc:  # noqa: BLE001 - the merge never stops the watcher
+                        log(f'h5ad merge: not run this poll ({type(exc).__name__}: {exc})')
                 ingest_watch.write_status(state_dir, db, {'last_poll': time.strftime('%Y-%m-%dT%H:%M:%S'),
                                                           'last_counts': counts, 'prefix': settings['prefix']})
             if counts:
@@ -541,7 +620,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0], epilog=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('command', nargs='?', choices=('run', 'status', 'approve', 'reject', 'retry', 'owner',
-                                                      'result-key', 'sites'), default='run')
+                                                      'result-key', 'sites', 'merge-pending'), default='run')
     parser.add_argument('item', nargs='?', help='approve / reject / retry: the item key (or db id); owner: set')
     parser.add_argument('rest', nargs='*', help='owner set: <db_id> <user>')
     parser.add_argument('--by', help='approve / reject / retry: who decided (recorded in the caveat and the state)')
@@ -557,6 +636,8 @@ def main() -> int:
     parser.add_argument('--max-items', type=int, help='process at most this many items per poll')
     parser.add_argument('--no-delete', action='store_true', help='keep the incoming objects after ingest')
     parser.add_argument('--no-git', action='store_true', help='no store git commit')
+    parser.add_argument('--now', action='store_true', help='merge-pending: ignore the merge window')
+    parser.add_argument('--db-id', help='merge-pending: only this dataset')
     parser.add_argument('--verbose', action='store_true',
                         help='one line per state change and per step with timings, and a polling line every '
                              f'{HEARTBEAT_SECONDS // 60} minutes (the default in a terminal; under systemd the '
@@ -575,6 +656,8 @@ def main() -> int:
     if args.command == 'sites':
         return cmd_sites(args)
     config.require_primary(config.get_config(), tool='ant-ingest-watch')
+    if args.command == 'merge-pending':
+        return cmd_merge_pending(args)
     return cmd_run(args)
 
 

@@ -258,3 +258,16 @@ def test_collection_create_answers_next_as_an_object_of_routes(tmp_path, monkeyp
     assert answer['next'] == {'status': f'/datasets/deposit/{answer["deposit_id"]}'} and answer['message']
     artefact = _artefact(client, ANALYST).json()
     assert set(artefact['next']) == {'urls', 'complete', 'status'}
+
+
+def test_obs_columns_deposits_are_for_dataset_uploaders(tmp_path, monkeypatch):
+    """deposit_kind obs_columns goes through the dataset uploader check (datasets_upload_groups), not the artefact
+    groups: an analyst is refused before the service; a curator reaches it (here: dataset deposits are off)."""
+    client, _service, _s3 = serve(tmp_path, monkeypatch)
+    payload = {'deposit_kind': 'obs_columns', 'data_project': 'Public2021', 'update_of': 'PU1/int',
+               'columns': [{'name': 'state', 'dtype': 'categorical'}],
+               'files': [{'name': 'calls.tsv', 'size': 10, 'sha256': 'a' * 64}]}
+    response = client.post('/datasets/deposit', headers=ANALYST, json=payload)
+    assert response.status_code == 403 and response.json()['status'] == 'forbidden'
+    response = client.post('/datasets/deposit', headers=CURATOR, json=payload)
+    assert response.status_code == 503 and response.json()['status'] == 'disabled', response.text

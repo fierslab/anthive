@@ -61,7 +61,7 @@ ZIP_MAX_TOTAL = 1024 ** 4
 class Outcome:
     state: str = 'failed'
     detail: str = ''
-    version: Optional[int] = None
+    version: Optional[Any] = None          # an artefact version number, or a dataset version (obs columns)
     warnings: List[str] = field(default_factory=list)
     held_reasons: List[str] = field(default_factory=list)
     report: Optional[Dict[str, Any]] = None
@@ -332,7 +332,7 @@ class ArtefactPublisher:
                  stop_requested: Callable[[], bool] = lambda: False, server_version: str = '',
                  site_id: str = '', run: Optional[Callable[..., Any]] = None, de_runner: Any = None,
                  dataset_catalog_prefix: Optional[str] = None, update_policy: str = 'own',
-                 incoming_bucket: Optional[str] = None):
+                 incoming_bucket: Optional[str] = None, git_push: bool = False):
         self.store_root = Path(store_root)
         self.state_dir = Path(state_dir)
         self.work_root = Path(work_root)
@@ -366,6 +366,9 @@ class ArtefactPublisher:
         self._marks: Dict[Tuple[str, str], str] = {}
         #: ``datasets_deposit_update_policy``: who may change a dataset through a de_table (review N1)
         self.update_policy = update_policy
+        #: ``ingest_watch.store_git_push``: push a commit of a dataset ``.md`` (obs columns) when it is the only
+        #: unpushed one
+        self.git_push = git_push
         self._store: Any = None
 
     # ── the poll ────────────────────────────────────────────────────────────
@@ -384,7 +387,8 @@ class ArtefactPublisher:
             rules.ensure_purge_schema(store.conn)
             for state, number in self.process_purges(store).items():
                 counts[f'purge_{state}'] = counts.get(f'purge_{state}', 0) + number
-            records = store._rows("SELECT * FROM deposits WHERE deposit_kind IN ('artefact', 'collection') AND "
+            records = store._rows("SELECT * FROM deposits WHERE deposit_kind IN ('artefact', 'collection', "
+                                  "'obs_columns') AND "
                                   "state = 'uploaded' AND COALESCE(disputed, '') = '' "
                                   "ORDER BY COALESCE(imported, completed), rowid")
             for record in records:
@@ -405,7 +409,7 @@ class ArtefactPublisher:
         accounted: Dict[str, str] = {}
         if store is not None:
             for row in store._rows("SELECT f.key, f.etag FROM files f JOIN deposits d ON d.id = f.deposit_id WHERE "
-                                   "d.deposit_kind IN ('artefact', 'collection') AND d.state IN ('uploaded', "
+                                   "d.deposit_kind IN ('artefact', 'collection', 'obs_columns') AND d.state IN ('uploaded', "
                                    "'completing', 'uploading', 'withdrawing') AND f.etag IS NOT NULL"):
                 accounted[row['key']] = row['etag']
             open_keys = store.held_keys()
@@ -439,6 +443,7 @@ class ArtefactPublisher:
         objs = [listing.get(entry['key']) for entry in files]
         signature = json.dumps(sorted([entry['key'], entry['etag'], entry['size']] for entry in files)
                                + [['deposit', record['id'], 0]])
+        # obs columns: the watch row names obs:<db_id> (the dataset's owner stays the depositor of its data)
         base = {'data_project': record['data_project'], 'basename': record['basename'], 'last_seen': self.clock(),
                 'kind': record['deposit_kind'], 'db_id': record.get('artefact_ref')}
         if not files or any(obj is None or obj.etag != entry['etag'] or obj.size != entry['size']
@@ -479,6 +484,8 @@ class ArtefactPublisher:
         try:
             if record['deposit_kind'] == 'collection':
                 outcome = self.publish_collection(record, files, objs, approval)
+            elif record['deposit_kind'] == 'obs_columns':
+                outcome = self.publish_obs_columns(record, files, objs, approval)
             else:
                 outcome = self.publish_artefact(record, files, objs, approval)
         except TransientError as exc:
@@ -513,7 +520,8 @@ class ArtefactPublisher:
         fields.update(processed_signature=signature, content_signature=signature,
                       error=None if outcome.state == 'live' else outcome.detail,
                       warnings=json.dumps(outcome.warnings), held_reasons=json.dumps(outcome.held_reasons),
-                      version=f'v{outcome.version}' if outcome.version and outcome.state == 'live' else None,
+                      version=(outcome.version if isinstance(outcome.version, str) else f'v{outcome.version}')
+                      if outcome.version and outcome.state == 'live' else None,
                       report_path=report_path, consumed=json.dumps(outcome.consumed), served=int(outcome.served),
                       catalog_verified=int(outcome.state == 'live'), git_commit=outcome.git_commit, attempts=0,
                       next_attempt=0, approval=json.dumps(approval) if approval else None)
@@ -538,7 +546,8 @@ class ArtefactPublisher:
         except Exception as exc:  # noqa: BLE001 - the record is a mirror; the watch row is the truth
             self.log(f'artefacts: could not mirror the outcome of {record["id"]}: {exc}')
         self.log(f'artefacts: {record["id"]} ({record.get("artefact_ref")}): {outcome.state}'
-                 + (f' v{outcome.version}' if outcome.version and outcome.state == 'live' else '')
+                 + (f' {outcome.version}' if isinstance(outcome.version, str) and outcome.state == 'live' else '')
+                 + (f' v{outcome.version}' if isinstance(outcome.version, int) and outcome.state == 'live' else '')
                  + (f': {outcome.detail}' if outcome.detail and outcome.state != 'live' else ''))
 
     def _deposit_mark(self, obj: ObjInfo) -> str:
@@ -1301,7 +1310,7 @@ class ArtefactPublisher:
             return False
 
     def _commit(self, rels: Sequence[PurePosixPath], message: str, record: Optional[Dict[str, Any]],
-                warnings: List[str]) -> Optional[str]:
+                warnings: List[str], push: bool = False) -> Optional[str]:
         """Commit only these store paths (written, or deleted, by the route); never others' staged changes."""
         if not self.git_commit:
             return None
@@ -1330,7 +1339,245 @@ class ArtefactPublisher:
             self.run(['git', '-C', self.store_root, 'reset', '-q', '--', *rel])
             return None
         head = self.run(['git', '-C', self.store_root, 'rev-parse', 'HEAD'])
+        if self.git_push and push:
+            ahead = self.run(['git', '-C', self.store_root, 'rev-list', '--count', '@{u}..HEAD'])
+            if ahead.returncode != 0 or (ahead.stdout or '').strip().splitlines()[-1:] != ['1']:
+                warnings.append('store_git_push: not pushed, the store branch has other unpushed commits or no '
+                                'upstream')
+            else:
+                pushed = self.run(['git', '-C', self.store_root, 'push'])
+                if pushed.returncode != 0:
+                    warnings.append('git push failed: '
+                                    + ((pushed.stdout or '') + (pushed.stderr or '')).strip()[:300])
         return head.stdout.strip() if head.returncode == 0 else None
+
+    # ── publish obs columns (design section 26 of the ingestion design) ────────
+    def publish_obs_columns(self, record: Dict[str, Any], files: List[Dict[str, Any]], objs: List[ObjInfo],
+                            approval: Optional[Dict[str, Any]]) -> Outcome:
+        try:
+            return self._publish_obs_columns(record, files, objs, approval)
+        except Stop as stop:
+            return Outcome(state=stop.state, detail=str(stop), report=stop.report, held_reasons=stop.held)
+
+    def _publish_obs_columns(self, record: Dict[str, Any], files: List[Dict[str, Any]], objs: List[ObjInfo],
+                             approval: Optional[Dict[str, Any]]) -> Outcome:
+        """Check the table against the dataset (every cell name a cell of it, values typed, names free), hold
+        public datasets and donor identifiers, then write the columns with ``AnnotationWriter`` (``__pending_cols``
+        marks them for the h5ad merge), bump the ``.md`` (minor, or major for a replacement) with a changelog line
+        per column and a caveat, push the duckdb to the catalog, rescan and commit the ``.md``. The h5ad is not
+        touched. Idempotent across a restart: ``__pending_cols`` rows of this deposit mean the write happened,
+        the deposit id in the ``.md`` means the version bump happened."""
+        import md_edit  # noqa: PLC0415
+        import obs_columns  # noqa: PLC0415
+        from anthive_db import AnnotationWriter, AnnotationWriterError  # noqa: PLC0415
+        from ingest_md_fill import curation_caveat, today_iso  # noqa: PLC0415
+
+        db_id = str(record.get('update_of') or '')
+        specs, replace = obs_columns.spec_from_record(record)
+        if not specs or len(files) != 1 or len(objs) != 1:
+            raise Stop('failed', 'the deposit declares no columns or not exactly one table')
+        collections, mds, folders = self._catalog()
+        md = mds.get(db_id)
+        if md is None or folders.get(db_id) != record['data_project']:
+            raise Stop('failed', f'the dataset {db_id} is not served (removed or inactive)')
+        self._require_dataset_update(record, db_id, what='obs columns')
+        if replace and not record.get('is_admin') and (self._store is None
+                                                       or self._store.owner_of_dataset(db_id) != record.get('user')):
+            raise Stop('failed', f'not_owner: existing obs columns of {db_id} are replaced by its owner or an admin')
+        duckdb_path = md.with_suffix('.duckdb')
+        if not duckdb_path.is_file():
+            raise Stop('failed', f'the duckdb of {db_id} is not on this host (a dataset served from S3): obs columns '
+                                 f'are written where its duckdb lives')
+        entry, obj = files[0], objs[0]
+        results: List[Dict[str, Any]] = []
+
+        def add(check_id: str, status: str, summary: str, fix: str = '') -> None:
+            results.append({'id': check_id, 'status': status, 'summary': summary, 'fix': fix})
+
+        def report(result: str, remaining: Sequence[str] = (), cover: Optional[Dict[str, Any]] = None
+                   ) -> Dict[str, Any]:
+            return {'schema': 'anthive.obs_columns_qc/1', 'deposit_id': record['id'], 'db_id': db_id,
+                    'result': result, 'publish': result == 'pass', 'held_reasons': list(remaining),
+                    'columns': [{'name': spec['name'], 'dtype': spec['dtype'], 'replaces': bool(spec.get('replaces'))}
+                                for spec in specs],
+                    'coverage': cover, 'version_class': obs_columns.version_part(specs),
+                    'counts': {status: sum(item['status'] == status for item in results)
+                               for status in ('pass', 'warn', 'fail', 'held')},
+                    'checks': results}
+
+        def fail(check_id: str, message: str, cover: Optional[Dict[str, Any]] = None) -> Stop:
+            add(check_id, 'fail', message)
+            return Stop('failed', message, report('fail', cover=cover))
+
+        work = self.work_root / f'obs_{record["id"]}'
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+        local = work / entry['name']
+        ensure_inside(local, work)
+        max_bytes = float(self.settings.get('obs_columns_max_file_gb', 2.0)) * 1024 ** 3
+        if int(entry['size']) > max_bytes:
+            raise fail('files.limits', f'{entry["name"]} is over the obs-columns table limit')
+        check = self._hash(obj, entry, local)
+        if check.size != int(entry['size']) or check.sha256 != entry['sha256']:
+            raise fail('files.sha256', f'{entry["name"]}: declared {entry["size"]} bytes / {entry["sha256"][:12]}, '
+                                       f'read {check.size} bytes / {check.sha256[:12]}')
+        add('files.sha256', 'pass', 'size and sha256 match')
+        try:
+            written = obs_columns.written_by(duckdb_path, record['id'])
+            cells = obs_columns.cell_names(duckdb_path)
+        except Exception as exc:  # noqa: BLE001 - a duckdb being rebuilt or written
+            raise TransientError(f'the duckdb of {db_id} cannot be read ({type(exc).__name__}: {exc})') from exc
+        table, problems = obs_columns.read_table(local, specs,
+                                                 int(self.settings.get('obs_columns_max_rows', obs_columns.MAX_ROWS)))
+        if problems:
+            raise fail('table.read', 'the table: ' + '; '.join(problems)[:1500])
+        add('table.read', 'pass', f'{len(table)} rows, values typed as declared')
+        cover = obs_columns.coverage(table, cells)
+        if cover['unknown']:
+            raise fail('table.cells', f'{cover["unknown"]} cell names of the table are not cells of {db_id} (for '
+                                      f'example {", ".join(cover["unknown_sample"])}); every cell_name must be a '
+                                      f'cell of the dataset (the table belongs to another dataset or version)', cover)
+        without = {name: count for name, count in cover['without_value'].items() if count}
+        add('table.cells', 'warn' if without else 'pass',
+            f'{cover["given"]} of {cover["cells"]} cells given' + (
+                '; cells without a value: ' + ', '.join(f'{name} {count}' for name, count in without.items())
+                if without else ''))
+        if not written:
+            existing = obs_columns.dataset_obs_names(duckdb_path)
+            declared = [{key: spec.get(key) for key in ('name', 'dtype', 'description', 'source', 'facet')
+                         if spec.get(key) is not None} for spec in specs]
+            try:
+                specs = obs_columns.validate_columns(declared, list(existing), replace=replace, may_replace=True,
+                                                     max_columns=len(declared))
+            except obs_columns.ObsColumnsError as exc:
+                raise fail('columns.names', f'{exc.code}: {exc}', cover)
+            for spec in specs:
+                if not spec['replaces']:
+                    continue
+                current = next(name for name in existing if name.lower() == spec['name'].lower())
+                if current != spec['name'] or existing[current] != spec['dtype']:
+                    raise fail('columns.names', f'{spec["name"]} replaces the {existing[current]} column {current}: a '
+                                                f'replacement keeps its exact name and dtype', cover)
+            add('columns.names', 'pass', 'names are free' + (' (replacements by the owner or an admin)'
+                                                             if replace else ''))
+        held: List[str] = []
+        crosswalk_values = self._crosswalk_values()
+        donors = set()
+        if crosswalk_values:
+            for spec in specs:
+                if spec['dtype'] == 'categorical':
+                    donors |= {str(value).strip().lower() for value in table[spec['name']].dropna().unique()} \
+                        & crosswalk_values
+        if donors:
+            held.append('donor_identifiers')
+            add('content.donors', 'held', f'{len(donors)} value(s) of the donor crosswalk in categorical columns',
+                'replace internal donor ids by public ones')
+        else:
+            add('content.donors', 'pass', 'no donor crosswalk values' if crosswalk_values else
+                'no donor crosswalk on this site')
+        policy = artefacts.AccessPolicy(collections, self._mus_access({db_id: md}), self._folder_db_ids(folders))
+        if policy.dataset_public(db_id):
+            held.append('public_access')
+            add('access.public', 'held', f'{db_id} is public: an admin publishes the columns')
+        approved = set((approval or {}).get('reasons') or [])
+        remaining = [reason for reason in held if reason not in approved]
+        if remaining:
+            raise Stop('held', 'held for an admin: ' + ', '.join(remaining), report('held', remaining, cover),
+                       held=remaining)
+        outcome = Outcome(report=report('pass', cover=cover))
+        names = ', '.join(spec['name'] for spec in specs)
+        if not written:
+            try:
+                with AnnotationWriter(duckdb_path, annotator=obs_columns.ANNOTATOR, run_id=record['id'], db_id=db_id,
+                                      ant_serve_url=getattr(self.api, 'base_url', None)) as writer:
+                    for spec in specs:
+                        conflict = 'overwrite' if spec['replaces'] else 'fail'
+                        if spec['dtype'] == 'numerical':
+                            writer.add_numerical(spec['name'], table[spec['name']], source_hash=check.sha256,
+                                                 on_conflict=conflict)
+                        else:
+                            writer.add_categorical(spec['name'], table[spec['name']], source_hash=check.sha256,
+                                                   on_conflict=conflict, max_cardinality=obs_columns.MAX_CATEGORIES)
+                    writer.commit()
+            except AnnotationWriterError as exc:
+                if 'lock' in str(exc).lower() or 'rebuilt' in str(exc).lower():
+                    raise TransientError(f'the duckdb of {db_id} is busy ({exc})') from exc
+                raise fail('columns.write', f'writing the columns failed: {exc}', cover)
+        if f'deposit {record["id"]}' not in md.read_text(encoding='utf-8'):
+            today = today_iso()
+            text = md.read_text(encoding='utf-8')
+            caveat = curation_caveat(obs_columns.caveat_message(specs, record['id'], today), 'obs_columns', today)
+            try:
+                new_text = md_edit.apply_edits(text, [
+                    md_edit.append_top('caveats', caveat),
+                    md_edit.bump_version(obs_columns.changelog_lines(specs, record['id'], cover), today,
+                                         obs_columns.version_part(specs))])
+            except md_edit.MdEditError as exc:
+                raise Stop('failed', f'the columns are in the duckdb (pending) but the .md of {db_id} could not be '
+                                     f'edited ({exc}); an admin bumps its version by hand') from exc
+            partial = md.with_name(f'.{md.name}.obs-partial')
+            partial.write_text(new_text, encoding='utf-8')
+            os.replace(partial, md)
+        version = str(rules.read_md_meta(md).get('version') or '')
+        outcome.version = version
+        outcome.report['dataset_version'] = version
+        self._push_duckdb(md, outcome.warnings)
+        self._full_rescan(outcome.warnings)
+        outcome.served = self._served_with_columns(db_id, specs, outcome.warnings)
+        outcome.git_commit = self._commit(
+            [PurePosixPath(md.relative_to(self.store_root))],
+            f'{db_id}: obs columns {names} ({obs_columns.version_part(specs)}, {version})\n\nDeposit {record["id"]} '
+            f'by {record["user"]}. The h5ad gets the columns at the next merge.\n', record, outcome.warnings,
+            push=True)
+        outcome.consumed = {obj.key: obj.etag}
+        outcome.state = 'live'
+        outcome.detail = f'obs columns {names} added to {db_id} ({version}); the h5ad gets them at the next merge'
+        shutil.rmtree(work, ignore_errors=True)
+        return outcome
+
+    def _push_duckdb(self, md: Path, warnings: List[str]) -> bool:
+        """Upload the dataset's duckdb to the catalog with its sha256, under the dataset's writer lock (no annotator
+        writes during the hash and upload), and verify size and sha256 by HEAD."""
+        from ingest_pipeline import _transfer_config  # noqa: PLC0415
+        path = md.with_suffix('.duckdb')
+        key = f'{self.dataset_catalog_prefix}{md.parent.relative_to(self.store_root).as_posix()}/{path.name}'
+        try:
+            with writer_lock(path, timeout=600):
+                sha = sha256_file(path)
+                size = path.stat().st_size
+                kwargs: Dict[str, Any] = {'ExtraArgs': {'Metadata': {'sha256': sha,
+                                                                     'original-mtime': str(int(path.stat().st_mtime))}}}
+                config = _transfer_config()
+                if config is not None:
+                    kwargs['Config'] = config
+                self.s3.upload_file(str(path), self.bucket, key, **kwargs)
+            head = self.s3.head_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f'push of {path.name} to the catalog failed ({_code(exc)}); ant-sync push carries it later')
+            return False
+        if int(head.get('ContentLength', -1)) != size or _meta_of(head).get('sha256') != sha:
+            warnings.append(f'the catalog copy of {path.name} could not be verified (size or sha256); ant-sync push '
+                            f'carries it later')
+            return False
+        return True
+
+    def _served_with_columns(self, db_id: str, specs: Sequence[Dict[str, Any]], warnings: List[str]) -> bool:
+        if self.api is None:
+            warnings.append('no API configured: not rescanned')
+            return False
+        try:
+            answer = self.api._request(f'/databases/{db_id}/info', method='GET', timeout=60)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f'served check failed ({exc}); the next rescan serves the columns')
+            return False
+        obs = (answer or {}).get('obs') if isinstance(answer, dict) else None
+        if not isinstance(obs, dict):
+            return bool(answer)
+        shown = {str(name).lower() for name in (obs.get('numerical') or []) + (obs.get('categorical') or [])}
+        missing = [spec['name'] for spec in specs if spec['name'].lower() not in shown]
+        if missing:
+            warnings.append(f'not served yet: {", ".join(missing)} (the next rescan serves them)')
+        return not missing
 
     # ── publish a collection ────────────────────────────────────────────────
     def publish_collection(self, record: Dict[str, Any], files: List[Dict[str, Any]], objs: List[ObjInfo],
@@ -1664,14 +1911,14 @@ class ArtefactPublisher:
             out[db_id] = (str(meta.get('version')), str(meta.get('sha256')))
         return out
 
-    def _require_dataset_update(self, record: Dict[str, Any], db_id: str) -> None:
+    def _require_dataset_update(self, record: Dict[str, Any], db_id: str, what: str = 'DE tables') -> None:
         """Review N1, again at publication: the depositor may still update the dataset (an owner change or a
         policy change since the create is honoured)."""
         if record.get('is_admin') or self.update_policy == 'any':
             return
         owner = self._store.owner_of_dataset(db_id) if self._store is not None else None
         if owner != record.get('user'):
-            raise Stop('failed', f'not_owner: DE tables are added to {db_id} by its owner or an admin '
+            raise Stop('failed', f'not_owner: {what} are added to {db_id} by its owner or an admin '
                                  f'(datasets_deposit_update_policy: own)')
 
     def _own_studies(self, path: artefacts.ArtefactPath, head: Optional[Dict[str, Any]], exclude: int) -> set:

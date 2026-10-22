@@ -84,11 +84,16 @@ class DepositFakeS3(FakeS3):
                 f'"{self.objects[key]["etag"]}"' != condition:
             raise S3Error('PreconditionFailed')
 
-    def get_object(self, Bucket: str, Key: str, IfMatch: Optional[str] = None):  # noqa: N803
+    def get_object(self, Bucket: str, Key: str, IfMatch: Optional[str] = None,  # noqa: N803
+                   Range: Optional[str] = None):  # noqa: N803
         if Key not in self.objects:
             raise S3Error('NoSuchKey')
         self._condition(Key, IfMatch)
-        return {'Body': io.BytesIO(self.objects[Key]['body'])}
+        body = self.objects[Key]['body']
+        if Range is not None:                       # bytes=<first>-<last>, inclusive
+            first, last = (int(part) for part in Range.split('=')[1].split('-'))
+            body = body[first:last + 1]
+        return {'Body': io.BytesIO(body)}
 
     def copy_object(self, Bucket: str, Key: str, CopySource: dict, Metadata: Optional[dict] = None,  # noqa: N803
                     MetadataDirective: str = 'COPY', CopySourceIfMatch: Optional[str] = None,  # noqa: N803

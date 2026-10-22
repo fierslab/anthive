@@ -65,7 +65,9 @@ RECORD_FIELDS = ('id', 'user', 'is_admin', 'data_project', 'basename', 'update_o
 FILE_FIELDS = ('name', 'kind', 'key', 'size', 'sha256', 'method', 'state', 'etag', 'staging_key', 'staging_etag',
                'completed')
 INT_FIELDS = {'is_admin', 'created', 'expires', 'completed', 'total_bytes', 'size'}
-DEPOSIT_KINDS = ('dataset', 'metadata_update', 'de_only', 'artefact', 'collection')
+DEPOSIT_KINDS = ('dataset', 'metadata_update', 'de_only', 'artefact', 'collection', 'obs_columns')
+#: kinds whose watch key is ``artefact:<deposit_id>`` and whose files lie under ``artefacts/<deposit_id>/``
+ARTEFACT_ROUTE_KINDS = ('artefact', 'collection', 'obs_columns')
 RECORD_STATES = ('uploading', 'completing', 'uploaded', 'withdrawing', 'withdrawn', 'expiring', 'expired')
 
 
@@ -342,9 +344,10 @@ def record_problems(record: Mapping[str, Any], site_id: str, deposit_id: str, in
             if not isinstance(value, str) or not DEPOSIT_ID_RE.fullmatch(value):
                 problems.append('continues is not a deposit id')
             continue
-        if field == 'watch_key' and record.get('deposit_kind') in ('artefact', 'collection'):
+        if field == 'watch_key' and record.get('deposit_kind') in ARTEFACT_ROUTE_KINDS:
             if value != f'artefact:{deposit_id}':
-                problems.append('the watch key of an artefact or collection deposit is artefact:<deposit_id>')
+                problems.append('the watch key of an artefact, collection or obs-columns deposit is '
+                                'artefact:<deposit_id>')
             continue
         if not _key_ok(value) or not value.startswith(project_prefix):
             problems.append(f'{field} is not a key under {project_prefix}')
@@ -366,8 +369,8 @@ def record_problems(record: Mapping[str, Any], site_id: str, deposit_id: str, in
         key = entry.get('key')
         if not _key_ok(key) or not key.startswith(project_prefix):
             problems.append(f'{name}: key is not under {project_prefix}')
-        if entry.get('kind') == 'artefact' or record.get('deposit_kind') in ('artefact', 'collection'):
-            if isinstance(key, str) and record.get('deposit_kind') == 'artefact' \
+        if entry.get('kind') == 'artefact' or record.get('deposit_kind') in ARTEFACT_ROUTE_KINDS:
+            if isinstance(key, str) and record.get('deposit_kind') in ('artefact', 'obs_columns') \
                     and not key.startswith(f'{project_prefix}artefacts/{deposit_id}/'):
                 problems.append(f'{name}: an artefact file must lie under artefacts/{deposit_id}/')
         staging_key = entry.get('staging_key')

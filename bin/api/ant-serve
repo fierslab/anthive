@@ -17653,7 +17653,16 @@ def _artefact_context(request: Request):
     return artefact_deposit.ArtefactContext(
         store_root=registry.data_folder, collections=registry.collection_registry(),
         index=registry.artefact_index(), policy=_artefact_policy(), viewer=_artefact_viewer(request),
-        dataset_md=dict(registry._db_md_bases), dataset_folder=folders)
+        dataset_md=dict(registry._db_md_bases), dataset_folder=folders, dataset_obs=_dataset_obs_names)
+
+
+def _dataset_obs_names(db_id: str) -> List[str]:
+    """The obs column names a served dataset shows (the cached metadata, no duckdb opened in this process):
+    an obs-columns deposit must not clash with one, case-insensitively. The watcher checks the duckdb itself
+    (hidden columns too) before it writes."""
+    meta = registry._metadata_all.get(db_id) or {}
+    obs = meta.get('obs') or {}
+    return [str(name) for name in (obs.get('numerical') or []) + (obs.get('categorical') or [])]
 
 
 @app.post("/datasets/deposit", tags=["datasets-deposit"], include_in_schema=False)
@@ -17664,7 +17673,9 @@ def dataset_deposit_create(request: Request, body: Any = Body(None)):
     update_of?}``. ``artefact`` (REST 2.47): ``{data_project, scope, artefact: {kind, artefact_id, title,
     description, access?, made_from, declared, new_version_of?, change_note?}, files: [{name, size, sha256,
     role?}]}``. ``collection``: ``{data_project, collection: {title, authors, description?, access?, doi?,
-    papers?}}`` (no files; answers ``uploaded`` with the group id)."""
+    papers?}}`` (no files; answers ``uploaded`` with the group id). ``obs_columns`` (REST 2.47, dataset
+    uploaders): ``{data_project, update_of, columns: [{name, dtype, description?, source?, facet?}], replace?,
+    files: [{name, size, sha256}]}``."""
     kind = body.get('deposit_kind') if isinstance(body, dict) else None
     if kind in ('artefact', 'collection'):
         return _deposit_call(request, lambda service, identity: service.create(identity, body,

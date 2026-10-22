@@ -207,6 +207,11 @@ artefacts_max_stored_gb_per_user: 1000
 artefacts_max_versions: 100
 # Artefacts of public datasets or collections wait for an admin.
 artefacts_hold_public: true
+# Obs-columns deposits (deposit_kind obs_columns: new obs columns for a published dataset from one TSV,
+# needs datasets_deposit_enabled): the largest table in GB, columns per deposit, rows per table.
+obs_columns_max_file_gb: 2
+obs_columns_max_columns: 50
+obs_columns_max_rows: 20000000
 # fallback: redirect to S3 when the site can read it, else stream a verified
 # local copy. prefer: a verified local copy first, S3 otherwise.
 artefacts_serve_local: fallback
@@ -290,9 +295,13 @@ ingest_watch:
   # its S3 copy is verified (S3 is canonical; doc/DESIGN_dataset_ingestion.md section 25). Default: keep.
   keep_local_versions: true
   # Hours (host time, HH:MM-HH:MM) in which the watcher merges pending obs columns into the h5ad files
-  # (a minor version per dataset, section 26), when nothing else runs and the host is quiet. Empty: never
+  # (a new version per dataset, section 26), when nothing else runs and the host is quiet. Empty: never
   # (only `ant ingest-watch merge-pending --now`).
   merge_window: '01:00-06:00'
+  # The merge starts a dataset only while the 1 minute load is at most merge_max_load and at least
+  # merge_min_free_gb of memory is available (the limits of ant-score-fleet).
+  merge_max_load: 8
+  merge_min_free_gb: 40
   # Lower the priority of the pipeline's children (nice 19, ionice idle).
   low_priority: true
   # An upload for a dataset that is already published becomes a new version.

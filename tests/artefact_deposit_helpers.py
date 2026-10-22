@@ -72,6 +72,11 @@ class ArtefactFakeS3(DepositFakeS3):
         if ContentDisposition:
             self.dispositions[Key] = ContentDisposition
 
+    def upload_file(self, Filename: str, Bucket: str, Key: str, ExtraArgs: Optional[dict] = None,  # noqa: N803
+                    Config: Any = None) -> None:  # noqa: N803
+        self.calls.append(('upload_file', Key))
+        self.put(Key, Path(Filename).read_bytes(), self.clock(), metadata=(ExtraArgs or {}).get('Metadata'))
+
     def generate_presigned_url(self, operation: str, Params: dict, ExpiresIn: int):  # noqa: N803
         self.presign_log.append((operation, Params['Key']))
         return super().generate_presigned_url(operation, Params, ExpiresIn)

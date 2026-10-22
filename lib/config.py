@@ -586,6 +586,8 @@ INGEST_WATCH_DEFAULTS: Dict[str, Any] = {
     'trusted_admin_sites': [],
     'keep_local_versions': True,
     'merge_window': '01:00-06:00',
+    'merge_max_load': 8.0,
+    'merge_min_free_gb': 40.0,
     'notify': {'on': ['live', 'held', 'failed', 'needs_decision'], 'webhook_url': '', 'email_to': '',
                'email_from': 'anthive-ingest@localhost', 'smtp_host': '', 'smtp_port': 25},
 }
@@ -774,6 +776,10 @@ ARTEFACT_DEFAULTS: Dict[str, Any] = {
     'artefacts_max_versions': 100,
     'artefacts_hold_public': True,
     'artefacts_serve_local': 'fallback',
+    # obs-columns deposits (dataset deposits of kind obs_columns, design section 26 of the ingestion design)
+    'obs_columns_max_file_gb': 2.0,
+    'obs_columns_max_columns': 50,
+    'obs_columns_max_rows': 20000000,
 }
 ARTEFACT_SERVE_LOCAL_MODES = ('fallback', 'prefer')
 ARTEFACT_URL_TTL_RANGE = (10, 3600)

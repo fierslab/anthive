@@ -39,6 +39,9 @@ from dataset_deposit import (DEPOSIT_ID_RE, MiB, SHA256_RE, SINGLE_PUT_HARD_MAX,
                              Identity, _error_code, _iso, choose_part_size, clean_note, new_deposit_id, part_sizes)
 
 ARTEFACT_DEPOSIT_KINDS = ('artefact', 'collection')
+#: new obs columns for a published dataset from one TSV (REST 2.47.0, design section 26 of the ingestion design)
+OBS_COLUMNS_KIND = 'obs_columns'
+OBS_HEADER_BYTES = 64 * 1024
 #: the folder below ``<incoming prefix><data_project>/`` that only artefact and collection deposits use
 INCOMING_DIR = 'artefacts'
 #: kinds not accepted yet (none since A3: ``de_table`` artefacts are imported into the dataset's DE tables)
@@ -351,6 +354,8 @@ class ArtefactContext:
     viewer: artefacts.Viewer
     dataset_md: Mapping[str, Path] = field(default_factory=dict)        # served db_id -> its .md
     dataset_folder: Mapping[str, str] = field(default_factory=dict)     # served db_id -> group folder
+    #: the obs column names a served dataset shows (obs-columns deposits: the case-insensitive clash check)
+    dataset_obs: Optional[Callable[[str], Sequence[str]]] = None
 
     def collection_by_folder(self, folder: str) -> Optional[artefacts.Collection]:
         return next((c for c in self.collections.values() if c.folder == folder), None)
@@ -436,8 +441,10 @@ class ArtefactDepositService(DepositService):
             return self.create_artefact(identity, body, context)
         if kind == 'collection':
             return self.create_collection(identity, body, context)
+        if kind == OBS_COLUMNS_KIND:
+            return self.create_obs_columns(identity, body, context)
         if kind not in (None, 'dataset', 'de_only'):
-            raise DepositError(422, 'invalid', 'deposit_kind is dataset, artefact or collection')
+            raise DepositError(422, 'invalid', 'deposit_kind is dataset, artefact, collection or obs_columns')
         if (kind == 'de_only' or is_de_only_body(body)) and self.artefacts_active:
             return self.create_de_only_alias(identity, body, context)
         if not self.settings.active:
@@ -484,7 +491,7 @@ class ArtefactDepositService(DepositService):
         return super().withdraw(identity, deposit_id)
 
     def _verify_for_complete(self, record: Dict[str, Any], deposit_id: str):
-        if record.get('deposit_kind') not in ARTEFACT_DEPOSIT_KINDS:
+        if record.get('deposit_kind') not in ARTEFACT_DEPOSIT_KINDS + (OBS_COLUMNS_KIND,):
             return super()._verify_for_complete(record, deposit_id)
         rows = {row['name']: row for row in self.store.files(deposit_id)}
         try:
@@ -495,6 +502,8 @@ class ArtefactDepositService(DepositService):
         if incomplete:
             raise DepositError(409, 'incomplete', 'not every file is uploaded completely', files=incomplete)
         rows = {row['name']: row for row in self.store.files(deposit_id)}
+        if record.get('deposit_kind') == OBS_COLUMNS_KIND:
+            self._check_obs_header(record, rows)
         if record.get('deposit_kind') == 'artefact' and json.loads(record.get('artefact') or '{}').get('kind') == \
                 'de_table':
             from dataset_deposit import StagingChanged  # noqa: PLC0415
@@ -548,6 +557,12 @@ class ArtefactDepositService(DepositService):
                 view['artefact']['ref_version'] = f'{record.get("artefact_ref")}@{version}'
         elif record.get('deposit_kind') == 'collection':
             view['collection'] = {'data_project': record['data_project'], 'group_id': record.get('group_id')}
+        elif record.get('deposit_kind') == OBS_COLUMNS_KIND:
+            import obs_columns  # noqa: PLC0415
+            specs, replace = obs_columns.spec_from_record(record)
+            view['obs_columns'] = {'db_id': record.get('update_of'), 'replace': replace,
+                                   'columns': [{'name': spec['name'], 'dtype': spec['dtype'],
+                                                'replaces': bool(spec.get('replaces'))} for spec in specs]}
         return view
 
     # create: artefact ------------------------------------------------------
@@ -842,13 +857,15 @@ class ArtefactDepositService(DepositService):
         return identity.is_admin or self.settings.update_policy == 'any' \
             or self.store.owner_of_dataset(db_id) == identity.user
 
-    def require_dataset_update(self, identity: Identity, db_id: str) -> None:
+    def require_dataset_update(self, identity: Identity, db_id: str, what: str = 'DE tables',
+                               hint: str = ', or deposit the table as kind table') -> None:
         """Review N1: DE tables change the dataset (a patch version and new DE studies), so a de_table (and
-        the de_only alias) needs the right to update the dataset, as the 2.46 DE-only route did."""
+        the de_only alias) needs the right to update the dataset, as the 2.46 DE-only route did. Obs-columns
+        deposits need the same right."""
         if not self.may_update_dataset(identity, db_id):
-            raise DepositError(403, 'not_owner', f'DE tables are added to {db_id} by its owner or an admin '
+            raise DepositError(403, 'not_owner', f'{what} are added to {db_id} by its owner or an admin '
                                                  f'(datasets_deposit_update_policy: own); ask an admin to record '
-                                                 f'you as its owner, or deposit the table as kind table')
+                                                 f'you as its owner{hint}')
 
     def _pending_new_group(self, data_project: str) -> bool:
         """A dataset deposit that is creating a group of this name (open or waiting for the watcher)."""
@@ -1148,6 +1165,170 @@ class ArtefactDepositService(DepositService):
                 if (state is None or row['state'] == state)
                 and (action is None or (row.get('action') or 'hard') == action)]
 
+    # create: obs columns ---------------------------------------------------
+    def _pending_dataset_conflict(self, db_id: str, exclude: str) -> Callable[[sqlite3.Connection], None]:
+        """An ``extra_check`` for ``reserve``: no other deposit that changes this dataset (an update, a DE table,
+        obs columns) is open or waiting for the watcher, so two writers never race for its duckdb and ``.md``."""
+        def check(conn: sqlite3.Connection) -> None:
+            row = conn.execute(
+                "SELECT id FROM deposits WHERE UPPER(COALESCE(update_of, '')) = UPPER(?) AND id != ? AND ("
+                "state IN ('uploading', 'completing') OR (state = 'uploaded' AND COALESCE(watch_state, '') "
+                "NOT IN ('live', 'rejected', 'failed')))", (db_id, exclude)).fetchone()
+            if row is not None:
+                raise DepositError(409, 'busy', f'another deposit for {db_id} is open or being published; wait '
+                                                f'until it is live, or withdraw it')
+        return check
+
+    def create_obs_columns(self, identity: Identity, body: Dict[str, Any], context: Optional[ArtefactContext]
+                           ) -> Dict[str, Any]:
+        """``POST /datasets/deposit`` with ``deposit_kind: "obs_columns"``: new obs columns for a published
+        dataset from one TSV (design section 26). ``{data_project, update_of: <db_id>, columns: [{name, dtype,
+        description?, source?, facet?}], replace?: false, files: [{name, size, sha256}]}``."""
+        import obs_columns  # noqa: PLC0415
+        if not self.settings.active:
+            super()._require_active()
+        if context is None:
+            raise DepositError(503, 'disabled', 'the dataset registry is not loaded yet; try again')
+        unknown = sorted(set(body) - {'deposit_kind', 'data_project', 'update_of', 'columns', 'replace', 'files'})
+        if unknown:
+            raise DepositError(422, 'invalid', f'unknown fields: {", ".join(unknown)}')
+        db_id = body.get('update_of')
+        data_project = body.get('data_project')
+        if not isinstance(db_id, str) or not artefacts.DB_ID_RE.fullmatch(db_id):
+            raise DepositError(422, 'invalid', 'obs columns are added to a published dataset: give "update_of": '
+                                               '"<db_id>"')
+        if db_id not in context.dataset_md or context.dataset_folder.get(db_id) != data_project \
+                or not context.policy.dataset_visible(db_id, context.viewer):
+            raise DepositError(422, 'update_of_unknown', f'{data_project}/{db_id} is not a published dataset')
+        self.require_dataset_update(identity, db_id, what='obs columns', hint='')
+        replace = body.get('replace', False)
+        if not isinstance(replace, bool):
+            raise DepositError(422, 'invalid', 'replace is true or false')
+        may_replace = identity.is_admin or self.store.owner_of_dataset(db_id) == identity.user
+        existing = list(context.dataset_obs(db_id) or []) if context.dataset_obs is not None else []
+        try:
+            specs = obs_columns.validate_columns(
+                body.get('columns'), existing, replace=replace, may_replace=may_replace,
+                max_columns=int(self._limit('obs_columns_max_columns', obs_columns.MAX_COLUMNS)))
+        except obs_columns.ObsColumnsError as exc:
+            status = {'not_owner': 403, 'column_exists': 409}.get(exc.code, 422)
+            raise DepositError(status, exc.code, str(exc))
+        if replace and not any(spec['replaces'] for spec in specs):
+            raise DepositError(422, 'invalid', 'replace is set but no declared column exists yet; leave it out')
+        files = body.get('files')
+        if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict) \
+                or set(files[0]) - {'name', 'size', 'sha256', 'kind'}:
+            raise DepositError(422, 'invalid', 'files is one table: [{name, size, sha256}]')
+        entry = files[0]
+        name, size, sha = entry.get('name'), entry.get('size'), str(entry.get('sha256') or '').lower()
+        problem = obs_columns.file_name_problem(name)
+        if problem:
+            raise DepositError(422, 'invalid_name', problem)
+        if entry.get('kind') not in (None, 'obs_table'):
+            raise DepositError(422, 'invalid', f'{name}: file kind is obs_table')
+        if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+            raise DepositError(422, 'invalid', f'{name}: size must be a positive integer (bytes)')
+        max_gb = self._limit('obs_columns_max_file_gb', 2.0)
+        if size > max_gb * 1024 ** 3:
+            raise DepositError(413, 'too_large', f'{name}: an obs-columns table is at most {max_gb:g} GB')
+        if not SHA256_RE.fullmatch(sha):
+            raise DepositError(422, 'invalid', f'{name}: sha256 must be 64 hex characters')
+        self.limiter.check(identity.user)              # before any call to the object store
+        self.expire_stale()
+        now = self.clock()
+        deposit_id = new_deposit_id()
+        key = incoming_folder(self.settings.prefix, data_project, deposit_id) + name
+        expires = now + self._ttl()
+        multipart = size > min(self.settings.single_put_max_mb * MiB, SINGLE_PUT_HARD_MAX)
+        part_size = choose_part_size(size) if multipart else None
+        row = {'deposit_id': deposit_id, 'name': name, 'kind': 'obs_table', 'key': key,
+               'staging_key': self._staging_key(deposit_id, key), 'size': size, 'sha256': sha, 'state': 'pending',
+               'etag': None, 'completed': None, 'method': 'multipart' if multipart else 'put', 'upload_id': None,
+               'part_size': part_size, 'part_count': len(part_sizes(size, part_size)) if multipart else None}
+        group_id, file_id = db_id.split('/')
+        record = {'id': deposit_id, 'user': identity.user, 'name': identity.name, 'email': identity.email,
+                  'is_admin': int(identity.is_admin), 'data_project': data_project, 'basename': file_id,
+                  'update_of': db_id, 'state': 'uploading', 'created': now, 'updated': now, 'expires': expires,
+                  'total_bytes': size, 'watch_key': f'artefact:{deposit_id}', 'refreshes': 0,
+                  'deposit_kind': OBS_COLUMNS_KIND, 'artefact_ref': f'obs:{db_id}',
+                  'artefact': obs_columns.spec_json(specs, replace), 'group_id': group_id}
+        self.store.reserve(record, [row], now, self.settings,
+                           extra_check=self._pending_dataset_conflict(db_id, deposit_id))
+        try:
+            if multipart:
+                response = self.s3.create_multipart_upload(Bucket=self.bucket, Key=row['staging_key'],
+                                                           Metadata=self._metadata(deposit_id, sha))
+                row['upload_id'] = response['UploadId']
+                self.store.update_file(deposit_id, name, upload_id=row['upload_id'])
+        except Exception as exc:  # noqa: BLE001 - S3 refused: release the deposit
+            self._abort_and_delete(self.store.get(deposit_id), actor='create')
+            self.store.cas(deposit_id, ('uploading',), 'expired')
+            self.store.release_keys(deposit_id)
+            raise DepositError(502, 's3_error', f'the object store refused to start the upload ({_error_code(exc)}); '
+                                                f'try again later')
+        names = ', '.join(spec['name'] for spec in specs)
+        self.store.event(deposit_id, identity.user, 'created', f'obs columns {names} for {db_id}, {size} bytes')
+        return {'deposit_id': deposit_id, 'state': 'uploading', 'deposit_kind': OBS_COLUMNS_KIND,
+                'data_project': data_project, 'update_of': db_id, 'expires': _iso(expires),
+                'url_ttl_seconds': self._ttl(), 'total_bytes': size,
+                'files': [self._instructions(deposit_id, row, 1, self.settings.parts_per_batch, expires)],
+                'columns': [{'name': spec['name'], 'dtype': spec['dtype'], 'replaces': spec['replaces']}
+                            for spec in specs],
+                'version_class': obs_columns.version_part(specs), 'warnings': [],
+                'next': {'urls': f'/datasets/deposit/{deposit_id}/urls',
+                         'complete': f'/datasets/deposit/{deposit_id}/complete',
+                         'status': f'/datasets/deposit/{deposit_id}'}}
+
+    def _check_obs_header(self, record: Dict[str, Any], rows: Dict[str, Dict[str, Any]]) -> None:
+        """At complete: the first line of the staged table (a ranged read pinned to the verified ETag) is
+        ``cell_name`` and exactly the declared columns. The watcher reads the whole table again."""
+        import obs_columns  # noqa: PLC0415
+        specs, _replace = obs_columns.spec_from_record(record)
+        for row in rows.values():
+            try:
+                response = self.s3.get_object(Bucket=self.bucket, Key=row['staging_key'],
+                                              IfMatch=f'"{row["staging_etag"]}"',
+                                              Range=f'bytes=0-{OBS_HEADER_BYTES - 1}')
+                raw = response['Body'].read(OBS_HEADER_BYTES)
+            except Exception as exc:  # noqa: BLE001
+                if _error_code(exc) in ('PreconditionFailed', '412'):
+                    raise self._staging_changed_error() from exc
+                raise DepositError(502, 's3_error', f'reading the table header back failed ({_error_code(exc)})')
+            try:
+                header = obs_columns.first_line(raw, row['name'])
+            except Exception:  # noqa: BLE001 - zlib errors
+                raise DepositError(422, 'invalid_table', f'{row["name"]} is not a readable gzip file')
+            problems = obs_columns.header_problems(header, specs)
+            if problems:
+                raise DepositError(422, 'invalid_table', f'{row["name"]}: ' + '; '.join(problems) + '. Withdraw and '
+                                                         'deposit again with a matching table or declaration.')
+
+    def obs_columns_vocab(self) -> Dict[str, Any]:
+        import obs_columns  # noqa: PLC0415
+        return {
+            'uploads_enabled': self.settings.active,
+            'deposit_kind': OBS_COLUMNS_KIND,
+            'dtypes': list(obs_columns.DTYPES),
+            'name_rule': _anno_name_pattern() + ' (the ant-annotate rule), unique case-insensitively',
+            'reserved': sorted(obs_columns.RESERVED),
+            'facet_prefix': obs_columns.FACET_PREFIX + ' (only with "facet": true)',
+            'file': 'one <name>.tsv or <name>.tsv.gz: header cell_name then the declared columns, tab separated',
+            'missing_values': ['', 'NA', 'NaN', 'nan'],
+            'limits': {'max_file_gb': self._limit('obs_columns_max_file_gb', 2.0),
+                       'max_columns': int(self._limit('obs_columns_max_columns', obs_columns.MAX_COLUMNS)),
+                       'max_rows': int(self._limit('obs_columns_max_rows', obs_columns.MAX_ROWS)),
+                       'max_categories': obs_columns.MAX_CATEGORIES,
+                       'description_chars': obs_columns.DESCRIPTION_MAX_CHARS,
+                       'source_chars': obs_columns.SOURCE_MAX_CHARS},
+            'rights': 'the owner of the dataset or an admin (any uploader with datasets_deposit_update_policy: any); '
+                      'replace: owner or admin only',
+            'cells': 'every cell_name must be a cell of the dataset (an unknown name fails the deposit); cells '
+                     'without a value are allowed and reported',
+            'version': 'minor (additive); major when replace overwrites existing values',
+            'held_reasons': {'public_access': 'the dataset is public: an admin publishes the columns',
+                             'donor_identifiers': 'the table holds values of the donor crosswalk'},
+        }
+
     # de_only alias ---------------------------------------------------------
     def create_de_only_alias(self, identity: Identity, body: Dict[str, Any], context: Optional[ArtefactContext]
                              ) -> Dict[str, Any]:
@@ -1220,6 +1401,7 @@ class ArtefactDepositService(DepositService):
         answer = super().vocab(identity)
         answer['artefacts'] = self.artefact_vocab()
         answer['analysis_index_md'] = analysis_index_md_vocab()
+        answer['obs_columns'] = self.obs_columns_vocab()
         return answer
 
     def artefact_vocab(self) -> Dict[str, Any]:
@@ -1247,6 +1429,11 @@ class ArtefactDepositService(DepositService):
             'hold_public': bool(settings.get('artefacts_hold_public', True)),
             'incoming_key': '<prefix><data_project>/artefacts/<deposit_id>/<name>',
         }
+
+
+def _anno_name_pattern() -> str:
+    from anthive_db import _ANNO_COL_RE  # noqa: PLC0415
+    return _ANNO_COL_RE.pattern
 
 
 def is_de_only_body(body: Any) -> bool:
