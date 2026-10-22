@@ -323,6 +323,18 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### Version classes and the purge policy (design section 25)
+
+- A new h5ad for a published dataset is compared with the published one: additive (the same cells in the same
+  order, X, layers and every existing obs, var and obsm entry identical) is a minor version, anything else a
+  major version (X+1.0.0); before, every new h5ad was minor. The changelog line "Version class <class>:
+  <reason>" and the report's `version_class` ({class, reason, added, seconds}) record it; the watcher's kind is
+  `update_major`, `update_minor` or `update_patch`. Patch stays metadata only.
+- `ant ingest purge --local-only --verified` removes local `_versions/` copies whose S3 copy is verified;
+  `--superseded-minor` removes predecessors (S3 and local) of verified patch or minor versions; a version an
+  artefact's `made_from` or a facet result names stays without `--force`. `ingest_watch.keep_local_versions`
+  (default true): false drops the local copy right after a verified S3 archive.
+
 ### Operations fixes from the 2.46.5 scratch-site check
 
 - `ant sync pull --dry-run` (priority mode): the header shows `max_local_gb` next to free now, budget and

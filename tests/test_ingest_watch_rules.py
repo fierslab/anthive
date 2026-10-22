@@ -180,10 +180,13 @@ def test_seed_md_delta():
 def test_plan_update_rules(tmp_path):
     first = md_fill.profile_h5ad(make_h5ad(tmp_path / 'a.h5ad', n_cells=6))
     second = md_fill.profile_h5ad(make_h5ad(tmp_path / 'b.h5ad', n_cells=8, extra_obs='batch'))
-    minor = md_fill.plan_update({}, first, second, 'a' * 64, 'b' * 64, [])
-    assert minor.part == 'minor' and minor.previous_sha256 == 'a' * 64
-    assert any('6 -> 8' in change for change in minor.changes)
-    assert any('batch' in change for change in minor.changes)
+    major = md_fill.plan_update({}, first, second, 'a' * 64, 'b' * 64, [])     # not compared: major
+    assert major.part == 'major' and major.previous_sha256 == 'a' * 64
+    assert any('6 -> 8' in change for change in major.changes)
+    assert any('batch' in change for change in major.changes)
+    minor = md_fill.plan_update({}, first, second, 'a' * 64, 'b' * 64, [],
+                                data_class=('minor', 'additive: added obs/batch'))
+    assert minor.part == 'minor' and 'Version class minor: additive: added obs/batch.' in minor.changes
     patch = md_fill.plan_update({}, None, None, 'a' * 64, 'a' * 64, [('tissue', 'x', 'y')])
     assert patch.part == 'patch' and patch.previous_sha256 is None
     assert md_fill.plan_update({}, None, None, 'a' * 64, 'a' * 64, []).part is None

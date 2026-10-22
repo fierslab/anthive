@@ -943,7 +943,7 @@ class Watcher:
                                    pending.sha256 or '', pending.store_h5ad or '')
             self.db.record_version(pending.db_id or '', item.display, 'archived', pending.previous_version or '',
                                    pending.previous_sha256 or '', '; '.join(pending.archived_local[:1]))
-        if live and outcome.kind in ('new', 'update_minor', 'update_patch'):
+        if live and outcome.kind in ('new', 'update_major', 'update_minor', 'update_patch'):
             self.db.record_version(outcome.db_id or '', item.display, 'current', outcome.version or '',
                                    outcome.sha256 or '', outcome.store_h5ad or '')
             if outcome.previous_version and outcome.kind != 'new':

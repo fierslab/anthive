@@ -199,7 +199,7 @@ def test_updates_by_deposit_need_update_of_and_the_owner(tmp_path):
     env.clock_value += 10
     clock[0] = env.clock_value
     assert env.poll_twice() == {'live': 1}
-    assert service.status(ALICE, second)['version'] == '1.1.0'
+    assert service.status(ALICE, second)['version'] == '2.0.0'
     # a deposit record without update_of for a dataset that exists by now: a person decides
     third = deposit(env, service, seed=2, index=False, update_of='WT6/MIC')
     service.store.update(third, update_of=None)
@@ -255,6 +255,6 @@ def test_an_update_by_deposit_does_not_adopt_sidecar_depositor_lines(tmp_path):
                      sidecar_extra={'depositor': 'Mallory', 'depositor_email': 'm@evil.example'})
     env.clock_value += 10
     assert env.poll_twice() == {'live': 1}
-    assert service.status(ADMIN, second)['version'] == '1.1.0'
+    assert service.status(ADMIN, second)['version'] == '2.0.0'
     sidecar = (env.store / GROUP / 'micro.h5ad.mus').read_text()
     assert 'Mallory' not in sidecar and 'evil' not in sidecar

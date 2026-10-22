@@ -136,21 +136,21 @@ def test_pending_post_steps_run_before_a_later_patch_update(tmp_path):
     env = Env(tmp_path)
     _live_v1(env)
     _stop_during(env, 'facet_test')
-    keys = env.deposit(seed=1, with_seeds=False)                                # data update 1.1.0, stopped in post
+    keys = env.deposit(seed=1, with_seeds=False)                                # data update 2.0.0 (major), stopped in post
     env.clock_value += 10
     assert env.poll_twice() == {'retry': 1}
-    assert _marker(env, keys['h5ad'])['to'] == '1.1.0'
+    assert _marker(env, keys['h5ad'])['to'] == '2.0.0'
     env.stop = False
     keys = env.deposit(seed=1, with_seeds=False, sidecar_extra={'tissue': 'cortex', 'override_tissue': 'true'})
     env.clock_value += 120
     before = len(env.runner.commands)
     assert env.poll_twice() == {'live': 1}
     tools = [Path(cmd[0]).name for cmd in env.runner.commands[before:]]
-    assert tools.count('ant-facet-test') == 1                                   # the pending step of 1.1.0
+    assert tools.count('ant-facet-test') == 1                                   # the pending step of 2.0.0
     row = env.row(keys['h5ad'])
-    assert row['kind'] == 'update_patch' and row['version'] == '1.1.1'
+    assert row['kind'] == 'update_patch' and row['version'] == '2.0.1'
     versions = [(entry['action'], entry['version']) for entry in env.db.versions('WT6/MIC')]
-    assert ('current', '1.1.0') in versions and ('current', '1.1.1') in versions
+    assert ('current', '2.0.0') in versions and ('current', '2.0.1') in versions
     assert _marker(env, keys['h5ad']) is None and keys['h5ad'] in env.s3.deleted
 
 

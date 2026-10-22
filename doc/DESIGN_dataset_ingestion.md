@@ -1455,3 +1455,53 @@ store even when other sites are known (its own site id is skipped when reading r
    watcher (default none).
 4. Rotation: new secret file and `key_id` on the site, both lines on the watcher until every older record is
    processed; for the watcher's key, add the new public key on every site first.
+
+## 25. Version classes and the purge policy (2026-10-22, REST 2.47.0)
+
+Decided by Mark. A dataset version says what kind of change it was:
+
+- **patch**: metadata only (`.md` keys, caveats, mapping); the data files are unchanged.
+- **minor**: additive, no existing data destroyed: new obs columns (the obs-columns deposit and the h5ad merge
+  of pending columns, section 26), new embeddings or layers, new var columns; existing values untouched. A
+  minor version's predecessor can be removed without losing data.
+- **major**: data altered: X or a layer changed, cells added, removed or reordered, genes changed, an existing
+  obs value changed or a column removed, a new h5ad that is not a superset.
+
+### 25.1 The classifier (`lib/h5ad_compare.py`)
+
+Before 2.47.0 every new h5ad was a minor version. Now the watcher compares the new h5ad with the published
+one (`classify`, read-only through h5py): the obs names (an array or an encoded group) must be equal in order;
+then every dataset under `X`, `layers`, `obs`, `var`, `obsm`, `varm`, `obsp`, `varp` and `raw` of the old
+file must exist in the new one with the same shape, type and values, compared in blocks of `BLOCK_ELEMENTS`
+(8 M) values, so memory stays flat and the comparison stops at the first difference; a sparse group's
+`encoding-type` and `shape` attributes must match. Keys only the new file has under `layers`, `obs`, `var`,
+`obsm`, `varm`, `obsp` and `varp` are additions. `uns` is metadata and not compared. Result `minor` (with
+what was added, or "no data change") or `major` with the first difference ("data altered: obs/n_counts
+differs (rows 0 to ...)"). Without the published h5ad on the host, or when the files cannot be read, the class
+is major (never lower). The class and its reason are a changelog line ("Version class minor: additive: ...")
+and the report's `version_class` ({class, reason, added, seconds}); `outcome.kind` is `update_major`,
+`update_minor` or `update_patch`. A depositor cannot force a lower class. Measured: a 9.2 GB store file
+(Castonguay2026 cerebellum) against itself, every block read twice, 250 s, 291 MB peak memory.
+
+`md_edit.bump_version` takes `part` `patch`, `minor` (X.Y+1.0) or `major` (X+1.0.0).
+
+### 25.2 Purge policy (`lib/ingest_versions.py`, `ant-ingest purge`)
+
+- **Local copies** under `<Group>/_versions/` may be removed from a server at any time once the S3 copy is
+  verified (S3 is canonical): `ant-ingest purge --local-only --verified` (`plan_local_verified`,
+  `verify_s3_version`: the archived `.md` on S3, and the archived h5ad's `x-amz-meta-sha256` equal to the
+  version's sha256; a patch version archived without an h5ad needs the `.md` only). The watcher setting
+  `ingest_watch.keep_local_versions: false` drops the local copy right after a verified S3 archive
+  (`drop_local_if_verified`; default true, as before). `archive_s3` now copies the catalog object with its
+  metadata explicitly, so a managed multipart copy keeps the sha256.
+- **On S3**, `ant-ingest purge <db_id>|--all --superseded-minor` (`plan_superseded`) removes the S3 and local
+  copies of a version whose successor is patch or minor and verified (`verify_current` for the current h5ad,
+  `verify_s3_version` for an archived one). The step class comes from the current `.md` changelog
+  (`successor_class`): the major number decides major; a minor step counts as additive only with the
+  classifier's "Version class minor" line (pre-2.47 minor bumps may have altered data: `unknown`, kept); an
+  entry without `previous_sha256` at the same minor number is a patch. Major predecessors stay until an
+  explicit `--keep N`. `--dry-run` first, a typed `yes` or `--yes`, as the existing purge.
+- **References**: a version that an artefact manifest's `made_from` names (`{db_id, dataset_version}` or its
+  `h5ad_sha256`) or whose sha256 a facet result manifest recorded (`dataset_sha256`) is never purged from S3
+  without `--force` (`version_references`, `protected_by`, `protect_plan` for `--keep`); the run lists them.
+  `--local-only` needs no protection (the S3 copy stays).

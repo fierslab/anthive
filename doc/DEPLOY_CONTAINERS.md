@@ -836,6 +836,22 @@ s3:
 Signed links never reach the access log: the Caddy log filter drops the query string of a redirect's
 `Location` header (checked by `ant-stack check`).
 
+### Archived dataset versions (since 2.47.0)
+
+An update archives the previous version under `<Group>/_versions/` in the store and on S3. Since 2.47.0 a
+version is patch (metadata), minor (additive) or major (data altered), decided by comparing the files. To free
+disk space without losing anything:
+
+```sh
+bin/ops/ant-stack ingest -- ant ingest purge --all --local-only --verified --dry-run
+bin/ops/ant-stack ingest -- ant ingest purge --all --superseded-minor --dry-run
+```
+
+The first removes local copies whose S3 copy is verified; the second removes predecessors of verified patch or
+minor versions on S3 too. Run without `--dry-run` to apply (it asks for `yes`). Versions that artefacts or facet
+results name stay unless you add `--force`. A watcher host short of disk can set `ingest_watch:
+keep_local_versions: false` in its anthive.yaml (the local copy goes right after a verified S3 archive).
+
 ### Send deposits to a central watcher (since 2.47.0)
 
 A site can accept dataset and artefact deposits from its own users while one watcher on another host (the

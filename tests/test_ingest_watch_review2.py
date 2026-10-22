@@ -54,12 +54,12 @@ def test_n1_recovery_runs_the_post_steps_push_and_versions(tmp_path, monkeypatch
     env.clock_value += 3600
     assert env.watcher.poll() == {'live': 1}                 # recovery, then the item is finished at once
     row = env.row(keys['h5ad'])
-    assert row['kind'] == 'update_minor' and row['version'] == '1.1.0'
+    assert row['kind'] == 'update_major' and row['version'] == '2.0.0'
     tools = [Path(cmd[0]).name for cmd in env.runner.commands[before:]]
     assert 'ant-score-fleet' in tools and 'ant-facet-test' in tools               # the post steps ran
     assert not (env.state / 'swaps' / 'resume').exists() or not list((env.state / 'swaps' / 'resume').iterdir())
     assert [(entry['action'], entry['version']) for entry in env.db.versions('WT6/MIC')][-2:] == \
-        [('current', '1.1.0'), ('archived', '1.0.0')]
+        [('current', '2.0.0'), ('archived', '1.0.0')]
     catalog = env.s3.objects[f'{CATALOG}WatchTest2026/micro.h5ad']
     assert catalog['metadata']['sha256'] == sha_of(group / 'micro.h5ad')          # the new version was pushed
     assert keys['h5ad'] in env.s3.deleted

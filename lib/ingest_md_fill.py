@@ -569,7 +569,7 @@ def describe_change(key: str, old: Any, new: Any) -> str:
 @dataclass
 class UpdatePlan:
     """What an upload changes in a dataset that is already in the store."""
-    part: Optional[str]                     # 'minor', 'patch' or None (nothing changed)
+    part: Optional[str]                     # 'major', 'minor', 'patch' or None (nothing changed)
     changes: List[str]
     previous_sha256: Optional[str]
     sidecar_changes: List[Tuple[str, str, str]]
@@ -582,16 +582,21 @@ def _short(values: Sequence[str], limit: int = 8) -> str:
 
 def plan_update(old_meta: Dict[str, Any], old_profile: Optional[H5adProfile], new_profile: Optional[H5adProfile],
                 old_sha: str, new_sha: str, sidecar_changes: List[Tuple[str, str, str]],
-                extra_changes: Sequence[str] = (), notes: Sequence[str] = ()) -> UpdatePlan:
+                extra_changes: Sequence[str] = (), notes: Sequence[str] = (),
+                data_class: Optional[Tuple[str, str]] = None) -> UpdatePlan:
     """Version bump and changelog lines for an upload to an existing dataset path.
 
-    ``minor`` when the h5ad hash differs, ``patch`` when only sidecar keys
-    changed, ``None`` when the upload is identical to what is published.
+    When the h5ad hash differs the bump is ``data_class`` (``(part, reason)`` from
+    :func:`h5ad_compare.classify`: ``minor`` additive, ``major`` data altered; ``major`` when not given), with
+    the class and its reason as a changelog line; ``patch`` when only sidecar keys changed, ``None`` when the
+    upload is identical to what is published.
     """
     changes: List[str] = []
     data_changed = (not old_sha) or old_sha != new_sha
+    data_part, data_reason = data_class or ('major', 'data altered: not compared with the published h5ad')
     if data_changed:
         changes.append(f'New data from an S3 deposit: h5ad sha256 {old_sha[:12] or "unknown"} -> {new_sha[:12]}.')
+        changes.append(f'Version class {data_part}: {data_reason}.')
         if old_profile and new_profile:
             if old_profile.n_obs != new_profile.n_obs:
                 changes.append(f'Cells: {old_profile.n_obs} -> {new_profile.n_obs}.')
@@ -616,7 +621,7 @@ def plan_update(old_meta: Dict[str, Any], old_profile: Optional[H5adProfile], ne
     if not data_changed and not sidecar_changes and not extra_changes:
         return UpdatePlan(None, [], None, [])
     changes.extend(notes)
-    return UpdatePlan('minor' if data_changed else 'patch', changes, old_sha if data_changed else None,
+    return UpdatePlan(data_part if data_changed else 'patch', changes, old_sha if data_changed else None,
                       sidecar_changes)
 
 
@@ -642,7 +647,7 @@ def update_md_text(old_text: str, plan: UpdatePlan, new_sha: str, new_profile: O
     operations: List[Dict[str, Any]] = []
     if old_meta.get('sha256') != new_sha:
         operations.append(md_edit.set_top('sha256', new_sha))
-    if new_profile is not None and plan.part == 'minor':
+    if new_profile is not None and plan.part in ('minor', 'major'):
         for key, value in (('n_obs', new_profile.n_obs), ('n_vars', new_profile.n_vars)):
             if old_meta.get(key) != value:
                 operations.append(md_edit.set_top(key, value))

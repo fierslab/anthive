@@ -65,7 +65,7 @@ def test_c1_failure_while_staging_rolls_back_and_the_retry_is_an_update(tmp_path
     env.clock_value += 3600                                                 # past the retry delay
     assert env.watcher.poll() == {'live': 1}
     row = env.row(keys['h5ad'])
-    assert row['kind'] == 'update_minor' and row['version'] == '1.1.0'
+    assert row['kind'] == 'update_major' and row['version'] == '2.0.0'
     assert 'curator note' in (group / 'micro.md').read_text()
     assert _meta(group / 'micro.md')['api'] == {'obs_rename': {'donor': 'ant_donor'}}
 
@@ -95,7 +95,7 @@ def test_c1_crash_during_commit_is_rolled_forward_on_the_next_run(tmp_path, monk
         [f'swap {journals[0].stem}: rolled forward, post steps pending, WT6/MIC restored in ant-serve']
     assert restored == ['WT6/MIC']
     meta = _meta(group / 'micro.md')
-    assert meta['version'] == '1.1.0' and 'curator note' in (group / 'micro.md').read_text()
+    assert meta['version'] == '2.0.0' and 'curator note' in (group / 'micro.md').read_text()
     assert sha_of(group / 'micro.h5ad') == meta['sha256']
     assert (group / '_versions' / 'micro' / '1.0.0' / 'micro.md').exists()
     assert not list(group.glob('.*.ingest-new'))
@@ -661,7 +661,7 @@ def test_nit_unversioned_md_is_archived_as_0_0_0_and_bumped_from_it(tmp_path):
     keys = env.deposit(seed=1, with_seeds=False)
     env.clock_value += 10
     assert env.poll_twice() == {'live': 1}
-    assert _meta(md)['version'] == '0.1.0'
+    assert _meta(md)['version'] == '1.0.0'
     assert (env.store / 'WatchTest2026' / '_versions' / 'micro' / '0.0.0' / 'micro.md').exists()
 
 

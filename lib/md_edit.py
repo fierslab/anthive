@@ -210,10 +210,11 @@ def bump_version(changes: Sequence[str], date: str, part: str = 'patch',
     Args:
         changes: Lines of the changelog entry.
         date: ISO date of the entry.
-        part: ``patch`` (metadata only) or ``minor`` (the data changed: X.Y+1.0).
+        part: ``patch`` (metadata only), ``minor`` (additive: X.Y+1.0) or ``major`` (data altered: X+1.0.0);
+            design section 25 of doc/DESIGN_dataset_ingestion.md.
         previous_sha256: Recorded in the entry when the h5ad changed.
     """
-    if part not in ('patch', 'minor'):
+    if part not in ('patch', 'minor', 'major'):
         raise MdEditError(f'unknown version part {part!r}')
     operation = {'op': 'bump', 'changes': list(changes), 'date': date, 'part': part}
     if previous_sha256:
@@ -251,6 +252,8 @@ def _bump(version: Any, part: str = 'patch') -> str:
     parts = str(version).split('.')
     if len(parts) != 3 or not all(part_text.isdigit() for part_text in parts):
         raise MdEditError(f'version {version!r} is not major.minor.patch')
+    if part == 'major':
+        return f'{int(parts[0]) + 1}.0.0'
     if part == 'minor':
         return f'{parts[0]}.{int(parts[1]) + 1}.0'
     return f'{parts[0]}.{parts[1]}.{int(parts[2]) + 1}'

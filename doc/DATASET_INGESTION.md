@@ -245,8 +245,13 @@ stops too; this protects against two depositors who pick the same group and file
 version of someone else's dataset (the old one stays restorable). The same checks run.
 When they are clean:
 
-- a different h5ad (another sha256) becomes a new minor version (1.0.0 to 1.1.0), with a changelog entry
-  naming the previous sha256 and what changed (cells, genes, obs columns, sidecar keys);
+- a different h5ad (another sha256) is compared with the published one (read-only, streamed): when it only
+  adds (the same cells in the same order, X and every existing layer, obs, var and obsm entry identical; new
+  obs columns, embeddings, layers or var columns) it becomes a minor version (1.0.0 to 1.1.0); anything else
+  (a changed value, cells or genes added or removed, a column removed) is a major version (1.0.0 to 2.0.0). The
+  changelog entry names the previous sha256, the class with its reason ("Version class minor: additive: ...
+  added obs/batch") and what changed; the report carries `version_class`. A depositor cannot ask for a lower
+  class. Comparing a 9.2 GB store file with itself took 250 s with 291 MB of memory;
 - the same h5ad with new sidecar keys, overridden keys or new caveats in the deposited `<basename>.md`
   becomes a patch version (1.0.0 to 1.0.1);
 - an identical upload changes nothing (new static files are still placed).
@@ -294,7 +299,25 @@ ant ingest purge --all --keep 1 --yes       # every dataset, no question
 ```
 
 Purge only removes archived versions (`_versions/` folders and the matching S3 keys); `--local-only` leaves
-S3 alone. The watcher never purges.
+S3 alone. The watcher never purges (but see `keep_local_versions` below).
+
+What can go without losing data (design section 25):
+
+```bash
+ant ingest purge --all --local-only --verified --dry-run   # local copies whose S3 copy is verified
+ant ingest purge WT6/MIC --superseded-minor --dry-run      # predecessors of verified patch/minor versions
+```
+
+- A local copy under `_versions/` may go whenever its S3 copy is verified (S3 is canonical): `--local-only
+  --verified` checks the archived h5ad's `x-amz-meta-sha256` against the version's `.md` first, whatever
+  `--keep` says. `ingest_watch.keep_local_versions: false` makes the watcher drop the local copy right after a
+  verified S3 archive (default: keep).
+- On S3, a version whose successor is a patch or a minor version (additive) holds nothing the successor lacks:
+  `--superseded-minor` removes it (S3 and local) once the successor is verified on S3. A major predecessor
+  stays until an explicit `--keep N`. A minor bump from before 2.47.0 has no "Version class minor" line in
+  its changelog entry and counts as possibly altering (kept).
+- A version that an artefact's `made_from` names, or whose h5ad sha256 a facet result recorded, is never
+  removed from S3 without `--force`; the run lists those references (kept, or "--force over").
 
 Removing a dataset itself is a different thing. To take it out of the catalogue but keep everything, mark it
 inactive (`ant inactive <db_id>`, a `.inactive` sidecar) and rescan; to delete it, remove its files from the

@@ -259,7 +259,8 @@ def build(args: argparse.Namespace):
                        route='s3-watch', state_dir=state_dir, s3_endpoint=s3_cfg.get('endpoint'),
                        min_free_gb=settings['min_free_gb'],
                        require_update_marker=settings['require_update_marker'],
-                       incoming_bucket=incoming_bucket),
+                       incoming_bucket=incoming_bucket,
+                       keep_local_versions=bool(settings.get('keep_local_versions', True))),
         client, runner, ApiClient(api_url, config.internal_auth_headers()), log=log,
         stop_requested=lambda: _stop)
     pipeline.progress = progress

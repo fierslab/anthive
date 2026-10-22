@@ -42,6 +42,9 @@ Subcommands:
   ant-ingest prune --include-catalog-orphans
   ant-ingest purge <db_id> [--keep N] [--dry-run] [--yes]
   ant-ingest purge --all --keep N    # remove archived versions (local + S3)
+  ant-ingest purge --all --local-only --verified   # local copies whose S3 copy is verified
+  ant-ingest purge <db_id> --superseded-minor      # predecessors of verified patch/minor versions
+  (versions an artefact's made_from or a facet result names stay unless --force)
 
 Non-destructive guarantee: the default command never deletes anything on S3.
 ``prune`` and ``purge`` are the only commands that call S3 DeleteObject; both
@@ -1154,20 +1157,49 @@ def cmd_purge(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
         if not datasets:
             _err(f'{args.db_id}: no such dataset in {data_folder}')
             return 2
-    client = _s3_client(s3_cfg) if not args.local_only else None
+    if args.verified and not args.local_only:
+        _err('--verified goes with --local-only (it checks the S3 copy before the local one goes)')
+        return 2
+    if args.superseded_minor and args.local_only:
+        _err('--superseded-minor removes S3 and local copies; leave out --local-only')
+        return 2
+    client = _s3_client(s3_cfg) if (not args.local_only or args.verified) else None
     bucket = s3_cfg['bucket']
+    refs = None
+    if not args.local_only:                      # versions others point at stay unless --force (design 25)
+        refs = ingest_versions.version_references(data_folder, anthive_config.get_facet_results_dir())
     plans = []
+    kept = []
     for entry in datasets:
-        plan = ingest_versions.plan_purge(entry['db_id'], entry['dataset_dir'], entry['rel_dir'], entry['basename'],
-                                          entry['version'], args.keep, s3=client, bucket=bucket,
-                                          catalog_prefix=args.catalog_prefix)
+        if args.verified:
+            plan = ingest_versions.plan_local_verified(entry, client, bucket, args.catalog_prefix)
+        elif args.superseded_minor:
+            from metadata import parse_md_file  # noqa: PLC0415
+            meta = parse_md_file(entry['dataset_dir'] / f'{entry["basename"]}.md')[0]
+            plan = ingest_versions.plan_superseded(entry, meta, client, bucket, args.catalog_prefix, refs,
+                                                   force=args.force)
+        else:
+            plan = ingest_versions.plan_purge(entry['db_id'], entry['dataset_dir'], entry['rel_dir'],
+                                              entry['basename'], entry['version'], args.keep, s3=client,
+                                              bucket=bucket, catalog_prefix=args.catalog_prefix)
+            if refs is not None:
+                ingest_versions.protect_plan(plan, refs, force=args.force, s3=client, bucket=bucket,
+                                             catalog_prefix=args.catalog_prefix)
+        if plan.blocked:
+            kept.append(plan)
         if plan.remove_versions:
             plans.append(plan)
+    for plan in kept:
+        for version, reasons in plan.blocked.items():
+            print(f'{plan.db_id}  keeps {version}: {"; ".join(reasons)}')
     if not plans:
-        print(f'Nothing to purge (keep {args.keep}).')
+        print('Nothing to purge.' if (args.verified or args.superseded_minor) else f'Nothing to purge (keep {args.keep}).')
         return 0
     for plan in plans:
         print(f'{plan.db_id}  current {plan.current_version}  remove {", ".join(plan.remove_versions)}')
+        for version, reasons in plan.references.items():
+            if version in plan.remove_versions:
+                print(f'    --force over: {version}: {"; ".join(reasons)}')
         for folder in plan.local_dirs:
             print(f'    local  {folder}')
         for key in plan.s3_keys:
@@ -1244,6 +1276,14 @@ def main() -> int:
     purge_parser.add_argument('--dry-run', action='store_true', help='show what would be removed')
     purge_parser.add_argument('--yes', action='store_true', help='do not ask for confirmation')
     purge_parser.add_argument('--local-only', action='store_true', help='leave S3 alone')
+    purge_parser.add_argument('--verified', action='store_true',
+                              help='with --local-only: remove only local copies whose S3 copy is verified '
+                                   '(sha256), whatever --keep says')
+    purge_parser.add_argument('--superseded-minor', action='store_true',
+                              help='remove archived versions (S3 and local) whose successor is a patch or minor '
+                                   'version verified on S3; major predecessors stay')
+    purge_parser.add_argument('--force', action='store_true',
+                              help="also versions an artefact's made_from or a facet result names (listed)")
     purge_parser.add_argument('--catalog-prefix', default='', help="catalog prefix on S3 ('' = the root)")
 
     args = parser.parse_args()

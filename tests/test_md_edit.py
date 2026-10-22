@@ -82,6 +82,15 @@ def test_bump_version_updates_changelog_and_updated():
     assert _front(new)['changelog'][0]['version'] == '0.1.5'
 
 
+@pytest.mark.parametrize('part, version', [('patch', '0.1.5'), ('minor', '0.2.0'), ('major', '1.0.0')])
+def test_version_parts(part, version):
+    """Design section 25: patch metadata, minor additive, major data altered."""
+    new = md_edit.apply_edits(TEXT, [md_edit.bump_version(['x'], '2026-10-22', part=part)])
+    assert _front(new)['version'] == version
+    with pytest.raises(md_edit.MdEditError):
+        md_edit.bump_version(['x'], '2026-10-22', part='huge')
+
+
 def test_errors_are_raised_not_written():
     with pytest.raises(md_edit.MdEditError):
         md_edit.apply_edits('no front matter', [])

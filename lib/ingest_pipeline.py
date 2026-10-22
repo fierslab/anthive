@@ -825,6 +825,8 @@ class PipelineConfig:
     require_update_marker: bool = False
     #: the bucket of ``__incoming/`` (a central watcher's ingestion bucket, design section 24); default ``bucket``
     incoming_bucket: Optional[str] = None
+    #: false: an archived version's local copy goes right after its S3 copy is verified (design section 25)
+    keep_local_versions: bool = True
 
     @property
     def incoming(self) -> str:
@@ -841,7 +843,8 @@ class Outcome:
     """Result of :meth:`Pipeline.process`."""
     state: str = 'failed'                    # live | held | failed | needs_decision
     detail: str = ''
-    kind: str = ''                           # new | update_minor | update_patch | unchanged
+    kind: str = ''                           # new | update_major | update_minor | update_patch | unchanged
+    version_class: Optional[Dict[str, Any]] = None   # {class, reason, added, seconds} of a data update
     db_id: Optional[str] = None
     version: Optional[str] = None
     previous_version: Optional[str] = None
@@ -1335,8 +1338,17 @@ class Pipeline:
                     seed_md_applied = True
             data_changed = old_sha != actual
             old_profile = md_fill.profile_h5ad(store_h5ad, with_layer_stats=False) if data_changed else None
+            data_class = None
+            if data_changed:
+                # design section 25: the comparison with the published h5ad decides minor (additive) or major
+                import h5ad_compare  # noqa: PLC0415
+                started_class = time.time()
+                part, reason, details = h5ad_compare.classify_or_major(store_h5ad, staged_h5ad)
+                data_class = (part, reason)
+                outcome.version_class = {**details, 'class': part, 'reason': reason}
+                self._timed(outcome, 'classify', started_class, f'version class {part}: {reason}')
             plan = md_fill.plan_update(old_meta, old_profile, new_profile, old_sha, actual, merge.changes,
-                                       extra_changes=extra_changes, notes=notes)
+                                       extra_changes=extra_changes, notes=notes, data_class=data_class)
             if plan.part is None:
                 if approval_caveat:
                     outcome.warnings.append('approval recorded, but the upload changes nothing')
@@ -1369,7 +1381,7 @@ class Pipeline:
             except Exception as exc:  # noqa: BLE001 - md_edit refuses an edit it cannot verify
                 raise Blocked('needs_decision', f'the store .md cannot be edited safely ({exc}); update it by hand')
             staged_md.write_text(new_text)
-            outcome.kind = 'update_minor' if data_changed else 'update_patch'
+            outcome.kind = f'update_{plan.part}' if data_changed else 'update_patch'
             outcome.rebuilt = outcome.rebuilt and not data_changed      # a minor update converts anyway
             outcome.version = str(parse_md_file(staged_md)[0].get('version'))
             de_sidecar = store_dir / f'{item.basename}.de.parquet'
@@ -1415,6 +1427,9 @@ class Pipeline:
         if code == 2 or not report_json.exists():
             raise Blocked('failed', f'ant-ingest-check could not run (exit {code}): {tail[-1500:]}', str(report_json))
         report = json.loads(report_json.read_text())
+        if outcome.version_class:                   # design section 25: the class and its reason in the report
+            report['version_class'] = outcome.version_class
+            report_json.write_text(json.dumps(report, indent=1))
         checks = [entry for entry in report.get('checks', []) if isinstance(entry, dict)]
         self.progress(_verdict_line(report, checks) + f' in {outcome.timings["ingest_check"]:.1f} s')
         if report.get('result') == 'fail':
@@ -1440,7 +1455,7 @@ class Pipeline:
         started = time.time()
         if is_update:
             placed_static = self._swap_update(item, outcome, group_dir, store_dir, plain_static, store_group,
-                                              data_changed=outcome.kind == 'update_minor',
+                                              data_changed=outcome.kind in ('update_minor', 'update_major'),
                                               views_changed=outcome.rebuilt)
         else:
             placed_static = self._swap_new(item, outcome, group_dir, store_dir, store_group, plain_static,
@@ -1618,6 +1633,14 @@ class Pipeline:
                     journal._save()
                 self._commit(journal)
                 outcome.archived_local = list(meta['archived_local'])
+                if not cfg.keep_local_versions and cfg.push_catalog and outcome.archived_s3:
+                    dropped, why = ingest_versions.drop_local_if_verified(
+                        store_dir, item.basename, version, self.s3, cfg.bucket, cfg.catalog_prefix, item.rel_dir)
+                    if dropped:
+                        outcome.archived_local = []
+                        self.log(f'local copy of {item.display} {version} removed (its S3 copy is verified)')
+                    else:
+                        outcome.warnings.append(f'local copy of version {version} kept: {why}')
             finally:
                 if released:
                     try:

@@ -584,6 +584,8 @@ INGEST_WATCH_DEFAULTS: Dict[str, Any] = {
     'incoming_bucket': '',
     'sites_dir': '',
     'trusted_admin_sites': [],
+    'keep_local_versions': True,
+    'merge_window': '01:00-06:00',
     'notify': {'on': ['live', 'held', 'failed', 'needs_decision'], 'webhook_url': '', 'email_to': '',
                'email_from': 'anthive-ingest@localhost', 'smtp_host': '', 'smtp_port': 25},
 }

@@ -346,7 +346,23 @@ def _live_v1(env: Env) -> dict:
     return keys
 
 
-def test_update_with_new_data_is_a_minor_version_and_keeps_the_previous_one(tmp_path):
+def test_an_additive_update_is_a_minor_version_with_its_class_in_the_changelog_and_report(tmp_path):
+    """Design section 25: the same cells, X, layers and annotations plus a new obs column is minor."""
+    env = Env(tmp_path)
+    _live_v1(env)
+    keys = env.deposit(seed=0, with_seeds=False, extra_obs='batch')
+    env.clock_value += 10
+    assert env.poll_twice() == {'live': 1}
+    row = env.row(keys['h5ad'])
+    assert row['kind'] == 'update_minor' and row['version'] == '1.1.0'
+    entry = yaml.safe_load((env.store / 'WatchTest2026' / 'micro.md').read_text().split('---\n')[1])['changelog'][-1]
+    assert any(change.startswith('Version class minor: additive') and 'obs/batch' in change
+               for change in entry['changes'])
+    report = json.loads(Path(row['report_path']).read_text())
+    assert report['version_class']['class'] == 'minor' and 'obs/batch' in report['version_class']['added']
+
+
+def test_update_with_altered_data_is_a_major_version_and_keeps_the_previous_one(tmp_path):
     env = Env(tmp_path)
     _live_v1(env)
     group = env.store / 'WatchTest2026'
@@ -362,11 +378,11 @@ def test_update_with_new_data_is_a_minor_version_and_keeps_the_previous_one(tmp_
     env.clock_value += 10
     assert env.poll_twice() == {'live': 1}
     row = env.row(keys['h5ad'])
-    assert row['kind'] == 'update_minor' and row['version'] == '1.1.0'
+    assert row['kind'] == 'update_major' and row['version'] == '2.0.0'
     new_meta = yaml.safe_load(md.read_text().split('---\n')[1])
-    assert new_meta['version'] == '1.1.0'
+    assert new_meta['version'] == '2.0.0'
     entry = new_meta['changelog'][-1]
-    assert entry['previous_sha256'] == old_sha and entry['version'] == '1.1.0'
+    assert entry['previous_sha256'] == old_sha and entry['version'] == '2.0.0'
     assert any('batch' in change for change in entry['changes'])
     assert any(caveat.get('message') == 'curator note' for caveat in new_meta['caveats'])
     assert any(caveat.get('topic') == 'dataset_update' for caveat in new_meta['caveats'])
@@ -379,7 +395,7 @@ def test_update_with_new_data_is_a_minor_version_and_keeps_the_previous_one(tmp_
     assert f'{CATALOG}WatchTest2026/_versions/micro/1.0.0/micro.md' in env.s3.objects
     assert 'release:WT6/MIC' in env.api.calls and 'restore:WT6/MIC' in env.api.calls
     versions = env.db.versions('WT6/MIC')
-    assert [(entry['action'], entry['version']) for entry in versions][-2:] == [('current', '1.1.0'),
+    assert [(entry['action'], entry['version']) for entry in versions][-2:] == [('current', '2.0.0'),
                                                                                  ('archived', '1.0.0')]
 
 
