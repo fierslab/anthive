@@ -25,6 +25,7 @@ The watcher never writes a site's staging except its result; it reads the record
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -43,6 +44,17 @@ UPDATE_KINDS = ('dataset', 'metadata_update', 'de_only', 'obs_columns')
 FINAL_WATCH_STATES = ('live', 'rejected', 'failed')
 #: copies up to this size are one CopyObject; larger ones a managed (multipart) copy
 COPY_SINGLE_MAX = 5 * 1024 ** 3
+#: a copy of a multipart upload up to this size is read back and its sha256 compared at copy time
+SHA_CHECK_MAX_BYTES = 256 * 1024 ** 2
+
+
+class CopyMismatch(RuntimeError):
+    """A copy into incoming that is not the signed upload (its copies are removed, the record is refused)."""
+
+
+def _absent(exc: BaseException) -> bool:
+    code = str(((getattr(exc, 'response', None) or {}).get('Error') or {}).get('Code') or '')
+    return isinstance(exc, KeyError) or code in ('404', 'NoSuchKey', 'NotFound')
 
 
 def epoch(value: Any) -> float:
@@ -117,8 +129,9 @@ class RemoteSites:
         return [obj for obj in objects if str(obj.get('Key', '')).endswith('/' + dr.RECORD_NAME)]
 
     def import_records(self, store: Any, listed: Mapping[str, Tuple[Any, ...]]) -> Dict[str, int]:
-        """Verify and import every new record version of the known sites. ``listed``: incoming key -> (etag,
-        size, last modified as epoch seconds; 0 when unknown)."""
+        """Verify and import every new record version of the known sites, then check the incoming copies of the
+        imported deposits that wait (``_check_copies``, by HEAD). ``listed`` (incoming key -> etag, size, last
+        modified) is no longer needed since the watcher copies itself (24.9); kept for callers."""
         listed = {key: (tuple(value) + (0.0,))[:3] for key, value in listed.items()}
         counts = {'imported': 0, 'refused': 0, 'ignored': 0}
         state = self._load()
@@ -127,7 +140,7 @@ class RemoteSites:
         except Exception as exc:  # noqa: BLE001 - listing trouble: the next poll tries again
             self._log_once('list', f'listing {self.staging_root} failed ({type(exc).__name__})')
             return counts
-        verified: List[Tuple[str, str, str, Dict[str, Any], float]] = []
+        verified: List[Tuple[str, str, str, Dict[str, Any]]] = []
         for obj in objects:
             key = str(obj['Key'])
             parsed = dr.parse_object_key(key, self.staging_root)
@@ -154,12 +167,15 @@ class RemoteSites:
             if isinstance(envelope, str):
                 counts[envelope] = counts.get(envelope, 0) + 1
                 continue
-            verified.append((key, site_id, deposit_id, envelope, epoch(obj.get('LastModified'))))
+            verified.append((key, site_id, deposit_id, envelope))
         # withdrawn and expired records first: they release their claims before the uploads of this poll
         verified.sort(key=lambda entry: entry[3]['record'].get('state') not in ('withdrawn', 'expired'))
-        for key, site_id, deposit_id, envelope, record_mtime in verified:
+        imported_now = set()
+        for key, site_id, deposit_id, envelope in verified:
             try:
-                outcome = self._import_one(store, state, key, site_id, deposit_id, envelope, listed, record_mtime)
+                outcome = self._import_one(store, state, key, site_id, deposit_id, envelope)
+                if outcome == 'imported':
+                    imported_now.add(deposit_id)
             except Deferred as reason:
                 self._log_once(key, f'{key}: waits, {reason}')
                 outcome = 'waiting'
@@ -167,8 +183,46 @@ class RemoteSites:
                 self._log_once(key, f'{key}: not imported ({type(exc).__name__}); retried next poll')
                 outcome = 'ignored'
             counts[outcome] = counts.get(outcome, 0) + 1
+        try:
+            counts['copies_changed'] = self._check_copies(store, state, skip=imported_now)
+        except Exception as exc:  # noqa: BLE001 - the next poll checks again
+            self._log_once('copies', f'checking the incoming copies failed ({type(exc).__name__})')
         self._save(state)
         return counts
+
+    def _check_copies(self, store: Any, state: Dict[str, Any], skip: Any = ()) -> int:
+        """An imported remote deposit that waits to be linked: its incoming copies must still carry the ETags this
+        watcher recorded. A copy that is gone, rewritten or re-marked (an ETag change) means the route would never
+        link the deposit again; it gets ``needs_decision`` and the signed result says why (review round 3)."""
+        changed = 0
+        for row in store.remote_rows(self.local_site_id):
+            if row['id'] in skip or row.get('state') != 'uploaded' or row.get('watch_state') or row.get('disputed') \
+                    or row.get('site_id') not in self.sites:
+                continue
+            gone = []
+            for entry in store.files(row['id']):
+                if not entry.get('etag'):
+                    continue
+                try:
+                    head = self.s3.head_object(Bucket=self.bucket, Key=entry['key'])
+                    etag = str(head.get('ETag', '')).strip('"')
+                except Exception as exc:  # noqa: BLE001
+                    if not _absent(exc):
+                        raise
+                    etag = None
+                if etag != entry['etag']:
+                    gone.append(str(entry['key']))
+            if not gone:
+                continue
+            reason = (f'{", ".join(gone[:5])} of this deposit was removed, rewritten or re-marked in incoming after '
+                      f'the watcher copied it; the deposit is not published. An admin of the central site decides '
+                      f'(reject it; the site deposits again)')
+            store.update(row['id'], watch_state='needs_decision', error=reason)
+            self._delete_copies({entry['key']: entry['etag'] for entry in store.files(row['id'])
+                                 if entry.get('etag') and str(entry['key']) not in gone})
+            self.log(f'remote deposits: {row["id"]} of {row["site_id"]}: {reason}')
+            changed += 1
+        return changed
 
     def _read_verified(self, key: str, site_id: str, deposit_id: str) -> Any:
         """The verified envelope of a record, or the outcome word when it is unreadable or not authentic."""
@@ -185,8 +239,7 @@ class RemoteSites:
             return 'refused'
 
     def _import_one(self, store: Any, state: Dict[str, Any], key: str, site_id: str, deposit_id: str,
-                    envelope: Dict[str, Any], listed: Mapping[str, Tuple[str, int, float]],
-                    record_mtime: float = 0.0) -> str:
+                    envelope: Dict[str, Any]) -> str:
         seen_key = f'{site_id}/{deposit_id}'
         version = envelope['version']
         seen = int(state['seen'].get(seen_key) or 0)
@@ -212,6 +265,15 @@ class RemoteSites:
         if not problems and record.get('state') in ('withdrawn', 'expired'):
             self._remove_copies(store, state, record, site_id, deposit_id)
             self._release_claims(state, f'{site_id}/{deposit_id}')
+            before = store.get(deposit_id)
+            note = f'the deposit was {record.get("state")} at {site_id}; the watcher removed its incoming copies'
+            if before is not None and before.get('watch_state') not in (None, '', 'live', 'rejected', 'failed'):
+                # a final signed result: the deposit ended at the site while it waited for a decision here
+                store.update(deposit_id, watch_state=record.get('state'), error=note)
+            elif before is None and f'{site_id}/{deposit_id}' in state['results']:
+                # refused before (never imported): the refusal is answered by a final result too
+                self._write_result(state, site_id, deposit_id,
+                                   dr.result_from_row({'watch_state': record.get('state'), 'error': note}, None))
         if problems:
             self._refuse(state, site_id, deposit_id, '; '.join(problems))
             state['seen'][seen_key] = version
@@ -223,6 +285,9 @@ class RemoteSites:
         if sources:
             try:
                 copied = self._stage_in(state, record, site_id, deposit_id, sources)
+            except CopyMismatch as exc:          # the copies are removed; never import a copy that is not signed
+                self._refuse(state, site_id, deposit_id, str(exc))
+                return 'refused'
             except Exception as exc:  # noqa: BLE001 - a failed copy: the record is looked at again next poll
                 self._log_once(key, f'{key}: copy into incoming failed ({type(exc).__name__}); retried next poll')
                 return 'waiting'
@@ -391,9 +456,30 @@ class RemoteSites:
                                                               'CopySourceIfMatch': condition})
         head = self.s3.head_object(Bucket=self.bucket, Key=key)
         marks = {str(k).lower(): str(v) for k, v in (head.get('Metadata') or {}).items()}
+        etag = str(head.get('ETag', '')).strip('"')
+        copied[key] = etag                     # recorded first, so a refusal below removes this copy too
         if int(head.get('ContentLength') or -1) != int(entry['size']) or marks.get('deposit') != deposit_id:
-            raise RuntimeError(f'the copy of {entry.get("name")} into incoming could not be verified')
-        copied[key] = str(head.get('ETag', '')).strip('"')
+            raise CopyMismatch(f'{entry.get("name")}: the copy in incoming has another size or mark than the signed '
+                               f'upload; nothing imported')
+        staged = str(entry['staging_etag'])
+        if '-' not in staged:
+            # a single-part upload: its ETag is the MD5 of its bytes, and a copy (server-side or streamed in one
+            # PUT) keeps it. Another ETag means other bytes, e.g. a swap between the HEAD and a copy whose
+            # CopySourceIfMatch the store ignored (review round 3)
+            if etag != staged:
+                raise CopyMismatch(f'{entry.get("name")}: the copy in incoming is not the signed upload (ETag '
+                                   f'{etag[:12]} instead of {staged[:12]}); nothing imported')
+        elif int(entry['size']) <= SHA_CHECK_MAX_BYTES:
+            # a multipart ETag depends on the part sizes of whoever wrote it: read the copy back and compare the
+            # sha256 (cheap up to SHA_CHECK_MAX_BYTES). Larger copies are checked by the pull's sha256 against
+            # the signed record (C5), before anything is published
+            digest = hashlib.sha256()
+            body = self.s3.get_object(Bucket=self.bucket, Key=key, IfMatch=f'"{etag}"')['Body']
+            for chunk in iter(lambda: body.read(8 * 1024 * 1024), b''):
+                digest.update(chunk)
+            if digest.hexdigest() != entry.get('sha256'):
+                raise CopyMismatch(f'{entry.get("name")}: the copy in incoming is not the signed upload (sha256); '
+                                   f'nothing imported')
 
     def _remove_copies(self, store: Any, state: Dict[str, Any], record: Mapping[str, Any], site_id: str,
                        deposit_id: str) -> None:
@@ -418,8 +504,7 @@ class RemoteSites:
         try:
             head = self.s3.head_object(Bucket=self.bucket, Key=key)
         except Exception as exc:  # noqa: BLE001
-            code = str(((getattr(exc, 'response', None) or {}).get('Error') or {}).get('Code') or '')
-            if isinstance(exc, KeyError) or code in ('404', 'NoSuchKey', 'NotFound'):
+            if _absent(exc):
                 return None
             raise
         metadata = {str(name).lower(): str(value) for name, value in (head.get('Metadata') or {}).items()}

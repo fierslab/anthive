@@ -1494,6 +1494,21 @@ re-mark another site's upload in the instant between that copy and the record (2
   `<ingest_state_dir>/secrets/incoming_s3_access_key_id` and `incoming_s3_secret_access_key`, else the block
   (keep keys out of the config text); endpoint and region default to the `s3` block, the bucket to
   `incoming_bucket`. The pair never enters the watcher's settings dict.
+- **Review round 3** (2026-10-22): the copy itself is checked before anything is imported. A single-part
+  upload's copy must show the signed staging ETag (its MD5, kept by a server-side copy and by a one-PUT
+  streamed copy); a multipart upload's copy is read back and its sha256 compared up to 256 MB
+  (`SHA_CHECK_MAX_BYTES`), larger ones rely on the pull's sha256 check against the signed record (C5), which
+  runs before anything is published. A mismatch (for example a swap between the HEAD and a copy whose
+  `CopySourceIfMatch` the store ignored) removes every copy of the attempt and refuses the record with a signed
+  `needs_decision`. Each poll HEADs the copies of imported remote deposits that wait to be linked
+  (`_check_copies`): a copy that is gone, rewritten or re-marked gives the deposit `needs_decision` and a signed
+  result (before, it stayed `uploaded` without an answer); the remaining copies are removed. A site keeps the
+  staged uploads of a `needs_decision` deposit `datasets_deposit_decision_days` after completion (0, the
+  default: twice `datasets_deposit_max_open_days`), then removes them, expires the deposit and e-mails the
+  depositor (`expire_decided`); the watcher reads the expired record, removes its copies and signs a final
+  result (`expired`, also for a record it had refused). `streamed_copy` reads at most the HEAD size, in
+  chunks, and at most 9,001 parts; `BucketRouter` refuses a call without an explicit `Bucket=` (except
+  `generate_presigned_url`, `can_paginate`, `close`).
 - **Single host** (the API and the watcher share `ingest_state_dir`, no `central_watcher`): unchanged. The API
   copies the verified uploads into incoming itself, as there is no record to verify and both run with the
   same keys on the same host; the simplest correct design is to keep the 2.46 path there.

@@ -332,6 +332,11 @@ Collection deposits create `<Group>/index.md`; a public one is held.
   older protocol) are refused by the watcher.
 - `ingest_watch.incoming_s3` (key pair from secrets files or env) gives the ingestion bucket its own keys;
   copies between the buckets are streamed and sha256-checked (`ingest_watch.copy_mode`: auto, server, stream).
+- Review round 3: a copy that is not the signed upload is never imported (signed `needs_decision`); an
+  imported deposit whose incoming copies changed gets `needs_decision` with a signed result; a central site
+  ends a `needs_decision` deposit after `datasets_deposit_decision_days` (default twice
+  `datasets_deposit_max_open_days`): staged uploads removed, state `expired`, an e-mail to the depositor, and a
+  final signed result `expired` from the watcher.
 
 ### Obs-columns deposits and the h5ad merge (design section 26)
 

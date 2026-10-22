@@ -117,6 +117,10 @@ datasets_deposit_max_gb: 200
 datasets_deposit_url_ttl_hours: 24
 # ... and at the latest this many days after it was created.
 datasets_deposit_max_open_days: 7
+# A site with a central watcher keeps the staged uploads of a deposit that ended in needs_decision this many
+# days after its completion, then removes them, ends the deposit (expired; the watcher removes its incoming
+# copies and signs a final result) and e-mails the depositor. 0: twice datasets_deposit_max_open_days.
+datasets_deposit_decision_days: 0
 # Open (not yet completed) deposits per user.
 datasets_deposit_max_open_per_user: 5
 # Bytes a user may have waiting (uploading, or completed but not yet published), in GB.

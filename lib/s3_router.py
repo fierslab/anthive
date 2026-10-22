@@ -17,7 +17,10 @@ import hashlib
 from typing import Any, Dict, Iterator, Mapping, Optional
 
 PART_BYTES = 64 * 1024 * 1024
-MAX_PARTS = 9000
+MAX_PARTS = 9000                 # S3 allows 10,000 parts; the part size grows to stay below this
+READ_BYTES = 8 * 1024 * 1024
+#: calls without a Bucket that the router passes to the data bucket's client
+NO_BUCKET_CALLS = ('generate_presigned_url', 'can_paginate', 'close')
 COPY_MODES = ('auto', 'server', 'stream')
 
 
@@ -63,21 +66,33 @@ def streamed_copy(source_client: Any, source_bucket: str, source_key: str, targe
     digest = hashlib.sha256()
     body = response['Body']
     if size <= part:
-        data = body.read()
-        digest.update(data)
+        buffer = bytearray()
+        for chunk in _chunks(body, min(READ_BYTES, max(size, 1))):   # bounded by the HEAD size, in chunks
+            buffer += chunk
+            if len(buffer) > size:
+                raise CopyError(f'{source_key}: the source is longer than its HEAD says; not copied')
+        if len(buffer) != size:
+            raise CopyError(f'{source_key}: the source is shorter than its HEAD says; not copied')
+        digest.update(buffer)
         if expected and digest.hexdigest() != expected:
             raise CopyError(f'{source_key}: the bytes read are not the expected sha256; not copied')
-        target_client.put_object(Bucket=target_bucket, Key=target_key, Body=data, **extra)
+        target_client.put_object(Bucket=target_bucket, Key=target_key, Body=bytes(buffer), **extra)
     else:
         upload = target_client.create_multipart_upload(Bucket=target_bucket, Key=target_key, **extra)
         upload_id = upload['UploadId']
         parts = []
         try:
+            read = 0
             for number, chunk in enumerate(_chunks(body, part), start=1):
+                read += len(chunk)
+                if read > size or number > MAX_PARTS + 1:
+                    raise CopyError(f'{source_key}: the source is longer than its HEAD says; not copied')
                 digest.update(chunk)
                 answer = target_client.upload_part(Bucket=target_bucket, Key=target_key, UploadId=upload_id,
                                                    PartNumber=number, Body=chunk)
                 parts.append({'PartNumber': number, 'ETag': answer['ETag']})
+            if read != size:
+                raise CopyError(f'{source_key}: the source is shorter than its HEAD says; not copied')
             if expected and digest.hexdigest() != expected:
                 raise CopyError(f'{source_key}: the bytes read are not the expected sha256; not copied')
             target_client.complete_multipart_upload(Bucket=target_bucket, Key=target_key, UploadId=upload_id,
@@ -132,6 +147,9 @@ class BucketRouter:
 
         def call(*args: Any, **kwargs: Any) -> Any:
             bucket = kwargs.get('Bucket')
+            if bucket is None and name not in NO_BUCKET_CALLS:
+                # never guess the key pair: a call without an explicit Bucket would go to the data keys
+                raise TypeError(f'BucketRouter.{name} needs an explicit Bucket= keyword')
             return getattr(self.client_for(bucket), name)(*args, **kwargs)
         return call
 

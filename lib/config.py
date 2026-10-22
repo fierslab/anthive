@@ -781,6 +781,7 @@ def get_dataset_deposit_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[s
         'max_gb': number('datasets_deposit_max_gb', 200.0),
         'url_ttl_hours': number('datasets_deposit_url_ttl_hours', 24.0),
         'max_open_days': number('datasets_deposit_max_open_days', 7.0),
+        'decision_days': number('datasets_deposit_decision_days', 0.0),
         'max_open_per_user': number('datasets_deposit_max_open_per_user', 5, int),
         'max_pending_gb_per_user': number('datasets_deposit_max_pending_gb_per_user', 400.0),
         'presign_per_minute': number('datasets_deposit_presign_per_minute', 30, int),

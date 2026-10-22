@@ -207,3 +207,30 @@ def test_the_ingestion_key_pair_comes_from_secrets_files_or_env_never_the_settin
         config.get_incoming_s3(dict(cfg, ingest_watch={}))            # a pair without a bucket
     with pytest.raises(config.ConfigError):
         config.get_ingest_watch_settings(dict(cfg, ingest_watch={'copy_mode': 'teleport'}))
+
+
+class Lying(Service):
+    """A source whose body is longer than its HEAD says."""
+
+    def head_object(self, Bucket, Key):  # noqa: N803
+        head = super().head_object(Bucket=Bucket, Key=Key)
+        head['ContentLength'] = int(head['ContentLength']) - 10
+        return head
+
+
+@pytest.mark.parametrize('part_bytes', [s3_router.PART_BYTES, 64])
+def test_a_source_longer_than_its_head_is_refused(part_bytes):
+    ingest, data = Lying('ingest'), Service('data')
+    ingest.put('__incoming/G/x.tsv', BODY, metadata={'sha256': SHA})
+    with pytest.raises(s3_router.CopyError, match='longer than its HEAD'):
+        s3_router.streamed_copy(ingest, 'ingest', '__incoming/G/x.tsv', data, 'data', 'cat/G/x.tsv',
+                                part_bytes=part_bytes)
+    assert 'cat/G/x.tsv' not in data.objects and data.uploads == {}
+
+
+def test_the_router_refuses_a_call_without_an_explicit_bucket():
+    _ingest, _data, router = services()
+    with pytest.raises(TypeError, match='explicit Bucket'):
+        router.head_object('ingest', '__incoming/G/x.tsv')
+    with pytest.raises(TypeError, match='explicit Bucket'):
+        router.delete_object(Key='__incoming/G/x.tsv')

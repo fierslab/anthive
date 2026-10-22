@@ -83,7 +83,7 @@ STALE_COMPLETING_SECONDS = 12 * 3600
 #: Watcher states a depositor sees (``pulled`` / ``checked`` are shown as ``checking``).
 WATCH_FINAL = ('live', 'held', 'failed', 'needs_decision', 'rejected')
 WATCH_BUSY = ('pulled', 'checked')
-NOTIFY_DEPOSITOR_ON = ('live', 'held', 'failed')
+NOTIFY_DEPOSITOR_ON = ('live', 'held', 'failed', 'expired')
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deposits (
@@ -148,6 +148,8 @@ class DepositSettings:
     max_gb: float = 200.0
     url_ttl_hours: float = 24.0
     max_open_days: float = 7.0
+    #: a central watcher's needs_decision deposit keeps its staged uploads this long (0: 2 x max_open_days)
+    decision_days: float = 0.0
     max_open_per_user: int = 5
     max_pending_gb_per_user: float = 400.0
     presign_per_minute: int = 30
@@ -1333,6 +1335,7 @@ class DepositService:
                 if self.settings.central_watcher and record['state'] == 'uploaded' \
                         and record.get('watch_state') not in ('live', 'rejected', 'failed'):
                     continue              # the central watcher copies from staging: kept until it is final
+                                          # (a needs_decision deposit ends after decision_days: expire_decided)
                 if record['state'] in TERMINAL_STATES:
                     # a central watcher's record and result stay until the deposit is over and old
                     over = record['state'] in ('withdrawn', 'expired') or record.get('watch_state') in ('live',
@@ -1358,10 +1361,43 @@ class DepositService:
             self.publish_record(record['id'])
         return True
 
+    def expire_decided(self) -> List[str]:
+        """A site with a central watcher: a deposit that ended in ``needs_decision`` (refused, or stopped by the
+        watcher) keeps its staged uploads ``decision_days`` after its completion (default twice
+        ``max_open_days``); then they are removed, the deposit expires (the signed record tells the watcher, which
+        removes its incoming copies and signs a final result) and the depositor gets an e-mail."""
+        if not self.settings.central_watcher:
+            return []
+        days = self.settings.decision_days or 2 * self.settings.max_open_days
+        cutoff = self.clock() - days * 86400
+        ended: List[str] = []
+        for record in self.store._rows("SELECT * FROM deposits WHERE state = 'uploaded' AND watch_state = "
+                                       "'needs_decision' AND COALESCE(completed, created) < ?", (cutoff,)):
+            if not self._expire_one(record, 'decision_expiry', ('uploaded',)):
+                continue
+            message = (f'this deposit waited {days:g} days in needs_decision; its uploads were removed and the '
+                       f'deposit has ended. Deposit again once the cause is fixed.')
+            self.store.update(record['id'], error=message)
+            self.store.event(record['id'], 'decision_expiry', 'expired', message)
+            try:
+                import ingest_watch  # noqa: PLC0415
+                fresh = self.store.get(record['id']) or record
+                ingest_watch.notify_depositor({'notify': self.settings.notify}, fresh,
+                                              {'state': 'expired', 'error': message, 'held_reasons': '[]'}, None,
+                                              lambda line: self.store.event(record['id'], 'site', 'notify', line))
+            except Exception:  # noqa: BLE001 - the e-mail is best effort
+                pass
+            ended.append(record['id'])
+        return ended
+
     def expire_stale(self) -> List[str]:
         """Expire open deposits whose window passed (and interrupted completes), then sweep the staging prefix."""
         now = self.clock()
         expired: List[str] = []
+        try:
+            expired += self.expire_decided()
+        except Exception:  # noqa: BLE001 - runs again on the next call
+            pass
         for record in self.store._rows("SELECT * FROM deposits WHERE (state = 'uploading' AND expires <= ?) OR "
                                        "(state = 'completing' AND updated <= ?)", (now, now - STALE_COMPLETING_SECONDS)):
             if self._expire_one(record, 'expiry', (record['state'],)):

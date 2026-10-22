@@ -19,7 +19,7 @@ import deposit_records as dr
 from tests.deposit_helpers import ALICE, upload
 from tests.ingest_watch_helpers import PREFIX
 from tests.test_dataset_deposit_watch import deposit_body
-from tests.test_deposit_central_watcher import SECRET, _deposit, _split, central
+from tests.test_deposit_central_watcher import SECRET, _deposit, _split, central, mailbox  # noqa: F401
 
 ATTACKER_SECRET = 'attacker-secret-' + 'z' * 40
 EVIL = 'dep_' + 'e' * 20
@@ -335,3 +335,108 @@ def test_the_site_keys_folder_must_be_private_and_hold_regular_files(tmp_path):
     os.chmod(folder, 0o770)
     with pytest.raises(dr.RecordError, match='not be writable by group or others'):
         dr.load_site_keys(folder)
+
+
+# ── security review round 3 (24.9): regression tests of its probes ───────────────────────────────────────
+
+def test_a_swap_between_the_head_and_the_copy_is_refused_when_the_store_ignores_the_pin(tmp_path, monkeypatch):
+    import remote_deposits
+    env, service, clock = central(tmp_path)
+    env.s3.ignore_conditions = True                    # a store that ignores CopySourceIfMatch
+    deposit_id = _deposit(env, service)
+    record = _honest_record(env, deposit_id)
+    h5ad = next(entry for entry in record['files'] if entry['key'] == record['watch_key'])
+    original = remote_deposits.RemoteSites._copy_one
+
+    def swapping(self, entry, key, bucket, source_key, dep, copied):
+        if source_key == h5ad['staging_key']:
+            obj = env.s3.objects[source_key]
+            env.s3.put(source_key, obj['body'][:-1] + bytes([obj['body'][-1] ^ 1]), env.clock_value,
+                       metadata=obj['metadata'])          # other bytes, same size and marks
+        return original(self, entry, key, bucket, source_key, dep, copied)
+    monkeypatch.setattr(remote_deposits.RemoteSites, '_copy_one', swapping)
+    env.watcher.poll()
+    assert _store(env).get(deposit_id) is None                       # never imported
+    assert not [key for key in env.s3.objects if key.startswith(PREFIX)]   # every copy removed
+    answer = _result(env, 'intern', deposit_id)
+    assert answer['state'] == 'needs_decision' and 'is not the signed upload (ETag' in answer['error']
+    env.watcher.poll()                                               # later polls see the swapped staging
+    assert _store(env).get(deposit_id) is None
+    assert 'not the signed one' in _result(env, 'intern', deposit_id)['error']
+
+
+def test_a_copy_of_a_multipart_upload_is_checked_by_its_sha256(tmp_path, monkeypatch):
+    import remote_deposits
+    env, service, clock = central(tmp_path)
+    deposit_id = _deposit(env, service)
+    store = _store(env)
+    record = _honest_record(env, deposit_id)
+    h5ad = next(entry for entry in record['files'] if entry['key'] == record['watch_key'])
+    copied = {}
+    env.s3.ignore_conditions = True                    # the pin on a made-up multipart ETag is not the point here
+    entry = dict(h5ad, staging_etag='0' * 32 + '-2', sha256='f' * 64)  # a multipart upload whose bytes differ
+    env.s3.objects[h5ad['key']] = dict(env.s3.objects[h5ad['staging_key']])
+    with pytest.raises(remote_deposits.CopyMismatch, match='sha256'):
+        env.watcher.remote._copy_one(entry, h5ad['key'], 'ingest', h5ad['staging_key'], deposit_id, copied)
+    assert h5ad['key'] in copied                                      # recorded, so the caller removes it
+    del store
+
+
+def test_re_marking_the_watchers_copies_never_takes_the_upload_and_answers_the_owner(tmp_path):
+    env, service, clock = central(tmp_path)
+    _attacker(env, 'prod')
+    deposit_id = _deposit(env, service)
+    store = _store(env)
+    assert env.watcher.remote.import_records(store, {})['imported'] == 1      # copied into incoming, waiting
+    honest = _honest_record(env, deposit_id)
+    files = []
+    env.clock_value += 5
+    for entry in honest['files']:
+        staged = f'__deposits/prod/{EVIL}/{entry["name"]}'
+        body = env.s3.objects[entry['staging_key']]['body']
+        etag = env.s3.put(staged, body, env.clock_value, metadata={'deposit': EVIL, 'sha256': entry['sha256']})
+        env.s3.put(entry['key'], env.s3.objects[entry['key']]['body'], env.clock_value,
+                   metadata={'deposit': EVIL, 'sha256': entry['sha256']})            # re-mark the watcher's copy
+        env.s3.objects[entry['key']]['etag'] = hashlib.md5(entry['key'].encode()).hexdigest() + '-1'
+        files.append(dict(entry, staging_key=staged, staging_etag=etag))
+    forged = dict(honest, id=EVIL, user='mallory', files=files)
+    env.s3.put(f'__deposits/prod/{EVIL}/record.json', dr.sign_record(forged, 'prod', EVIL, 1, 'k1', ATTACKER_SECRET),
+               env.clock_value + 1)
+    env.poll_twice()
+    env.poll_twice()
+    assert (store.get(EVIL) or {}).get('watch_state') != 'live'
+    assert store.owner_of_dataset('WT6/MIC') != 'mallory@prod'
+    assert store.get(deposit_id)['watch_state'] == 'needs_decision'          # not 'uploaded' forever
+    answer = _result(env, 'intern', deposit_id)
+    assert answer['state'] == 'needs_decision' and 're-marked in incoming' in answer['error']
+    status = service.status(ALICE, deposit_id)
+    assert status['state'] == 'needs_decision'
+
+
+def test_record_mtime_is_gone():
+    import inspect
+    import remote_deposits
+    assert 'record_mtime' not in inspect.getsource(remote_deposits)
+
+
+def test_staged_uploads_of_a_needs_decision_deposit_expire_with_a_final_result(tmp_path, mailbox):
+    env, service, clock = central(tmp_path)
+    deposit_id = _deposit(env, service)
+    seed = next(row for row in service.store.files(deposit_id) if row['kind'] == 'seed_md')
+    env.s3.put(seed['staging_key'], b'---\ntitle: swapped\n---\n', env.clock_value,
+               metadata=env.s3.objects[seed['staging_key']]['metadata'])
+    env.poll_twice()
+    assert service.status(ALICE, deposit_id)['state'] == 'needs_decision'
+    staged = [row['staging_key'] for row in service.store.files(deposit_id)]
+    clock[0] += 13 * 86400
+    assert service.expire_decided() == []                              # 2 x max_open_days (7) not reached
+    assert all(key in env.s3.objects for key in staged)
+    clock[0] += 2 * 86400
+    assert service.expire_decided() == [deposit_id]
+    assert not [key for key in staged if key in env.s3.objects]       # the staged uploads are gone
+    assert service.store.get(deposit_id)['state'] == 'expired'
+    assert [message['To'] for message in mailbox.messages] == ['alice@example.org']
+    assert 'expired' in mailbox.messages[0]['Subject']
+    env.watcher.remote.import_records(_store(env), {})                # the expired record reaches the watcher
+    answer = _result(env, 'intern', deposit_id)
+    assert answer['state'] == 'expired' and 'removed its incoming copies' in answer['error']
