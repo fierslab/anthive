@@ -82,6 +82,12 @@ nothing is removed or renamed.
   lock file on release while still holding it and, after each flock, checks that the path still names the
   locked file (retrying otherwise), so the removal cannot let two writers in. `ant-merge-h5ad` no longer
   removes the lock file of another writer when it finds the lock busy.
+- One definition of the ingestion bucket in anthive.yaml: `datasets_deposit_s3` (the block the api presigns
+  into). The watcher derives its ingestion bucket and key pair from it (`config.get_ingestion_s3`; the pair
+  only for a bucket other than `s3.bucket`), with the env and `<ingest_state_dir>/secrets/incoming_s3_*`
+  still winning for the keys. `ingest_watch.incoming_s3` stays as an override for a watcher without
+  `datasets_deposit_s3`; different buckets in the two blocks are refused. `ingest_watch.incoming_bucket`
+  (2.47.0) is removed and refused with a pointer to `datasets_deposit_s3`. No REST change.
 - The deployment guide says how to try a deposit by hand: the watcher publishes after two unchanged listings
   and `settle_seconds`, so a single `ant-stack watch -- --once` right after a deposit publishes nothing; a
   test run may poll twice with `--settle-seconds 0`.

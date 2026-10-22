@@ -159,24 +159,28 @@ def s3_client(s3_cfg: dict, retries: Optional[dict] = None, timeouts: Optional[d
 
 def s3_clients(cfg: dict, settings: dict, s3_cfg: dict):
     """``(client, listing client, incoming bucket)``: one key pair, or a router over the data bucket's and the
-    ingestion bucket's pairs (``ingest_watch.incoming_s3``; copies between them streamed, ``copy_mode``)."""
+    ingestion bucket's pairs (copies between them streamed, ``copy_mode``). The ingestion bucket and its pair
+    come from ``datasets_deposit_s3`` (``ingest_watch.incoming_s3`` overrides; ``config.get_ingestion_s3``)."""
     from s3_router import BucketRouter  # noqa: PLC0415
 
     try:
-        incoming = config.get_incoming_s3(cfg)
+        ingestion = config.get_ingestion_s3(cfg)
     except config.ConfigError as exc:
         sys.exit(str(exc))
+    incoming = ({field: ingestion[field] for field in config.INCOMING_S3_FIELDS}
+                if ingestion['own_pair'] else None)
     main, lister = s3_client(s3_cfg), s3_client(s3_cfg, LIST_RETRIES, LIST_TIMEOUTS)
     if incoming is None:
-        bucket = settings.get('incoming_bucket') or s3_cfg['bucket']
+        bucket = ingestion['bucket'] or s3_cfg['bucket']
+        if bucket != s3_cfg['bucket']:
+            log(f'ingestion bucket {bucket} (from {ingestion["source"]}) with the s3 keys')
         if settings['copy_mode'] == 'auto':
             return main, lister, bucket
         return (BucketRouter(main, {}, settings['copy_mode']), BucketRouter(lister, {}, settings['copy_mode']),
                 bucket)
     bucket = incoming['bucket']
-    if bucket == s3_cfg['bucket']:
-        sys.exit('ERROR: ingest_watch.incoming_s3.bucket must be another bucket than s3.bucket')
-    log(f'ingestion bucket {bucket} with its own key pair; copies to {s3_cfg["bucket"]}: {settings["copy_mode"]}')
+    log(f'ingestion bucket {bucket} (from {ingestion["source"]}) with its own key pair; copies to '
+        f'{s3_cfg["bucket"]}: {settings["copy_mode"]}')
     return (BucketRouter(main, {bucket: s3_client(incoming)}, settings['copy_mode']),
             BucketRouter(lister, {bucket: s3_client(incoming, LIST_RETRIES, LIST_TIMEOUTS)}, settings['copy_mode']),
             bucket)
@@ -408,7 +412,7 @@ def artefact_publisher(cfg: dict, settings: dict, client, s3_cfg: dict, db, stor
     artefact_settings = config.get_artefact_settings(cfg)
     return artefact_pipeline.ArtefactPublisher(
         store_root=store_root, state_dir=state_dir, work_root=work_root / 'artefacts', s3=client,
-        bucket=s3_cfg['bucket'], incoming_bucket=incoming_bucket or settings.get('incoming_bucket') or s3_cfg['bucket'],
+        bucket=s3_cfg['bucket'], incoming_bucket=incoming_bucket or s3_cfg['bucket'],
         incoming_prefix=settings['prefix'],
         catalog_prefix=artefact_settings['catalog_prefix'], artefact_settings=artefact_settings, db=db, api=api,
         settle_seconds=float(settings['settle_seconds']), log=log, git_commit=settings['store_git_commit'],

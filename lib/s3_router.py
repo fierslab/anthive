@@ -1,6 +1,7 @@
 """One S3 client surface over two key pairs: the ingestion bucket's and the catalog's (design section 24.9).
 
-A central watcher may hold separate credentials for the ingestion bucket (``ingest_watch.incoming_s3``: read
+A central watcher may hold separate credentials for the ingestion bucket (``datasets_deposit_s3``, or the
+override ``ingest_watch.incoming_s3``; ``config.get_ingestion_s3``: read
 the sites' staging, write and delete ``__incoming/``) and for the data bucket (the catalog). The watcher's code
 calls one client with an explicit ``Bucket``; :class:`BucketRouter` sends every call to the client of that
 bucket. A copy between buckets of different clients cannot be a server-side copy (neither key pair reaches both

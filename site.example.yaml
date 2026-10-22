@@ -218,7 +218,8 @@ datasets:
   # host by `up` / `init`, bound read-only into the api only; copy it to the watcher host, `check` says how;
   # scope the ingestion key pair to __deposits/<site_id>/ where the store can: the site writes only there and the
   # watcher copies into __incoming/ itself), and reads the watcher's signed result.json back. No watcher runs on
-  # this site (`ant-stack watch` refuses).
+  # this site (`ant-stack watch` refuses). The api gets it as datasets_deposit_s3 in its anthive.yaml; the
+  # watcher host names the same bucket in datasets_deposit_s3 of its own anthive.yaml.
   central_watcher:
     ingestion_bucket: null  # e.g. anthive-ingest: holds __deposits/<site_id>/ and __incoming/
     endpoint: null          # default s3.endpoint

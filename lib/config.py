@@ -581,7 +581,6 @@ INGEST_WATCH_DEFAULTS: Dict[str, Any] = {
     'work_ttl_days': 14,
     'allow_repo_dirs': False,
     'accept_unlinked': True,
-    'incoming_bucket': '',
     'sites_dir': '',
     'trusted_admin_sites': [],
     'keep_local_versions': True,
@@ -621,6 +620,8 @@ def get_ingest_watch_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str,
     """
     cfg = cfg if cfg is not None else get_config()
     block = cfg.get('ingest_watch') or {}
+    if str(block.get('incoming_bucket') or '').strip() or os.environ.get('ANTHIVE_INGEST_WATCH_INCOMING_BUCKET'):
+        raise ConfigError(REMOVED_INCOMING_BUCKET)
     settings: Dict[str, Any] = {}
     for key, default in INGEST_WATCH_DEFAULTS.items():
         if key in ('notify', 'incoming_s3'):
@@ -652,23 +653,42 @@ INCOMING_S3_SECRET_FILES = {'access_key_id': 'incoming_s3_access_key_id',
                             'secret_access_key': 'incoming_s3_secret_access_key'}
 
 
-def get_incoming_s3(cfg: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    """The ingestion bucket's own key pair of a central watcher (``ingest_watch.incoming_s3``, design 24.9).
+REMOVED_INCOMING_BUCKET = ('ERROR: [Config] ingest_watch.incoming_bucket was removed in 2.47.1: the ingestion bucket '
+                           'is datasets_deposit_s3.bucket (or, for a watcher without that block, '
+                           'ingest_watch.incoming_s3.bucket)')
 
-    Per field: env ``ANTHIVE_INGEST_WATCH_INCOMING_S3_<FIELD>`` > for the key pair the secrets files
-    ``<ingest_state_dir>/secrets/incoming_s3_access_key_id`` and ``incoming_s3_secret_access_key`` > the block
-    in anthive.yaml (keep keys out of the config text: use the files) > endpoint and region of the ``s3`` block,
-    bucket ``ingest_watch.incoming_bucket``. None without a key pair: then the ``s3`` keys reach both buckets
-    (one client, server-side copies).
+
+def get_ingestion_s3(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The ingestion bucket the watcher reads (incoming prefix, the sites' records), and its key pair.
+
+    One definition (2.47.1): ``datasets_deposit_s3``, the block the api presigns into, is the ingestion bucket.
+    A watcher on the same host as the api (a single host, dev) and the central watcher host read it from the
+    same anthive.yaml. ``ingest_watch.incoming_s3`` is only an override, for a watcher whose config has no
+    ``datasets_deposit_s3``; a config that names different buckets in the two blocks is refused.
+
+    Fields endpoint, region, bucket, access_key_id, secret_access_key. Per field: env
+    ``ANTHIVE_INGEST_WATCH_INCOMING_S3_<FIELD>`` > for the key pair the secrets files
+    ``<ingest_state_dir>/secrets/incoming_s3_access_key_id`` and ``incoming_s3_secret_access_key`` >
+    ``ingest_watch.incoming_s3`` > ``datasets_deposit_s3`` > the ``s3`` block (endpoint, region, bucket).
+
+    Returns a dict with those fields plus ``source`` (``incoming_s3``, ``datasets_deposit_s3`` or ``s3``) and
+    ``own_pair``: True when the watcher must use this key pair for the ingestion bucket (a bucket other than
+    ``s3.bucket``). In the data bucket itself the watcher always uses the ``s3`` keys (a presigning pair may
+    be limited to the incoming prefixes), and ``access_key_id`` / ``secret_access_key`` are then empty.
 
     Raises:
-        ConfigError: a key pair without a bucket, or half a key pair.
+        ConfigError: different buckets in the two blocks, half a key pair, or an override key pair for
+            ``s3.bucket`` itself.
     """
     cfg = cfg if cfg is not None else get_config()
-    block = dict((cfg.get('ingest_watch') or {}).get('incoming_s3') or {})
+    watch_block = cfg.get('ingest_watch') or {}
+    if str(watch_block.get('incoming_bucket') or '').strip():
+        raise ConfigError(REMOVED_INCOMING_BUCKET)
+    override = dict(watch_block.get('incoming_s3') or {})
+    deposit = dict(cfg.get('datasets_deposit_s3') or {})
     base = dict(cfg.get('s3') or {})
     secrets_dir = get_ingest_state_dir(cfg, create=False) / 'secrets'
-    out: Dict[str, Any] = {}
+    explicit: Dict[str, str] = {}               # env, secrets files and the override block
     for field in INCOMING_S3_FIELDS:
         value = os.environ.get(f'ANTHIVE_INGEST_WATCH_INCOMING_S3_{field.upper()}', '').strip()
         if not value and field in INCOMING_S3_SECRET_FILES:
@@ -678,20 +698,45 @@ def get_incoming_s3(cfg: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, 
             except OSError:
                 value = ''
         if not value:
-            value = str(block.get(field) or '').strip()
-        if not value and field in ('endpoint', 'region'):
-            value = str(base.get(field) or '').strip()
-        if not value and field == 'bucket':
-            value = str((cfg.get('ingest_watch') or {}).get('incoming_bucket') or '').strip()
-        out[field] = value
-    if not out['access_key_id'] and not out['secret_access_key']:
-        return None
-    if not out['access_key_id'] or not out['secret_access_key']:
+            value = str(override.get(field) or '').strip()
+        explicit[field] = value
+    deposit_bucket = str(deposit.get('bucket') or '').strip()
+    if explicit['bucket'] and deposit_bucket and explicit['bucket'] != deposit_bucket:
+        raise ConfigError(f'ERROR: [Config] the ingestion bucket is defined twice with different buckets: '
+                          f'datasets_deposit_s3.bucket {deposit_bucket!r} and ingest_watch.incoming_s3.bucket '
+                          f'{explicit["bucket"]!r}; keep datasets_deposit_s3 only (incoming_s3 is an override for a '
+                          f'watcher whose config has no datasets_deposit_s3)')
+    if bool(explicit['access_key_id']) != bool(explicit['secret_access_key']):
         raise ConfigError('ERROR: [Config] ingest_watch.incoming_s3 needs both access_key_id and secret_access_key')
-    if not out['bucket']:
-        raise ConfigError('ERROR: [Config] ingest_watch.incoming_s3 has a key pair but no bucket '
-                          '(incoming_s3.bucket or ingest_watch.incoming_bucket)')
+    data_bucket = str(base.get('bucket') or '').strip()
+    out: Dict[str, Any] = {}
+    for field in ('endpoint', 'region', 'bucket'):
+        out[field] = (explicit[field] or str(deposit.get(field) or '').strip()
+                      or str(base.get(field) or '').strip())
+    if explicit['access_key_id']:
+        out['access_key_id'], out['secret_access_key'] = explicit['access_key_id'], explicit['secret_access_key']
+        out['source'] = 'incoming_s3'
+        if out['bucket'] == data_bucket:
+            raise ConfigError('ERROR: [Config] ingest_watch.incoming_s3 has its own key pair for s3.bucket itself: '
+                              'an own pair is for an ingestion bucket other than s3.bucket')
+    else:
+        out['access_key_id'] = str(deposit.get('access_key_id') or '').strip()
+        out['secret_access_key'] = str(deposit.get('secret_access_key') or '').strip()
+        out['source'] = ('incoming_s3' if explicit['bucket'] else 'datasets_deposit_s3' if deposit_bucket
+                         else 's3')
+    out['own_pair'] = bool(out['bucket'] != data_bucket and out['access_key_id'] and out['secret_access_key'])
+    if not out['own_pair']:
+        out['access_key_id'] = out['secret_access_key'] = ''
     return out
+
+
+def get_incoming_s3(cfg: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """The ingestion bucket's own key pair (``get_ingestion_s3`` when it has one), else None: then the
+    ``s3`` keys reach both buckets (one client, server-side copies)."""
+    ingestion = get_ingestion_s3(cfg)
+    if not ingestion['own_pair']:
+        return None
+    return {field: ingestion[field] for field in INCOMING_S3_FIELDS}
 
 
 def get_dataset_ingest_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

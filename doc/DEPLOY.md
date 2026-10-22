@@ -60,6 +60,11 @@ The watcher (`ant-ingest-watch`, run by systemd or `make ingest-watch`) gains wo
   `merge_max_load`, `merge_min_free_gb`, `copy_mode`, `incoming_s3`; top level `obs_columns_max_file_gb`,
   `obs_columns_max_columns`, `obs_columns_max_rows`, `datasets_deposit_decision_days`. The central watcher keys
   (`incoming_bucket`, `incoming_s3`, `sites_dir`, `trusted_admin_sites`) stay unset in 2.47.0.
+- 2.47.1: the ingestion bucket has one definition, `datasets_deposit_s3` (the block the api presigns into). A
+  watcher reading the same anthive.yaml (this host, or the central watcher host) takes its ingestion bucket and
+  key pair from it; `ingest_watch.incoming_s3` only overrides it for a watcher without that block, a different
+  bucket in the two is refused, and `ingest_watch.incoming_bucket` is removed (the watcher refuses to start
+  with it: move the bucket into `datasets_deposit_s3.bucket`).
 - Restart the watcher together with api, web and mcp after the upgrade.
 
 ## Upgrading a host install to 2.45

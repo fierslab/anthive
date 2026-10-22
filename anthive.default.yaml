@@ -153,9 +153,11 @@ datasets_deposit_site_id: ''
 # Who may deposit a new version of a published dataset: own (the user whose
 # deposit published it, and admins) or any (every depositor).
 datasets_deposit_update_policy: own
-# Optional separate key pair for presigning (endpoint, region and bucket are
-# taken from s3 unless given here). Empty: the s3 block's keys. With a central
-# watcher (below) this is the INGESTION bucket: staging, records and __incoming/.
+# THE ingestion bucket (2.47.1: its one definition): where the api presigns deposits into (staging, records)
+# and where the watcher reads __incoming/. Fields endpoint, region, bucket, access_key_id, secret_access_key;
+# endpoint, region and bucket default to the s3 block. Empty: the s3 block's bucket and keys. A watcher that
+# reads this anthive.yaml (one host, or the central watcher host) takes its ingestion bucket from here, and
+# uses this key pair for it when the bucket is not s3.bucket (in s3.bucket itself it keeps the s3 keys).
 datasets_deposit_s3: {}
 # One central watcher for several sites (doc/DESIGN_dataset_ingestion.md section 24). true: this API writes
 # each deposit's signed record.json next to its uploads in the ingestion bucket and reads the watcher's
@@ -283,15 +285,14 @@ ingest_watch:
   delete_despite_post_warnings: true
   # Base URL of the local ant-serve (empty: api_url / rest_api_host:port).
   api_url: ''
-  # The bucket of the incoming prefix and of the sites' deposit records (the INGESTION bucket of a central
-  # watcher, doc/DESIGN_dataset_ingestion.md section 24). Empty: s3.bucket. The watcher's s3 keys must
-  # read, write and delete in it; published files still go to s3.bucket.
-  incoming_bucket: ''
-  # The ingestion bucket's own key pair (section 24.9), when the watcher's s3 keys should not reach it (or the
-  # data keys should not be in reach of the ingestion side). Fields endpoint, region, bucket (defaults: the s3
-  # block's endpoint and region, incoming_bucket); put the key pair in <ingest_state_dir>/secrets/
-  # incoming_s3_access_key_id and incoming_s3_secret_access_key (mode 600) or the env
-  # ANTHIVE_INGEST_WATCH_INCOMING_S3_ACCESS_KEY_ID / _SECRET_ACCESS_KEY, never in this file. Empty: one key pair.
+  # The ingestion bucket (incoming prefix, the sites' deposit records; doc/DESIGN_dataset_ingestion.md
+  # section 24) is datasets_deposit_s3 above; published files always go to s3.bucket. incoming_s3 only
+  # overrides it, for a watcher whose config has no datasets_deposit_s3: fields endpoint, region, bucket
+  # (defaults: datasets_deposit_s3, then the s3 block). Its key pair, and a key pair that replaces the one of
+  # datasets_deposit_s3, goes in <ingest_state_dir>/secrets/incoming_s3_access_key_id and
+  # incoming_s3_secret_access_key (mode 600) or the env ANTHIVE_INGEST_WATCH_INCOMING_S3_ACCESS_KEY_ID /
+  # _SECRET_ACCESS_KEY. A bucket here that differs from datasets_deposit_s3.bucket is refused. (The separate
+  # ingest_watch.incoming_bucket of 2.47.0 is gone: name the bucket in datasets_deposit_s3.)
   incoming_s3: {}
   # Copies between the two buckets: auto (server-side with one key pair, streamed through this host with two),
   # server (always server-side: the data keys must read the ingestion bucket), stream (always streamed).

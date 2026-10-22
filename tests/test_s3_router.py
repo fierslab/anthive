@@ -181,13 +181,81 @@ def test_an_artefact_is_placed_with_separate_ingestion_and_catalog_keys(tmp_path
     assert data.server_copies == 0 and ingest.foreign == [] and data.foreign == []
 
 
-def test_the_ingestion_key_pair_comes_from_secrets_files_or_env_never_the_settings(tmp_path, monkeypatch):
-    import config
+@pytest.fixture
+def clean_ingestion_env(monkeypatch):
     for name in ('ACCESS_KEY_ID', 'SECRET_ACCESS_KEY', 'BUCKET', 'ENDPOINT', 'REGION'):
         monkeypatch.delenv(f'ANTHIVE_INGEST_WATCH_INCOMING_S3_{name}', raising=False)
+    monkeypatch.delenv('ANTHIVE_INGEST_WATCH_INCOMING_BUCKET', raising=False)
     monkeypatch.delenv('ANTHIVE_INGEST_STATE_DIR', raising=False)
+
+
+DEPOSIT_S3 = {'endpoint': 'ingest.example', 'region': 'eu', 'bucket': 'ingest', 'access_key_id': 'AKIDDEP',
+              'secret_access_key': 'secretdep'}
+
+
+def test_the_ingestion_bucket_is_derived_from_datasets_deposit_s3(tmp_path, clean_ingestion_env):
+    """2.47.1: one definition. A single host and the central watcher read datasets_deposit_s3, the block the
+    api presigns into."""
+    import config
     cfg = {'ingest_state_dir': str(tmp_path / 'ingest'), 's3': {'endpoint': 's3.example', 'bucket': 'data'},
-           'ingest_watch': {'incoming_bucket': 'ingest'}}
+           'datasets_deposit_s3': dict(DEPOSIT_S3)}
+    ingestion = config.get_ingestion_s3(cfg)
+    assert ingestion['source'] == 'datasets_deposit_s3' and ingestion['own_pair'] is True
+    assert config.get_incoming_s3(cfg) == DEPOSIT_S3
+    # a presigning pair limited to the incoming prefixes of the data bucket itself: the watcher keeps the s3 keys
+    same = dict(cfg, datasets_deposit_s3={'access_key_id': 'AKIDDEP', 'secret_access_key': 'secretdep'})
+    ingestion = config.get_ingestion_s3(same)
+    assert ingestion['bucket'] == 'data' and ingestion['own_pair'] is False and ingestion['access_key_id'] == ''
+    assert config.get_incoming_s3(same) is None
+    # neither block: the data bucket with the s3 keys
+    plain = config.get_ingestion_s3({'ingest_state_dir': str(tmp_path / 'ingest'), 's3': {'bucket': 'data'}})
+    assert plain['bucket'] == 'data' and plain['source'] == 's3' and not plain['own_pair']
+    # another bucket without a key pair of its own: that bucket, reached with the s3 keys
+    keyless = config.get_ingestion_s3(dict(cfg, datasets_deposit_s3={'bucket': 'ingest'}))
+    assert keyless['bucket'] == 'ingest' and not keyless['own_pair']
+
+
+def test_the_watcher_builds_its_clients_from_datasets_deposit_s3(tmp_path, clean_ingestion_env):
+    import config
+    from s3_router import BucketRouter
+    from tests.test_ingest_watch import _watch_cli
+    cli = _watch_cli()
+    s3_cfg = {'endpoint': 's3.example', 'region': 'eu', 'bucket': 'data', 'access_key_id': 'AKIDDATA',
+              'secret_access_key': 'secretdata'}
+    cfg = {'ingest_state_dir': str(tmp_path / 'ingest'), 's3': s3_cfg, 'datasets_deposit_s3': dict(DEPOSIT_S3)}
+    settings = config.get_ingest_watch_settings(cfg)
+    client, lister, bucket = cli.s3_clients(cfg, settings, s3_cfg)
+    assert bucket == 'ingest' and isinstance(client, BucketRouter) and set(client.clients) == {'ingest'}
+    assert client.clients['ingest'].meta.endpoint_url == 'https://ingest.example'
+    client, lister, bucket = cli.s3_clients(dict(cfg, datasets_deposit_s3={}), settings, s3_cfg)
+    assert bucket == 'data' and not isinstance(client, BucketRouter)
+
+
+def test_incoming_s3_overrides_and_both_buckets_must_agree(tmp_path, clean_ingestion_env):
+    import config
+    base = {'ingest_state_dir': str(tmp_path / 'ingest'), 's3': {'endpoint': 's3.example', 'bucket': 'data'}}
+    override = dict(base, ingest_watch={'incoming_s3': {'bucket': 'ingest', 'access_key_id': 'AKIDOVR',
+                                                        'secret_access_key': 'secretovr'}})
+    pair = config.get_incoming_s3(override)                            # a watcher without datasets_deposit_s3
+    assert pair['bucket'] == 'ingest' and pair['access_key_id'] == 'AKIDOVR' and pair['endpoint'] == 's3.example'
+    assert config.get_ingestion_s3(override)['source'] == 'incoming_s3'
+    both_same = dict(override, datasets_deposit_s3=dict(DEPOSIT_S3))
+    assert config.get_incoming_s3(both_same)['access_key_id'] == 'AKIDOVR'     # the override's pair wins
+    assert config.get_incoming_s3(both_same)['endpoint'] == 'ingest.example'
+    both_differ = dict(override, datasets_deposit_s3=dict(DEPOSIT_S3, bucket='other-ingest'))
+    with pytest.raises(config.ConfigError, match='defined twice with different buckets'):
+        config.get_ingestion_s3(both_differ)
+    with pytest.raises(config.ConfigError, match='removed in 2.47.1'):
+        config.get_ingestion_s3(dict(base, ingest_watch={'incoming_bucket': 'ingest'}))
+    with pytest.raises(config.ConfigError, match='removed in 2.47.1'):
+        config.get_ingest_watch_settings(dict(base, ingest_watch={'incoming_bucket': 'ingest'}))
+
+
+def test_the_ingestion_key_pair_comes_from_secrets_files_or_env_never_the_settings(tmp_path, clean_ingestion_env,
+                                                                                   monkeypatch):
+    import config
+    cfg = {'ingest_state_dir': str(tmp_path / 'ingest'), 's3': {'endpoint': 's3.example', 'bucket': 'data'},
+           'datasets_deposit_s3': {'bucket': 'ingest'}}
     assert config.get_incoming_s3(cfg) is None                         # one key pair
     secrets = tmp_path / 'ingest' / 'secrets'
     secrets.mkdir(parents=True)
@@ -200,11 +268,11 @@ def test_the_ingestion_key_pair_comes_from_secrets_files_or_env_never_the_settin
                     'secret_access_key': 'secretfile'}
     monkeypatch.setenv('ANTHIVE_INGEST_WATCH_INCOMING_S3_ACCESS_KEY_ID', 'AKIDENV')
     assert config.get_incoming_s3(cfg)['access_key_id'] == 'AKIDENV'
-    settings = config.get_ingest_watch_settings(dict(cfg, ingest_watch={'incoming_bucket': 'ingest', 'incoming_s3': {
+    settings = config.get_ingest_watch_settings(dict(cfg, ingest_watch={'incoming_s3': {
         'secret_access_key': 'inline'}}))
     assert 'incoming_s3' not in settings and settings['copy_mode'] == 'auto'
     with pytest.raises(config.ConfigError):
-        config.get_incoming_s3(dict(cfg, ingest_watch={}))            # a pair without a bucket
+        config.get_incoming_s3(dict(cfg, datasets_deposit_s3={}))     # a pair for s3.bucket itself
     with pytest.raises(config.ConfigError):
         config.get_ingest_watch_settings(dict(cfg, ingest_watch={'copy_mode': 'teleport'}))
 

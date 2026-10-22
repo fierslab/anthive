@@ -1272,8 +1272,9 @@ refused as `needs_decision` (deposit-marked objects nobody accounts for).
   for metadata-only updates (the ingestion key pair then needs read access on the catalog prefix; without it a
   metadata-only update is refused with `h5ad_unavailable`). `datasets_deposit_central_watcher: true` switches
   the route on. Intern keeps its main data keys host-only; only the ingestion pair goes into the container.
-- **Watcher**: `ingest_watch.incoming_bucket` names the ingestion bucket. One client: the watcher's s3 keys
-  must read, write and delete there (server-side copies of artefacts go from it to the data bucket). Published
+- **Watcher**: the ingestion bucket is `datasets_deposit_s3.bucket` (since 2.47.1 the one definition, see
+  24.9; 2.47.0 had a separate `ingest_watch.incoming_bucket`). One client when that block has no key pair of
+  its own: the watcher's s3 keys must read, write and delete there (server-side copies of artefacts go from it to the data bucket). Published
   files still go to `s3.bucket`. Implemented as `PipelineConfig.incoming_bucket` (pulls), the `Watcher`'s bucket
   (listing, deposit marks, deletes) and `ArtefactPublisher.incoming_bucket` (artefact reads, the copy source,
   incoming deletes); the catalog bucket is used for everything else. A test checks every call's bucket.
@@ -1428,8 +1429,8 @@ Not covered:
 ### 24.7 Backwards compatible
 
 Without site secrets on the watcher and without `datasets_deposit_central_watcher` on a site nothing changes:
-the API and the watcher of one host share `ingest_state_dir` (today's dev). `ingest_watch.incoming_bucket`
-defaults to `s3.bucket`. The multi-site path is opt-in per known site; dev's own deposits keep the shared
+the API and the watcher of one host share `ingest_state_dir` (today's dev). The ingestion bucket
+(`datasets_deposit_s3.bucket`) defaults to `s3.bucket`. The multi-site path is opt-in per known site; dev's own deposits keep the shared
 store even when other sites are known (its own site id is skipped when reading records).
 
 ### 24.8 Set-up per site (Mark)
@@ -1437,7 +1438,8 @@ store even when other sites are known (its own site id is skipped when reading r
 1. Ingestion bucket with a lifecycle rule AbortIncompleteMultipartUpload for `__deposits/` and `__incoming/`;
    per site a key pair limited to that bucket (if the object store can scope keys); the watcher's main keys
    need read, write and delete there.
-2. Watcher host: `ingest_watch.incoming_bucket: <bucket>` in its anthive.yaml; `ant ingest-watch result-key`
+2. Watcher host: `datasets_deposit_s3: {bucket: <bucket>}` in its anthive.yaml (the key pair in
+   `<ingest_state_dir>/secrets/incoming_s3_*`, 24.9); `ant ingest-watch result-key`
    prints the public key; lab members' `mus s3 upload` must then write to the ingestion bucket as well.
 3. Each site (site.yaml): `datasets.central_watcher: {ingestion_bucket, watcher_public_keys: [<that line>]}`,
    the pair in `secrets/s3_ingest_access_key_id` and `secrets/s3_ingest_secret_access_key`, a unique
@@ -1481,7 +1483,15 @@ re-mark another site's upload in the instant between that copy and the record (2
   item as `needs_decision` (it is never published without that file); pulled files are still checked against
   the signed sha256 (C5). A withdrawn or expired record makes the watcher delete its copies (only objects that
   still carry the deposit's mark and the copy's ETag, never after the deposit went live).
-- **Two key pairs** (`ingest_watch.incoming_s3`, `lib/s3_router.py`). Without it the watcher's `s3` keys reach
+- **One definition of the ingestion bucket** (2.47.1, `config.get_ingestion_s3`). `datasets_deposit_s3` is the
+  ingestion bucket for the api (presigning, records) and for the watcher (incoming, pulls, deletes, results),
+  so a single host and the central watcher host, which read the same anthive.yaml, cannot disagree.
+  `ingest_watch.incoming_s3` remains only as an override for a watcher whose config has no
+  `datasets_deposit_s3`; a config that names different buckets in the two is refused, and
+  `ingest_watch.incoming_bucket` is refused with a pointer to `datasets_deposit_s3`. The watcher uses the
+  block's key pair only for a bucket other than `s3.bucket` (a presigning pair limited to the incoming prefixes
+  of the data bucket would not do for the watcher's other work there).
+- **Two key pairs** (the ingestion bucket's pair, `lib/s3_router.py`). Without one the watcher's `s3` keys reach
   both buckets (one client, server-side copies, as before). With it the ingestion bucket has its own key pair
   (read the sites' staging, write and delete `__incoming/`, write results) and the data keys never touch it: a
   `BucketRouter` sends each call to the client of its bucket, and a copy between the two buckets (the artefact
@@ -1491,9 +1501,10 @@ re-mark another site's upload in the instant between that copy and the record (2
   `ingest_watch.copy_mode`: `auto` (server-side within one key pair, streamed across two), `server` (always
   server-side: the data keys must read the ingestion bucket), `stream`. The pair comes from the env
   (`ANTHIVE_INGEST_WATCH_INCOMING_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY`), else the secrets files
-  `<ingest_state_dir>/secrets/incoming_s3_access_key_id` and `incoming_s3_secret_access_key`, else the block
-  (keep keys out of the config text); endpoint and region default to the `s3` block, the bucket to
-  `incoming_bucket`. The pair never enters the watcher's settings dict.
+  `<ingest_state_dir>/secrets/incoming_s3_access_key_id` and `incoming_s3_secret_access_key`, else
+  `ingest_watch.incoming_s3`, else `datasets_deposit_s3` (keep keys out of the config text); endpoint, region
+  and bucket come from `incoming_s3`, else `datasets_deposit_s3`, else the `s3` block. The pair never enters
+  the watcher's settings dict.
 - **Review round 3** (2026-10-22): the copy itself is checked before anything is imported. A single-part
   upload's copy must show the signed staging ETag (its MD5, kept by a server-side copy and by a one-PUT
   streamed copy); a multipart upload's copy is read back and its sha256 compared up to 256 MB
