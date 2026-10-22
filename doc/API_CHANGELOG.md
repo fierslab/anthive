@@ -31,7 +31,8 @@ the spec drifting away from the running code.
 
 ## 2.47.1 (unreleased)
 
-Patch release with three additions approved for 2.47.1; nothing is removed or renamed.
+Patch release with three additions approved for 2.47.1 and the fixes from the 2.47.0 scratch-site check;
+nothing is removed or renamed.
 
 ### Withdrawing a whole artefact (design 4.5)
 
@@ -55,6 +56,21 @@ Patch release with three additions approved for 2.47.1; nothing is removed or re
   false the notebook buttons and every JupyterLite link disappear from the web UI and Caddy answers `/jupyter`
   and `/jupyter/...` with 404 (`config/caddy-jupyter.off`, rendered by ant-stack into
   `stack/caddy/jupyter.caddy`, set by ant-supervisor). The REST API is unchanged (`/api/notebook/...` stays).
+
+### Fixes from the 2.47.0 scratch-site check
+
+- Artefact manifests were never committed to the h5adstore: its `.gitignore` is an allow-list that ignores
+  `manifest.json`, so `git add` refused and the store commit failed without a word. The watcher now adds
+  exactly the head record and manifest with `git add -f`, leaves out a path that is neither on disk nor
+  tracked (a manifest that was never committed no longer fails a later delete), and logs `artefacts: WARNING
+  store commit failed` / `skipped`; `ant ingest-watch status` ends with a WARNING line naming the items. The
+  h5adstore `.gitignore` gets `!**/static/artefacts/**/manifest.json`.
+- `ant-stack check` asks git (`git check-ignore`) whether the h5adstore ignores manifests, files and previews
+  and names the line to add; the 2.47.0 guide's `static/artefacts/**/files/` lines only matched at the store
+  root. The read-key and `.gitignore` advice is printed only with `artefacts.enabled`.
+- `ant-stack check` names the configured incoming prefix (`datasets.incoming_prefix`) in its deposit and
+  lifecycle messages instead of a fixed `__incoming/`, and a central-watcher site is no longer told that
+  `ant-stack watch` publishes its artefacts.
 
 ---
 

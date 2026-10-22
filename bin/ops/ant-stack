@@ -631,6 +631,18 @@ def _deposit_key_source(site: dict) -> str | None:
     return None
 
 
+# the staging root of API deposits (lib/dataset_deposit.DepositService.staging_prefix; ant-stack never changes it)
+DEPOSIT_STAGING_PREFIX = '__deposits/'
+
+
+def lifecycle_hint(site: dict) -> str:
+    """The bucket lifecycle advice for this site's deposit prefixes (the configured incoming prefix)."""
+    incoming, _catalog = watch_prefixes(site)
+    return (f"give the bucket a lifecycle rule AbortIncompleteMultipartUpload (e.g. after 8 days) for "
+            f"{DEPOSIT_STAGING_PREFIX} and {incoming}, so multipart uploads nobody completes do not keep storage "
+            f"(doc/DEPLOY_CONTAINERS.md)")
+
+
 def watch_prefixes(site: dict) -> tuple[str, str]:
     """(incoming prefix, catalog prefix) the api and the watcher must share. The catalog prefix follows
     ``s3.prefix`` (where ant-sync keeps the catalogue) unless ``datasets.catalog_prefix`` says otherwise."""
@@ -1612,13 +1624,11 @@ def _check_datasets(site: dict) -> list[str]:
               f"{S3_INCOMING_KEY_FILES[1]} if the object store can scope keys")
     s3 = site.get('s3') or {}
     site_id = datasets.get('site_id') or site['site']['name']
-    _warn(f"dataset deposits stage uploads in s3://{s3.get('bucket')}/__deposits/{site_id}/ and the watcher reads "
-          f"__incoming/ of that bucket: another site on the same bucket must have a different site name "
-          f"(datasets.site_id) and must not run a watcher on the same incoming prefix")
-    _say("dataset deposits: give the bucket a lifecycle rule AbortIncompleteMultipartUpload (e.g. after 8 days) "
-         "for __deposits/ and __incoming/, so multipart uploads nobody completes do not keep storage "
-         "(doc/DEPLOY_CONTAINERS.md)")
     incoming, catalog = watch_prefixes(site)
+    _warn(f"dataset deposits stage uploads in s3://{s3.get('bucket')}/{DEPOSIT_STAGING_PREFIX}{site_id}/ and the "
+          f"watcher reads {incoming} of that bucket: another site on the same bucket must have a different site "
+          f"name (datasets.site_id) and must not run a watcher on the same incoming prefix")
+    _say(f"dataset deposits: {lifecycle_hint(site)}")
     secret = site['_state'] / 'secrets' / 'internal_secret'
     _say(f"dataset deposits: on for {groups}; presigning with the {'read-write' if source == 'write' else source} "
          f"key pair")
@@ -1663,9 +1673,10 @@ def _check_central(site: dict, central: dict, groups: str) -> list[str]:
                         "watcher's results (run `ant ingest-watch result-key` on the watcher host)")
     site_id = (site.get('datasets') or {}).get('site_id') or site['site']['name']
     secret = secrets_dir / DEPOSIT_SITE_SECRET_FILE
+    incoming, _catalog = watch_prefixes(site)
     _say(f"dataset deposits: on for {groups}, ingested by the central watcher: uploads and signed records in "
-         f"s3://{central['ingestion_bucket']}/__deposits/{site_id}/ (the watcher copies them into __incoming/; "
-         f"scope this site's key pair to that folder where the store can); do not run `ant-stack watch` on this "
+         f"s3://{central['ingestion_bucket']}/{DEPOSIT_STAGING_PREFIX}{site_id}/ (the watcher copies them into "
+         f"{incoming}; scope this site's key pair to that folder where the store can); do not run `ant-stack watch` on this "
          f"host")
     if secret.is_file():
         _say(f"dataset deposits: give the watcher host the site secret: a file <sites_dir>/{site_id}.keys "
@@ -1699,8 +1710,10 @@ def _check_artefacts(site: dict) -> list[str]:
     except OSError:
         pass
     if not block.get('enabled'):
+        # the read-key and .gitignore advice matter only to a site that publishes artefacts (2.47.1)
         _say("artefact deposits: off (artefacts.enabled); the artefact read routes serve what the store holds")
-    elif not s3.get('enabled'):
+        return problems
+    if not s3.get('enabled'):
         problems.append("artefacts.enabled is on but s3.enabled is false: artefact deposits are presigned S3 uploads")
     else:
         if site['auth']['mode'] == 'none':
@@ -1714,12 +1727,13 @@ def _check_artefacts(site: dict) -> list[str]:
                 _warn(f"artefact deposits presign with the read-write S3 keys, so the api container holds them; "
                       f"put a key pair limited to the incoming prefixes in secrets/{S3_INCOMING_KEY_FILES[0]} "
                       f"and {S3_INCOMING_KEY_FILES[1]} if the object store can scope keys")
-            _say("artefact deposits: give the bucket a lifecycle rule AbortIncompleteMultipartUpload for __deposits/ "
-                 "and __incoming/ (doc/DEPLOY_CONTAINERS.md)")
+            _say(f"artefact deposits: {lifecycle_hint(site)}")
         groups = block.get('upload_groups') or ['admins', 'analysts']
+        publisher = ("the central watcher publishes them (do not run `ant-stack watch` on this host)"
+                     if _central_block(site) is not None else
+                     "the same watcher publishes them: `bin/ops/ant-stack watch`")
         _say(f"artefact deposits: on for {', '.join(groups)} (collections: "
-             f"{', '.join(block.get('collections_create_groups') or ['admins', 'analysts'])}); the same watcher "
-             f"publishes them: `bin/ops/ant-stack watch`")
+             f"{', '.join(block.get('collections_create_groups') or ['admins', 'analysts'])}); {publisher}")
         if site['auth']['mode'] == 'basic':
             _warn("auth.mode basic has no groups: only auth.admins can deposit artefacts and create collections")
         elif site['auth']['mode'] == 'authelia' and any(group not in ('admins',) for group in groups):
@@ -1736,18 +1750,43 @@ def _check_artefacts(site: dict) -> list[str]:
                   f"{S3_ARTEFACTS_READ_KEY_FILES[0]}): only files with a local copy (figures, small files) can be "
                   f"downloaded")
     store = site['_h5adstore']
-    gitignore = store / '.gitignore' if store else None
-    if gitignore is not None and (store / '.git').exists():
-        try:
-            text = gitignore.read_text() if gitignore.is_file() else ''
-        except OSError:
-            text = ''
-        missing = [pattern for pattern in ('static/artefacts/**/files/', 'static/artefacts/**/preview/')
-                   if pattern not in text]
-        if missing:
-            _warn(f"{gitignore} lacks {', '.join(missing)}: a hand `git add -A` in the h5adstore would commit "
-                  f"artefact files (the watcher commits only head records and manifests)")
+    if store and (store / '.git').exists():
+        for finding in artefact_gitignore_findings(store):
+            _warn(finding)
     return problems
+
+
+# a sample artefact version folder (<Group>/static/artefacts/<scope>/<kind>/<id>/v<N>/) for `git check-ignore`
+_ARTEFACT_SAMPLE = 'Group/static/artefacts/scope/figure/sample/v1/'
+MANIFEST_ALLOW_LINE = '!**/static/artefacts/**/manifest.json'
+
+
+def artefact_gitignore_findings(store: Path) -> list[str]:
+    """What the h5adstore's .gitignore gets wrong for artefacts, answered by git itself (an allow-list store
+    ignores everything not allowed, a plain one only what it names). The watcher adds head records and
+    manifests with -f, so this is about mirrors and a hand `git add -A`. Nothing when git cannot answer."""
+    ignored = {}
+    for leaf in ('manifest.json', 'files/sample.png', 'preview/sample.png'):
+        try:
+            result = subprocess.run(['git', '-C', str(store), 'check-ignore', '-q', '--no-index',
+                                     _ARTEFACT_SAMPLE + leaf], capture_output=True, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        if result.returncode not in (0, 1):
+            return []
+        ignored[leaf.split('/')[0]] = result.returncode == 0
+    gitignore = store / '.gitignore'
+    findings = []
+    if ignored['manifest.json']:
+        findings.append(f"{gitignore} ignores artefact manifests: add the line {MANIFEST_ALLOW_LINE} and commit it "
+                        f"(the watcher commits them anyway, but a hand `git add` and the review of the store "
+                        f"repository would not see them)")
+    leaked = [name for name in ('files', 'preview') if not ignored[name]]
+    if leaked:
+        findings.append(f"{gitignore} does not ignore artefact {' and '.join(leaked)}: add "
+                        f"{' and '.join(f'**/static/artefacts/**/{name}/' for name in leaked)} and commit it, or a "
+                        f"hand `git add -A` in the h5adstore would commit artefact files")
+    return findings
 
 
 def _loose_permissions(path: Path) -> bool:

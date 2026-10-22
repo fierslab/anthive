@@ -633,3 +633,91 @@ def test_the_watcher_refuses_a_new_version_of_a_withdrawn_artefact(tmp_path, clo
     poll_until_final(publisher, s3, clock)
     row = watch_row(db, answer['deposit_id'])
     assert row['state'] == 'failed' and 'withdrawn' in row['error']
+
+
+# ── a real store repository with an allow-list .gitignore (2.47.0 scratch-site check) ───────────────────
+
+ALLOW_LIST_GITIGNORE = '# Ignore everything\n*\n!*/\n!*.md\n!*.inactive\n!.env\n!*.h5ad.mus\n'
+
+
+def _real_store_repo(store):
+    import shutil
+    import subprocess
+    shutil.rmtree(store / '.git', ignore_errors=True)
+    (store / '.gitignore').write_text(ALLOW_LIST_GITIGNORE)
+    for cmd in (['init', '-q'], ['add', '-A'], ['-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'init']):
+        subprocess.run(['git', '-C', str(store), *cmd], check=True, capture_output=True)
+
+
+def _tracked(store):
+    import subprocess
+    return subprocess.run(['git', '-C', str(store), 'ls-files'], check=True, capture_output=True,
+                          text=True).stdout.split()
+
+
+def test_manifests_are_committed_although_the_gitignore_allow_list_ignores_them(tmp_path, clock):
+    import subprocess
+    service, s3, publisher, db, git, api = _setup(tmp_path, clock)
+    store = tmp_path / 'store'
+    _real_store_repo(store)
+    publisher.run = lambda cmd: subprocess.run([str(part) for part in cmd], capture_output=True, text=True)
+    logged = []
+    publisher.log = logged.append
+    answer = deposit(service, s3, ANALYST, {'volcano.png': PNG}, **INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    row = watch_row(db, answer['deposit_id'])
+    assert row['state'] == 'live', row['error']
+    tracked = _tracked(store)
+    base = 'Public2021/static/artefacts/int/figure/volcano/'
+    assert base + 'artefact.md' in tracked and base + 'v1/manifest.json' in tracked
+    assert base + 'v1/files/volcano.png' not in tracked                    # files stay out of git
+    assert not any('WARNING' in line for line in logged)
+    # a later admin delete commits the removal without a pathspec error
+    deposit(service, s3, ANALYST, {'volcano.png': PNG + b'2'}, new_version_of=1, change_note='v2', **INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    _purge(service, ANALYST, 1)
+    publisher.poll(listing(s3))
+    _delete(service, 1)
+    publisher.poll(listing(s3))
+    assert service.purges(ADMIN)[0]['state'] == 'done', service.purges(ADMIN)[0]
+    assert base + 'v1/manifest.json' not in _tracked(store)
+    assert not any('WARNING' in line for line in logged), logged
+
+
+def test_a_manifest_that_was_never_committed_does_not_fail_the_delete(tmp_path, clock):
+    import subprocess
+    service, s3, publisher, db, git = _live_two_versions(tmp_path, clock)         # FakeGit: nothing was committed
+    store = tmp_path / 'store'
+    _real_store_repo(store)
+    base = 'Public2021/static/artefacts/int/figure/volcano/'
+    publisher.run = lambda cmd: subprocess.run([str(part) for part in cmd], capture_output=True, text=True)
+    logged = []
+    publisher.log = logged.append
+    _purge(service, ANALYST, 1)
+    publisher.poll(listing(s3))
+    _delete(service, 1)
+    publisher.poll(listing(s3))
+    assert service.purges(ADMIN)[0]['state'] == 'done'
+    assert base + 'artefact.md' in _tracked(store), (logged, service.purges(ADMIN))
+    assert not any('WARNING store commit failed' in line for line in logged), logged
+
+
+def test_a_failed_store_commit_is_a_warning_in_the_log_and_the_status_summary(tmp_path, clock):
+    import ingest_watch
+    service, s3, publisher, db, git, api = _setup(tmp_path, clock)
+
+    class Failing(type(git)):
+        def __call__(self, cmd):
+            result = super().__call__(cmd)
+            if 'commit' in [str(part) for part in cmd]:
+                result.returncode, result.stderr = 1, 'fatal: something broke'
+            return result
+    publisher.run = Failing()
+    logged = []
+    publisher.log = logged.append
+    answer = deposit(service, s3, ANALYST, {'volcano.png': PNG}, **INTERNAL)
+    poll_until_final(publisher, s3, clock)
+    assert watch_row(db, answer['deposit_id'])['state'] == 'live'
+    assert any('WARNING store commit failed' in line for line in logged)
+    table = ingest_watch.render_status_table(ingest_watch.status_rows(db))
+    assert 'WARNING: the store commit failed for 1 item(s)' in table

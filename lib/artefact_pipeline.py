@@ -1319,17 +1319,26 @@ class ArtefactPublisher:
         if not (self.store_root / '.git').exists():
             warnings.append('the store is not a git repository: not committed')
             return None
-        rel = [str(item) for item in rels]
+        wanted = [str(item) for item in rels]
+        # the store's .gitignore may be an allow-list that ignores manifest.json: add exactly these paths with -f;
+        # a path that is neither on disk nor tracked (a manifest never committed, deleted now) is left out, so one
+        # missing path never fails the whole commit (2.47.0 scratch-site check)
+        tracked = self.run(['git', '-C', self.store_root, 'ls-files', '--', *wanted])
+        known = set((tracked.stdout or '').split()) if tracked.returncode == 0 else set()
+        rel = [path for path in wanted if (self.store_root / path).exists() or path in known]
+        if not rel:
+            return None
         staged = self.run(['git', '-C', self.store_root, 'diff', '--cached', '--name-only', '--', *rel])
         if staged.returncode != 0 or staged.stdout.strip():
             warnings.append('not committed: staged changes of someone else on these paths')
+            self.log(f'artefacts: WARNING store commit skipped: staged changes of someone else on {", ".join(rel)}')
             return None
         name, _, email = self.git_identity.partition('<')
         author = []
         if record and record.get('user'):
             mail = record.get('email') or f'{record["user"]}@anthive'
             author = ['--author', f'{record.get("name") or record["user"]} <{mail}>']
-        add = self.run(['git', '-C', self.store_root, 'add', '-A', '--', *rel])
+        add = self.run(['git', '-C', self.store_root, 'add', '-A', '-f', '--', *rel])
         if add.returncode == 0:
             result = self.run(['git', '-C', self.store_root, '-c', f'user.name={name.strip()}', '-c',
                                f'user.email={email.rstrip(">").strip()}', 'commit', '--only', '-m', message,
@@ -1337,7 +1346,9 @@ class ArtefactPublisher:
         else:
             result = add
         if result.returncode != 0:
-            warnings.append(f'git commit failed: {(result.stdout or "") + (result.stderr or "")}'.strip()[:300])
+            output = f'{(result.stdout or "") + (result.stderr or "")}'.strip()[:300]
+            warnings.append(f'git commit failed: {output}')
+            self.log(f'artefacts: WARNING store commit failed ({", ".join(rel)}): {output}')
             self.run(['git', '-C', self.store_root, 'reset', '-q', '--', *rel])
             return None
         head = self.run(['git', '-C', self.store_root, 'rev-parse', 'HEAD'])

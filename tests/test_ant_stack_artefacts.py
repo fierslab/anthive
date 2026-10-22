@@ -123,21 +123,84 @@ def test_the_artefacts_block_is_validated(tmp_path, ant_stack, block, word):
         ant_stack.load_site(_write_site(tmp_path, artefacts=block))
 
 
+def _git_init(folder: Path) -> None:
+    import subprocess
+    subprocess.run(['git', 'init', '-q', str(folder)], check=True, capture_output=True)
+
+
+# the h5adstore's allow-list before and after the 2.47.0 scratch-site fix
+OLD_ALLOW_LIST = '*\n!*/\n!*.md\n!*.inactive\n!.env\n!*.h5ad.mus\n'
+NEW_ALLOW_LIST = OLD_ALLOW_LIST + '!**/static/artefacts/**/manifest.json\n'
+
+
 def test_check_names_a_half_read_pair_and_a_missing_gitignore(tmp_path, ant_stack, capsys):
     site = _site(ant_stack, tmp_path, s3=S3_ON, artefacts={'enabled': True})
     _keys(site['_state'], s3_artefacts_read_access_key_id='AR-KEY-ID')
-    (site['_h5adstore'] / '.git').mkdir()
+    _git_init(site['_h5adstore'])
     problems = ant_stack._check_artefacts(site)
     assert any('only one of' in problem for problem in problems)
     output = capsys.readouterr()
     text = output.out + output.err
-    assert 'static/artefacts/**/files/' in text
-    (site['_h5adstore'] / '.gitignore').write_text('static/artefacts/**/files/\nstatic/artefacts/**/preview/\n')
+    assert '**/static/artefacts/**/files/' in text and '**/static/artefacts/**/preview/' in text
+    assert 'ignores artefact manifests' not in text                     # nothing ignored at all
+    (site['_h5adstore'] / '.gitignore').write_text('**/static/artefacts/**/files/\n**/static/artefacts/**/preview/\n')
     _keys(site['_state'], s3_artefacts_read_secret_access_key='AR-SECRET')
     assert ant_stack._check_artefacts(site) == []
     output = capsys.readouterr()
     assert '.gitignore' not in output.out + output.err
     assert 'read-only pair' in output.out + output.err
+
+
+def test_root_anchored_patterns_do_not_cover_group_folders(tmp_path, ant_stack):
+    """`static/artefacts/**/files/` (the 2.47.0 guide's lines) is anchored at the store root and misses
+    <Group>/static/...: check asks git, not the text."""
+    _git_init(tmp_path)
+    (tmp_path / '.gitignore').write_text('static/artefacts/**/files/\nstatic/artefacts/**/preview/\n')
+    findings = ant_stack.artefact_gitignore_findings(tmp_path)
+    assert len(findings) == 1 and 'does not ignore artefact files and preview' in findings[0]
+
+
+def test_an_allow_list_gitignore_must_allow_the_manifests(tmp_path, ant_stack):
+    _git_init(tmp_path)
+    (tmp_path / '.gitignore').write_text(OLD_ALLOW_LIST)
+    findings = ant_stack.artefact_gitignore_findings(tmp_path)
+    assert len(findings) == 1 and ant_stack.MANIFEST_ALLOW_LINE in findings[0]
+    (tmp_path / '.gitignore').write_text(NEW_ALLOW_LIST)
+    assert ant_stack.artefact_gitignore_findings(tmp_path) == []
+
+
+def test_the_gitignore_check_is_silent_when_git_cannot_answer(tmp_path, ant_stack):
+    (tmp_path / '.git').mkdir()                                          # not a repository
+    assert ant_stack.artefact_gitignore_findings(tmp_path) == []
+
+
+def test_artefacts_off_prints_no_read_key_or_gitignore_advice(tmp_path, ant_stack, capsys):
+    site = _site(ant_stack, tmp_path, s3={**S3_ON, 'api_access': 'none'})
+    _git_init(site['_h5adstore'])
+    (site['_h5adstore'] / '.gitignore').write_text(OLD_ALLOW_LIST)
+    assert ant_stack._check_artefacts(site) == []
+    output = capsys.readouterr()
+    text = output.out + output.err
+    assert 'artefact deposits: off' in text
+    assert 'artefact files' not in text and '.gitignore' not in text and 'WARNING' not in text
+
+
+def test_check_messages_use_the_configured_incoming_prefix(tmp_path, ant_stack, capsys):
+    site = _site(ant_stack, tmp_path, s3=S3_ON, artefacts={'enabled': True}, datasets={'incoming_prefix': 'drop/'})
+    ant_stack._check_artefacts(site)
+    text = ''.join(capsys.readouterr())
+    assert 'for __deposits/ and drop/' in text and '__incoming' not in text
+
+
+def test_a_central_watcher_site_is_not_told_to_run_the_watcher(tmp_path, ant_stack, capsys):
+    central = {'ingestion_bucket': 'anthive-ingest', 'watcher_public_keys': ['ed25519:' + 'A' * 43 + '='],
+               'key_id': 'k2'}
+    site = _site(ant_stack, tmp_path, s3=S3_ON, artefacts={'enabled': True},
+                 services={'dataset_deposit': True}, datasets={'site_id': 'intern', 'central_watcher': central})
+    ant_stack._check_artefacts(site)
+    text = ''.join(capsys.readouterr())
+    assert 'the central watcher publishes them' in text
+    assert 'the same watcher publishes them' not in text
 
 
 def test_check_warns_when_the_api_cannot_sign_artefact_links(tmp_path, ant_stack, capsys):

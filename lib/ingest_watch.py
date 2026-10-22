@@ -474,7 +474,17 @@ def render_status_table(rows: Sequence[Dict[str, Any]]) -> str:
             '; '.join(row['warnings'])[:120] if row['warnings'] else '')
         lines.append(f'{row["state"]:<15} {row["db_id"] or "-":<9} {row["version"] or "-":<8} {row["updated"]:<19}  '
                      f'{row["key"]}' + (f'\n{"":<55}{note}' if note else ''))
+    failed = commit_failures(rows)
+    if failed:
+        lines.append(f'\nWARNING: the store commit failed for {len(failed)} item(s): {", ".join(failed[:10])} '
+                     f'(the files are in place but not committed; see the warnings above and the watcher log)')
     return '\n'.join(lines)
+
+
+def commit_failures(rows: Sequence[Dict[str, Any]]) -> List[str]:
+    """Keys of items whose store commit failed or was skipped (a warning: the item itself is live)."""
+    return [row['key'] for row in rows
+            if any(('commit failed' in str(warning) or 'not committed' in str(warning)) for warning in row['warnings'])]
 
 
 # ── one poll ─────────────────────────────────────────────────────────────────
