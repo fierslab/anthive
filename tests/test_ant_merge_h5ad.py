@@ -257,3 +257,27 @@ def test_cell_name_mismatch_refused(tmp_path):
     result = _run_merge(str(md))
     assert result.returncode == 3
     assert 'cell-name mismatch' in result.stdout
+
+
+def test_an_overwritten_column_already_in_the_h5ad_gets_the_new_values(tmp_path):
+    """A pending column that the h5ad already has (an annotator overwrote it, or a replace deposit) is written
+    again with the duckdb's values; before 2.47 its row was dropped and the h5ad kept the old values."""
+    md = _setup_dataset(tmp_path)
+    db = md.with_suffix('.duckdb')
+    h5 = md.with_suffix('.h5ad')
+    new_values = pd.Series({name: 7.0 for name in CELL_NAMES})
+    with AnnotationWriter(db, annotator='obs-columns-deposit', run_id='dep1') as w:
+        w.add_numerical('n_counts', new_values, on_conflict='overwrite')
+        w.commit()
+    result = _run_merge(str(md))
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert 'rewrite' in result.stdout
+    with h5py.File(h5, 'r') as f:
+        np.testing.assert_array_equal(f['obs']['n_counts'][:], np.full(len(CELL_NAMES), 7.0))
+        order = [v.decode() if isinstance(v, bytes) else v for v in f['obs'].attrs['column-order']]
+        assert order.count('n_counts') == 1
+    con = duckdb.connect(str(db), read_only=True)
+    try:
+        assert con.execute("SELECT COUNT(*) FROM __pending_cols").fetchone()[0] == 0
+    finally:
+        con.close()

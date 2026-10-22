@@ -228,20 +228,25 @@ def merge_dataset(
             return 2
         print(f"    --force given — merging only the recorded intersection.")
 
-    # The actual set we merge: rows in __pending_cols that are still
-    # only in the duckdb (not yet in h5ad)
-    mergeable = pending_df[pending_df['col_name'].isin(only_in_duckdb)].copy()
+    # The set we merge: every row in __pending_cols whose column the duckdb
+    # holds. A pending column that is ALREADY in the h5ad is written again
+    # with the duckdb's values: either a previous merge died before clearing
+    # __pending_cols (the values are the same), or an annotator overwrote the
+    # column (on_conflict='overwrite', a replace deposit) and the h5ad still
+    # has the old values. The duckdb is the truth for pending columns; before
+    # 2.47 these rows were dropped without writing, which lost replacements.
+    in_duckdb = only_in_duckdb | (set(already_merged) & set(diag['duck_obs_cols']))
+    mergeable = pending_df[pending_df['col_name'].isin(in_duckdb)].copy()
+    # rows for a column the h5ad has but the duckdb lost (--force only): nothing to write, the row goes
+    stale = sorted(set(already_merged) - set(diag['duck_obs_cols']))
+    rewritten = sorted(set(already_merged) & set(mergeable['col_name']))
+    if rewritten:
+        print(f"  ↺ {md_path.name}: {len(rewritten)} pending columns already in the h5ad — "
+              f"written again with the duckdb values")
+        for c in rewritten:
+            print(f"    ~ {c} (rewrite)")
 
-    # Recovery path: rows whose column is ALREADY in the h5ad. This happens
-    # when a previous merge wrote the h5ad but died before clearing
-    # __pending_cols. We just delete those rows — the work is already done.
-    if already_merged and not dry_run:
-        print(f"  ↺ {md_path.name}: {len(already_merged)} columns already in h5ad — "
-              f"clearing stale __pending_cols entries")
-        for c in already_merged:
-            print(f"    ~ {c} (cleanup)")
-
-    if mergeable.empty and not already_merged:
+    if mergeable.empty and not stale:
         print(f"  · {md_path.name}: nothing mergeable")
         return 0
 
@@ -335,6 +340,9 @@ def merge_dataset(
             obs = f['obs']
             existing_order = _h5_column_order(obs)
 
+            for col in list(new_arrays) + list(new_categoricals):
+                if col in obs:                 # a pending column already there: replaced
+                    del obs[col]
             for col, arr in new_arrays.items():
                 _write_numerical(obs, col, arr)
             for col, (cats, codes) in new_categoricals.items():
@@ -346,8 +354,8 @@ def merge_dataset(
                                           if c not in existing_order]
             obs.attrs['column-order'] = np.array(new_order, dtype=object)
 
-        # --- Clear __pending_cols rows we just merged + any stale already-merged ones ---
-        merged_names = list(mergeable['col_name']) + list(already_merged)
+        # --- Clear __pending_cols rows we just merged ---
+        merged_names = list(mergeable['col_name']) + stale
         if merged_names:
             con_rw, released_db = _open_duckdb_rw_with_release(
                 duckdb_path, db_id, ant_serve_url,
