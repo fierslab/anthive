@@ -157,6 +157,31 @@ def s3_client(s3_cfg: dict, retries: Optional[dict] = None, timeouts: Optional[d
     return client
 
 
+def s3_clients(cfg: dict, settings: dict, s3_cfg: dict):
+    """``(client, listing client, incoming bucket)``: one key pair, or a router over the data bucket's and the
+    ingestion bucket's pairs (``ingest_watch.incoming_s3``; copies between them streamed, ``copy_mode``)."""
+    from s3_router import BucketRouter  # noqa: PLC0415
+
+    try:
+        incoming = config.get_incoming_s3(cfg)
+    except config.ConfigError as exc:
+        sys.exit(str(exc))
+    main, lister = s3_client(s3_cfg), s3_client(s3_cfg, LIST_RETRIES, LIST_TIMEOUTS)
+    if incoming is None:
+        bucket = settings.get('incoming_bucket') or s3_cfg['bucket']
+        if settings['copy_mode'] == 'auto':
+            return main, lister, bucket
+        return (BucketRouter(main, {}, settings['copy_mode']), BucketRouter(lister, {}, settings['copy_mode']),
+                bucket)
+    bucket = incoming['bucket']
+    if bucket == s3_cfg['bucket']:
+        sys.exit('ERROR: ingest_watch.incoming_s3.bucket must be another bucket than s3.bucket')
+    log(f'ingestion bucket {bucket} with its own key pair; copies to {s3_cfg["bucket"]}: {settings["copy_mode"]}')
+    return (BucketRouter(main, {bucket: s3_client(incoming)}, settings['copy_mode']),
+            BucketRouter(lister, {bucket: s3_client(incoming, LIST_RETRIES, LIST_TIMEOUTS)}, settings['copy_mode']),
+            bucket)
+
+
 def lower_priority() -> None:
     """nice 19 and idle IO class for this process and its children."""
     try:
@@ -244,13 +269,13 @@ def build(args: argparse.Namespace):
     if not s3_cfg.get('bucket'):
         sys.exit('ERROR: no s3.bucket in anthive.yaml')
     api_url = args.api_url or settings.get('api_url') or config.get_api_url(cfg)
-    client = s3_client(s3_cfg)
+    client, list_client, incoming_bucket = s3_clients(cfg, settings, s3_cfg)
     global LOG_FILE
     LOG_FILE = state_dir / 'logs' / f'ingest_watch_{time.strftime("%Y%m%d")}.log'
     runner = SubprocessRunner(log_path=LOG_FILE)
     # The incoming prefix may live in an ingestion bucket of its own (a central watcher, design section 24);
-    # published files always go to s3.bucket. One client: the watcher's keys reach both buckets.
-    incoming_bucket = settings.get('incoming_bucket') or s3_cfg['bucket']
+    # published files always go to s3.bucket. With ingest_watch.incoming_s3 that bucket has its own key pair:
+    # the client routes each call by bucket and streams copies between the two (lib/s3_router.py, 24.9).
     pipeline = Pipeline(
         PipelineConfig(store_root=store_root, work_root=work_root, reports_root=state_dir / 'reports',
                        bucket=s3_cfg['bucket'], catalog_prefix=settings['catalog_prefix'],
@@ -272,8 +297,9 @@ def build(args: argparse.Namespace):
                                    max_items=args.max_items, stop_requested=lambda: _stop,
                                    deposit_settings=deposit_settings(cfg, settings),
                                    artefact_publisher=artefact_publisher(cfg, settings, client, s3_cfg, db, store_root,
-                                                                         state_dir, work_root, pipeline.api),
-                                   list_s3=s3_client(s3_cfg, LIST_RETRIES, LIST_TIMEOUTS),
+                                                                         state_dir, work_root, pipeline.api,
+                                                                         incoming_bucket),
+                                   list_s3=list_client,
                                    remote=remote_sites(cfg, settings, client, incoming_bucket, state_dir))
     watcher.h5ad_merger = h5ad_merger(settings, state_dir, store_root, client, s3_cfg, pipeline.api)
     return settings, state_dir, db, watcher, store_root
@@ -305,6 +331,10 @@ def run_merges(watcher, state_dir: Path, db, now: bool = False, only: Optional[s
     return merger.run_pending(now=now, only=only, deposit_pending=h5ad_merge.deposit_pending_check(state_dir, db))
 
 
+def s3_cfg_bucket(cfg: dict) -> str:
+    return str((cfg.get('s3') or {}).get('bucket') or '')
+
+
 def sites_dir(settings: dict, state_dir: Path) -> Path:
     return Path(settings.get('sites_dir') or state_dir / 'secrets' / 'deposit_sites')
 
@@ -328,7 +358,8 @@ def remote_sites(cfg: dict, settings: dict, client, incoming_bucket: str, state_
     log(f'remote deposits: reading the records of {", ".join(sorted(sites))} in s3://{incoming_bucket}/'
         f'{deposit_records.staging_root(staging)}')
     return remote_deposits.RemoteSites(
-        s3=client, bucket=incoming_bucket, state_dir=state_dir, sites=sites,
+        s3=client, bucket=incoming_bucket, state_dir=state_dir, sites=sites, catalog_bucket=s3_cfg_bucket(cfg),
+        catalog_prefix=settings['catalog_prefix'],
         result_key=deposit_records.load_or_create_result_key(result_key_path(state_dir)),
         staging_root=staging, incoming_prefix=settings['prefix'], local_site_id=config.deposit_site_id(cfg),
         trusted_admin_sites=[str(site) for site in settings.get('trusted_admin_sites') or []], log=log)
@@ -370,14 +401,14 @@ def cmd_sites(args: argparse.Namespace) -> int:
 
 
 def artefact_publisher(cfg: dict, settings: dict, client, s3_cfg: dict, db, store_root: Path, state_dir: Path,
-                       work_root: Path, api):
+                       work_root: Path, api, incoming_bucket: Optional[str] = None):
     """The artefact route of this run (lib/artefact_pipeline.py): artefact and collection deposits, purges."""
     import artefact_pipeline  # noqa: PLC0415
 
     artefact_settings = config.get_artefact_settings(cfg)
     return artefact_pipeline.ArtefactPublisher(
         store_root=store_root, state_dir=state_dir, work_root=work_root / 'artefacts', s3=client,
-        bucket=s3_cfg['bucket'], incoming_bucket=settings.get('incoming_bucket') or s3_cfg['bucket'],
+        bucket=s3_cfg['bucket'], incoming_bucket=incoming_bucket or settings.get('incoming_bucket') or s3_cfg['bucket'],
         incoming_prefix=settings['prefix'],
         catalog_prefix=artefact_settings['catalog_prefix'], artefact_settings=artefact_settings, db=db, api=api,
         settle_seconds=float(settings['settle_seconds']), log=log, git_commit=settings['store_git_commit'],

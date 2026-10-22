@@ -98,7 +98,8 @@ S3_KEY_FILES = {'write': ('s3_access_key_id', 's3_secret_access_key'),
 # without it the api gets the read-write pair for that purpose (`check` warns).
 S3_INCOMING_KEY_FILES = ('s3_incoming_access_key_id', 's3_incoming_secret_access_key')
 # A site whose deposits a central watcher on another host ingests (datasets.central_watcher, design section 24):
-# the key pair of the INGESTION bucket (staging, records, __incoming/) the api presigns and writes records with;
+# the key pair of the INGESTION bucket (its own staging folder and records; the watcher copies into __incoming/)
+# the api presigns and writes records with;
 # the main s3 keys can then stay on the host. The site secret signs the records; the watcher holds a copy.
 S3_INGEST_KEY_FILES = ('s3_ingest_access_key_id', 's3_ingest_secret_access_key')
 DEPOSIT_SITE_SECRET_FILE = 'deposit_site_secret'
@@ -1632,9 +1633,10 @@ def _check_central(site: dict, central: dict, groups: str) -> list[str]:
                         "watcher's results (run `ant ingest-watch result-key` on the watcher host)")
     site_id = (site.get('datasets') or {}).get('site_id') or site['site']['name']
     secret = secrets_dir / DEPOSIT_SITE_SECRET_FILE
-    _say(f"dataset deposits: on for {groups}, ingested by the central watcher: uploads, signed records and "
-         f"__incoming/ in s3://{central['ingestion_bucket']}/ (site folder __deposits/{site_id}/); do not run "
-         f"`ant-stack watch` on this host")
+    _say(f"dataset deposits: on for {groups}, ingested by the central watcher: uploads and signed records in "
+         f"s3://{central['ingestion_bucket']}/__deposits/{site_id}/ (the watcher copies them into __incoming/; "
+         f"scope this site's key pair to that folder where the store can); do not run `ant-stack watch` on this "
+         f"host")
     if secret.is_file():
         _say(f"dataset deposits: give the watcher host the site secret: a file <sites_dir>/{site_id}.keys "
              f"(mode 600, owned by the watcher's user) with the line \"{central.get('key_id') or 'k1'} "

@@ -283,6 +283,15 @@ ingest_watch:
   # watcher, doc/DESIGN_dataset_ingestion.md section 24). Empty: s3.bucket. The watcher's s3 keys must
   # read, write and delete in it; published files still go to s3.bucket.
   incoming_bucket: ''
+  # The ingestion bucket's own key pair (section 24.9), when the watcher's s3 keys should not reach it (or the
+  # data keys should not be in reach of the ingestion side). Fields endpoint, region, bucket (defaults: the s3
+  # block's endpoint and region, incoming_bucket); put the key pair in <ingest_state_dir>/secrets/
+  # incoming_s3_access_key_id and incoming_s3_secret_access_key (mode 600) or the env
+  # ANTHIVE_INGEST_WATCH_INCOMING_S3_ACCESS_KEY_ID / _SECRET_ACCESS_KEY, never in this file. Empty: one key pair.
+  incoming_s3: {}
+  # Copies between the two buckets: auto (server-side with one key pair, streamed through this host with two),
+  # server (always server-side: the data keys must read the ingestion bucket), stream (always streamed).
+  copy_mode: auto
   # Folder of the known sites' secrets: one file <site_id>.keys (mode 600) per site, lines
   # "<key_id> <secret>" (two lines while a secret rotates). Empty: <ingest_state_dir>/secrets/deposit_sites.
   # No file: no other site's deposits are read (the single-host route is unchanged).

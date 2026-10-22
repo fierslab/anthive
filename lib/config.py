@@ -588,6 +588,8 @@ INGEST_WATCH_DEFAULTS: Dict[str, Any] = {
     'merge_window': '01:00-06:00',
     'merge_max_load': 8.0,
     'merge_min_free_gb': 40.0,
+    'copy_mode': 'auto',
+    'incoming_s3': {},          # read by get_incoming_s3 only (a key pair never enters the settings dict)
     'notify': {'on': ['live', 'held', 'failed', 'needs_decision'], 'webhook_url': '', 'email_to': '',
                'email_from': 'anthive-ingest@localhost', 'smtp_host': '', 'smtp_port': 25},
 }
@@ -621,7 +623,7 @@ def get_ingest_watch_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str,
     block = cfg.get('ingest_watch') or {}
     settings: Dict[str, Any] = {}
     for key, default in INGEST_WATCH_DEFAULTS.items():
-        if key == 'notify':
+        if key in ('notify', 'incoming_s3'):
             continue
         env_value = os.environ.get(f'ANTHIVE_INGEST_WATCH_{key.upper()}', '').strip()
         raw = env_value if env_value else block.get(key, default)
@@ -640,7 +642,56 @@ def get_ingest_watch_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str,
         settings[key] = (value.rstrip('/') + '/') if value else ''
     if not settings['prefix']:
         raise ConfigError('ERROR: [Config] ingest_watch.prefix must not be empty')
+    if settings['copy_mode'] not in ('auto', 'server', 'stream'):
+        raise ConfigError("ERROR: [Config] ingest_watch.copy_mode must be 'auto', 'server' or 'stream'")
     return settings
+
+
+INCOMING_S3_FIELDS = ('endpoint', 'region', 'bucket', 'access_key_id', 'secret_access_key')
+INCOMING_S3_SECRET_FILES = {'access_key_id': 'incoming_s3_access_key_id',
+                            'secret_access_key': 'incoming_s3_secret_access_key'}
+
+
+def get_incoming_s3(cfg: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """The ingestion bucket's own key pair of a central watcher (``ingest_watch.incoming_s3``, design 24.9).
+
+    Per field: env ``ANTHIVE_INGEST_WATCH_INCOMING_S3_<FIELD>`` > for the key pair the secrets files
+    ``<ingest_state_dir>/secrets/incoming_s3_access_key_id`` and ``incoming_s3_secret_access_key`` > the block
+    in anthive.yaml (keep keys out of the config text: use the files) > endpoint and region of the ``s3`` block,
+    bucket ``ingest_watch.incoming_bucket``. None without a key pair: then the ``s3`` keys reach both buckets
+    (one client, server-side copies).
+
+    Raises:
+        ConfigError: a key pair without a bucket, or half a key pair.
+    """
+    cfg = cfg if cfg is not None else get_config()
+    block = dict((cfg.get('ingest_watch') or {}).get('incoming_s3') or {})
+    base = dict(cfg.get('s3') or {})
+    secrets_dir = get_ingest_state_dir(cfg, create=False) / 'secrets'
+    out: Dict[str, Any] = {}
+    for field in INCOMING_S3_FIELDS:
+        value = os.environ.get(f'ANTHIVE_INGEST_WATCH_INCOMING_S3_{field.upper()}', '').strip()
+        if not value and field in INCOMING_S3_SECRET_FILES:
+            path = secrets_dir / INCOMING_S3_SECRET_FILES[field]
+            try:
+                value = path.read_text(encoding='utf-8').strip() if path.is_file() else ''
+            except OSError:
+                value = ''
+        if not value:
+            value = str(block.get(field) or '').strip()
+        if not value and field in ('endpoint', 'region'):
+            value = str(base.get(field) or '').strip()
+        if not value and field == 'bucket':
+            value = str((cfg.get('ingest_watch') or {}).get('incoming_bucket') or '').strip()
+        out[field] = value
+    if not out['access_key_id'] and not out['secret_access_key']:
+        return None
+    if not out['access_key_id'] or not out['secret_access_key']:
+        raise ConfigError('ERROR: [Config] ingest_watch.incoming_s3 needs both access_key_id and secret_access_key')
+    if not out['bucket']:
+        raise ConfigError('ERROR: [Config] ingest_watch.incoming_s3 has a key pair but no bucket '
+                          '(incoming_s3.bucket or ingest_watch.incoming_bucket)')
+    return out
 
 
 def get_dataset_ingest_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

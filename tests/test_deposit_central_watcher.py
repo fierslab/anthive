@@ -22,7 +22,7 @@ import deposit_records as dr
 import ingest_watch
 import remote_deposits
 from tests.deposit_helpers import ALICE, DepositFakeS3, upload
-from tests.ingest_watch_helpers import PREFIX
+from tests.ingest_watch_helpers import CATALOG, PREFIX
 from tests.test_dataset_deposit_watch import GROUP, Mailbox, deposit_body
 from tests.test_ingest_watch import Env
 
@@ -276,7 +276,8 @@ def central(tmp_path):
     key = dr.load_or_create_result_key(env.state / 'secrets' / 'deposit_result_ed25519.pem')
     env.watcher.remote = remote_deposits.RemoteSites(
         s3=env.s3, bucket='ingest', state_dir=env.state, sites={'intern': {'k1': SECRET.encode()}}, result_key=key,
-        staging_root='__deposits/', incoming_prefix=PREFIX, local_site_id='dev', log=lambda message: None)
+        staging_root='__deposits/', incoming_prefix=PREFIX, local_site_id='dev', log=lambda message: None,
+        catalog_bucket='data', catalog_prefix=CATALOG)
     clock = [env.clock_value]
     import artefact_deposit
     settings = dd.DepositSettings(
@@ -326,7 +327,8 @@ def test_a_record_changed_after_signing_is_never_imported(tmp_path):
     envelope['record']['is_admin'] = 1
     env.s3.put(key, _join(header, envelope))
     counts = env.poll_twice()
-    assert counts == {'needs_decision': 1}                          # deposit-marked objects nobody accounts for
+    assert counts == {}                                             # nothing reached incoming (section 24.9)
+    assert not [name for name in env.s3.objects if name.startswith(PREFIX)]
     store = dd.DepositStore(env.state / dd.DB_FILE)
     assert store.get(deposit_id) is None
     assert f'__deposits/intern/{deposit_id}/result.json' not in env.s3.objects   # unauthenticated: no answer
@@ -335,13 +337,14 @@ def test_a_record_changed_after_signing_is_never_imported(tmp_path):
 def test_a_swapped_file_is_refused_with_a_signed_reason(tmp_path):
     env, service, clock = central(tmp_path)
     deposit_id = _deposit(env, service)
-    seed_key = next(row['key'] for row in service.store.files(deposit_id) if row['kind'] == 'seed_md')
-    env.s3.put(seed_key, b'---\ntitle: swapped\n---\n', env.clock_value)
+    seed = next(row for row in service.store.files(deposit_id) if row['kind'] == 'seed_md')
+    env.s3.put(seed['staging_key'], b'---\ntitle: swapped\n---\n', env.clock_value,
+               metadata=env.s3.objects[seed['staging_key']]['metadata'])
     env.poll_twice()
     assert dd.DepositStore(env.state / dd.DB_FILE).get(deposit_id) is None
     status = service.status(ALICE, deposit_id)
     assert status['state'] == 'needs_decision'
-    assert 'another ETag than the signed record' in (service.store.get(deposit_id)['error'] or '')
+    assert 'not the signed one' in (service.store.get(deposit_id)['error'] or '')
 
 
 def test_an_update_of_a_dataset_the_central_store_does_not_record_for_the_user_is_refused(tmp_path):
@@ -361,7 +364,7 @@ def test_an_update_of_a_dataset_the_central_store_does_not_record_for_the_user_i
     status = service.status(bob, response['deposit_id'])
     assert status['state'] == 'needs_decision'
     assert 'does not record bob@intern as its owner' in service.store.get(response['deposit_id'])['error']
-    service.withdraw(bob, response['deposit_id'])                  # the site removes its incoming copies
+    service.withdraw(bob, response['deposit_id'])                  # its staging goes; nothing reached incoming
     # alice, the owner, may
     body, payloads = deposit_body(env.tmp, seed=2, update_of='WT6/MIC', index=False)
     response = service.create(ALICE, body)
@@ -369,6 +372,40 @@ def test_an_update_of_a_dataset_the_central_store_does_not_record_for_the_user_i
     service.complete(ALICE, response['deposit_id'])
     env.clock_value += 10
     assert 'live' in env.poll_twice()
+
+
+def test_a_metadata_update_reuses_the_published_h5ad_copied_in_by_the_watcher(tmp_path):
+    from tests.deposit_helpers import file_entry
+    env, service, clock = central(tmp_path)
+    service.settings.catalog_prefix = CATALOG
+    first = _deposit(env, service)
+    assert env.poll_twice() == {'live': 1}
+    assert service.status(ALICE, first)['state'] == 'live'           # the site learns it (alice owns it now)
+    body = env.s3.objects[f'{CATALOG}{GROUP}/micro.h5ad.mus']['body'].decode()
+    sidecar = ('\n'.join(line for line in body.splitlines() if not line.startswith('s3_')) + '\nstrain=C57BL/6\n').encode()
+    response = service.create(ALICE, {'data_project': GROUP, 'basename': 'micro', 'update_of': 'WT6/MIC',
+                                      'files': [file_entry('micro.h5ad.mus', sidecar, 'mus')]})
+    assert [entry['method'] for entry in response['files'] if entry['name'] == 'micro.h5ad'] == ['reuse']
+    upload(env.s3, {'files': [entry for entry in response['files'] if entry['method'] != 'reuse']},
+           {'micro.h5ad.mus': sidecar})
+    service.complete(ALICE, response['deposit_id'])
+    assert f'{PREFIX}{GROUP}/micro.h5ad' not in env.s3.objects              # the site copies nothing
+    env.clock_value += 10
+    assert 'live' in env.poll_twice()
+    assert service.status(ALICE, response['deposit_id'])['version'] == '1.0.1'
+    assert 'strain=C57BL/6' in (env.store / GROUP / 'micro.h5ad.mus').read_text()
+    assert env.s3.wrong == []                                       # the reused h5ad was read from the data bucket
+
+
+def test_a_reused_file_must_be_the_published_file_of_the_dataset(tmp_path):
+    env, service, clock = central(tmp_path)
+    record = {'deposit_kind': 'metadata_update', 'update_of': 'WT6/MIC', 'data_project': GROUP, 'basename': 'micro',
+              'files': [{'name': 'micro.h5ad', 'key': f'{PREFIX}{GROUP}/micro.h5ad', 'method': 'reuse',
+                         'staging_key': f'{CATALOG}Other2020/secret.h5ad', 'staging_etag': '0' * 32, 'size': 1,
+                         'sha256': 'a' * 64}]}
+    problems, sources = env.watcher.remote._staged_problems(dd.DepositStore(env.state / dd.DB_FILE), {}, record,
+                                                            'intern', DEP)
+    assert sources == {} and 'must be the published file' in problems[0]
 
 
 def test_an_unknown_site_is_ignored_and_a_local_site_is_left_to_the_shared_store(tmp_path):

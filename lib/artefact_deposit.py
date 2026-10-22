@@ -999,14 +999,18 @@ class ArtefactDepositService(DepositService):
                   'total_bytes': len(raw), 'watch_key': f'artefact:{deposit_id}', 'refreshes': 0,
                   'deposit_kind': 'collection', 'artefact_ref': f'collection:{data_project.upper()}',
                   'artefact': json.dumps({'collection': block, 'group_id': group_id}), 'group_id': group_id}
+        central = self.settings.central_watcher
+        if central:                      # section 24.9: the server's file is staged, the watcher copies it in
+            rows[0]['staging_key'] = self._staging_key(deposit_id, key)
+        written_key = rows[0]['staging_key'] if central else key
         self.store.reserve(record, rows, now, self.settings,
                            extra_check=self._collection_conflict(data_project, group_id, deposit_id))
         if not self.store.cas(deposit_id, ('uploading',), 'completing', worker=self.worker_id):
             raise DepositError(409, 'busy', 'the deposit changed state meanwhile')
         try:
-            self.s3.put_object(Bucket=self.bucket, Key=key, Body=raw, ContentType='text/markdown',
+            self.s3.put_object(Bucket=self.bucket, Key=written_key, Body=raw, ContentType='text/markdown',
                                Metadata=self._metadata(deposit_id, sha))
-            head = self.s3.head_object(Bucket=self.bucket, Key=key)
+            head = self.s3.head_object(Bucket=self.bucket, Key=written_key)
             etag = str(head.get('ETag', '')).strip('"')
             metadata = {str(k).lower(): str(v) for k, v in (head.get('Metadata') or {}).items()}
             if int(head.get('ContentLength') or -1) != len(raw) or metadata.get('deposit') != deposit_id \
@@ -1016,7 +1020,10 @@ class ArtefactDepositService(DepositService):
             self.store.cas(deposit_id, ('completing',), 'expired')
             self.store.release_keys(deposit_id)
             raise DepositError(502, 's3_error', f'writing the collection failed ({_error_code(exc)}); try again')
-        if not self.store.finish_complete(deposit_id, {'index.md': etag}, self.clock(), completed=self.clock()):
+        if central:
+            self.store.update_file(deposit_id, 'index.md', staging_etag=etag)
+        if not self.store.finish_complete(deposit_id, {'index.md': None if central else etag}, self.clock(),
+                                          completed=self.clock()):
             raise DepositError(409, 'not_completed', 'the deposit was ended meanwhile; start again')
         self.store.event(deposit_id, identity.user, 'created', f'collection {data_project} ({group_id})')
         self.publish_record(deposit_id)

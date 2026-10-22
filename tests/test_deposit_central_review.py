@@ -61,98 +61,131 @@ def _listed(env):
     return {obj['Key']: (obj['ETag'].strip('"'), obj['Size'], obj['LastModified']) for obj in contents}
 
 
-# ── S1: another site's pending upload ───────────────────────────────────────
+# ── S1 (section 24.9): uploads stay in the site's staging, the watcher copies them in ─────────────────────
+
+def _forge_staged(env, deposit_id, site_id, secret=ATTACKER_SECRET, deposit=EVIL, **changes):
+    """intern's pending record, signed by an authentic site for a deposit of its own, naming intern's uploads."""
+    honest = _honest_record(env, deposit_id)
+    forged = dict(honest, id=deposit, user='mallory', **changes)
+    env.s3.put(f'__deposits/{site_id}/{deposit}/record.json', dr.sign_record(forged, site_id, deposit, 1, 'k1', secret),
+               env.clock_value + 1)
+    return honest
+
+
+def test_a_central_site_writes_nothing_into_incoming_and_keeps_its_staging(tmp_path):
+    env, service, clock = central(tmp_path)
+    deposit_id = _deposit(env, service)
+    assert not [key for key in env.s3.objects if key.startswith(PREFIX)]
+    record = _honest_record(env, deposit_id)
+    assert all(entry['etag'] is None and entry['staging_etag'] for entry in record['files'])
+    assert record['h5ad_etag'] is None and record['mus_etag'] is None
+    service.sweep_staging()                                          # not final yet: the watcher copies from it
+    assert all(entry['staging_key'] in env.s3.objects for entry in record['files'])
+    assert env.poll_twice() == {'live': 1}
+    copies = {entry['key']: env.s3.objects.get(entry['key']) for entry in record['files']}
+    assert not [key for key, obj in copies.items() if obj is not None]  # consumed after publication
+    service.status(ALICE, deposit_id)                                # the site reads the result: live
+    service.sweep_staging()
+    assert not [entry for entry in record['files'] if entry['staging_key'] in env.s3.objects]
+
 
 @pytest.mark.parametrize('attacker', ['prod', 'aaa'])          # its records sort after and before intern's
-@pytest.mark.parametrize('files', [True, False])                # with the file entries, or only the linking keys
-def test_an_authentic_sites_copy_of_a_pending_record_never_takes_the_upload(tmp_path, attacker, files):
+def test_an_authentic_sites_copy_of_a_pending_record_never_takes_the_upload(tmp_path, attacker):
     env, service, clock = central(tmp_path)
     _attacker(env, attacker)
     deposit_id = _deposit(env, service)
-    _forge(env, deposit_id, attacker, env.clock_value + 1, files=files)
+    _forge_staged(env, deposit_id, attacker)
     assert env.poll_twice() == {'live': 1}
     store = _store(env)
-    assert store.get(EVIL) is None
-    assert store.get(deposit_id)['watch_state'] == 'live'
+    assert store.get(EVIL) is None and store.get(deposit_id)['watch_state'] == 'live'
     assert store.owner_of_dataset('WT6/MIC') == 'alice@intern'
     answer = _result(env, attacker, EVIL)                            # an authentic site gets a signed reason
-    assert answer['state'] == 'needs_decision'
-    assert 'mark of' in answer['error'] or 'claimed by' in answer['error']
+    assert answer['state'] == 'needs_decision' and 'staging key is not under' in answer['error']
 
 
-def test_a_site_that_re_marks_the_upload_before_its_owner_is_imported_gets_both_held(tmp_path):
-    """The attacker's record is read first (site 'aaa'), after it re-marked intern's objects as its own: the
-    owner's record then finds its objects rewritten after it signed them and disputes the attacker's deposit."""
+def test_a_site_cannot_name_the_staging_of_another_of_its_deposits(tmp_path):
     env, service, clock = central(tmp_path)
-    _attacker(env, 'aaa')
     deposit_id = _deposit(env, service)
-    honest = _honest_record(env, deposit_id)
-    for key in _incoming_keys(honest):
-        env.s3.objects[key]['metadata']['deposit'] = EVIL
-        env.s3.objects[key]['mtime'] = env.clock_value + 1         # a copy onto itself: a new LastModified
-    _forge(env, deposit_id, 'aaa', env.clock_value + 2)
+    _forge_staged(env, deposit_id, 'intern', secret=SECRET)
+    env.poll_twice()
+    assert _store(env).get(EVIL) is None
+    assert 'staging key is not under' in _result(env, 'intern', EVIL)['error']
+
+
+def test_a_staged_upload_swapped_after_signing_is_refused(tmp_path):
+    env, service, clock = central(tmp_path)
+    deposit_id = _deposit(env, service)
+    seed = next(row for row in service.store.files(deposit_id) if row['kind'] == 'seed_md')
+    metadata = env.s3.objects[seed['staging_key']]['metadata']
+    env.s3.put(seed['staging_key'], b'---\ntitle: swapped\n---\n', env.clock_value, metadata=metadata)
+    env.poll_twice()
+    assert _store(env).get(deposit_id) is None
+    assert not [key for key in env.s3.objects if key.startswith(PREFIX)]   # nothing copied
+    assert service.status(ALICE, deposit_id)['state'] == 'needs_decision'
+    assert 'not the signed one' in service.store.get(deposit_id)['error']
+
+
+def test_an_object_put_at_an_incoming_key_first_is_never_overwritten(tmp_path):
+    env, service, clock = central(tmp_path)
+    deposit_id = _deposit(env, service)
+    h5ad_key = _honest_record(env, deposit_id)['watch_key']
+    env.s3.put(h5ad_key, b'someone else', env.clock_value, metadata={'deposit': EVIL})
+    env.watcher.remote.import_records(_store(env), {})
+    assert _store(env).get(deposit_id) is None and env.s3.objects[h5ad_key]['body'] == b'someone else'
+    assert 'another upload waits at this incoming key' in _result(env, 'intern', deposit_id)['error']
+
+
+def test_an_incoming_key_claimed_by_a_waiting_deposit_is_refused(tmp_path):
+    env, service, clock = central(tmp_path)
+    first = _deposit(env, service)
+    store = _store(env)
+    assert env.watcher.remote.import_records(store, {})['imported'] == 1        # copied, waiting
+    second = _deposit(env, service)                                  # the same dataset again at the same site
+    env.watcher.remote.import_records(store, {})
+    assert store.get(second) is None
+    assert f'claimed by the deposit {first}' in _result(env, 'intern', second)['error']
+
+
+def test_a_rewrite_in_incoming_after_the_copy_is_never_published(tmp_path):
+    env, service, clock = central(tmp_path)
+    deposit_id = _deposit(env, service)
+    env.watcher.remote.import_records(_store(env), {})
+    seed = next(row for row in _store(env).files(deposit_id) if row['kind'] == 'seed_md')
+    env.s3.put(seed['key'], b'---\ntitle: rewritten\n---\n', env.clock_value, metadata={'deposit': deposit_id})
     counts = env.poll_twice()
     assert 'live' not in counts
-    store = _store(env)
-    assert store.get(EVIL)['disputed'] and store.get(EVIL)['watch_state'] == 'needs_decision'
-    assert store.get(deposit_id) is None
-    assert store.owner_of_dataset('WT6/MIC') is None
-    assert _result(env, 'aaa', EVIL)['state'] == 'needs_decision'
-    assert 'rewritten after this record' in service.status(ALICE, deposit_id)['error']
+    assert _store(env).get(deposit_id)['watch_state'] != 'live'
 
 
-def test_a_site_that_re_marks_the_upload_after_its_owner_was_read_gets_nothing(tmp_path):
+def test_a_withdrawn_record_removes_the_watchers_copies(tmp_path):
+    env, service, clock = central(tmp_path)
+    deposit_id = _deposit(env, service)
+    env.watcher.remote.import_records(_store(env), {})
+    keys = [entry['key'] for entry in _honest_record(env, deposit_id)['files']]
+    assert all(key in env.s3.objects for key in keys)
+    service.withdraw(ALICE, deposit_id)
+    env.watcher.remote.import_records(_store(env), {})
+    assert not [key for key in keys if key in env.s3.objects]
+    assert _store(env).get(deposit_id)['state'] == 'withdrawn'
+
+
+def test_continuing_a_deposit_is_refused(tmp_path):
     env, service, clock = central(tmp_path)
     _attacker(env, 'prod')
     deposit_id = _deposit(env, service)
-    honest = _honest_record(env, deposit_id)
-    for key in _incoming_keys(honest):
-        env.s3.objects[key]['metadata']['deposit'] = EVIL
-        env.s3.objects[key]['mtime'] = env.clock_value + 1
-    _forge(env, deposit_id, 'prod', env.clock_value + 2)
-    assert 'live' not in env.poll_twice()
-    store = _store(env)
-    assert store.get(EVIL) is None and store.get(deposit_id) is None
-    assert 'claimed by the deposit' in _result(env, 'prod', EVIL)['error']
-
-
-def test_a_key_claimed_by_a_waiting_deposit_cannot_be_taken_with_other_bytes(tmp_path):
-    """Claims are keyed by the incoming key alone: replacing the object (new ETag, own mark) does not free it."""
-    env, service, clock = central(tmp_path)
-    _attacker(env, 'prod')
-    deposit_id = _deposit(env, service)
-    store = _store(env)
-    assert env.watcher.remote.import_records(store, _listed(env))['imported'] == 1   # intern's, waiting
-    honest = _honest_record(env, deposit_id)
-    forged = dict(honest, id=EVIL, user='mallory', files=[])
-    for entry in honest['files']:
-        body = env.s3.objects[entry['key']]['body'] + b'\n'          # other bytes, the attacker's own mark
-        etag = env.s3.put(entry['key'], body, env.clock_value + 1, metadata={'deposit': EVIL})
-        forged['files'].append(dict(entry, etag=etag, size=len(body), staging_key=None, staging_etag=None))
-        if entry['key'] == honest['watch_key']:
-            forged['h5ad_etag'] = etag
-        if entry['key'] == honest['mus_key']:
-            forged['mus_etag'] = etag
-    env.s3.put(f'__deposits/prod/{EVIL}/record.json', dr.sign_record(forged, 'prod', EVIL, 1, 'k1', ATTACKER_SECRET),
-               env.clock_value + 2)
-    env.watcher.remote.import_records(store, _listed(env))
-    assert store.get(EVIL) is None
-    assert f'claimed by the deposit {deposit_id} of intern' in _result(env, 'prod', EVIL)['error']
-
-
-def test_continues_must_name_a_deposit_of_the_same_site(tmp_path):
-    env, service, clock = central(tmp_path)
-    _attacker(env, 'prod')
-    deposit_id = _deposit(env, service)
-    store = _store(env)
-    assert env.watcher.remote.import_records(store, _listed(env))['imported'] == 1   # intern's, not linked yet
-    honest = _honest_record(env, deposit_id)
-    forged = dict(honest, id=EVIL, user='mallory', continues=deposit_id, files=[])
+    forged = dict(_honest_record(env, deposit_id), id=EVIL, user='mallory', continues=deposit_id, files=[])
     env.s3.put(f'__deposits/prod/{EVIL}/record.json', dr.sign_record(forged, 'prod', EVIL, 1, 'k1', ATTACKER_SECRET),
                env.clock_value + 1)
-    env.watcher.remote.import_records(store, _listed(env))
-    assert store.get(EVIL) is None
-    assert f'continues {deposit_id}, which is not a deposit of prod' in _result(env, 'prod', EVIL)['error']
+    env.watcher.remote.import_records(_store(env), {})
+    assert 'continues: a site with a central watcher deposits the h5ad again' in _result(env, 'prod', EVIL)['error']
+
+
+def test_a_record_of_a_site_that_copied_into_incoming_itself_is_refused():
+    record = dr.staged_record_problems({'state': 'uploaded', 'h5ad_etag': 'e' * 32, 'files': [
+        {'name': 'a.h5ad', 'state': 'complete', 'etag': 'e' * 32, 'staging_key': None, 'staging_etag': None,
+         'sha256': 'a' * 64}]})
+    assert any('copied into incoming itself' in problem for problem in record)
+    assert any('no staged copy' in problem for problem in record)
 
 
 def test_remote_deposits_are_ordered_by_the_watchers_import_time(tmp_path):
@@ -257,10 +290,11 @@ def test_a_pulled_file_that_is_not_the_signed_one_fails(tmp_path):
     """A store that ignores IfMatch could serve other bytes under the listed ETag."""
     env, service, clock = central(tmp_path)
     deposit_id = _deposit(env, service)
+    env.watcher.poll()                                               # imported, copied into incoming, seen
     seed_key = next(row['key'] for row in service.store.files(deposit_id) if row['kind'] == 'seed_md')
     original = env.s3.objects[seed_key]['body']
     env.s3.objects[seed_key]['body'] = original.replace(b'---', b'+++', 1)    # same size and listed ETag
-    assert env.poll_twice() == {'failed': 1}
+    assert env.watcher.poll() == {'failed': 1}                       # the second identical listing processes
     status = service.status(ALICE, deposit_id)
     assert status['state'] == 'failed' and 'signed record' in status['error']
 

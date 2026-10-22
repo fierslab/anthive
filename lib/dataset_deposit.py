@@ -1330,6 +1330,9 @@ class DepositService:
         for deposit_id, stamp in newest.items():
             record = self.store.get(deposit_id)
             if record is not None:
+                if self.settings.central_watcher and record['state'] == 'uploaded' \
+                        and record.get('watch_state') not in ('live', 'rejected', 'failed'):
+                    continue              # the central watcher copies from staging: kept until it is final
                 if record['state'] in TERMINAL_STATES:
                     # a central watcher's record and result stay until the deposit is over and old
                     over = record['state'] in ('withdrawn', 'expired') or record.get('watch_state') in ('live',
@@ -1502,8 +1505,11 @@ class DepositService:
         return entries, sha
 
     def _check_keys(self, identity: Identity, deposit_files: Sequence[Dict[str, Any]]) -> None:
-        """A non-admin may not replace a waiting object of another user's deposit or of a lab member's upload."""
-        if identity.is_admin:
+        """A non-admin may not replace a waiting object of another user's deposit or of a lab member's upload.
+
+        A site with a central watcher never writes incoming (the watcher copies; section 24.9), so there is
+        nothing of others it could replace; the watcher checks the incoming keys against its claims."""
+        if identity.is_admin or self.settings.central_watcher:
             return
         for entry in deposit_files:
             head = _head(self.s3, self.bucket, entry['key'])
@@ -1593,7 +1599,9 @@ class DepositService:
         if de_only:
             pass
         elif h5ad_entry is None:
-            head = _head(self.s3, self.bucket, h5ad_key)
+            # a site with a central watcher cannot continue an h5ad waiting in incoming (it neither reads nor
+            # writes incoming, section 24.9): without an h5ad it is a metadata-only update or refused
+            head = None if self.settings.central_watcher else _head(self.s3, self.bucket, h5ad_key)
             previous = self.store.get(head['metadata'].get('deposit', '')) if head and head['metadata'].get('deposit') else None
             previous_row = next((row for row in self.store.files(previous['id']) if row['kind'] == 'h5ad'
                                  and row['etag'] == head['etag']), None) if previous else None
@@ -1994,6 +2002,8 @@ class DepositService:
         except DepositError as error:
             self._undo_complete(deposit_id, {}, error)
             raise
+        if self.settings.central_watcher:
+            return self._finish_staged(deposit_id, rows, warnings, identity.user)
         copy_bytes = sum(int(row['size'] or 0) for row in rows.values())     # uploads and reused files
         if copy_bytes > self.settings.async_complete_gb * 1024 ** 3:
             self.store.event(deposit_id, identity.user, 'completing', 'large deposit: copying in the background')
@@ -2137,6 +2147,26 @@ class DepositService:
                 'warnings': warnings,
                 'next': 'The watcher checks the deposit within a few minutes after it settles; follow it with '
                         f'GET /datasets/deposit/{deposit_id}.'}
+
+    def _finish_staged(self, deposit_id: str, rows: Dict[str, Dict[str, Any]], warnings: List[str],
+                       user: str) -> Dict[str, Any]:
+        """A site with a central watcher (section 24.9): the verified uploads stay in the deposit's staging
+        folder, the signed record names them with their staging ETags, and the watcher copies them into incoming
+        after it has verified the record and each staging object. Nothing is written to incoming here."""
+        now = self.clock()
+        finished = self.store.finish_complete(deposit_id, {row['name']: None for row in rows.values()}, now,
+                                              completed=now, h5ad_etag=None, mus_etag=None, progress=None)
+        if not finished:
+            raise DepositError(409, 'not_completed', 'the deposit was ended while it was being completed; '
+                                                     'start a new deposit')
+        self.store.event(deposit_id, user, 'completed', f'{len(rows)} file(s), staged for the central watcher')
+        self.publish_record(deposit_id)
+        return {'deposit_id': deposit_id, 'state': 'uploaded',
+                'files': [{'name': row['name'], 'key': row['key'], 'size': row['size'], 'sha256': row['sha256'],
+                           'etag': None} for row in rows.values()],
+                'warnings': warnings,
+                'next': 'The central watcher verifies the deposit and copies it into incoming within a few minutes; '
+                        f'follow it with GET /datasets/deposit/{deposit_id}.'}
 
     def resume_interrupted(self) -> List[str]:
         """After a restart: complete again the deposits a previous process left ``completing``.
@@ -2319,6 +2349,8 @@ class DepositService:
                         raise
                 aborted.append(row['name'])
                 self.store.update_file(record['id'], row['name'], state='aborted')
+            if self.settings.central_watcher:
+                continue                  # incoming is the central watcher's: it removes its copies (24.9)
             head = _head(self.s3, self.bucket, row['key'])
             if head is None:
                 continue

@@ -385,7 +385,33 @@ def record_problems(record: Mapping[str, Any], site_id: str, deposit_id: str, in
         if entry.get('sha256') is not None and (not isinstance(entry['sha256'], str)
                                                 or not SHA256_RE.fullmatch(entry['sha256'])):
             problems.append(f'{name}: sha256 is not a sha256')
+    if record.get('state') == 'uploaded':
+        problems += staged_record_problems(record)
     return problems[:20]
+
+
+def staged_record_problems(record: Mapping[str, Any]) -> List[str]:
+    """Section 24.9: a site leaves its uploads in its staging folder and the watcher copies them into incoming.
+    An uploaded record names every file complete with its staging key, staging ETag and sha256, and no incoming
+    ETag (a site that copied into incoming itself runs the protocol before 2.47.0); nothing continues a
+    deposit (the h5ad is deposited again)."""
+    problems: List[str] = []
+    if record.get('continues'):
+        problems.append('continues: a site with a central watcher deposits the h5ad again instead of continuing one')
+    if record.get('h5ad_etag') or record.get('mus_etag'):
+        problems.append('incoming ETags in the record: the site copied into incoming itself (an older version); '
+                        'the watcher copies from staging')
+    for entry in record.get('files') or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get('name'))[:60]
+        if entry.get('state') != 'complete':
+            problems.append(f'{name}: an uploaded record names a file that is not complete')
+        if entry.get('etag'):
+            problems.append(f'{name}: an incoming ETag in the record (the site copied it into incoming)')
+        if not entry.get('staging_key') or not entry.get('staging_etag') or not entry.get('sha256'):
+            problems.append(f'{name}: no staged copy (staging key, staging ETag and sha256) in the record')
+    return problems
 
 
 # ── export (site) and import (watcher) ───────────────────────────────────────
@@ -423,7 +449,7 @@ def qualified_user(user: str, site_id: str) -> str:
 
 
 def import_record(store: Any, envelope: Mapping[str, Any], site_id: str, trust_admins: bool = False,
-                  now: Optional[float] = None) -> str:
+                  now: Optional[float] = None, copied: Optional[Mapping[str, str]] = None) -> str:
     """Write a verified, checked record into the watcher's deposit store. Returns ``imported``, ``unchanged``.
 
     A site's admin flag is kept only when the watcher trusts that site's admins (``trust_admins``, off by
@@ -452,7 +478,14 @@ def import_record(store: Any, envelope: Mapping[str, Any], site_id: str, trust_a
     values['is_admin'] = 1 if trust_admins and record.get('is_admin') else 0
     values.update(site_id=site_id, record_version=version, record_digest=record_digest,
                   imported=float(now if now is not None else time.time()))
-    store.import_remote(deposit_id, values, [dict(entry) for entry in record['files']])
+    files = [dict(entry) for entry in record['files']]
+    if copied:                  # section 24.9: the watcher's own copies in incoming (key -> ETag)
+        for entry in files:
+            if entry.get('key') in copied:
+                entry['etag'] = copied[entry['key']]
+        values['h5ad_etag'] = copied.get(str(record.get('watch_key') or ''))
+        values['mus_etag'] = copied.get(str(record.get('mus_key') or ''))
+    store.import_remote(deposit_id, values, files)
     return 'imported'
 
 

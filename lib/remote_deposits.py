@@ -8,11 +8,12 @@ Each poll, before the deposits are linked to the incoming objects:
   with the signed ETags and sizes, checks update rights against this store's owners, and imports the record into
   the watcher's deposit store. From there the existing route links, checks and publishes it like a local deposit.
   An authentic record that cannot be imported gets a signed ``needs_decision`` result with the reason.
-* An authentic site is not trusted with another site's uploads (review S1): every incoming object an uploaded
-  record names (its files, and the h5ad and sidecar it is linked by) must be listed, carry the server's
-  ``x-amz-meta-deposit`` mark of that deposit (or of the deposit it continues, which must be one of the same
-  site), and belong to no other deposit. When another deposit that still waits claims the same object, both are
-  held (``disputed``): with shared ingestion keys the watcher cannot tell which site is right, so an admin decides.
+* Sites never write incoming (section 24.9): an uploaded record names its files in the site's own staging
+  folder with their staging ETags and sha256. The watcher HEADs each staged upload (the signed ETag and size,
+  the server's ``deposit`` and ``sha256`` marks), checks that no other deposit claims the incoming keys, copies
+  the uploads into incoming itself (marks set by the watcher, pinned to the staging ETag; streamed and
+  sha256-checked between two key pairs) and imports the record with the ETags of its own copies. A withdrawn or
+  expired record has those copies removed.
 * A site's ``is_admin`` counts only for the sites in ``trusted_admin_sites`` (review S2; default none).
 
 After the poll:
@@ -20,7 +21,7 @@ After the poll:
 * :meth:`RemoteSites.export_results` writes a signed ``result.json`` for every imported deposit whose outcome
   changed (state, held reasons, the redacted report, db id and version or artefact reference).
 
-The watcher never touches a site's staging except reading its record and writing its result.
+The watcher never writes a site's staging except its result; it reads the record and the staged uploads.
 """
 from __future__ import annotations
 
@@ -40,6 +41,8 @@ IMPORTED_STATES = ('uploaded', 'withdrawn', 'expired')
 UPDATE_KINDS = ('dataset', 'metadata_update', 'de_only', 'obs_columns')
 #: watch states after which an object a deposit claimed is its own for good
 FINAL_WATCH_STATES = ('live', 'rejected', 'failed')
+#: copies up to this size are one CopyObject; larger ones a managed (multipart) copy
+COPY_SINGLE_MAX = 5 * 1024 ** 3
 
 
 def epoch(value: Any) -> float:
@@ -62,7 +65,8 @@ class RemoteSites:
     def __init__(self, *, s3: Any, bucket: str, state_dir: Path, sites: Mapping[str, Mapping[str, bytes]],
                  result_key: Any, staging_root: str, incoming_prefix: str, local_site_id: str = '',
                  trusted_admin_sites: Optional[List[str]] = None, log: Callable[[str], None] = print,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, catalog_bucket: Optional[str] = None,
+                 catalog_prefix: str = ''):
         self.s3 = s3
         self.bucket = bucket
         self.state_dir = Path(state_dir)
@@ -74,6 +78,9 @@ class RemoteSites:
         self.trusted_admin_sites = set(trusted_admin_sites or [])
         self.log = log
         self.clock = clock
+        #: where the published files of a metadata-only update are reused from (the data bucket)
+        self.catalog_bucket = catalog_bucket or bucket
+        self.catalog_prefix = catalog_prefix
         self._logged: set = set()
 
     # bookkeeping (what was seen and answered) --------------------------------
@@ -197,13 +204,13 @@ class RemoteSites:
             state['seen'][seen_key] = version
             return 'ignored'
         problems = dr.record_problems(record, site_id, deposit_id, self.incoming_prefix, self.staging_root)
-        if not problems and record.get('state') == 'uploaded':
-            problems = dr.listing_mismatches(record, listed)
-        if not problems and record.get('state') == 'uploaded':
-            problems = self._ownership_problems(store, state, record, site_id, deposit_id, listed, record_mtime)
+        sources: Dict[str, Tuple[str, str]] = {}
         if not problems and record.get('state') == 'uploaded':
             problems = self._rights_problems(store, record, site_id)
+        if not problems and record.get('state') == 'uploaded':
+            problems, sources = self._staged_problems(store, state, record, site_id, deposit_id)
         if not problems and record.get('state') in ('withdrawn', 'expired'):
+            self._remove_copies(store, state, record, site_id, deposit_id)
             self._release_claims(state, f'{site_id}/{deposit_id}')
         if problems:
             self._refuse(state, site_id, deposit_id, '; '.join(problems))
@@ -212,10 +219,18 @@ class RemoteSites:
         if record.get('state') not in IMPORTED_STATES:
             state['seen'][seen_key] = version
             return 'ignored'
+        copied: Dict[str, str] = {}
+        if sources:
+            try:
+                copied = self._stage_in(state, record, site_id, deposit_id, sources)
+            except Exception as exc:  # noqa: BLE001 - a failed copy: the record is looked at again next poll
+                self._log_once(key, f'{key}: copy into incoming failed ({type(exc).__name__}); retried next poll')
+                return 'waiting'
         try:
             result = dr.import_record(store, envelope, site_id, trust_admins=site_id in self.trusted_admin_sites,
-                                      now=self.clock())
+                                      now=self.clock(), copied=copied)
         except dr.RecordError as exc:
+            self._delete_copies(copied)
             self._refuse(state, site_id, deposit_id, str(exc))
             return 'refused'
         state['seen'][seen_key] = version
@@ -254,87 +269,68 @@ class RemoteSites:
         for token in [token for token, owner in claims.items() if owner == holder]:
             del claims[token]
 
-    def _ownership_problems(self, store: Any, state: Dict[str, Any], record: Mapping[str, Any], site_id: str,
-                            deposit_id: str, listed: Mapping[str, Tuple[str, int, float]],
-                            record_mtime: float) -> List[str]:
-        """Review S1: the incoming objects an uploaded record names are this deposit's own.
+    def _staged_problems(self, store: Any, state: Dict[str, Any], record: Mapping[str, Any], site_id: str,
+                         deposit_id: str) -> Tuple[List[str], Dict[str, Tuple[str, str]]]:
+        """Section 24.9: the uploads of an authentic, uploaded record are still in the site's staging folder.
 
-        1. ``continues`` names a deposit of the same site already in this store (Deferred while it is not).
-        2. Every file is complete; every object (the files, and the h5ad and sidecar the item is linked by) is
-           listed (Deferred otherwise) with the signed ETag.
-        3. An object written after this record (S3's LastModified, one clock for both) was rewritten after the
-           site signed: another key holder re-marked or replaced it. The record is refused, keeps its claim on
-           the objects, and a waiting deposit the object's mark now names is disputed: whoever rewrote another
-           site's upload gets at most both held, never the upload.
-        4. No other deposit claims one of the objects' keys (the incoming key alone, whatever the ETag), outside
-           the chain: a deposit of this store
-           that is open or still waits, or an earlier authentic record kept in the state file (refused in step 3,
-           or imported; until it is withdrawn or expired, or its deposit is final here).
-        5. Every object carries the server's deposit mark of this deposit or of a deposit it continues; only then
-           does the record claim them.
-        """
-        chain = [deposit_id]
-        if record.get('continues'):
-            continued = store.get(str(record['continues']))
-            if continued is None:
-                raise Deferred(f'the continued deposit {record["continues"]} is not imported yet')
-            if (continued.get('site_id') or '') != site_id:
-                return [f'continues {record["continues"]}, which is not a deposit of {site_id}']
-            chain += [entry for entry in store.chain(str(record['continues'])) if entry not in chain]
-            if any((store.get(entry) or {}).get('site_id') != site_id for entry in chain[1:]):
-                return [f'continues a chain that leaves {site_id}']
-        objects: Dict[str, str] = {}
-        for entry in record.get('files') or []:
-            if entry.get('state') != 'complete' or not entry.get('etag'):
-                return [f'{entry.get("name")}: an uploaded record names a file that is not complete']
-            objects[str(entry['key'])] = str(entry['etag'])
-        for key_field, etag_field in (('watch_key', 'h5ad_etag'), ('mus_key', 'mus_etag')):
-            key, etag = record.get(key_field), record.get(etag_field)
-            if key and not str(key).startswith('artefact:'):
-                if not etag:
-                    continue                           # never linked: find_for_item needs both ETags
-                if objects.get(str(key), etag) != etag:
-                    return [f'{key_field} and its file entry name different ETags']
-                objects[str(key)] = str(etag)
-        for key in sorted(objects):
-            if key not in listed:
-                raise Deferred(f'{key} is not listed in incoming yet')
-        problems = [f'{key}: the incoming object has another ETag than the signed record'
-                    for key, etag in sorted(objects.items()) if listed[key][0] != etag]
+        Per file: the source is its staging key, which ``record_problems`` already confined to
+        ``<staging_root><site_id>/<deposit_id>/`` (a reused published file of a metadata-only update is the
+        catalog's own object of the dataset instead); a HEAD must show the signed staging ETag and size, and a
+        staged upload the server's marks (``deposit`` = this deposit, ``sha256`` = the signed sha256). Then the
+        incoming target keys must be free: no open or waiting deposit of this store and no earlier authentic
+        record claims one (the key alone, whatever the ETag), and an object that waits there must be one this
+        watcher wrote for this deposit (it is overwritten by the copy). Returns ``(problems, sources)`` with
+        ``sources``: incoming key -> (source bucket, source key)."""
+        problems: List[str] = []
+        sources: Dict[str, Tuple[str, str]] = {}
+        files = list(record.get('files') or [])
+        for entry in files:
+            name, key = str(entry.get('name')), str(entry.get('key'))
+            staging_key = str(entry.get('staging_key') or '')
+            if entry.get('method') == 'reuse':
+                bucket = self.catalog_bucket
+                expected = f'{self.catalog_prefix}{record.get("data_project")}/{name}'
+                if record.get('deposit_kind') != 'metadata_update' or not record.get('update_of') \
+                        or staging_key != expected or name not in (f'{record.get("basename")}.h5ad',
+                                                                   f'{record.get("basename")}.h5ad.mus'):
+                    problems.append(f'{name}: a reused file must be the published file {expected} of a metadata '
+                                    f'update')
+                    continue
+            else:
+                bucket = self.bucket
+            try:
+                head = self.s3.head_object(Bucket=bucket, Key=staging_key)
+            except Exception:  # noqa: BLE001 - absent (or unreadable): the record cannot be staged in
+                problems.append(f'{name}: the staged upload is gone (withdrawn, swept or never complete)')
+                continue
+            metadata = {str(k).lower(): str(v) for k, v in (head.get('Metadata') or {}).items()}
+            if str(head.get('ETag', '')).strip('"') != str(entry.get('staging_etag')) \
+                    or int(head.get('ContentLength') or -1) != int(entry.get('size') or -2):
+                problems.append(f'{name}: the staged upload is not the signed one (ETag or size changed after signing)')
+                continue
+            if entry.get('method') != 'reuse' and (metadata.get('deposit') != deposit_id
+                                                   or metadata.get('sha256') != entry.get('sha256')):
+                problems.append(f'{name}: the staged upload does not carry the marks of {deposit_id} and its sha256')
+                continue
+            if entry.get('method') == 'reuse' and name.endswith('.h5ad') \
+                    and metadata.get('sha256') != entry.get('sha256'):
+                problems.append(f'{name}: the published file is not the one the site verified (sha256)')
+                continue
+            sources[key] = (bucket, staging_key)
         if problems:
-            return problems[:20]
+            return problems[:20], {}
+        # the incoming targets: claimed by nobody else, and empty or written by this watcher for this deposit
         claims = state.setdefault('claims', {})
         me = f'{site_id}/{deposit_id}'
-        mine = {f'{site_id}/{entry}' for entry in chain}
-
-        # 3. rewritten after signing
-        rewritten = sorted(key for key in objects if float(listed[key][2] or 0) > float(record_mtime or 0))
-        if rewritten:
-            for key in objects:
-                claims.setdefault(key, me)
-            for key in rewritten:
-                mark = self._mark(key)
-                row = store.get(mark) if mark and mark not in chain else None
-                if row is not None and row.get('state') == 'uploaded' and not row.get('disputed') \
-                        and row.get('watch_state') not in FINAL_WATCH_STATES:
-                    reason = (f'disputed: {key} was rewritten after {deposit_id} of {site_id} signed it and now '
-                              f'carries the mark of {mark}' + (f' of {row["site_id"]}' if row.get('site_id') else '')
-                              + '; neither is published, an admin of the central site decides')
-                    store.dispute(mark, reason)
-                    self.log(f'remote deposits: {reason}')
-            return [f'{key} was rewritten after this record was written (another holder of the ingestion keys '
-                    f'replaced or re-marked it); an admin of the central site decides' for key in rewritten][:20]
-
-        # 4. claimed by another deposit
-        for claim in store.claims(objects, exclude=deposit_id):
-            if claim['id'] in chain or claim.get('watch_state') in FINAL_WATCH_STATES:
+        for claim in store.claims(dict.fromkeys(sources, ''), exclude=deposit_id):
+            if claim.get('watch_state') in FINAL_WATCH_STATES:
                 continue        # a final deposit's object was consumed or is never used again: its key is free
             owner = f'{claim["id"]}' + (f' of {claim["site_id"]}' if claim.get('site_id') else '')
             what = 'locked by the open deposit' if claim.get('open') else 'claimed by the deposit'
             problems.append(f'{claim["key"]} is {what} {owner}')
-        for key in sorted(objects):
+        for key in sorted(sources):
             holder = claims.get(key)
-            if not holder or holder in mine:
+            if not holder or holder == me:
                 continue
             holder_site, _, holder_id = holder.partition('/')
             row = store.get(holder_id)
@@ -344,19 +340,90 @@ class RemoteSites:
                 continue
             problems.append(f'{key} is claimed by the deposit {holder_id} of {holder_site}; that site withdraws it '
                             f'first, or an admin of the central site decides')
+        for key in sorted(sources):
+            mark = self._mark_or_none(key)
+            if mark is not None and mark != deposit_id:
+                problems.append(f'{key}: another upload waits at this incoming key (mark {mark or "none"}); it is '
+                                f'removed first (an admin of the central site decides)')
         if problems:
-            return sorted(set(problems))[:20]
+            return sorted(set(problems))[:20], {}
+        return [], sources
 
-        # 5. the server's mark
-        for key in sorted(objects):
-            mark = self._mark(key)
-            if mark not in chain:
-                problems.append(f'{key} does not carry the mark of {deposit_id} (it is not an upload of this deposit)')
-        if problems:
-            return problems[:20]
-        for key in objects:
-            claims.setdefault(key, me)
-        return []
+    def _stage_in(self, state: Dict[str, Any], record: Mapping[str, Any], site_id: str, deposit_id: str,
+                  sources: Mapping[str, Tuple[str, str]]) -> Dict[str, str]:
+        """Copy each verified staged upload to its incoming key (pinned to the signed staging ETag, the deposit
+        and sha256 marks set by the watcher) and HEAD it; returns incoming key -> the copy's ETag. The copy
+        between two key pairs is streamed and checked against the sha256 (``s3_router``)."""
+        by_key = {str(entry.get('key')): entry for entry in record.get('files') or []}
+        claims = state.setdefault('claims', {})
+        copies = state.setdefault('copies', {})
+        me = f'{site_id}/{deposit_id}'
+        copied: Dict[str, str] = {}
+        try:
+            for key, (bucket, source_key) in sorted(sources.items()):
+                self._copy_one(by_key[key], key, bucket, source_key, deposit_id, copied)
+        except BaseException:
+            self._delete_copies(copied)        # never leave marked copies of a deposit that is not imported
+            raise
+        for key, etag in copied.items():
+            claims[key] = me
+            copies[key] = [me, etag]
+        return copied
+
+    def _delete_copies(self, copied: Mapping[str, str]) -> None:
+        from ingest_pipeline import delete_consumed  # noqa: PLC0415
+        for key, etag in copied.items():
+            try:
+                delete_consumed(self.s3, self.bucket, self.incoming_prefix, {key: etag})
+            except Exception:  # noqa: BLE001 - left for the unlinked-object check and an admin
+                pass
+
+    def _copy_one(self, entry: Mapping[str, Any], key: str, bucket: str, source_key: str, deposit_id: str,
+                  copied: Dict[str, str]) -> None:
+        metadata = {'deposit': deposit_id, 'sha256': str(entry['sha256'])}
+        condition = f'"{entry["staging_etag"]}"'
+        source = {'Bucket': bucket, 'Key': source_key}
+        if int(entry['size']) <= COPY_SINGLE_MAX:
+            self.s3.copy_object(Bucket=self.bucket, Key=key, CopySource=source, Metadata=metadata,
+                                MetadataDirective='REPLACE', CopySourceIfMatch=condition)
+        else:
+            self.s3.copy(source, self.bucket, key, ExtraArgs={'Metadata': metadata, 'MetadataDirective': 'REPLACE',
+                                                              'CopySourceIfMatch': condition})
+        head = self.s3.head_object(Bucket=self.bucket, Key=key)
+        marks = {str(k).lower(): str(v) for k, v in (head.get('Metadata') or {}).items()}
+        if int(head.get('ContentLength') or -1) != int(entry['size']) or marks.get('deposit') != deposit_id:
+            raise RuntimeError(f'the copy of {entry.get("name")} into incoming could not be verified')
+        copied[key] = str(head.get('ETag', '')).strip('"')
+
+    def _remove_copies(self, store: Any, state: Dict[str, Any], record: Mapping[str, Any], site_id: str,
+                       deposit_id: str) -> None:
+        """A withdrawn or expired record: delete the incoming copies this watcher made for it (only objects that
+        still carry its mark and the ETag of the copy), unless the deposit was published meanwhile."""
+        from ingest_pipeline import delete_consumed  # noqa: PLC0415
+        row = store.get(deposit_id)
+        if row is not None and row.get('watch_state') == 'live':
+            return
+        copies = state.setdefault('copies', {})
+        me = f'{site_id}/{deposit_id}'
+        for key in [key for key, value in copies.items() if value and value[0] == me]:
+            try:
+                delete_consumed(self.s3, self.bucket, self.incoming_prefix, {key: copies[key][1]})
+            except Exception as exc:  # noqa: BLE001 - the next record version or an admin cleans up
+                self._log_once(f'{me}:{key}', f'{key}: copy of withdrawn {deposit_id} not deleted ({type(exc).__name__})')
+                continue
+            del copies[key]
+
+    def _mark_or_none(self, key: str) -> Optional[str]:
+        """``x-amz-meta-deposit`` of an incoming object ('' when unmarked), None when there is no object."""
+        try:
+            head = self.s3.head_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:  # noqa: BLE001
+            code = str(((getattr(exc, 'response', None) or {}).get('Error') or {}).get('Code') or '')
+            if isinstance(exc, KeyError) or code in ('404', 'NoSuchKey', 'NotFound'):
+                return None
+            raise
+        metadata = {str(name).lower(): str(value) for name, value in (head.get('Metadata') or {}).items()}
+        return metadata.get('deposit', '')
 
     def _mark(self, key: str) -> str:
         """``x-amz-meta-deposit`` of an incoming object ('' when unmarked)."""

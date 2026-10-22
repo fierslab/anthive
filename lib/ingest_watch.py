@@ -552,8 +552,8 @@ class Watcher:
         for message in self.pipeline.recover():
             self.db.event('-', 'recovery', message)
         objects = self.list_prefix()
-        if self.remote is not None:
-            self.import_remote_records(objects)
+        if self.remote is not None and (self.import_remote_records(objects) or {}).get('imported'):
+            objects = self.list_prefix()          # the watcher copied staged uploads into incoming (24.9)
         items, malformed = plan_items(objects, self.settings['prefix'])
         for message in malformed:
             self.log(f'malformed: {message}')
@@ -713,6 +713,16 @@ class Watcher:
                             return entry is not None and entry[0] in chain and entry[1] == obj.etag
                         item.static = [obj for obj in item.static if own(obj)]
                         item.de = [obj for obj in item.de if own(obj)]
+                        if record.get('site_id') and record.get('watch_state') not in ('live', 'rejected', 'failed'):
+                            # section 24.9: every file of another site's deposit is the watcher's own copy; one
+                            # that is gone or was rewritten in incoming stops the item (never published without it)
+                            present = {obj.key for obj in item.static + item.de} | {item.h5ad.key, item.mus.key}
+                            missing = sorted(row['key'] for row in store.files(record['id'])
+                                             if row['key'] not in present)
+                            if missing:
+                                item.refused = (f'{", ".join(missing[:5])} of the deposit {record["id"]} is gone or '
+                                                f'was rewritten in incoming after the watcher copied it; an admin of '
+                                                f'the central site decides (reject it; the site deposits again)')
                     else:
                         try:
                             def foreign(obj):
