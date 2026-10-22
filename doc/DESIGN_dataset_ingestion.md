@@ -1267,7 +1267,8 @@ refused as `needs_decision` (deposit-marked objects nobody accounts for).
 - **Ingestion bucket** (Mark creates it): `__deposits/<site_id>/<deposit_id>/` (staging, `record.json`,
   `result.json`) and `__incoming/`. The catalog (published datasets and artefacts) stays in the data bucket.
 - **Site** (an API that accepts deposits): `datasets_deposit_s3` names the ingestion bucket and its own key pair
-  (presigning, records, the copy into `__incoming/`); `datasets_deposit_catalog_bucket` names the data bucket
+  (presigning and records in its own staging folder; since 24.9 the watcher, not the site, copies into
+  `__incoming/`); `datasets_deposit_catalog_bucket` names the data bucket
   for metadata-only updates (the ingestion key pair then needs read access on the catalog prefix; without it a
   metadata-only update is refused with `h5ad_unavailable`). `datasets_deposit_central_watcher: true` switches
   the route on. Intern keeps its main data keys host-only; only the ingestion pair goes into the container.
@@ -1321,28 +1322,21 @@ deposits are linked) lists `__deposits/*/*/record.json` of the ingestion bucket 
    artefact files under `artefacts/<deposit_id>/`, the watch key of an artefact or collection deposit
    `artefact:<deposit_id>`; staging keys under the site's own `__deposits/<site_id>/<deposit_id>/`; file names
    of safe segments, unique; sizes, ETags, sha256 of the right form; at most 500 files;
-5. swapped files: for an uploaded record, an incoming object listed under a file's key with another ETag or
-   size than the signed one refuses the record (`listing_mismatches`); the route then links only objects that
-   match the record anyway (find_for_item);
-6. ownership of the objects (review S1, `_ownership_problems`): `continues` must name a deposit of the same
-   site already imported; every object the record names (its files, and the h5ad and sidecar an item is linked
-   by) must be listed with the signed ETag (the record waits otherwise); an object whose LastModified is later
-   than the record's own was rewritten after the site signed (another key holder re-marked or replaced it):
-   the record is refused, keeps its claim, and a waiting deposit the object's mark now names is disputed; no
-   other deposit may claim the objects' keys, whatever the ETag (an open or waiting deposit of the store, or an
-   earlier authentic record kept in the state file until it is withdrawn, expired or final; so other bytes put
-   under a waiting deposit's key never free it); and every object must carry the server's
-   `x-amz-meta-deposit` mark of this deposit or of the deposit it continues. Withdrawn and expired records of a
-   poll are handled first, so they release their claims before the uploads;
-7. update rights (24.5);
-8. only `uploaded`, `withdrawn` and `expired` records are imported, into the watcher's `deposits.sqlite` with
+5. update rights (24.5);
+6. the staged uploads and the incoming keys (24.9, replacing the incoming-object checks of review S1): each
+   staged upload shows the signed staging ETag, size and the server's marks; no other deposit or earlier
+   authentic record claims an incoming target key (the key alone, whatever the ETag; claims kept in the state
+   file until withdrawn, expired or final); nothing else waits at a target key; then the watcher copies the
+   uploads into incoming itself. Withdrawn and expired records of a poll are handled first (their copies are
+   removed and their claims released before the uploads);
+7. only `uploaded`, `withdrawn` and `expired` records are imported, into the watcher's `deposits.sqlite` with
    `site_id`, `record_version`, `record_digest` and `imported` (the watcher's clock), the user written as
    `<login>@<site_id>`. Remote deposits are ordered by `imported`, never by a site's own times (`find_for_item`,
    `owner_of_dataset`), and a `disputed` deposit is never linked. From there the
    existing route links, checks and publishes it like a local deposit (dataset, metadata update, DE-only,
    artefact, collection). The watcher never expires, sweeps or e-mails another site's deposits.
 
-An authentic record that fails 3 to 7 gets a signed `needs_decision` result with the reason, and is looked at
+An authentic record that fails 3 to 6 gets a signed `needs_decision` result with the reason, and is looked at
 again at the next poll (a claim released meanwhile lets it through).
 
 The route checks every pulled file of a remote deposit against the sha256 of the signed record (h5ad, sidecar,
@@ -1396,12 +1390,12 @@ pair). Tested in `tests/test_deposit_central_watcher.py`:
 | forged record (no secret) | HMAC under the site's secret; unknown site and unknown key id refused; nothing of an unverified record is used or answered |
 | a malicious site writes under another site's prefix | the key is chosen by the path's site id and the signed site id must equal it; a site can only sign for itself, its deposits live under its own prefix, its users are named `<login>@<site>` |
 | a site re-using another site's deposit id | refused at import (`another site`) |
-| an authentic site claims another site's (or the central host's) pending upload with a copied record | every object must carry the server's deposit mark of this deposit, no other deposit or earlier record may claim it, `continues` stays within the site, ordering by the watcher's import time; a site that also re-marks the objects gets at most a dispute (both held), never the upload (`tests/test_deposit_central_review.py`) |
+| an authentic site claims another site's (or the central host's) pending upload with a copied record | staging keys only in the record's own site and deposit folder; the watcher copies into incoming itself, a key claimed by another deposit or holding anything but this deposit's copy is refused; `continues` is refused; ordering by the watcher's import time (`tests/test_deposit_central_review.py`, 24.9) |
 | a site admin acting as an admin of the whole store | `is_admin` only for `ingest_watch.trusted_admin_sites` |
 | a parse bomb in record.json or result.json | signatures over the exact bytes before parsing, depth limit, every record and result handled on its own |
 | a pulled file that is not the signed one | sha256 of every pulled file against the signed record |
 | replay of an older record | versions are monotonic per deposit (state file and store); older refused, an equal version with other content refused |
-| files swapped after signing | ETag and size of each incoming object against the signed record; linking matches ETags too; pulls are pinned to the listed ETag |
+| files swapped after signing | ETag, size and marks of each staged upload against the signed record before the copy; after the copy linking matches the copy's ETag, a missing or rewritten file stops the item, pulls are pinned to the listed ETag and checked against the signed sha256 |
 | path traversal in names or keys | every segment `[A-Za-z0-9][A-Za-z0-9._-]*`, keys only under the deposit's project in incoming and the site's own staging folder; record paths parsed strictly |
 | oversized record or result | 1 MiB per record (listing size and read limit), 4 MiB per result, 500 files |
 | a site updates datasets it does not own | owners re-checked against the central store (24.5) |
@@ -1417,11 +1411,11 @@ Not covered:
   rights, raw HTML in a collection's index.md (review N5) and the artefact route its own placement rules, but
   not the site's artefact-block checks. Two sites can assign the same new group id at the same time; that clash
   is not checked across sites yet.
-- With one shared `__incoming/` every holder of ingestion keys can rewrite any upload. The watcher turns a
-  rewrite it can see (an object newer than the record that signed it) into a dispute, but a re-mark in the
-  instant between a site's copy into incoming and its record write is not seen. Delete rights also let a holder
-  remove uploads (availability, not integrity). A dispute is resolved by an admin of the central site (reject the
-  items; the right site deposits again; remove the keys file of a site that misbehaves).
+- Since 24.9 only the watcher writes `__incoming/`. A holder of unscoped ingestion keys can still delete or
+  rewrite an object there after the watcher copied it: the item then stops as `needs_decision` (a rewrite never
+  gets published, C5 and the copy's ETag), which is availability, not integrity. With scoped keys sites cannot
+  touch incoming at all. An admin of the central site resolves such an item (reject it; the site deposits
+  again; remove the keys file of a site that misbehaves).
 - Confidentiality: every site that holds ingestion keys can read the other sites' records (logins, keys, sha256,
   dataset ids) and results (the redacted reports: counts and digests, held reasons, db ids). Records carry no
   names or e-mail addresses and results nothing of other sites. Where the object store can scope keys, give each
@@ -1455,6 +1449,65 @@ store even when other sites are known (its own site id is skipped when reading r
    watcher (default none).
 4. Rotation: new secret file and `key_id` on the site, both lines on the watcher until every older record is
    processed; for the watcher's key, add the new public key on every site first.
+
+### 24.9 The watcher copies; two key pairs (2026-10-22, decided by Mark: option 1, trusted sites)
+
+Before, a site copied its verified uploads from staging into the shared `__incoming/` itself and then wrote
+the record; every site therefore held write rights on `__incoming/`, and a holder of the ingestion keys could
+re-mark another site's upload in the instant between that copy and the record (24.6, not covered). Now:
+
+- **Sites write only their own staging** (`__deposits/<site_id>/<deposit_id>/`). Complete verifies the parts,
+  sizes and metadata as before, leaves the uploads in staging and writes the signed record, whose files carry
+  their staging key, staging ETag, size and sha256 and no incoming ETag (`_finish_staged`). A site with a
+  central watcher never reads or writes incoming: no correction of an h5ad waiting in incoming (deposit the
+  h5ad again; `continues` is refused), no key check against incoming at create, withdraw and expiry delete only
+  staging, and the staging sweep keeps the uploads of an uploaded deposit until the watcher's result is live,
+  rejected or failed. A collection's server-written `index.md` is staged the same way.
+- **The watcher verifies and copies** (`RemoteSites._staged_problems`, `_stage_in`). For an authentic uploaded
+  record: the update rights (24.5); every staging key lies in the record's own site and deposit folder
+  (`record_problems`: another site's or another deposit's staging is refused); a HEAD of each staged upload
+  shows the signed staging ETag and size and the server's `deposit` and `sha256` marks; a reused published file
+  (a metadata-only update) must be exactly `<catalog_prefix><data_project>/<basename>.h5ad` (or `.h5ad.mus`) in
+  the data bucket with the signed ETag (and the signed sha256 for the h5ad). Then the incoming target keys must
+  be free: no open or waiting deposit and no earlier authentic record claims one (the key alone), and an
+  object already there must carry this deposit's mark (a copy of an earlier attempt, overwritten); anything
+  else waits there is never overwritten (refused, an admin decides). The watcher copies each upload into
+  incoming itself (`CopySourceIfMatch` on the staging ETag, `deposit` and `sha256` metadata set by the watcher),
+  HEADs the copy and imports the record with the ETags of its own copies (`import_record(copied=...)`; the
+  record digest stays the signed one). A failed copy removes the copies of that attempt; the record is read
+  again at the next poll. After the import the poll lists incoming again, so the copies settle in the usual
+  two listings.
+- **After the copy** an object of another site's deposit that is gone or was rewritten in incoming stops the
+  item as `needs_decision` (it is never published without that file); pulled files are still checked against
+  the signed sha256 (C5). A withdrawn or expired record makes the watcher delete its copies (only objects that
+  still carry the deposit's mark and the copy's ETag, never after the deposit went live).
+- **Two key pairs** (`ingest_watch.incoming_s3`, `lib/s3_router.py`). Without it the watcher's `s3` keys reach
+  both buckets (one client, server-side copies, as before). With it the ingestion bucket has its own key pair
+  (read the sites' staging, write and delete `__incoming/`, write results) and the data keys never touch it: a
+  `BucketRouter` sends each call to the client of its bucket, and a copy between the two buckets (the artefact
+  route's placement, a reused published file into incoming) is streamed through the watcher host: a GET pinned
+  to the source ETag, a single PUT or a multipart upload in 64 MB parts, the sha256 computed on the way and
+  compared with the target's `sha256` metadata before the upload is completed (aborted otherwise), then a HEAD.
+  `ingest_watch.copy_mode`: `auto` (server-side within one key pair, streamed across two), `server` (always
+  server-side: the data keys must read the ingestion bucket), `stream`. The pair comes from the env
+  (`ANTHIVE_INGEST_WATCH_INCOMING_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY`), else the secrets files
+  `<ingest_state_dir>/secrets/incoming_s3_access_key_id` and `incoming_s3_secret_access_key`, else the block
+  (keep keys out of the config text); endpoint and region default to the `s3` block, the bucket to
+  `incoming_bucket`. The pair never enters the watcher's settings dict.
+- **Single host** (the API and the watcher share `ingest_state_dir`, no `central_watcher`): unchanged. The API
+  copies the verified uploads into incoming itself, as there is no record to verify and both run with the
+  same keys on the same host; the simplest correct design is to keep the 2.46 path there.
+- **Scoped keys** (where the object store can): a site's pair only on `__deposits/<site_id>/` (read and
+  write); the watcher's ingestion pair on `__deposits/` (read, write results) and `__incoming/` (read, write,
+  delete). A site can then neither read other sites' records nor touch incoming at all.
+
+Tests: `tests/test_deposit_central_review.py` (S1 section: a forged record naming another site's or another
+deposit's staging, a staged upload swapped after signing, an object put at the incoming key first, a key
+claimed by a waiting deposit, a rewrite after the copy, withdraw removes the copies, continues refused, an old
+record with incoming ETags), `tests/test_deposit_central_watcher.py` (end to end, metadata-only update with a
+reused published h5ad, the reused-file rule), `tests/test_s3_router.py` (streamed copy with separate fake
+services and credentials, sha256 mismatch aborts, routing, `copy_mode`, the config precedence, a dataset and an
+artefact going live with separate ingestion and catalog keys).
 
 ## 25. Version classes and the purge policy (2026-10-22, REST 2.47.0)
 
@@ -1551,8 +1604,10 @@ once; the h5ad, the long-term source of truth, gets them later in a quiet window
 1. The item settles and carries its deposit mark like an artefact. The dataset must be served from this host
    (its duckdb is local), the depositor may still update it, and a replacement still needs the owner or an
    admin.
-2. The table is read (pinned to the listed ETag, sha256 and size against the declaration) and typed: a
-   numerical column must parse as numbers, everything else fails the deposit.
+2. The table is read (pinned to the listed ETag, sha256 and size against the declaration) and streamed in
+   chunks of 50,000 rows against the dataset's cells (`stream_table`): names looked up, duplicates found with a
+   bitmap, numbers parsed (a value that is not a number fails the deposit), categories coded. Memory follows
+   cells x columns (float64 arrays and integer codes laid out on the dataset's cells), not the file size.
 3. **The cell rule: every `cell_name` of the table must be a cell of the dataset. One unknown name fails the
    deposit** (the table belongs to another dataset, or to another version of this one). Cells the table
    leaves out, or gives no value, are allowed: they are NULL, and the report (`coverage`) and the changelog
@@ -1561,9 +1616,15 @@ once; the h5ad, the long-term source of truth, gets them later in a quiet window
 5. Holds as for other deposits: a public dataset is always held for an admin (`public_access`), values of the
    donor crosswalk in a categorical column hold it (`donor_identifiers`). An admin approves with the usual
    `POST .../approve`.
-6. `AnnotationWriter` writes the columns (the ant-annotate path: ALTER TABLE, values by cell name, view
-   rebuild, `__pending_cols` with annotator `obs-columns-deposit`, run id = deposit id, source hash = the
-   table's sha256; ant-serve release and restore on a lock conflict). A busy duckdb is a retry.
+6. `AnnotationWriter.add_frame` writes the columns (the ant-annotate contracts: lock, one transaction, one
+   ALTER TABLE per new column and one `UPDATE ... FROM` per table over a registered frame of float64 arrays and
+   pandas Categoricals, view rebuild, `__pending_cols` with annotator `obs-columns-deposit`, run id = deposit
+   id, source hash = the table's sha256; ant-serve release and restore on a lock conflict; the writer's
+   connection capped at 2 GB and 2 threads). A busy duckdb is a retry. Measured on this host with a 2.03 GB
+   TSV (5.3 million cells, 20 numerical and 20 categorical columns): streaming 525 s, writing 50 s, peak RSS
+   3.58 GB for the whole path (1.2 GB of it the cell table). The column-by-column `add_numerical` /
+   `add_categorical` path took 549 s and 10.3 GB for a 1.5 GB table, hence the bulk path. The 2 GB file limit
+   stays; memory grows with cells x columns.
 7. The `.md` gets a minor version (additive, section 25), or a major version when a column replaces existing
    values, with the line "Version class minor: additive: obs columns added; ..." (the purge policy reads it),
    one changelog line per column (name, dtype, description, source, deposit id, cells without a value) and a

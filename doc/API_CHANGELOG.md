@@ -323,6 +323,16 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### The central watcher copies; two key pairs (design section 24.9)
+
+- A site with `datasets_deposit_central_watcher` no longer copies into `__incoming/`: complete answers
+  `uploaded` with the files still in the site's staging (`etag` null in the answer and the record); the watcher
+  verifies each staged upload against the signed record and copies it in itself. Such a site refuses a
+  correction of a waiting h5ad (422 `h5ad_required`: deposit the h5ad again). Records with incoming ETags (the
+  older protocol) are refused by the watcher.
+- `ingest_watch.incoming_s3` (key pair from secrets files or env) gives the ingestion bucket its own keys;
+  copies between the buckets are streamed and sha256-checked (`ingest_watch.copy_mode`: auto, server, stream).
+
 ### Obs-columns deposits and the h5ad merge (design section 26)
 
 - `POST /datasets/deposit` takes `deposit_kind: "obs_columns"`: `{data_project, update_of, columns: [{name,
@@ -351,7 +361,8 @@ Collection deposits create `<Group>/index.md`; a public one is held.
   major version (X+1.0.0); before, every new h5ad was minor. The changelog line "Version class <class>:
   <reason>" and the report's `version_class` ({class, reason, added, seconds}) record it; the watcher's kind is
   `update_major`, `update_minor` or `update_patch`. Patch stays metadata only.
-- `ant ingest purge --local-only --verified` removes local `_versions/` copies whose S3 copy is verified;
+- `ant ingest purge --local-only` (with `--keep N`, or `--verified` for every local copy) removes a local
+  `_versions/` copy only when its S3 copy is verified;
   `--superseded-minor` removes predecessors (S3 and local) of verified patch or minor versions; a version an
   artefact's `made_from` or a facet result names stays without `--force`. `ingest_watch.keep_local_versions`
   (default true): false drops the local copy right after a verified S3 archive.

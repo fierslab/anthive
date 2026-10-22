@@ -868,10 +868,11 @@ each deposit and the incoming copies go to a separate ingestion bucket, and the 
 result that the site shows and e-mails to the depositor (design section 24).
 
 1. **Ingestion bucket and keys.** Ask the administrator of the central watcher for the ingestion bucket and a
-   key pair for this site. Where the object store can scope keys, limit the pair to `__deposits/<site_id>/`
-   (read and write) and `__incoming/` (write): every holder of a key for the whole bucket can read the other
-   sites' deposit records and results (logins, file keys and checksums, redacted reports), and can rewrite
-   their uploads (the watcher then holds both deposits for an admin). Write the pair to
+   key pair for this site. The site writes only its own folder `__deposits/<site_id>/` (uploads, records); the
+   watcher verifies each upload there and copies it into `__incoming/` itself. Where the object store can
+   scope keys, limit the pair to `__deposits/<site_id>/` (read and write): every holder of a key for the whole
+   bucket can read the other sites' deposit records and results (logins, file keys and checksums, redacted
+   reports). Write the pair to
    `<state_dir>/secrets/s3_ingest_access_key_id` and `<state_dir>/secrets/s3_ingest_secret_access_key`
    (mode 600). The main `s3` keys of the data bucket stay on the host (the api does not get them for deposits).
 2. **The watcher's public key.** The administrator runs `ant ingest-watch result-key` on the watcher host and
@@ -902,6 +903,18 @@ result that the site shows and e-mails to the depositor (design section 24).
 To rotate the site secret: write a new secret to `deposit_site_secret`, set `key_id: k2`, and ask the
 administrator to add the line `k2 <new secret>` next to the old one; the old line can go once older deposits
 are processed.
+
+A site with a central watcher cannot send a corrected sidecar for an h5ad that still waits: the depositor
+sends the h5ad again with the corrected sidecar (vark does this).
+
+**On the watcher host** (the central watcher, outside ant-stack): `ingest_watch.incoming_bucket` names the
+ingestion bucket. To keep the data bucket's keys away from it, give the ingestion bucket its own key pair: put
+it in `<ingest_state_dir>/secrets/incoming_s3_access_key_id` and `incoming_s3_secret_access_key` (mode 600;
+or the env `ANTHIVE_INGEST_WATCH_INCOMING_S3_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY`), with
+`ingest_watch.incoming_s3: {endpoint, region}` only when they differ from the `s3` block. Copies between the
+two buckets are then streamed through the watcher host and checked against their sha256
+(`ingest_watch.copy_mode: auto`); scope that pair to `__deposits/` (read, write) and `__incoming/` (read, write,
+delete) where the store can.
 
 ### A mirror with a hand-picked subset (symlinked stores and library)
 
