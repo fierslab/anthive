@@ -233,15 +233,14 @@ def cmd_rollback(args) -> int:
 
     # Drop directly via duckdb — bypasses AnnotationWriter's add/commit
     # semantics because we're going in the other direction.
-    lock_path = duckdb_path.with_suffix(duckdb_path.suffix + '.lock')
-    import fcntl
-    with open(lock_path, 'w') as lock_fd:
-        try:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print(f"ERROR: another writer holds the lock: {lock_path}",
-                  file=sys.stderr)
-            return 1
+    import duckdb_lock
+    lock_path = duckdb_lock.lock_path_for(duckdb_path)
+    lock_fd = duckdb_lock.try_acquire(lock_path)
+    if lock_fd is None:
+        print(f"ERROR: another writer holds the lock: {lock_path}",
+              file=sys.stderr)
+        return 1
+    try:
         con = duckdb.connect(str(duckdb_path), read_only=False)
         try:
             for _, row in to_drop.iterrows():
@@ -265,10 +264,8 @@ def cmd_rollback(args) -> int:
                 )
         finally:
             con.close()
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
+    finally:
+        duckdb_lock.release(lock_fd, lock_path)
     print("  ✓ rolled back")
     return 0
 

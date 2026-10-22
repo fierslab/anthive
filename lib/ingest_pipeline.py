@@ -34,7 +34,6 @@ and its umbrella wrapper, which rewrite ``.md`` files, are never called.
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -627,25 +626,19 @@ def served_ids(rescan_result: Dict[str, Any]) -> List[str]:
 
 @contextmanager
 def writer_lock(duckdb_path: Path, timeout: float = 600) -> Iterator[None]:
-    """The flock on ``<duckdb>.lock`` that AnnotationWriter, ant-score and friends take."""
-    lock_path = duckdb_path.with_name(duckdb_path.name + '.lock')
-    handle = open(lock_path, 'a+')
-    deadline = time.time() + timeout
+    """The flock on ``<duckdb>.lock`` that AnnotationWriter, ant-score and friends take (``duckdb_lock``: the
+    lock file is removed on release, so none stays in the store)."""
+    import duckdb_lock  # noqa: PLC0415
+
+    lock_path = duckdb_lock.lock_path_for(duckdb_path)
     try:
-        while True:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.time() > deadline:
-                    raise TransientError(f'{lock_path} is held by another writer')
-                time.sleep(5)
+        handle = duckdb_lock.acquire(lock_path, timeout, poll=5)
+    except duckdb_lock.LockBusy as exc:
+        raise TransientError(str(exc)) from exc
+    try:
         yield
     finally:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_UN)
-        finally:
-            handle.close()
+        duckdb_lock.release(handle, lock_path)
 
 
 def place_file(source: Path, target: Path, partial: Optional[Path] = None) -> None:

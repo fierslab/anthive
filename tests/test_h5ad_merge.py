@@ -260,3 +260,4 @@ def test_an_obs_deposit_then_its_merge_keep_the_version_chain_consistent(tmp_pat
     assert iv.successor_class(changelog, '1.1.0', '1.2.0') == 'minor'
     with h5py.File(md.with_suffix('.h5ad'), 'r') as handle:
         assert 'state' in handle['obs'] and 'score' in handle['obs']
+    assert list(md.parent.parent.rglob('*.duckdb.lock')) == []         # no lock file left (2.47.1)

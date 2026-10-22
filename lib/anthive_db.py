@@ -6,7 +6,6 @@ Provides a clean interface to query DuckDB databases created by ant-convert
 
 import copy
 import hashlib
-import fcntl
 import json
 import logging
 import math
@@ -2646,38 +2645,21 @@ class AnnotationWriter:
     # --------- locking ---------
 
     def _acquire_lock(self) -> None:
-        deadline = time.monotonic() + self.LOCK_TIMEOUT_SECONDS
-        self._lock_fd = open(self.lock_path, 'w')
-        while True:
-            try:
-                fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    self._lock_fd.close()
-                    self._lock_fd = None
-                    raise AnnotationWriterError(
-                        f"Could not acquire lock on {self.lock_path} within "
-                        f"{self.LOCK_TIMEOUT_SECONDS}s — another writer is active."
-                    )
-                time.sleep(0.5)
+        # duckdb_lock: the inode check after the flock makes removing the anchor file on release safe
+        import duckdb_lock  # noqa: PLC0415
+        try:
+            self._lock_fd = duckdb_lock.acquire(self.lock_path, self.LOCK_TIMEOUT_SECONDS)
+        except duckdb_lock.LockBusy:
+            self._lock_fd = None
+            raise AnnotationWriterError(
+                f"Could not acquire lock on {self.lock_path} within "
+                f"{self.LOCK_TIMEOUT_SECONDS}s — another writer is active."
+            )
 
     def _release_lock(self) -> None:
-        if self._lock_fd is not None:
-            try:
-                fcntl.flock(self._lock_fd.fileno(), fcntl.LOCK_UN)
-            except Exception:
-                pass
-            try:
-                self._lock_fd.close()
-            except Exception:
-                pass
-            self._lock_fd = None
-            try:
-                # File is just a flock anchor; safe to remove.
-                self.lock_path.unlink()
-            except FileNotFoundError:
-                pass
+        import duckdb_lock  # noqa: PLC0415
+        handle, self._lock_fd = self._lock_fd, None
+        duckdb_lock.release(handle, self.lock_path)     # unlinks the anchor while still holding it
 
     # --------- schema bootstrap ---------
 

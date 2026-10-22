@@ -31,7 +31,6 @@ The companion .h5ad and .duckdb are inferred from the .md path.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -44,6 +43,8 @@ import pandas as pd
 script_dir = Path(__file__).parent.resolve()
 lib_dir = script_dir.parent.parent / 'lib'
 sys.path.insert(0, str(lib_dir))
+
+import duckdb_lock  # noqa: E402
 
 from anthive_db import (  # noqa: E402
     _post_ant_serve,
@@ -325,15 +326,14 @@ def merge_dataset(
         con.close()
 
     # --- Acquire lock for the brief duckdb update after h5ad write ---
-    lock_path = duckdb_path.with_suffix(duckdb_path.suffix + '.lock')
-    lock_fd = open(lock_path, 'w')
+    # duckdb_lock: removed on release, never removed when another writer holds it
+    lock_path = duckdb_lock.lock_path_for(duckdb_path)
+    lock_fd = duckdb_lock.try_acquire(lock_path)
+    if lock_fd is None:
+        print(f"  ✗ {md_path.name}: cannot acquire write lock — "
+              f"another writer is active")
+        return 4
     try:
-        try:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print(f"  ✗ {md_path.name}: cannot acquire write lock — "
-                  f"another writer is active")
-            return 4
 
         # --- Write into h5ad (h5py opens 'r+', appends datasets) ---
         with h5py.File(h5ad_path, 'r+') as f:
@@ -374,15 +374,7 @@ def merge_dataset(
                         on_failure='warn',
                     )
     finally:
-        try:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
-        lock_fd.close()
-        try:
-            lock_path.unlink()
-        except FileNotFoundError:
-            pass
+        duckdb_lock.release(lock_fd, lock_path)
 
     print(f"  ✓ {md_path.name}: merged {len(merged_names)} columns")
     return 0

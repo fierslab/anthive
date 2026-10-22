@@ -254,6 +254,7 @@ def test_happy_path_categorical_and_numerical(tmp_path, clock):
     assert len(committed) == 1 and committed[0][-1] == 'Public2021/int.md'
     assert ('POST', '/admin/rescan') in api.calls and ('GET', '/databases/PU1/int/info') in api.calls
     assert (store_root / 'Public2021' / 'int.h5ad').read_bytes() == h5ad_before          # h5ad untouched
+    assert list(store_root.rglob('*.duckdb.lock')) == []               # no lock file left (2.47.1)
     assert s3.keys(PREFIX) == []
     status = service.status(ANALYST, answer['deposit_id'])
     assert status['state'] == 'live'
