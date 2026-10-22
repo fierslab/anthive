@@ -1505,3 +1505,113 @@ and the report's `version_class` ({class, reason, added, seconds}); `outcome.kin
   `h5ad_sha256`) or whose sha256 a facet result manifest recorded (`dataset_sha256`) is never purged from S3
   without `--force` (`version_references`, `protected_by`, `protect_plan` for `--keep`); the run lists them.
   `--local-only` needs no protection (the S3 copy stays).
+
+
+## 26. Obs-columns deposits and the h5ad merge (2026-10-22, REST 2.47.0)
+
+A depositor who has computed new per-cell values for a published dataset (a cell state call, a score from
+their own pipeline) adds them as obs columns without depositing the h5ad again. The served duckdb gets them at
+once; the h5ad, the long-term source of truth, gets them later in a quiet window.
+
+### 26.1 The deposit (`lib/obs_columns.py`, `ArtefactDepositService.create_obs_columns`)
+
+`POST /datasets/deposit` with `deposit_kind: "obs_columns"`:
+
+```json
+{"deposit_kind": "obs_columns", "data_project": "Smith2024", "update_of": "SM4/MIC",
+ "columns": [{"name": "state", "dtype": "categorical", "description": "DAM call", "source": "lab pipeline v2"},
+             {"name": "dam_score", "dtype": "numerical"}],
+ "replace": false,
+ "files": [{"name": "calls.tsv.gz", "size": 123456, "sha256": "<64 hex>"}]}
+```
+
+- Who: dataset uploaders (`datasets_upload_groups`, the route's `kinds=('dataset',)`), and only for a dataset
+  they may update (its owner, an admin, or anyone with `datasets_deposit_update_policy: any`); otherwise 403
+  `not_owner`. `replace: true` (overwrite existing columns) needs the owner or an admin even under policy any.
+  Dataset deposits must be on (`datasets_deposit_enabled`); artefacts need not be.
+- Names: the ant-annotate identifier rule (`anthive_db._validate_anno_col_name`), not `cell_id`, `cell_name`,
+  `gene_id`, `gene_name` (`reserved_column_name`), no `ant_*` name unless the column says `"facet": true`, no
+  two declared names equal case-insensitively, and no case-insensitive clash with a column the dataset
+  shows (409 `column_exists`; the API checks the cached metadata, the watcher the duckdb tables including
+  hidden columns and the names the `.md` `api:` section publishes). A replacement keeps the existing
+  column's exact name and dtype.
+- The file: one `<name>.tsv` or `<name>.tsv.gz`, header `cell_name` then exactly the declared columns. Limits
+  `obs_columns_max_file_gb` (2), `obs_columns_max_columns` (50), `obs_columns_max_rows` (20 million), at most
+  10,000 distinct values in a categorical column. Missing values are empty, `NA` or `NaN`.
+- One open or waiting deposit per dataset of any kind (409 `busy`), so two writers never race for its duckdb
+  and `.md`.
+- Storage: the file goes to the deposit's staging folder like every upload; complete reads the first 64 kB
+  back (a ranged GET pinned to the verified ETag) and refuses a header that does not match the declaration
+  (422 `invalid_table`), then copies it to `<prefix><data_project>/artefacts/<deposit_id>/<name>`. The watch
+  key is `artefact:<deposit_id>`, so the artefact route handles it; the declaration is stored in the deposit
+  row's `artefact` column.
+
+### 26.2 Publication (`ArtefactPublisher.publish_obs_columns`)
+
+1. The item settles and carries its deposit mark like an artefact. The dataset must be served from this host
+   (its duckdb is local), the depositor may still update it, and a replacement still needs the owner or an
+   admin.
+2. The table is read (pinned to the listed ETag, sha256 and size against the declaration) and typed: a
+   numerical column must parse as numbers, everything else fails the deposit.
+3. **The cell rule: every `cell_name` of the table must be a cell of the dataset. One unknown name fails the
+   deposit** (the table belongs to another dataset, or to another version of this one). Cells the table
+   leaves out, or gives no value, are allowed: they are NULL, and the report (`coverage`) and the changelog
+   line count them per column.
+4. The names are checked again against the duckdb as it is now (a column added since the create is a clash).
+5. Holds as for other deposits: a public dataset is always held for an admin (`public_access`), values of the
+   donor crosswalk in a categorical column hold it (`donor_identifiers`). An admin approves with the usual
+   `POST .../approve`.
+6. `AnnotationWriter` writes the columns (the ant-annotate path: ALTER TABLE, values by cell name, view
+   rebuild, `__pending_cols` with annotator `obs-columns-deposit`, run id = deposit id, source hash = the
+   table's sha256; ant-serve release and restore on a lock conflict). A busy duckdb is a retry.
+7. The `.md` gets a minor version (additive, section 25), or a major version when a column replaces existing
+   values, with the line "Version class minor: additive: obs columns added; ..." (the purge policy reads it),
+   one changelog line per column (name, dtype, description, source, deposit id, cells without a value) and a
+   caveat "obs columns X, Y added from deposit D, <date>". No `previous_sha256`: the h5ad did not change, and
+   nothing is archived under `_versions/` (the duckdb is a derivative).
+8. The duckdb is uploaded to the catalog with its sha256 (under the dataset's writer lock) and verified by
+   HEAD; a failure is a warning (`ant sync push` carries it later). ant-serve rescans, the served check asks
+   `/databases/<db_id>/info` for the new names, the `.md` is committed (and pushed with
+   `ingest_watch.store_git_push`). The h5ad is not touched.
+9. Idempotent across a restart: `__pending_cols` rows with this deposit's run id mean the write happened, the
+   deposit id in the `.md` means the bump happened.
+
+The watch row's `db_id` is `obs:<db_id>`, so such a deposit never makes its depositor the dataset's owner. In
+the multi-site records (section 24) `obs_columns` is a known kind with the artefact key rules, and the central
+watcher checks update rights for it like for a dataset update.
+
+### 26.3 The merge into the h5ad (`lib/h5ad_merge.py`, `ant ingest-watch merge-pending`)
+
+After each poll, still inside the watcher lock (so never during an item, never two at once), the watcher
+merges the pending columns of each dataset into a new h5ad version:
+
+- **Gates**: inside `ingest_watch.merge_window` (default `01:00-06:00`, host time; empty: only
+  `merge-pending --now`), no deposit for the dataset open or waiting and no unsettled watcher item for it,
+  the host's 1 minute load at most `merge_max_load` (8) and at least `merge_min_free_gb` (40) of memory
+  available (`lib/host_load.py`, shared with ant-score-fleet), free disk for one more copy of the h5ad. One
+  dataset at a time at the watcher's nice 19 and idle IO; a stop request ends the run between datasets.
+- **Checks**: `pending_state_diagnosis` must be consistent, the duckdb and the h5ad hold the same cells, and
+  the store h5ad's sha256 is the `.md`'s (the published file).
+- **The copy**: `.<name>.h5ad.merge-work` next to the h5ad gets every pending column with the duckdb's values
+  (a column of that name already in the h5ad is replaced: the duckdb is the truth for pending columns).
+  `h5ad_compare.classify` then compares it with the published h5ad: additive is a minor version; a replaced
+  value is a major version, because the archived h5ad keeps values the new one lacks and the purge policy
+  must not drop it as a superseded minor. A major result without a replaced column stops the merge.
+- **The swap** (`SwapJournal` in `<ingest_state_dir>/merge_swaps/`): the current h5ad, `.md`, sidecar and
+  scores are hard-linked into `_versions/<basename>/<version>/` and copied to the matching S3 prefix with
+  their sha256 metadata (before anything is swapped), then the new h5ad and the new `.md` are renamed into
+  place, the `.md` last. The `.md` gets the new `sha256`, the version bump, `previous_sha256` and the lines
+  "Version class minor: additive: the h5ad catches up with the served obs columns." and "h5ad: merged obs
+  columns X, Y (no data change for the served dataset; ...)".
+- **After the swap** (a resume marker carries these across a crash): the merged rows leave
+  `__pending_cols`, the new h5ad and the duckdb are uploaded with their sha256 and verified by HEAD (a failed
+  h5ad push keeps the marker and is retried at the next run), the `.md` is committed (pushed with
+  `store_git_push`), ant-serve rescans, `keep_local_versions: false` drops the archived local copy once its S3
+  copy is verified. A line goes to the watcher log and `<ingest_state_dir>/h5ad_merges.json`; no e-mail.
+- **Crash recovery**: a journal still `staged` is rolled back (the links and staged files go, the merge runs
+  again later); one `committing` is rolled forward; a resume marker gets its post steps; a leftover
+  `.merge-work` copy is deleted.
+
+`ant ingest-watch merge-pending [--now] [--db-id X]` runs the same pass by hand (it takes the watcher lock;
+exit 3 when the watcher holds it). `ant ingest-watch status` lists the datasets with pending columns and the
+last merge (`h5ad_merge` in `--json`). `ant-merge-h5ad` remains the manual, in-place tool.

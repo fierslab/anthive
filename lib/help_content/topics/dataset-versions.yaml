@@ -1,6 +1,6 @@
 id: dataset-versions
 title: Dataset versions
-summary: 'A dataset''s version X.Y.Z says what changed: a minor bump means the data changed, a patch bump means only the metadata did; the changelog records each change.'
+summary: 'A dataset''s version X.Y.Z says what changed: a major bump means existing data changed, a minor bump means data was added, a patch bump means only the metadata changed; the changelog records each change.'
 related:
 - what
 - dataset-caveats
@@ -10,5 +10,6 @@ aliases:
 - release
 - versions
 body_html: |
-  <p>Every dataset record carries a version <code>X.Y.Z</code>, shown as a small grey tag such as <code>v0.1.4</code>. A <strong>minor</strong> bump means the data changed (cells, expression, annotation columns). A <strong>patch</strong> bump means only the metadata changed (title, description, links<span data-ui="caveats">, caveats</span>). The record keeps a changelog: for each version the date, the checksum (sha256) of the previous file and what changed.</p>
+  <p>Every dataset record carries a version <code>X.Y.Z</code>, shown as a small grey tag such as <code>v0.1.4</code>. A <strong>major</strong> bump means existing data changed (expression values, cells or genes added or removed, an annotation value overwritten). A <strong>minor</strong> bump means data was only added (new annotation columns, embeddings or layers) and everything that was there before is unchanged. A <strong>patch</strong> bump means only the metadata changed (title, description, links<span data-ui="caveats">, caveats</span>). The record keeps a changelog: for each version the date, the checksum (sha256) of the previous file and what changed.</p>
+  <p>New annotation columns deposited for a dataset are shown straight away and noted in the changelog<span data-ui="caveats"> and as a caveat</span>. The stored h5ad file receives them later, at night, as a further version with the line "h5ad: merged obs columns"; the data you see does not change at that step.</p>
   <p><span data-ui="facets">Facet test results record the checksum of the data they were computed from, and the API marks a result whose checksum no longer matches the current dataset. </span>When you cite a dataset in an analysis, give its id and version.</p>

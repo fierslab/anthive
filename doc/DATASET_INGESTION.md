@@ -45,6 +45,19 @@ shapes are in `doc/API_CHANGELOG.md` (2.46.0).
    live: the uploads are aborted and the deposit's own files are deleted. A correction is withdrawn together
    with its original, not alone.
 
+**Adding obs columns to a published dataset.** Per-cell values you computed yourself (a state call, a score)
+go in as new obs columns without a new h5ad: `POST /api/datasets/deposit` with `"deposit_kind":
+"obs_columns"`, `"update_of": "<db_id>"`, the columns (`[{"name", "dtype": "categorical" | "numerical",
+"description", "source"}]`) and one file `<name>.tsv` or `<name>.tsv.gz` whose header is `cell_name` followed
+by exactly those columns. You need the right to update the dataset (its owner or an admin). Every cell name in
+the table must be a cell of the dataset: one unknown name fails the deposit. Cells you leave out stay empty
+and the report counts them. Names follow the ant-annotate rule (letters, digits, underscores), must not
+clash with an existing column (case does not matter), and `ant_*` names are reserved for facets. The columns
+are served as soon as the watcher has checked them; the dataset gets a minor version with a changelog line per
+column and a caveat. To overwrite an existing column send `"replace": true` (owner or admin; a major version).
+The limits are in `GET /api/datasets/deposit/vocab` under `obs_columns`. The h5ad gets the columns later, see
+"Merging pending obs columns into the h5ad" below.
+
 To change only the metadata of a published dataset (sidecar keys, new caveats in the seed `.md`), deposit
 the sidecar and/or the seed `.md` with `update_of` and no h5ad: the published h5ad is reused and the dataset
 gets a patch version. This needs the published h5ad's `x-amz-meta-sha256`, which `ant sync push` sets;
@@ -322,6 +335,24 @@ ant ingest purge WT6/MIC --superseded-minor --dry-run      # predecessors of ver
 Removing a dataset itself is a different thing. To take it out of the catalogue but keep everything, mark it
 inactive (`ant inactive <db_id>`, a `.inactive` sidecar) and rescan; to delete it, remove its files from the
 store and its keys from S3 by hand, commit the removal in the store repository, and rescan.
+
+### Merging pending obs columns into the h5ad
+
+Obs columns added to a served duckdb (obs-columns deposits, `ant-score`, `ant-annotate`) wait in
+`__pending_cols` until the h5ad has them. The watcher merges them itself in `ingest_watch.merge_window`
+(default 01:00 to 06:00 host time) while no deposit for the dataset is pending and the host is quiet
+(`merge_max_load`, `merge_min_free_gb`). Each merge is a new version: the previous h5ad is archived under
+`_versions/` and on S3, the `.md` gets the new sha256, `previous_sha256` and the line "h5ad: merged obs columns
+..."; additive merges are minor versions, a merge that replaces values is a major version. By hand:
+
+```bash
+ant ingest-watch status                      # datasets with pending columns, the last merge
+ant ingest-watch merge-pending --now         # merge everything now (takes the watcher lock)
+ant ingest-watch merge-pending --now --db-id SM4/MIC
+```
+
+A merge that stops (cells that differ, a store h5ad that is not the published one, a divergent pending state)
+is logged and listed in `status`; the dataset is skipped until the cause is fixed.
 
 ### Cleaning up incoming objects
 

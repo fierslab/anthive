@@ -323,6 +323,27 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### Obs-columns deposits and the h5ad merge (design section 26)
+
+- `POST /datasets/deposit` takes `deposit_kind: "obs_columns"`: `{data_project, update_of, columns: [{name,
+  dtype: categorical|numerical, description?, source?, facet?}], replace?, files: [{name, size, sha256}]}` with
+  one `.tsv` or `.tsv.gz` (header `cell_name` plus the declared columns). Dataset uploaders with the right to
+  update the dataset; 403 `not_owner` otherwise, `replace` only for the owner or an admin. Errors
+  `invalid_column_name`, `reserved_column_name`, `column_exists` (409, case-insensitive), `invalid_table` (422
+  at complete: the header does not match), `busy` (another deposit for the dataset). The create answer adds
+  `columns` and `version_class`; the status adds `obs_columns {db_id, replace, columns}`; the vocab adds
+  `obs_columns` with the limits (`obs_columns_max_file_gb` 2, `obs_columns_max_columns` 50,
+  `obs_columns_max_rows` 20 million).
+- The watcher fails a table with any cell name the dataset lacks, reports cells without a value (report
+  `coverage`), holds public datasets and donor identifiers, writes the columns into the duckdb
+  (`__pending_cols`), gives the dataset a minor version (major for `replace`) with a changelog line per column
+  and a caveat, pushes the duckdb to the catalog and commits the `.md`. The h5ad is untouched.
+- The watcher merges pending obs columns into the h5ad in `ingest_watch.merge_window` (default `01:00-06:00`)
+  under load and memory gates (`merge_max_load`, `merge_min_free_gb`): a new version with the previous h5ad
+  archived, the new sha256 and `previous_sha256` in the `.md`, the h5ad pushed and verified, the pending rows
+  cleared. `ant ingest-watch merge-pending [--now] [--db-id X]`; `status` lists pending datasets and the last
+  merge.
+
 ### Version classes and the purge policy (design section 25)
 
 - A new h5ad for a published dataset is compared with the published one: additive (the same cells in the same

@@ -852,6 +852,14 @@ minor versions on S3 too. Run without `--dry-run` to apply (it asks for `yes`). 
 results name stay unless you add `--force`. A watcher host short of disk can set `ingest_watch:
 keep_local_versions: false` in its anthive.yaml (the local copy goes right after a verified S3 archive).
 
+Obs columns added to served datasets (obs-columns deposits, scoring) are merged into the h5ad files by the
+watcher between 01:00 and 06:00 host time while the host is quiet, each as a new archived version. Set
+`ingest_watch.merge_window` (`HH:MM-HH:MM`, or empty to merge only with `ant ingest-watch merge-pending
+--now`), `merge_max_load` (default 8) and `merge_min_free_gb` (default 40) in the watcher's anthive.yaml. A
+merge needs free disk for one more copy of the largest h5ad next to it. Obs-columns deposits need
+`services.dataset_deposit: true` like other dataset deposits; their limits are `obs_columns_max_file_gb`,
+`obs_columns_max_columns` and `obs_columns_max_rows` in anthive.yaml.
+
 ### Send deposits to a central watcher (since 2.47.0)
 
 A site can accept dataset and artefact deposits from its own users while one watcher on another host (the

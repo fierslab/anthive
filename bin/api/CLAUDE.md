@@ -238,6 +238,10 @@ and `lib/config.py` (anthive.yaml loader).
   caller only their own deposits). Two-stage purge (design 4.4): `POST .../{version}/purge` (soft, never the
   latest), `.../unpurge` and `.../delete` (admins) record a request through `_purge_call` (202 recorded, 200
   `state: done, changed: false` when nothing is left to do); the watcher carries them out under the artefact lock. Tests: `tests/test_artefact_deposit_api.py` (rights matrix).
+- **Obs-columns deposits** (REST 2.47.0, design section 26 of `doc/DESIGN_dataset_ingestion.md`): `deposit_kind:
+  "obs_columns"` goes through `_deposit_call(..., kinds=('dataset',))` (dataset uploaders) to
+  `ArtefactDepositService.create_obs_columns`; `_artefact_context` passes `dataset_obs=_dataset_obs_names`, the obs
+  names of the cached metadata, so the clash check never opens a duckdb in this process.
 - **Collections and artefacts over MCP** (2.47): `list_collections` (`GET /collections`), `list_artefacts`, `get_artefact`,
   open to every caller (the API decides visibility; no role gate). Depositor text is labelled as such, download links are
   `public_api_url` + the API download route, never a signed URL. `_deposit_groups` adds `artefacts_upload_groups` and
