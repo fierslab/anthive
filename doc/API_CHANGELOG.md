@@ -29,7 +29,7 @@ the spec drifting away from the running code.
 
 ---
 
-## 2.47.1 (unreleased)
+## 2.47.1 (2026-10-22)
 
 Patch release with three additions approved for 2.47.1 and the fixes from the 2.47.0 scratch-site check;
 nothing is removed or renamed.
