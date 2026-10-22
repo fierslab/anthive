@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --quiet --script
 # /// script
-# dependencies = ["boto3", "h5py>=3.0.0", "numpy>=1.24.0", "pyyaml"]
+# dependencies = ["boto3", "h5py>=3.0.0,<4", "numpy>=1.24.0,<2.5", "pyyaml"]
 # ///
 
 """

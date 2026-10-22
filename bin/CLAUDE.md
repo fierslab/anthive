@@ -23,9 +23,12 @@ is launched via `web/ant-browse` (NOT `ant browse`), supervised by
   with PEP-723 deps in the header. Editing deps = editing that header,
   not a shared `pyproject.toml`. No shared venv.
 - **Packages that write stored files are capped**: `"duckdb>=1.3,<1.6"` (duckdb 2.0 writes files 1.5 cannot
-  read) and `"anndata>=...,<0.13"` (h5ad encodings change between 0.x minors) in every header, matching the
-  image lock. `tests/test_dependency_caps.py` fails on a header without the cap; raise a cap only together
-  with the lock (`docker/gen-lock`) and every host's script environments.
+  read), `"anndata>=...,<0.13"` (h5ad encodings change between 0.x minors), `pandas<3.0` (default string dtype)
+  and `h5py<4` (HDF5 2.x) in every header, numpy `<2.5` like the lock override, matching the image lock. Every
+  header range must contain the version `docker/requirements-app.lock` pins (the starCAT tools, left out of
+  the image, are exempt: scikit-learn==1.3.2 keeps them on numpy<2). `tests/test_dependency_caps.py` enforces
+  this and `tests/test_h5ad_round_trip.py` reads and writes an h5ad across the test and the pinned versions;
+  raise a cap only together with the lock (`docker/gen-lock`) and every host's script environments.
 - **`sys.path` shim**: scripts add `lib/` to `sys.path` via
   `script_dir.parent.parent / 'lib'` (two levels up from `bin/<domain>/`).
 - **Coordination with ant-serve**: anything that writes a duckdb (ingest +

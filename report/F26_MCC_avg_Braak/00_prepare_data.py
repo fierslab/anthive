@@ -3,9 +3,9 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "duckdb>=1.3,<1.6",
-#   "pandas>=2.0",
+#   "pandas>=2.0,<3.0",
 #   "pyarrow>=14.0",
-#   "numpy>=1.24",
+#   "numpy>=1.24,<2.5",
 #   "anndata>=0.10,<0.13",
 # ]
 # ///

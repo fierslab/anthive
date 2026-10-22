@@ -2,9 +2,9 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "pandas>=2.0",
+#   "pandas>=2.0,<3.0",
 #   "pyarrow>=14.0",
-#   "numpy>=1.24",
+#   "numpy>=1.24,<2.5",
 #   "scipy>=1.11",
 #   "matplotlib>=3.7",
 #   "seaborn>=0.12",

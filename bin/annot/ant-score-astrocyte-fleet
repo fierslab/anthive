@@ -4,7 +4,7 @@
 #   "duckdb>=1.3,<1.6",
 #   "requests>=2.31.0",
 #   "pyyaml>=6.0",
-#   "pandas>=2.0.0",
+#   "pandas>=2.0.0,<3.0",
 # ]
 # ///
 """ant-score-astrocyte-fleet — batch-score every astrocyte dataset with the
