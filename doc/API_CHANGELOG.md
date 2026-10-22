@@ -29,7 +29,7 @@ the spec drifting away from the running code.
 
 ---
 
-## 2.46.5 (2026-10-21)
+## 2.46.5 (2026-10-22)
 
 Patch release. No endpoint, parameter or response field changes. Clients do not need to update.
 
