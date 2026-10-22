@@ -13,21 +13,16 @@ cryptography>=42
 duckdb>=1.3,<1.6  # override (headers: duckdb>=1.3,<1.6)
 fastapi>=0.141.1
 fastembed>=0.5,<0.9
-h5py>=3.0
-h5py>=3.0.0
-h5py>=3.8.0
+h5py>=3.8,<4  # override (headers: h5py>=3.0,<4; h5py>=3.0.0,<4; h5py>=3.8.0,<4)
 httpx>=0.27.0
 jinja2>=3.1.0
 markdown>=3.5.0
 markdown-it-py>=3.0.0
 matplotlib>=3.7.0
 mcp>=1.10,<2  # override (headers: mcp>=1.10,<2)
-numpy>=2.0,<2.5  # override (headers: numpy; numpy>=1.24; numpy>=1.24.0; numpy>=1.24.0,<2.0)
+numpy>=2.0,<2.5  # override (headers: numpy<2.5; numpy>=1.24,<2.5; numpy>=1.24.0,<2.5; numpy>=1.26,<2.5)
 openai>=1.30.0
-pandas
-pandas>=1.5
-pandas>=2.0.0
-pandas>=2.0.0,<3.0
+pandas>=2.0,<3.0  # override (headers: pandas<3.0; pandas>=1.5,<3.0; pandas>=2.0.0,<3.0)
 pyarrow>=14
 pyarrow>=14.0
 pyarrow>=14.0.0
