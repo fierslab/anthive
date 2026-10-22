@@ -690,6 +690,29 @@ issue_tracker_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues
 # Env: ANTHIVE_FACETS_VISIBLE (comma separated, "*" for all).
 facets_visible: [ant_sex, ant_disease, ant_apoe4_carrier, ant_braak, ant_age, ant_app_nlgf]
 
+# Parts of the web UI a site shows. All true by default; a public read-only
+# mirror can switch them off. Each one also closes its pages on the server:
+#   facets   Facet tabs, the /facets pages, facet DE on gene and gene set
+#            pages, per donor plots, facet help. The REST API keeps its facet
+#            endpoints.
+#   caveats  The Caveats tab and caveat markers on dataset, collection and plot
+#            pages. Caveats carry data-quality warnings (curation decisions,
+#            known defects); a site without them shows the data without those
+#            warnings. The REST API keeps serving them.
+#   api      The API page (/api-guide), API links, code snippets and notebook
+#            buttons. ant-serve then answers 404 on /docs and /redoc to callers
+#            that are not signed in; the REST API and /openapi.json stay.
+#   mcp      The MCP account page, MCP links and MCP help. ant-serve reports
+#            MCP links as disabled; ant-supervisor does not start ant-mcp and
+#            Caddy answers 404 on /mcp.
+# Env: ANTHIVE_UI_FACETS, ANTHIVE_UI_CAVEATS, ANTHIVE_UI_API, ANTHIVE_UI_MCP
+# (true/false).
+ui:
+  facets: true
+  caveats: true
+  api: true
+  mcp: true
+
 # Folder the in-app help links to for detailed docs (doc/MCP_CLIENTS.md,
 # doc/MCP_LINKS.md, ...). They live in the repo so they can be corrected
 # without a release. Env: ANTHIVE_DOCS_BASE_URL. Empty means this default.

@@ -1,4 +1,5 @@
 id: facet-cell-type-groups
+ui: facets
 title: Cell type groups and what counts
 summary: Cell type labels are mapped to Cell Ontology based groups so cohorts with different label sets can be compared, and what is counted per group.
 terms:

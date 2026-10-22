@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import importlib.machinery
 import importlib.util
 import os
@@ -37,7 +38,7 @@ class RecordingS3:
         class _Pages:
             def paginate(self, Bucket, Prefix=''):  # noqa: N803
                 yield {'Contents': [
-                    {'Key': key, 'Size': len(body), 'ETag': '"x"',
+                    {'Key': key, 'Size': len(body), 'ETag': f'"{hashlib.md5(body).hexdigest()}"',
                      'LastModified': dt.datetime.fromtimestamp(MTIME, dt.timezone.utc)}
                     for key, body in sorted(outer.objects.items()) if key.startswith(Prefix)]}
         return _Pages()
@@ -49,7 +50,9 @@ class RecordingS3:
     def head_object(self, Bucket, Key):  # noqa: N803
         if Key not in self.objects:
             raise KeyError(Key)
-        return {'ContentLength': len(self.objects[Key]), 'ETag': '"x"', 'Metadata': {'original-mtime': str(MTIME)}}
+        body = self.objects[Key]
+        return {'ContentLength': len(body), 'ETag': f'"{hashlib.md5(body).hexdigest()}"',
+                'Metadata': {'original-mtime': str(MTIME)}}
 
     def download_file(self, bucket, key, filename, **_):
         self.writes.append(('download_file', key))
@@ -104,7 +107,8 @@ S3_OBJECTS = {
 }
 
 
-def _patch(ant_sync, monkeypatch, client, store, *, mode='priority', max_local_gb=None):
+def _patch(ant_sync, monkeypatch, client, store, *, mode='priority', max_local_gb=None,
+           catalogued=('G1/a', 'G1/b'), inactive=()):
     admin_calls: list = []
     config = {'sync_policy': {'mode': mode, 'role': 'slave', 'max_local_gb': max_local_gb},
               's3': {'bucket': 'bk'}}
@@ -113,6 +117,8 @@ def _patch(ant_sync, monkeypatch, client, store, *, mode='priority', max_local_g
     monkeypatch.setattr(ant_sync, '_admin_post', lambda *a, **k: admin_calls.append(a) or 200)
     monkeypatch.setattr(ant_sync, '_read_priorities', lambda folder, default: {'G1/b.duckdb': 90, 'G1/a.duckdb': 80})
     monkeypatch.setattr(ant_sync, '_free_space', lambda path: 10 ** 12)
+    if catalogued is not None:          # None: the real catalogue of the store's .md files
+        monkeypatch.setattr(ant_sync, '_catalogue', lambda folder: (set(catalogued), set(inactive)))
     monkeypatch.setattr(ant_sync, 'require_primary', lambda **kw: None)
     monkeypatch.setattr(ant_sync, 'is_slave', lambda cfg=None: True)
     monkeypatch.setattr(ant_sync, '_rebuild_module_variability_if_stale',
@@ -144,6 +150,8 @@ PULL_VARIANTS = [
     ('all', dict(only='.duckdb,.h5ad')),
     ('duckdb', dict()),
     ('duckdb', dict(filter='G1/*')),
+    ('priority', dict(filter='G1/b*', evict=True)),               # 2.46.5: the glob holds in priority mode
+    ('all', dict(filter='G1/*', include_duckdb=True)),
 ]
 
 

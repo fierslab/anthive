@@ -1047,3 +1047,30 @@ ant_donor_uid and the replicate column ("1,499 donors; values not listed") and c
 `_DONOR_LIKE_COLUMN` (donor, patient, projid, sample, batch, hashtag, ...); the page also hides a column whose top
 values contain a value of a donor column. This hides values in the UI only: `/obs_summary` still returns the top
 values of every column, donor columns included, as it did before. Plottable columns are unchanged (top-3 chips).
+
+## ui switches: facets, caveats, API, MCP (public mirrors, 2026-10-21)
+
+A site can switch parts of the UI off (`ui:` in anthive.yaml, rendered from site.yaml by ant-stack;
+`config.get_ui_settings`). `browser._ui()` reads it once (tests set `browser._ui_cfg`; both web test files have an
+autouse fixture that switches everything on), the Jinja global `ui` gives `{% if ui.facets %}` and friends, and
+`window.antUi` carries the same flags for page scripts. A part that is off disappears and its pages answer 404
+through the route dependency `_require_ui('<part>')`.
+
+- **facets**: no `facets` nav link, no Facet tab group (label, Gene, GS) or `#ds-facets-pointer` on the dataset
+  page, no facet API calls in `dataset_view` (facets, facet-tests, Other DE), no replicate unit row, no "facet"
+  pill on `ant_*` column names (`col_label`, `formatColLabel` in plot.html and _module_view.html), no Facet DE
+  tab on gene and gene set pages (no `/facet-effects` fetch; the gene set Genes tab lists members without facet
+  calls), no `fx_gene_panel` in the old atlas. 404: `/facets`, `/facets/{name}`, `/facets/{name}/effects-table`,
+  `/browse/{g}/{d}/plot/donor`.
+- **caveats**: `caveats` is emptied in `dataset_view`, `plot_view`, `donor_plot_view` and the collection listing
+  (`caveats_summary`), and the Caveats tab and panel are not rendered (not even the empty one).
+- **api**: no API link in the top bar or user menu, the version pill is a plain span (no changelog link), no
+  notebook buttons (dataset page, plot page; the plot script uses `?.addEventListener`), no REST/notebook links
+  on /about, no MCP-free AI/programmatic sections in help. 404: `/api-guide`.
+- **mcp**: no `#mcp-menu-link`, no MCP text on help, /about or the API page. 404: `/account/mcp`, `/admin/mcp-links`.
+
+Help: help.html wraps its own sections in `{% if ui.<part> %}`; the shared text in `lib/help_content` marks
+whole topics and glossary terms with `ui: <part>` and passages with `data-ui="<part>"`, removed by
+`help_content.strip_ui` through `_help_topic_html` / `_help_glossary_html` (hidden parts from `_ui_hidden()`).
+Tests: `tests/test_web_ui_switches.py` (each switch off, all off, defaults on, glossary links of the remaining
+pages resolve).

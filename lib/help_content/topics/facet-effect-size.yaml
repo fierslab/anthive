@@ -1,4 +1,5 @@
 id: facet-effect-size
+ui: facets
 title: 'Effect size: the 10 percent filter and the second tier'
 summary: Replicated genes must also change by at least 10 percent in at least 2 cohorts (the effect gate); the treat tier adds a minimum-effect test.
 terms:

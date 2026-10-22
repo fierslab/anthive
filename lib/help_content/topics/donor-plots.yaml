@@ -1,4 +1,5 @@
 id: donor-plots
+ui: facets
 title: Donor plots
 summary: A donor plot shows the values the facet test actually compared, one dot per donor (or host animal) and one panel per cohort, on the scale the test uses.
 related:

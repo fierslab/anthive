@@ -1,4 +1,5 @@
 id: facet-scopes
+ui: facets
 title: 'Scopes: human post-mortem and xenograft'
 summary: A facet scope is the kind of system a dataset comes from (human post-mortem, xenograft of human cells in mouse, in vitro); facets are tested, counted and replicated within one scope and results are never merged across scopes.
 related:

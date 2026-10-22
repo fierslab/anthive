@@ -411,7 +411,7 @@
     {% if pub_icon and pub_icon.glyph %}<span class="ds-pub-icon" style="color:{{ pub_icon.color }}" title="{{ pub_icon.tooltip }}">{{ pub_icon.glyph|safe }}</span>{% endif %}
     <button type="button" class="btn-grey ds-actions-toggle" id="ds-actions-toggle" title="actions" aria-haspopup="true" aria-expanded="false">actions <span class="caret">▾</span></button>
     <div class="ds-actions-group">
-    {% if has_duckdb %}<a class="btn-grey btn-icon" id="ds-open-notebook" href="/jupyter/" target="_blank" rel="noopener" title="open this dataset in a JupyterLite notebook (pre-fills the AnthiveClient for {{ db_id }})">📓 notebook</a>{% endif %}
+    {% if has_duckdb and ui.api %}<a class="btn-grey btn-icon" id="ds-open-notebook" href="/jupyter/" target="_blank" rel="noopener" title="open this dataset in a JupyterLite notebook (pre-fills the AnthiveClient for {{ db_id }})">📓 notebook</a>{% endif %}
     {% if has_duckdb %}
     <div class="viz-menu" id="viz-menu">
       <button type="button" class="btn-grey" id="viz-menu-btn" aria-haspopup="true" aria-expanded="false">visualize <span class="caret">▾</span></button>
@@ -496,7 +496,7 @@
 {% if info and info.designation %}
 <div class="ds-lineage" id="ds-lineage">
   {% set _desig = info.designation %}
-  <span class="lineage-pill {{ _desig }}" id="ds-designation" title="{% if _desig == 'primary' %}Primary data: these cells are served by this dataset only. It counts in pooled numbers and towards facet replication.{% elif _desig == 'reanalysis' %}Reanalysis: these cells are also served by another dataset. It is left out of pooled numbers and never counts towards facet replication.{% elif _desig == 'qc' %}QC companion: all cells before filtering, with their per-cell QC statistics. Never counted in statistics or facet tests.{% else %}Not yet classified as primary or reanalysis (no is_secondary key in the .md).{% endif %}">{{ 'primary data' if _desig == 'primary' else ('reanalysis' if _desig == 'reanalysis' else ('QC companion' if _desig == 'qc' else 'designation unresolved')) }}</span>
+  <span class="lineage-pill {{ _desig }}" id="ds-designation" title="{% if _desig == 'primary' %}Primary data: these cells are served by this dataset only. It counts in pooled numbers{% if ui.facets %} and towards facet replication{% endif %}.{% elif _desig == 'reanalysis' %}Reanalysis: these cells are also served by another dataset. It is left out of pooled numbers{% if ui.facets %} and never counts towards facet replication{% endif %}.{% elif _desig == 'qc' %}QC companion: all cells before filtering, with their per-cell QC statistics. Never counted in statistics{% if ui.facets %} or facet tests{% endif %}.{% else %}Not yet classified as primary or reanalysis (no is_secondary key in the .md).{% endif %}">{{ 'primary data' if _desig == 'primary' else ('reanalysis' if _desig == 'reanalysis' else ('QC companion' if _desig == 'qc' else 'designation unresolved')) }}</span>
   {% if _desig == 'qc' %}<span id="ds-qc-of"><span class="pk">QC companion of</span> {% if info.qc_of %}<a href="/browse/{{ info.qc_of }}">{{ info.qc_of }}</a>{% else %}<span class="muted">its final dataset (not deposited yet)</span>{% endif %}</span>{% endif %}
   {% if info.qc_companions %}<span id="ds-qc-companions"><span class="pk">QC companion</span> {% for companion in info.qc_companions %}<a href="/browse/{{ companion }}" title="All cells before filtering, with per-cell QC statistics">{{ companion }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
   {% if info.reanalysis_of %}<span id="ds-reanalysis-of"><span class="pk">reanalysis of</span> {% for parent in info.reanalysis_of %}<a href="/browse/{{ parent }}">{{ parent }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
@@ -537,7 +537,7 @@
   {% if n_module_scores %}
   <button type="button" class="tab-btn"        data-tab="modules"  role="tab">Gene sets<span class="tab-count">{{ n_module_scores }}</span></button>
   {% endif %}
-  {% if show_facets_tab or n_module_scores %}
+  {% if ui.facets and (show_facets_tab or n_module_scores) %}
   {# Facet group: one bordered tab holding the label (facet description, #facets) and the sub-tab pills
      Gene (effects by facet, #facet-gene) and GS (gene set scores by annotation column, #facet-gs).
      All three are plain .tab-btn buttons, so the tab wiring treats them as ordinary tabs. A span, not a
@@ -558,7 +558,8 @@
   <button type="button" class="tab-btn"        data-tab="downloads" role="tab" id="tab-btn-downloads">Downloads</button>
   {# Caveats is always shown, last, and NEVER default-active: it is a warning affordance, not a landing
      surface. Without caveats it is greyed (.tab-empty) and the panel says none are recorded. #}
-  {% if caveats %}<button type="button" class="tab-btn caveat-tab lvl-{{ caveats_summary.max_level or 'low' }}" data-tab="caveats" role="tab" id="tab-btn-caveats">⚠ Caveats<span class="tab-count">{{ caveats_summary.n }}</span></button>
+  {% if not ui.caveats %}{# ui.caveats false: no Caveats tab #}
+  {% elif caveats %}<button type="button" class="tab-btn caveat-tab lvl-{{ caveats_summary.max_level or 'low' }}" data-tab="caveats" role="tab" id="tab-btn-caveats">⚠ Caveats<span class="tab-count">{{ caveats_summary.n }}</span></button>
   {% else %}<button type="button" class="tab-btn tab-empty" data-tab="caveats" role="tab" id="tab-btn-caveats" title="No caveats recorded for this dataset">Caveats</button>{% endif %}
 </div>
 
@@ -576,7 +577,8 @@
 {# ── Papers tab (only when the library links papers to this dataset) ──── #}
 
 {# ── Caveats tab (only rendered when caveats present) ────────────────── #}
-{% if not caveats %}
+{% if not ui.caveats %}{# ui.caveats false: no Caveats panel #}
+{% elif not caveats %}
 <section class="tab-panel" id="tab-caveats" role="tabpanel">
   <h2 class="section-head">Caveats</h2>
   <p class="muted tab-empty-note" id="ds-no-caveats">No caveats recorded for this dataset.</p>
@@ -907,6 +909,7 @@
   </script>
 </section>
 
+{% if ui.facets %}
 {# ── Facet group, GS sub-tab (2026-10-13): the facet x cell type matrix of the donor-level gene set (module) results, one
    per variant (pseudobulk | cell mean scanpy | cell mean UCell, selector), same layout as the Gene sub-tab. The earlier
    per-cell association explorer (_module_view.html) sits in the hidden box #fxs-percell ("per-cell associations
@@ -951,6 +954,7 @@
   {% include "_module_view.html" with context %}
   {% endcall %}
 </section>
+{% endif %}{# ui.facets #}
 {% endif %}
 
 {# ── Facets tab ───────────────────────────────────────────────────────── #}
@@ -1084,7 +1088,7 @@
   {% if facet_tests and facet_tests.matrix %}{{ fxg_list_script('genes', 'fxg', 'fxg-genes', db_id, '/browse/' ~ folder_browse_id ~ '/' ~ file_id, default_embedding, obs_columns) }}{% endif %}
   {{ fx_script() }}
 </section>
-{% elif n_module_scores %}
+{% elif ui.facets and n_module_scores %}
 {# Facet group without facets (only the GS sub-tab has content): the label opens an empty-state panel. #}
 <section class="tab-panel" id="tab-facets" role="tabpanel">
   <h2 class="section-head">Facets</h2>

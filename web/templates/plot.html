@@ -877,7 +877,7 @@
           </div>
         </div>
       </span>
-      <a id="open-notebook" href="#" title="Open this exact plot as a one-off JupyterLite notebook (runs in your browser; download it to keep changes)">📓 notebook</a>
+      {% if ui.api %}<a id="open-notebook" href="#" title="Open this exact plot as a one-off JupyterLite notebook (runs in your browser; download it to keep changes)">📓 notebook</a>{% endif %}
       <a id="force-refresh" href="#" title="re-render this figure, bypassing the server + browser cache">↻ refresh</a>
       <a id="copy-url" href="#">copy URL</a>
       <a id="copy-thumb" href="#" title="Copy a markdown snippet that embeds this plot as a thumbnail in a dataset/collection description">🖼 copy thumbnail md</a>
@@ -1441,7 +1441,7 @@
   //   biology-keyed filename, then put that into the URL, so JupyterLite
   //   saves the file as e.g. 'S25_V6A_scatter_P2RY12.ipynb' instead of
   //   the literal 'plot.ipynb'.
-  document.getElementById('open-notebook').addEventListener('click', async e => {
+  document.getElementById('open-notebook')?.addEventListener('click', async e => {
     e.preventDefault();
     if (!canRender()) {
       status.innerHTML = `<span class="err">${renderHint()} before opening a notebook</span>`;
@@ -1927,7 +1927,7 @@
   // The actual `value` submitted to the API always stays the raw ant_* name.
   function formatColLabel(name) {
     function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
-    if (!name || !name.startsWith('ant_')) return esc(name);
+    if (!name || !name.startsWith('ant_') || (window.antUi && !window.antUi.facets)) return esc(name);
     var tag = name.slice(4);
     return '<span class="facet-col" title="facet annotation `' + esc(name) + '`, standardised across datasets">'
       + '<b>' + esc(tag) + '</b>'

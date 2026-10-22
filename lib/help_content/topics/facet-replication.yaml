@@ -1,4 +1,5 @@
 id: facet-replication
+ui: facets
 title: Replication across cohorts
 summary: A gene counts as replicated when its effect shows in the same direction in at least 2 independent cohorts according to a partial conjunction test (r-value below 0.05) and the effect-size gate passes.
 terms:

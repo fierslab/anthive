@@ -1,4 +1,5 @@
 id: facet-replicate-unit
+ui: facets
 title: Replicate unit and analysis level
 summary: The replicate unit is what counts as one independent observation (donor, host animal or sample); the analysis level is replicate level when there are enough replicates, otherwise cell-level and descriptive only.
 related:

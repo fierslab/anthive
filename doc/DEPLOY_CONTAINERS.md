@@ -4,7 +4,7 @@ This is the one supported way to run anthive: a docker compose stack,
 described by one file (`site.yaml`) and driven by one tool
 (`bin/ops/ant-stack`). Follow the steps in order.
 
-Every command below was run end to end on a fresh checkout for release 2.46.4.
+Every command below was run end to end on a fresh checkout for release 2.46.5.
 
 Plan about an hour, plus the time it takes to download the data.
 
@@ -132,7 +132,8 @@ Where the numbers come from:
   DuckDB spills large queries and `ant convert` stages its work on the
   scratch disk (`scratch_dir`, by default a docker volume, also under
   `/var/lib/docker`); a conversion needs room for about the size of the
-  `.h5ad` it converts. `state_dir` stays small (users, links, caches).
+  `.h5ad` it converts. The api's facet cache there takes about 1.5 GB per
+  kind of visitor on a full store (see "Cache warm-up after a start"). `state_dir` stays small (users, links, caches).
 
 ### Network
 
@@ -183,7 +184,7 @@ sudo mkdir -p /srv/anthive && sudo chown $USER /srv/anthive
 cd /srv/anthive
 git clone https://gitlab.kuleuven.be/bdslab/anthive/anthive4.git
 cd anthive4
-git checkout v2.46.4
+git checkout v2.46.5
 ```
 
 Always check out a release tag, and use the same number as the image tag in
@@ -271,7 +272,7 @@ ports:
 
 images:
   registry: registry.gitlab.kuleuven.be/bdslab/anthive/anthive4
-  tag: 2.46.4                                 # same number as the git tag (step 2)
+  tag: 2.46.5                                 # same number as the git tag (step 2)
 
 s3:                                           # skip if you have no S3 keys
   enabled: true
@@ -391,7 +392,16 @@ the `_*_cache/` folders, `static/`), and never a raw `.h5ad`. There
 `--include-duckdb` has no effect (before 2.46.1 it switched the policy
 off and pulled every `.h5ad`; do not use it on such a site with an older
 release). Try any pull first with `--dry-run`: it lists what would be
-downloaded or evicted and changes nothing. A dataset whose files are not
+downloaded or evicted and changes nothing. Only catalogued datasets come
+down: those with a `.md` in your h5adstore checkout, without a `.inactive`
+sidecar and not in a `_` folder (since 2.46.5). Objects on S3 without their
+`.md` (retired datasets) are listed as "on S3 but not catalogued (retired?)"
+with their sizes, never pulled and never deleted from S3. A glob such as
+`'Francken2026/*'` limits the run to the datasets and shared files it
+matches (the budget is still planned over the whole catalogue). A file
+whose S3 ETag shows the same content is never downloaded again, only its
+mtime is realigned; a file that does differ is listed with the reason
+before it is overwritten. A dataset whose files are not
 local is only listed with `s3.api_access: read` (step 4); it is then read
 from S3 over the network, which is slow. Running the same pull again only
 downloads what changed.
@@ -918,6 +928,42 @@ Rules and limits:
   there are no admins, so nobody does. `ant lib-check` on the host still
   reports them.
 
+### A public mirror: switch off facets, caveats, API pages and MCP
+
+A public read-only site (for example a data website with `auth.mode: none`)
+can leave out parts of the web UI with the `ui:` block. Every switch is
+`true` by default, so an existing site changes nothing:
+
+```yaml
+auth:
+  mode: none
+ui:
+  facets: false      # Facet tabs, /facets pages, facet DE on gene and gene set pages, per donor plots, facet help
+  caveats: false     # Caveats tab and caveat markers (see the warning below)
+  api: false         # API page, API links, code snippets and notebook buttons
+  mcp: false         # MCP account page, MCP links and MCP help; no mcp service
+services:
+  mcp: false         # say so here too; ui.mcp: false wins anyway
+```
+
+What each switch does:
+
+| Switch | Gone from the web UI | Closed on the server |
+| --- | --- | --- |
+| `ui.facets: false` | the `facets` menu entry, the Facet tab group (Facet, Gene, GS) of the dataset page, the Facet DE tab of gene and gene set pages, the "facet" label on `ant_*` column names, facet sections, topics and glossary terms on the help page | `/facets`, `/facets/<name>` and the per donor plot pages answer 404. The REST API keeps its facet endpoints (`/api/facets/...`, `/api/databases/<id>/facet-tests`) for vark and pyvark |
+| `ui.caveats: false` | the Caveats tab of the dataset page, the caveat mark in collection lists, the caveat button of plot pages, the caveats topic on the help page | nothing: the REST API and MCP still return caveats (`/api/databases/<id>/info`, `get_dataset_context`) |
+| `ui.api: false` | the API link in the top bar and the user menu, the changelog link of the version button, the notebook buttons, the REST API and notebook links on the about page, the programmatic access section of the help page | `/api-guide` answers 404; `/api/docs` and `/api/redoc` answer 404 to visitors who are not signed in. The REST API itself, `/api/openapi.json` and `/api/version` stay: the web UI calls the API from the browser, and the notebooks, vark and pyvark need it. JupyterLite (`/jupyter/`) is still served; nothing on the site links to it |
+| `ui.mcp: false` | the "Connect an MCP client" menu entry and every mention of MCP on the help, about and API pages | `/account/mcp` answers 404, the API reports MCP links as disabled, the mcp container is not started (even with `services.mcp: true`) and `/mcp` answers a JSON 404 |
+
+> **Caveats carry data-quality warnings.** They record curation decisions and
+> known defects of a dataset (for example a broken embedding or contaminated
+> cells). With `ui.caveats: false` visitors of the site see the data without
+> those warnings. `ant-stack check` prints a warning when the switch is off.
+
+`ant-stack check` lists the parts that are off (`ui: switched off: ...`) and
+the plan shows them on the `ui off` line. After a change, `ant-stack up`
+recreates the web, api and mcp containers with the new config.
+
 ### Run syncs from cron or a systemd timer
 
 `ant-stack` and `ant-sync` start with `#!/usr/bin/env -S uv run ...`, so
@@ -928,7 +974,7 @@ Set `PATH` in the crontab or the unit, as the templates do:
 
 | Job | Templates in `config/examples/` |
 | --- | --- |
-| `ant-stack ingest -- ant sync pull` (data, library PDFs, `_facet_tests/`) | `anthive-sync.cron.example`, `anthive-sync.service.example` (+ a timer like the next row) |
+| `git pull` of the h5adstore, then `ant-stack ingest -- ant sync pull` (metadata, data, library PDFs, `_facet_tests/`); **every hour** is the recommended interval, so datasets the ingest watcher publishes reach this site within the hour | `anthive-sync.cron.example`, `anthive-sync.service.example` (+ a timer like the next row) |
 | `ant-stack publish-library` | `anthive-publish-library.{cron,service,timer}.example` |
 
 `ant-stack check` prints where `uv` is and which directory cron needs on
@@ -997,6 +1043,7 @@ Read every entry between your current version (top-right of the site, or
 | **2.46.2** | Security and scratch-site fixes. (1) The Caddy access log no longer writes the presigned query (signature) of a download redirect. (2) Validators refuse values with a trailing newline. (3) `check` refuses unknown keys in the `auth`, `tls`, `ports`, `s3`, `services`, `datasets` and `data` sections of `site.yaml` and warns about unknown keys elsewhere, with the closest known key. (4) An invalid rendered config is one `PROBLEM` line; `ant sync` with an unreachable S3 endpoint says so in one line. (5) The MCP instructions name `<public_url>/mcp`, not the container listener. (6) The deposit watcher gives up a listing of an unreachable endpoint within about a minute and logs every failed attempt; a second SIGTERM stops it at once. `ant-stack watch` prints the command it runs. | Fix every `site.yaml: unknown key` that `check` reports (typos there were silently ignored before), then `ant-stack pull` and `ant-stack up`. |
 | **2.46.3** | JupyterLite works again. The `Getting_Started` notebook failed at its first cell (`No module named 'requests'`) and the bundled Python client was pyvark 0.9.0; it is now 0.11.0, and the dataset and plot notebooks no longer install an old pyvark from PyPI. No API or configuration change. | `ant-stack pull` and `ant-stack up`. Optionally run `make test-live-site URL=<public_url>` from a checkout of v2.46.3 to confirm JupyterLite after the login. |
 | **2.46.4** | `ant-stack ingest`, `publish-library` and `watch` apply their own config before they run. In 2.46.1 to 2.46.3 S3 keys written after `init` stayed staged, and the first `ant-stack ingest -- ant sync pull` failed with `s3.access_key_id is not set`. No API change. | `ant-stack pull` and `ant-stack up`. (The workaround on older releases is `ant-stack render` after writing the key files.) |
+| **2.46.5** | `ant sync pull` fixes, found on a priority slave. (1) Only catalogued datasets are pulled (a `.md` in the h5adstore checkout, no `.inactive`, not in a `_` folder), on every path; S3 objects without their `.md` are listed as "on S3 but not catalogued (retired?)" with sizes and left on S3. Before, a priority site planned to download every retired `.duckdb` (about 40 GB on the intern site). (2) The glob filter (`ant sync pull 'Francken2026/*'`) now holds under `sync_policy.mode: priority`; it was ignored. (3) Same-size files with the same content (S3 ETag, or `x-amz-meta-sha256`) are never downloaded again, only their mtime is realigned; before, a priority site re-downloaded small `_facet_tests/` and cache files whenever their S3 copy had been re-uploaded, and the generic slave pull re-downloaded every same-size file on every run. A file that does differ is listed with the reason before it is overwritten. No API change. Also new: New `ui:` block in `site.yaml` (`facets`, `caveats`, `api`, `mcp`, all `true` by default) to switch parts of the web UI off on a public mirror; each switch also closes the pages it hides. `ui.mcp: false` stops the mcp service and Caddy answers `/mcp` with a JSON 404 (also when `services.mcp` is false; before, `/mcp` gave a 502). See "A public mirror: switch off facets, caveats, API pages and MCP". Faster restarts: the facet results are cached on the scratch disk (parquet and JSON, no pickle) and module rank tables no longer pause after cache hits, so a restart with unchanged data finishes its warm-up in about 30 s instead of about 3 minutes; the first start after the upgrade rebuilds the caches once. | `git pull` the h5adstore, then `ant-stack pull` and `ant-stack up`. Try `ant-stack ingest -- ant sync pull --dry-run` and review the "not catalogued" list (restore a `.md` for anything that should still be served). A public mirror may add the `ui:` block. |
 
 The in-app chat assistant is off and being phased out; leave
 `services.chat: false`. AI use goes through the personal MCP links.
@@ -1170,6 +1217,29 @@ anthive:
     anonymous: false                       # login-only site: skip the anonymous caches
 ```
 
+The facet tables, replication families and dataset summaries are kept on
+the scratch disk too, in `tmp/facet_cache` (`/scratch/tmp/facet_cache` in
+the containers; the `tmp_dir` setting moves it). A restart whose inputs did
+not change loads them in seconds instead of building them again (about
+100 s on a full store). Each entry is stored with a key over everything it was
+built from: the release (any change of the server code), the facet result
+files under `_facet_tests/` (by size and modification time), the cohort table
+and every dataset attribute the tables carry. After `ant sync pull` brings a
+new result file, the next start rebuilds the tables and only the replication
+families that file is part of (for a human post-mortem dataset most of them,
+for a xenograft dataset only the xenograft ones); after an upgrade the first start rebuilds
+everything once. On a full store the folder takes about 1.5 GB per kind of
+visitor (signed-in, anonymous). Nothing needs to be done to keep it right. To
+clear it, which only costs one slow start, delete the folder while the stack
+runs and restart the api: `bin/ops/ant-stack ingest -- rm -rf
+/scratch/tmp/facet_cache`, then `bin/ops/ant-stack restart api` (with
+`scratch_dir` set you can also delete `<scratch_dir>/tmp/facet_cache` on the
+host). `tmp/module_rank` is cleared the same way. The cache files are
+parquet tables with a JSON header, never Python pickles, so a file planted on
+the shared scratch volume cannot run code in the api. It can still change
+what the facet views show, like any write to the result files, so keep the
+scratch volume to the anthive containers.
+
 The anonymous facet tables cost memory in the api container, about as much
 as the signed-in ones (above 1 GB on a full store); a site that only serves
 signed-in people can set `anonymous: false`. `warmup.enabled: false` (or env
@@ -1256,6 +1326,7 @@ resolve inside the containers.
 | `run_as` | the user id the containers run as (default: whoever runs ant-stack) |
 | `images.*` | registry, image names, tag (the release number; change it at every upgrade) |
 | `services.mcp` | personal MCP links for AI clients (on by default; the supported way to use AI with anthive) |
+| `ui.facets`, `ui.caveats`, `ui.api`, `ui.mcp` | which parts of the web UI the site shows (all `true` by default; `ui.mcp: false` also stops the mcp service). Caveats carry data-quality warnings: switching them off hides those warnings from visitors. See "A public mirror: switch off facets, caveats, API pages and MCP" |
 | `mcp.token_ttl_days`, `mcp.max_links_per_user` | how long a link lives (0 = forever) and how many links one user may hold (default 5) |
 | `services.paper_upload` | let `library.upload_groups` add papers through the API and MCP (mounts the library read-write) |
 | `services.dataset_deposit` | since 2.46.0: let `datasets.upload_groups` deposit datasets through presigned S3 uploads (needs `s3.enabled`; see "Let depositors add datasets") |

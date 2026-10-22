@@ -302,7 +302,7 @@
 #}
 {% macro col_label(name) -%}
 {%- set _ci = obs_col_info(name) -%}
-{%- if _ci.is_canonical -%}
+{%- if _ci.is_canonical and ui.facets -%}
 <span class="facet-col" title="facet annotation `{{ name }}`, standardised across datasets"><b>{{ _ci.display_name }}</b><span class="facet-pill">facet</span></span>
 {%- else -%}
 {{ name }}

@@ -1,4 +1,5 @@
 id: facets-columns
+ui: facets
 title: Facets (ant_* columns)
 title_html: Facets (<code>ant_*</code> columns)
 summary: Columns starting with ant_ are the site's standardised annotations, with the same name and values in every dataset that has them; prefer them to compare datasets.

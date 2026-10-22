@@ -135,7 +135,7 @@ images:
   # The release you run: the same number as the git tag you checked out
   # (`git describe --tags`). Change it at every upgrade. Never `latest`, it
   # changes under you.
-  tag: 2.46.4
+  tag: 2.46.5
   # Leave the defaults unless you mirror these images.
   caddy: caddy:2.11-alpine
   authelia: authelia/authelia:4.39
@@ -150,6 +150,21 @@ services:
   dataset_deposit: false # let users in datasets.upload_groups deposit datasets: the api
                      # hands out presigned S3 uploads into the incoming prefix (needs
                      # s3.enabled); ant-ingest-watch on the host checks and publishes them
+
+# Parts of the web UI this site shows. All on by default; a public read-only
+# mirror (auth.mode none) may switch some off. Each switch also closes the
+# pages it hides (they answer 404). The REST API stays in every case: the web
+# UI, the notebooks, vark and pyvark use it.
+ui:
+  facets: true       # Facet tabs, /facets pages, facet DE on gene and gene set pages,
+                     # per donor plots and the facet help
+  caveats: true      # Caveats tab and caveat markers on dataset, collection and plot pages.
+                     # Caveats carry data-quality warnings (curation decisions, known
+                     # defects): with false, visitors see the data without them
+  api: true          # API page, API links, code snippets and notebook buttons; false also
+                     # hides /api/docs and /api/redoc from visitors who are not signed in
+  mcp: true          # MCP account page, MCP links and MCP help; false also stops the mcp
+                     # service (even with services.mcp: true) and /mcp answers 404
 
 # Paper library: uploads and the two-way sync (`ant sync library`).
 library:

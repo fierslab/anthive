@@ -163,7 +163,7 @@
     <thead>
         <tr>
             <th class="sortable" data-col="id" data-help="Short dataset id used in URLs and copy-paste refs. Example: HMI in P26/HMI." style="color:#999;font-weight:500">id <span class="info" title="Click to sort by id">ⓘ</span><span class="sort-ind"></span></th>
-            <th class="sortable" data-col="name" data-help="Dataset name (icon before it: 🌐 public / 🧪 lab-generated; red=unpublished, green=published). External-link icons (🔗) link to DOI / accession / URL. ⚠ = caveats.">Dataset <span class="info" title="Click to sort or read help">ⓘ</span><span class="sort-ind"></span></th>
+            <th class="sortable" data-col="name" data-help="Dataset name (icon before it: 🌐 public / 🧪 lab-generated; red=unpublished, green=published). External-link icons (🔗) link to DOI / accession / URL.{% if ui.caveats %} ⚠ = caveats.{% endif %}">Dataset <span class="info" title="Click to sort or read help">ⓘ</span><span class="sort-ind"></span></th>
             <th class="sortable" data-col="cells" title="cells × genes" data-help="Cell count × gene count for this dataset.">Cells × Genes <span class="info" title="Click to sort by cell count">ⓘ</span><span class="sort-ind"></span></th>
             <th class="sortable" data-col="date" data-help="Publication year (when known and published), or upload date (mtime) otherwise.">Date <span class="info" title="Click to sort by date">ⓘ</span><span class="sort-ind"></span></th>
             {% if 'organism' in var_fields %}<th data-col="organism" data-help="Organism(s) for this dataset. Chips: Hs=human, Mm=mouse, Rn=rat, Dr=zebrafish, Dm=drosophila, Mf=macaque, Ce=C.elegans." data-filter-field="organism">Org <span class="info" title="Click to filter by organism">ⓘ</span></th>{% endif %}

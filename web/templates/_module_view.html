@@ -118,8 +118,8 @@ Optional mv_ctx keys:
   <p class="mv-short" id="{{ _id }}-short" style="font-size:12px;margin:2px 0 4px"><strong>Exploratory.</strong> These are per-cell associations (descriptive), not tests.</p>
   {# With mv_ctx.about_in_header the page header carries doc_toggle(<id>-about); otherwise the summary bar is the fallback. #}
   {% call doc_block('About per-cell associations', id=_id ~ '-about', summary=not _mv.get('about_in_header')) %}
-    <p>Each value describes how a gene set score differs with a cell annotation column, computed over individual cells rather than donors. Cells of one donor are not independent, and every cell carries its donor's facet value, so these numbers mostly show how different donors are from each other. They help to spot candidates; they are not significance tests.</p>
-    <p>Donor and cluster columns are off by default because they explain a lot by construction. For effects tested per donor use the Gene sub-tab of a dataset's Facet tab (<a href="/help#glossary-per-cell-association">glossary</a>).</p>
+    <p>Each value describes how a gene set score differs with a cell annotation column, computed over individual cells rather than donors. Cells of one donor are not independent, and every cell carries its donor's{% if ui.facets %} facet{% endif %} value, so these numbers mostly show how different donors are from each other. They help to spot candidates; they are not significance tests.</p>
+    <p>Donor and cluster columns are off by default because they explain a lot by construction.{% if ui.facets %} For effects tested per donor use the Gene sub-tab of a dataset's Facet tab{% endif %} (<a href="/help#glossary-per-cell-association">glossary</a>).</p>
   {% endcall %}
   {# Row 1: dataset · module · facet #}
   <div class="mv-filter-row mv-filter-row-1">
@@ -156,7 +156,7 @@ Optional mv_ctx keys:
       </div>
     </div>
     <div>
-      <label>obs column <span class="info" title="The cell annotation column the score is compared against, such as braak, sex, disease, donor or cluster. Donor and cluster columns are off by default (still selectable). Standardised columns are aliased to ant_&lt;tag&gt; across datasets; see the Facets tab for donor-level tests of those.">ⓘ</span></label>
+      <label>obs column <span class="info" title="The cell annotation column the score is compared against, such as braak, sex, disease, donor or cluster. Donor and cluster columns are off by default (still selectable). Standardised columns are aliased to ant_&lt;tag&gt; across datasets{% if ui.facets %}; see the Facets tab for donor-level tests of those{% endif %}.">ⓘ</span></label>
       <div class="mff-widget mv-flt-tag-w">
         <button class="mff-btn" type="button" aria-expanded="false">obs column: all ▾</button>
         <div class="mff-popover" hidden>
@@ -506,7 +506,7 @@ Optional mv_ctx keys:
    */
   function formatColLabel(name) {
     if (!name) return '';
-    if (!name.startsWith('ant_')) {
+    if (!name.startsWith('ant_') || (window.antUi && !window.antUi.facets)) {
       return '<span class="mv-tag-chip">' + esc(name) + '</span>';
     }
     var tag = name.slice(4);   // strip 'ant_'

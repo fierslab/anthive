@@ -1,7 +1,9 @@
 # EXAMPLE: systemd service that pulls new data from S3 into one container
-# site (`ant-stack ingest -- ant sync pull`). Pair it with a timer like
-# anthive-publish-library.timer.example (change the unit name and the
-# interval, e.g. OnCalendar=*-*-* 03:17:00).
+# site: a `git pull` of the h5adstore (dataset metadata), then
+# `ant-stack ingest -- ant sync pull`. Pair it with a timer like
+# anthive-publish-library.timer.example (change the unit name; hourly is the
+# recommended interval: OnCalendar=*-*-* *:17:00). A oneshot service never
+# runs twice at once, so a long pull just delays the next one.
 #
 #   sudo cp anthive-sync.service.example /etc/systemd/system/anthive-sync.service
 #   (fill the <PLACEHOLDERS>)
@@ -25,6 +27,7 @@ WorkingDirectory=<REPO_PATH>
 Environment=HOME=<HOME>
 Environment=PATH=<HOME>/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=ANTHIVE_SITE=<REPO_PATH>/site.yaml
+ExecStartPre=-/usr/bin/git -C <H5ADSTORE_PATH> pull --ff-only -q
 ExecStart=<REPO_PATH>/bin/ops/ant-stack ingest -- ant sync pull
 TimeoutStartSec=6h
 Nice=10

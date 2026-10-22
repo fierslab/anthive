@@ -1,4 +1,5 @@
 id: facet-low-detection
+ui: facets
 title: Low detection
 summary: A gene found in fewer than 5 percent of the cells of a cell type gets a plain low-detection note under the matrix, because its effects are fragile.
 related:

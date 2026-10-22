@@ -27,9 +27,15 @@ secondary view only. Ranks are never compared between datasets, only averaged fo
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import hashlib
+import os
+import tempfile
 import threading
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -46,6 +52,27 @@ _STRATUM_SQL = (
     "COUNT(*) AS n, AVG(s.score) AS mean, STDDEV_SAMP(s.score) AS std "
     "FROM read_parquet(?) s {join} WHERE s.score IS NOT NULL GROUP BY 1, 2, 3, 4"
 )
+#: Bump when ``cell_strata`` or ``stratum_means`` compute something else: the cached tables are then rebuilt.
+#: (The SQL above, the columns and the cell type group table are part of the cache key on their own.)
+TABLE_FORMAT = 2
+
+
+@lru_cache(maxsize=1)
+def table_version() -> str:
+    """Short hash of what a cached ``stratum_means`` table depends on besides its dataset: ``TABLE_FORMAT``, the
+    SQL, the columns and the cell type group table (``celltype_groups.py`` and ``.yaml``, which define the strata)."""
+    hasher = hashlib.sha256(f'{TABLE_FORMAT}|{_STRATUM_SQL}|{MEANS_COLUMNS}|{UNLABELLED}'.encode())
+    lib_dir = Path(__file__).resolve().parent
+    for name in ('celltype_groups.py', 'celltype_groups.yaml'):
+        hasher.update(name.encode())
+        hasher.update((lib_dir / name).read_bytes())
+    return hasher.hexdigest()[:16]
+
+
+def table_fingerprint(sidecar_stat: os.stat_result, duckdb_stat: os.stat_result) -> str:
+    """Cache key of a dataset's table: ``table_version()``, the sidecar's mtime and size and the duckdb's mtime
+    (cell types). No path, pid or start time: the same files give the same key in every process and container."""
+    return f'{table_version()}-{sidecar_stat.st_mtime_ns}-{sidecar_stat.st_size}-{duckdb_stat.st_mtime_ns}'
 
 
 def cell_strata(conn: Any) -> Optional[pd.DataFrame]:
@@ -185,18 +212,23 @@ class ModuleRankStore:
 
         Args:
             db_id: dataset id.
-            fingerprint: string that changes whenever the scores or cell types change.
+            fingerprint: string that changes whenever the scores or cell types change (``table_fingerprint``).
             build: zero-argument function returning the ``stratum_means`` frame.
         """
+        return self.get_with_status(db_id, fingerprint, build)[0]
+
+    def get_with_status(self, db_id: str, fingerprint: str, build: Callable[[], pd.DataFrame]
+                        ) -> Tuple[pd.DataFrame, bool]:
+        """``get``, and whether this call built the table (False: memory or disk)."""
         with self._guard:
             cached = self._memory.get(db_id)
             if cached and cached[0] == fingerprint:
-                return cached[1]
+                return cached[1], False
             lock = self._locks.setdefault(db_id, threading.Lock())
         with lock:
             cached = self._memory.get(db_id)
             if cached and cached[0] == fingerprint:
-                return cached[1]
+                return cached[1], False
             path = self._file(db_id, fingerprint)
             if path.exists():
                 try:
@@ -207,19 +239,35 @@ class ModuleRankStore:
                     frame = None      # written before a column was added: rebuild
             else:
                 frame = None
-            if frame is None:
+            built = frame is None
+            if built:
                 with self._slots:
                     frame = build()
                 self._write(db_id, path, frame)
             self._memory[db_id] = (fingerprint, frame)
-            return frame
+            return frame, built
 
     def _write(self, db_id: str, path: Path, frame: pd.DataFrame) -> None:
-        """Write atomically and drop the files of older fingerprints of the same dataset."""
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix('.tmp')
-        frame.to_parquet(temporary, index=False)
-        temporary.replace(path)
-        for old in self.cache_dir.glob(db_id.replace('/', '__') + '~*.parquet'):
-            if old != path:
-                old.unlink(missing_ok=True)
+        """Write atomically (unique temporary file, then rename) under an exclusive lock per dataset, so several
+        workers or processes sharing the folder never see or produce a partial file, and drop the files of older
+        fingerprints of the same dataset. A folder that is not writable only costs the disk copy."""
+        stem = db_id.replace('/', '__')
+        temporary = None
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.cache_dir / f'.{stem}.lock', 'a') as lock_handle:
+                fcntl.flock(lock_handle, fcntl.LOCK_EX)
+                handle, temporary = tempfile.mkstemp(dir=self.cache_dir, prefix=f'.{stem}~', suffix='.tmp')
+                os.close(handle)
+                frame.to_parquet(temporary, index=False)
+                os.replace(temporary, path)
+                temporary = None
+                for old in self.cache_dir.glob(stem + '~*.parquet'):
+                    if old != path:
+                        old.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 - a full or read-only disk, or a frame parquet cannot store
+            pass
+        finally:
+            if temporary is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(temporary)

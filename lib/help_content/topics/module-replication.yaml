@@ -1,4 +1,5 @@
 id: module-replication
+ui: facets
 title: Gene sets (modules) across cohorts
 summary: A module replicates when its donor-level score changes in the same direction in at least 2 cohorts (r-value below 0.05), shown next to how many of its member genes replicate.
 related:

@@ -637,7 +637,7 @@ def test_facet_results_dir_config(monkeypatch, tmp_path):
 # ── ant-serve endpoints ──────────────────────────────────────────────────────
 
 _SERVE_WANTED = {
-    '_facet_results_reader', '_facet_results_lock', '_facet_results', '_facet_results_location',
+    '_facet_results_reader', '_facet_results_lock', '_facet_results', '_facet_cache_dir', '_facet_results_location',
     '_facet_rows_response', '_FACET_ROWS_LIMIT_JSON', '_FACET_ROWS_LIMIT_CSV', '_facet_rows_limit',
     'get_facet_tests', 'get_facet_test_genes', 'get_facet_test_modules', 'get_facet_test_volcano',
     'get_facet_tests_across_datasets', '_tested_facet', '_facet_test_datasets',
@@ -752,7 +752,7 @@ def build_serve(results: Path, geneset_registry: Any = None, stats_rows: Optiona
         'Dict': Dict, 'List': List, 'Any': Any, 'Optional': Optional, 'Tuple': Tuple,
         'donor_values_lib': donor_values, 'donor_variability_lib': donor_variability, 'plotting': plotting, 'OrderedDict': OrderedDict, 'urlencode': urlencode,
         'duckdb': duckdb, 'dataset_access': dataset_access, 'Request': Request, 'JSONResponse': JSONResponse,
-        'time': time,
+        'time': time, 'get_tmp_dir': lambda: store / '_tmp',
     }
     namespace['_pooled_db'] = pooled_db if pooled_db is not None else _no_pooled_db
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
@@ -1428,8 +1428,10 @@ def _warmup_namespace(calls: List[Any], fail: bool = False, hidden: frozenset = 
         calls.append(('donor', facet, gene, cell_type, dataset_access.current_hidden()))
         return {}
 
-    def rank_means(db_id):
+    def rank_means(db_id, status=None):
         calls.append(('rank', db_id))
+        if status is not None:
+            status['built'] = db_id == 'B/b'                 # A/a comes from the disk cache, B/b is built
         return (object(), '') if db_id != 'C/c' else (None, 'no per-cell scores for this dataset')
 
     namespace: Dict[str, Any] = {
@@ -1518,6 +1520,18 @@ def test_warmup_module_ranks_modes(warm_env):
     assert namespace['_module_rank_warm_ids']('priority', ['C/c', 'Z/z']) == ['C/c']
     assert namespace['_module_rank_warm_ids']('all', ['C/c']) == ['C/c', 'A/a', 'B/b']
     assert namespace['_warm_module_ranks'](['A/a', 'C/c'], 2, 0) == 1        # C/c has no sidecar
+
+
+def test_warmup_module_ranks_pause_only_after_a_build(warm_env):
+    """2.46.4 paused after every dataset, also after a table read from <tmp_dir>/module_rank or a dataset without a
+    sidecar: a restart with every table cached took datasets x pause (153 x 0.5 s = 77 s on intern)."""
+    namespace = _warmup_namespace([])
+    started = time.monotonic()
+    assert namespace['_warm_module_ranks'](['A/a', 'C/c'] * 5, 1, 0.3) == 5     # cached or no sidecar: no pause
+    assert time.monotonic() - started < 0.3
+    started = time.monotonic()
+    assert namespace['_warm_module_ranks'](['A/a', 'B/b'], 1, 0.3) == 2         # one build: one pause
+    assert 0.3 <= time.monotonic() - started < 0.6
 
 
 def test_warmup_failure_is_logged_not_raised(warm_env, caplog):
@@ -1677,3 +1691,128 @@ def test_the_warm_gate_opens_after_its_time_limit(serve):
         assert namespace['_FACET_WARMUP_PENDING'] == set()
     finally:
         namespace['_FACET_WARMUP_PENDING'].clear()
+
+
+# ── disk cache of the warm-up (lib/warm_cache.py) ──────────────────────────────
+
+import warm_cache  # noqa: E402
+
+ALL_DATASETS = DATASETS + MOUSE_DATASETS
+
+
+def _events(reader: fr.FacetResults, prefix: str) -> List[str]:
+    return [outcome for name, outcome in reader.disk.events if name.startswith(prefix)]
+
+
+def _bump(path: Path) -> None:
+    """Move a file's mtime forward (a rewrite within the same clock tick keeps the old mtime)."""
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+
+
+def test_disk_cache_is_reused_by_the_next_process(results, tmp_path):
+    cache = tmp_path / 'facet_cache'
+    first = fr.FacetResults(results, cache_dir=cache)
+    families = first.replication_families('braak', ALL_DATASETS)
+    first.summary('G1/ds1', 'G1', 'ds1', current_sha256='abc123')
+    assert _events(first, 'gene_tables') == ['miss', 'write']
+    assert _events(first, 'gene_families') == ['miss', 'write']
+    second = fr.FacetResults(results, cache_dir=cache)                  # a restart: empty memory
+    again = second.replication_families('braak', ALL_DATASETS)
+    assert _events(second, 'gene_tables') == ['hit'] and _events(second, 'gene_families') == ['hit']
+    assert set(again) == set(families)
+    for group in families:
+        pd.testing.assert_frame_equal(again[group]['frame'], families[group]['frame'])
+        pd.testing.assert_frame_equal(again[group]['per_cohort'], families[group]['per_cohort'])
+    assert second.summary('G1/ds1', 'G1', 'ds1', current_sha256='abc123') == \
+        first.summary('G1/ds1', 'G1', 'ds1', current_sha256='abc123')
+    assert _events(second, 'summary') == ['hit']
+    # the card served from the reloaded tables is the card of a fresh build
+    assert second.gene_effects('braak', 'PTPRG', ALL_DATASETS) == fr.FacetResults(results).gene_effects(
+        'braak', 'PTPRG', ALL_DATASETS)
+    assert not list(cache.glob('.tmp-*'))
+
+
+def test_disk_cache_misses_when_a_dataset_version_changes(results, tmp_path):
+    cache = tmp_path / 'facet_cache'
+    fr.FacetResults(results, cache_dir=cache).warm(ALL_DATASETS)
+    fr.FacetResults(results, cache_dir=cache).summary('G1/ds1', 'G1', 'ds1', current_sha256='abc123')
+    changed = [{**dataset, 'sha256': 'new-version'} if dataset['db_id'] == 'G1/ds1' else dataset
+               for dataset in ALL_DATASETS]
+    reader = fr.FacetResults(results, cache_dir=cache)
+    reader.facet_gene_table('braak', changed, 'human_postmortem')
+    assert _events(reader, 'gene_tables') == ['miss', 'write']       # a dataset attribute is part of the key
+    summary = reader.summary('G1/ds1', 'G1', 'ds1', current_sha256='new-version')
+    assert _events(reader, 'summary-G1/ds1') == ['miss', 'write'] and summary['dataset_changed'] is True
+
+
+def test_disk_cache_misses_when_the_code_changes(results, tmp_path, monkeypatch):
+    cache = tmp_path / 'facet_cache'
+    fr.FacetResults(results, cache_dir=cache).warm(ALL_DATASETS)
+    monkeypatch.setattr(warm_cache, 'code_version', lambda: 'another release')
+    reader = fr.FacetResults(results, cache_dir=cache)
+    reader.warm(ALL_DATASETS)
+    assert reader.disk.hits == 0 and reader.disk.misses > 0
+    assert 'hit' not in _events(reader, 'gene_')
+
+
+def test_disk_cache_recomputes_only_the_families_of_a_changed_result_file(results, tmp_path):
+    cache = tmp_path / 'facet_cache'
+    first = fr.FacetResults(results, cache_dir=cache)
+    before = first.replication_families('braak', ALL_DATASETS)['microglia']['frame'].loc['PTPRG', 'median_logFC']
+    first.replication_families('sex', ALL_DATASETS, scope='xenograft_human_in_mouse')
+    # ant-facet-test reruns G2/ds2: PTPRG now goes down there
+    path = results / 'G2' / 'ds2.facet_tests.parquet'
+    rows = pd.read_parquet(path)
+    rows.loc[(rows['facet'] == 'braak') & (rows['gene'] == 'PTPRG'), 'logFC'] = -0.6
+    rows.to_parquet(path)
+    _bump(path)
+    second = fr.FacetResults(results, cache_dir=cache)
+    after = second.replication_families('braak', ALL_DATASETS)['microglia']['frame'].loc['PTPRG', 'median_logFC']
+    assert after != pytest.approx(before) and after == pytest.approx((0.5 - 0.6) / 2)   # never the stale value
+    mouse = second.replication_families('sex', ALL_DATASETS, scope='xenograft_human_in_mouse')
+    events = [(name, outcome) for name, outcome in second.disk.events if name.startswith('gene_families')]
+    assert ('gene_families-braak-human_postmortem-True', 'miss') in events
+    # the mouse family's datasets did not change: loaded, not recomputed (the gene tables were rebuilt)
+    assert ('gene_families-sex-xenograft_human_in_mouse-True', 'hit') in events
+    assert ('gene_families-sex-xenograft_human_in_mouse-True', 'miss') not in events
+    assert set(mouse) == {'microglia'}
+
+
+def test_disk_cache_misses_when_the_cohort_table_changes(results, tmp_path):
+    cache = tmp_path / 'facet_cache'
+    fr.FacetResults(results, cache_dir=cache).replication_families('braak', ALL_DATASETS)
+    table = results / fr.COHORT_TABLE_NAME
+    table.write_text(table.read_text().replace('CohortB\tmicroglia\tanchor\tG2/ds2', 'CohortB\tmicroglia\tdo not count\tG2/ds2'))
+    _bump(table)
+    reader = fr.FacetResults(results, cache_dir=cache)
+    families = reader.replication_families('braak', ALL_DATASETS)
+    assert _events(reader, 'gene_families') == ['miss', 'write']
+    assert int(families['microglia']['frame'].loc['PTPRG', 'm']) == 1      # G2/ds2 no longer counts
+
+
+def test_untested_summaries_stay_out_of_the_disk_cache(results, tmp_path):
+    reader = fr.FacetResults(results, cache_dir=tmp_path / 'facet_cache')
+    assert reader.summary('G3/ds3', 'G3', 'ds3')['status'] != 'tested'
+    assert reader.summary('G1/ds1', 'G1', 'ds1')['status'] == 'tested'
+    names = {path.name for path in (tmp_path / 'facet_cache').glob('summary-*')}
+    assert any(name.startswith('summary-G1_ds1') for name in names)
+    assert not any(name.startswith('summary-G3') for name in names)
+
+
+def test_module_families_disk_cache_follows_the_directionless_sets(results, tmp_path):
+    cache = tmp_path / 'facet_cache'
+    first = ModuleResults(fr.FacetResults(results, cache_dir=cache))
+    families = first.families('sex', ALL_DATASETS)
+    second_reader = fr.FacetResults(results, cache_dir=cache)
+    again = ModuleResults(second_reader).families('sex', ALL_DATASETS)
+    assert _events(second_reader, 'module_tables') == ['hit'] and _events(second_reader, 'module_families') == ['hit']
+    assert set(again) == set(families)
+    for key in families:
+        pd.testing.assert_frame_equal(again[key]['frame'], families[key]['frame'])
+    # the gene set store now calls modA directionless: the tables come from disk, the families are recomputed
+    third_reader = fr.FacetResults(results, cache_dir=cache)
+    flagged = ModuleResults(third_reader, directionless=lambda key: key.endswith('/modA')).families('sex', ALL_DATASETS)
+    assert _events(third_reader, 'module_tables') == ['hit']
+    assert _events(third_reader, 'module_families') == ['miss', 'write']
+    assert all('Study/Exp/modA' not in family['frame'].index for family in flagged.values())

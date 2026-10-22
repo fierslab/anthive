@@ -46,6 +46,8 @@ def _all_facets_visible(monkeypatch):
     """Show every facet unless a test sets facets_visible itself (the repo
     default config limits the facet pages to four)."""
     monkeypatch.setattr(browser, "_facets_visible_cfg", [[]])
+    # every part of the UI on (a local anthive.yaml with ui: switches must not change the results)
+    monkeypatch.setattr(browser, "_ui_cfg", {"facets": True, "caveats": True, "api": True, "mcp": True})
 
 
 # ── unit tests: _as_list ───────────────────────────────────────────────────────
