@@ -22,6 +22,10 @@ is launched via `web/ant-browse` (NOT `ant browse`), supervised by
 - **uv-script shebangs**: every `ant-*` is `#!/usr/bin/env -S uv run --quiet --script`
   with PEP-723 deps in the header. Editing deps = editing that header,
   not a shared `pyproject.toml`. No shared venv.
+- **Packages that write stored files are capped**: `"duckdb>=1.3,<1.6"` (duckdb 2.0 writes files 1.5 cannot
+  read) and `"anndata>=...,<0.13"` (h5ad encodings change between 0.x minors) in every header, matching the
+  image lock. `tests/test_dependency_caps.py` fails on a header without the cap; raise a cap only together
+  with the lock (`docker/gen-lock`) and every host's script environments.
 - **`sys.path` shim**: scripts add `lib/` to `sys.path` via
   `script_dir.parent.parent / 'lib'` (two levels up from `bin/<domain>/`).
 - **Coordination with ant-serve**: anything that writes a duckdb (ingest +
@@ -36,6 +40,6 @@ is launched via `web/ant-browse` (NOT `ant browse`), supervised by
 `make test` (= `PYTHONPATH=lib python -m pytest tests/`). The annotation-update
 suite needs duckdb/pandas/h5py:
 ```
-uv run --with pytest --with duckdb --with pandas --with numpy --with h5py \
+uv run --with pytest --with "duckdb>=1.3,<1.6" --with pandas --with numpy --with h5py \
     --no-project python -m pytest tests/test_annotation_writer.py
 ```

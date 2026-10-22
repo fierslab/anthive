@@ -3,7 +3,7 @@
 # requires-python = ">=3.10,<3.13"
 # dependencies = [
 #   "starcatpy>=1.0.0",
-#   "anndata>=0.10.0",
+#   "anndata>=0.10.0,<0.13",
 #   "scanpy>=1.10.0",
 #   "numpy>=1.24.0,<2.0",
 #   "pandas>=2.0.0",
@@ -11,7 +11,7 @@
 #   "scikit-learn==1.3.2",
 #   "mygene>=3.2.2",
 #   "pyyaml>=6.0",
-#   "duckdb>=0.10.0",
+#   "duckdb>=1.3,<1.6",
 # ]
 # ///
 """ant-starcat-ext — starCAT projection → <basename>.scores.parquet sidecar.

@@ -10,7 +10,7 @@
 #   "shap>=0.44",
 #   "matplotlib>=3.7",
 #   "seaborn>=0.12",
-#   "anndata>=0.10",
+#   "anndata>=0.10,<0.13",
 # ]
 # ///
 """
