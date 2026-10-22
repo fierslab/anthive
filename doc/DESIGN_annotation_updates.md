@@ -506,10 +506,19 @@ A new `bin/annot/ant-starcat` does:
 
 ### Environment
 
-starcat pins `scikit-learn==1.3.2` and is incompatible with most of our other
-deps. It gets its own micromamba env per the global CLAUDE.md rules:
-`envs/anthive-starcat/`. `ant-starcat` is a shell script that activates this
-env and runs the Python pipeline.
+The plan above (a separate micromamba env for a `scikit-learn==1.3.2` pin) was
+not what shipped: `ant-starcat` and `ant-starcat-ext` are `uv run --script`
+tools. They carried an exact `scikit-learn==1.3.2` pin, which held numpy below
+2.0. starcatpy itself only asks for `scikit-learn>=1.0` and uses one routine
+from it (`non_negative_factorization`, solver `mu`, spectra fixed). On
+2026-10-22 we ran the projection on Olah2020 (16,245 cells) and Gazestani2023
+microglia (67,513 cells) with scikit-learn 1.3.2 + numpy 1.26.4 and with
+scikit-learn 1.9.1 + numpy 2.4.6 (starcatpy 1.0.10 both times). Usages and
+scores agreed to float32 precision (largest difference 3.6e-7, every Pearson r
+1.0, no change in top program or in any boolean or label column), so the pin
+was dropped and the headers now contain the image lock's versions. The tools
+stay out of the image (`docker/gen-lock` EXCLUDED_SCRIPTS) because they read
+the catalog from a fixed host path, not because of their packages.
 
 ### Why this is a good first user
 

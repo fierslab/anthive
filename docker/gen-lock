@@ -44,8 +44,11 @@ PYTHON_VERSION = '3.11'
 # GPU/R-bound tools that are run from their own environment (or not at all
 # in containers). Keep this list short and justified.
 EXCLUDED_SCRIPTS = {
-    # starCAT scoring pulls torch-scale dependencies and is purged from the
-    # catalog (see git log 2026-09); run it from a dev checkout if needed.
+    # starCAT: its packages would fit the lock (starcatpy, mygene and
+    # biothings-client are the only additions), but the tools read the catalog
+    # from a fixed host path and ant-starcat writes report/ inside the repo,
+    # so they do not run in the read-only image; run them from a dev checkout.
+    # Their headers still contain the locked versions (test_dependency_caps).
     'ant-starcat', 'ant-starcat-ext',
 }
 
