@@ -390,6 +390,21 @@ Purge has two stages (Mark, 2026-10-22; section 5.3 for the watcher):
 
 ---
 
+### 4.5 Withdrawing a whole artefact (2.47.1, decided by Mark)
+
+- `POST /api/artefacts/{group_id}/{scope}/{artefact_id}/withdraw` `{reason}` (admins): the watcher writes
+  `withdrawn: {date, by, reason}` into the head record (`artefact.md`, committed, pushed). The artefact stays
+  listed, every version stays downloadable, and every payload carries `withdrawn: {date, reason}` (plus `by` for
+  admins). No new version is accepted: create answers 409 `withdrawn`, and a deposit created before the
+  withdrawal fails at publication. Its versions may now be purged and deleted, the latest one too: the soft purge
+  drops the "latest version" rule, and an admin may delete a live version directly (no purge stage first).
+- `POST .../unwithdraw` `{reason?}` (admins) undoes it (`unwithdrawn: {date, by, withdrawn}` stays in the head
+  record). Both are idempotent (200 `state: done, changed: false`), recorded in `artefact_purges` with version 0
+  and action `withdraw` / `unwithdraw`, refused on a central-watcher site (409 `central_watcher`).
+- Web: an admin-only "withdraw this artefact" form and "undo the withdrawal" button, a withdrawn mark on the
+  artefact page, purge and delete buttons on the latest version of a withdrawn artefact. MCP: `get_artefact` and
+  `list_artefacts` say WITHDRAWN.
+
 ## 5. Watcher and pipeline
 
 ### 5.1 Item

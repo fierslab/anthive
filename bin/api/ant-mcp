@@ -3510,7 +3510,8 @@ def main() -> None:
                          f"v{row.get('latest')}" + (f", {size} bytes" if size is not None else '')
                          + (', internal' if row.get('access') == 'internal' else '')
                          + (f", owner {_q(row.get('owner'), 80)}" if row.get('owner') else '')
-                         + (', no live version' if row.get('versions_live') == 0 else ''))
+                         + (', no live version' if row.get('versions_live') == 0 else '')
+                         + (', WITHDRAWN' if row.get('withdrawn') else ''))
         if data.get('next_cursor'):
             lines.append(f"More: call again with cursor={json.dumps(data['next_cursor'])}.")
         return '\n'.join(lines)
@@ -3715,6 +3716,11 @@ def main() -> None:
         # newline in a description can never forge a section, a link or an instruction (review round 3).
         lines = [f"{detail.get('ref')} ({detail.get('kind')}), showing v{number} of latest v{detail.get('latest')}"
                  + (', internal' if detail.get('access') == 'internal' else '')]
+        withdrawn = detail.get('withdrawn') if isinstance(detail.get('withdrawn'), dict) else None
+        if withdrawn:
+            lines.append(f"this artefact is WITHDRAWN (by an admin on {withdrawn.get('date')}; its files stay downloadable "
+                         f"but it takes no new versions; do not rely on it)"
+                         + (f", reason {_q(withdrawn.get('reason'), 300)}" if withdrawn.get('reason') else ''))
         purge = shown.get('purge') if isinstance(shown.get('purge'), dict) else None
         if purge:
             lines.append(f"this version is PURGED (withdrawn by {purge.get('purged_by')} on {purge.get('purged')}; files "

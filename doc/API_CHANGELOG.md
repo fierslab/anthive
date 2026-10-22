@@ -33,6 +33,15 @@ the spec drifting away from the running code.
 
 Patch release with three additions approved for 2.47.1; nothing is removed or renamed.
 
+### Withdrawing a whole artefact (design 4.5)
+
+- New admin routes `POST /artefacts/{group_id}/{scope}/{artefact_id}/withdraw` `{reason}` and `.../unwithdraw`
+  `{reason?}`: 202 `{ref, action, state: "requested", changed: true, request_id, requested, next}`, 200 `{...,
+  state: "done", changed: false}` when there is nothing to do; 403 for non-admins. A withdrawn artefact stays
+  downloadable; artefact payloads (`/artefacts`, the detail) carry `withdrawn: {date, reason}` (null otherwise;
+  `by` for admins); a new version is refused (409 `withdrawn`); the latest version may then be purged and an
+  admin may delete a live version directly (before, 409 `latest_version` / `not_purged`).
+
 ### ui.caveats: serious
 
 - `ui.caveats` (site.yaml, anthive.yaml, env `ANTHIVE_UI_CAVEATS`) takes `serious` besides true and false: the

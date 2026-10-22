@@ -962,6 +962,8 @@ class ArtefactPublisher:
                                              f'deposit was for {block.get("new_version_of")}')
                 if head.get('kind') != kind:
                     raise Stop('failed', f'{ref} is a {head.get("kind")}; the kind cannot change')
+                if head.get('withdrawn') and marker is None:
+                    raise Stop('failed', f'withdrawn: {ref} is withdrawn and accepts no new versions')
             elif block.get('new_version_of') is not None and marker is None:
                 raise Stop('failed', f'version_conflict: {ref} does not exist')
             if head is not None and head.get('kind') != kind:
@@ -1657,7 +1659,9 @@ class ArtefactPublisher:
             action = row.get('action') or 'hard'
             label = {'soft': 'purge', 'unpurge': 'unpurge', 'hard': 'permanent deletion'}.get(action, action)
             try:
-                if action == 'soft':
+                if action in ('withdraw', 'unwithdraw'):
+                    state, detail = self.withdraw(row, action == 'withdraw')
+                elif action == 'soft':
                     state, detail = self.soft_purge(row)
                 elif action == 'unpurge':
                     state, detail = self.unpurge(row)
@@ -1711,6 +1715,30 @@ class ArtefactPublisher:
         live = [v['version'] for v in head['versions'] if v['state'] == 'live']
         return {**head, 'latest': max(live) if live else None}
 
+    def withdraw(self, row: Dict[str, Any], withdraw: bool) -> Tuple[str, str]:
+        """2.47.1: an admin withdraws a whole artefact (``withdrawn: {date, by, reason}`` in the head record;
+        versions stay downloadable, no new version is published, its versions may be deleted, the last one too)
+        or undoes it. Under the scope's artefact lock; idempotent."""
+        path, _number, scope_md = self._purge_target(row)
+        with writer_lock(self._scope_lock_path(path, scope_md), timeout=600):
+            head = self._read_head(path)
+            if head is None:
+                return 'failed', 'no head record'
+            if bool(head.get('withdrawn')) == withdraw:
+                return 'done', 'already withdrawn' if withdraw else 'not withdrawn'
+            if withdraw:
+                head['withdrawn'] = {'date': _today(), 'by': row['requested_by'], 'reason': row.get('reason') or ''}
+            else:
+                previous = head.pop('withdrawn', None) or {}
+                head['unwithdrawn'] = {'date': _today(), 'by': row['requested_by'], 'withdrawn': previous.get('date')}
+            self._write_head(path, head)
+        warnings: List[str] = []
+        self._rescan_and_check(f'/artefacts/{row["ref"]}', warnings)
+        self._commit([path.head_rel], f'{"withdraw" if withdraw else "unwithdraw"} {row["ref"]}\n\nRequested by '
+                     f'{row["requested_by"]}: {row.get("reason") or ""}\n', None, warnings)
+        return 'done', ('withdrawn' if withdraw else 'withdrawal undone') + (
+            f' ({"; ".join(warnings)})' if warnings else '')
+
     def soft_purge(self, row: Dict[str, Any]) -> Tuple[str, str]:
         """Design 5.3, stage 1: mark a live version ``purged`` (who, when, why) in the head record. Nothing is
         deleted; the files stay listed and downloadable, a de_table's study stays in the dataset. Refused for the
@@ -1725,7 +1753,8 @@ class ArtefactPublisher:
                 return 'done', 'already purged'
             if entry['state'] != 'live':
                 return 'failed', f'v{number} is {entry["state"]}: only a live version can be purged'
-            if not any(v['state'] == 'live' and v['version'] > number for v in head['versions']):
+            if not any(v['state'] == 'live' and v['version'] > number for v in head['versions']) \
+                    and not head.get('withdrawn'):
                 return 'failed', 'latest_version: the latest version cannot be purged; deposit a newer version first'
             entry.update({'state': 'purged', 'purged': _today(), 'purged_by': row['requested_by'],
                           'purge_reason': row.get('reason') or ''})
@@ -1782,7 +1811,7 @@ class ArtefactPublisher:
                 entry.update({'state': 'deleted', **stamp})
                 self._write_head(path, head)
                 return 'done', f'failed version cleaned up ({len(deleted)} object(s) deleted)'
-            if entry['state'] == 'live':
+            if entry['state'] == 'live' and not head.get('withdrawn'):
                 return 'failed', 'not_purged: only a purged version is deleted permanently; purge it first'
             if entry['state'] == 'reserved':
                 return 'needs_decision', 'the version is still reserved by a publication in progress'

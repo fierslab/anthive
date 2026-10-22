@@ -259,3 +259,24 @@ def test_plot_thumbnail_alt_text_is_escaped_once(make_client, monkeypatch):
     html = make_client().get('/browse/GroupA/ds1').text
     assert 'alt="UMAP &amp; &quot;clusters&quot;"' in html and '&amp;amp;' not in html
 
+
+
+def test_a_withdrawn_artefact_shows_the_mark_and_admins_may_delete_live_versions(make_client, monkeypatch):
+    monkeypatch.setitem(DETAIL, 'withdrawn', {'date': '2026-10-23', 'reason': '<b>retracted</b>', 'by': 'root'})
+    client = make_client()
+    visitor = client.get('/artefacts/GroupA/ds1/volcano').text
+    assert 'id="art-withdrawn"' in visitor and 'withdrawn on 2026-10-23: retracted.' in visitor
+    assert '<b>retracted' not in visitor and 'by root' not in visitor
+    assert 'id="art-unwithdraw"' not in visitor and 'id="art-withdraw-open"' not in visitor
+    admin = client.get('/artefacts/GroupA/ds1/volcano', headers={'Remote-User': 'root', 'Remote-Groups': 'admins'}).text
+    assert 'id="art-unwithdraw"' in admin and 'id="art-withdraw-form"' not in admin
+    assert 'class="btn-link art-delete-open" data-version="2"' in admin              # the live latest, deletable
+    assert 'class="btn-link art-purge-open" data-version="2"' in admin
+
+
+def test_admins_get_the_withdraw_form(make_client):
+    client = make_client()
+    admin = client.get('/artefacts/GroupA/ds1/volcano', headers={'Remote-User': 'root', 'Remote-Groups': 'admins'}).text
+    assert 'id="art-withdraw-form"' in admin and "base + '/' + action" in admin
+    assert 'id="art-withdraw-open"' not in client.get('/artefacts/GroupA/ds1/volcano',
+                                                      headers={'Remote-User': 'ana'}).text

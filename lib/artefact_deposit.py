@@ -383,7 +383,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS artefact_purges_open ON artefact_purges(ref, v
 #: what a purge request asks (2.47.0 two-stage purge, design 5.3): ``soft`` marks the version purged (files kept),
 #: ``unpurge`` reverses it, ``hard`` (admins) deletes a purged version. Rows written before the column existed
 #: were hard purges and stay so (the column's default).
-PURGE_ACTIONS = ('soft', 'unpurge', 'hard')
+PURGE_ACTIONS = ('soft', 'unpurge', 'hard', 'withdraw', 'unwithdraw')
+#: artefact-level requests (2.47.1) carry version 0 in artefact_purges
+ARTEFACT_LEVEL = 0
 
 
 def ensure_purge_schema(conn: Any) -> None:
@@ -655,6 +657,9 @@ class ArtefactDepositService(DepositService):
             if new_version_of is None:
                 raise DepositError(409, 'artefact_exists', f'{ref} exists; a new version gives "new_version_of": '
                                                            f'{follows}', latest=existing.latest)
+            if existing.withdrawn is not None:
+                raise DepositError(409, 'withdrawn', f'{ref} is withdrawn: it accepts no new versions (an admin '
+                                                     f'can undo the withdrawal)')
             if not artefacts.owned_by(existing.owner, identity.user) and not identity.is_admin:
                 raise DepositError(403, 'not_owner', f'new versions of {ref} are deposited by its owner or an admin')
             if existing.path.kind != kind:
@@ -1091,6 +1096,7 @@ class ArtefactDepositService(DepositService):
         version = entry.versions.get(number) if number is not None else None
         if version is None:
             raise DepositError(404, 'not_found', f'no version {str(version_label)[:20]} of {entry.ref}')
+        withdrawn = entry.withdrawn is not None
         ref = f'{entry.ref}@v{number}'
         uploader = ((version.manifest or {}).get('recorded') or {}).get('uploaded_by')
         if not (identity.is_admin or artefacts.owned_by(uploader, identity.user)
@@ -1116,13 +1122,16 @@ class ArtefactDepositService(DepositService):
                 raise DepositError(409, 'failed_version', f'{ref} is a failed publication: an admin deletes it '
                                                           f'(POST .../delete)')
             newer = [other for other, item in entry.versions.items() if other > number and item.is_live]
-            if not newer:
+            if not newer and not withdrawn:
                 raise DepositError(409, 'latest_version', f'{ref} is the latest version of {entry.ref} and cannot be '
-                                                          f'purged; deposit a newer version first')
+                                                          f'purged; deposit a newer version first (or an admin '
+                                                          f'withdraws the artefact)')
         if action == 'unpurge' and version.state != 'purged':
             raise DepositError(409, 'not_purged', f'{ref} is {version.state}: only a purged version is unpurged')
-        if action == 'hard' and version.state not in ('purged', 'failed'):
-            raise DepositError(409, 'not_purged', f'{ref} is {version.state}: purge it first, then delete it')
+        if action == 'hard' and version.state not in ('purged', 'failed') \
+                and not (withdrawn and version.state == 'live'):
+            raise DepositError(409, 'not_purged', f'{ref} is {version.state}: purge it first, then delete it (a '
+                                                  f'withdrawn artefact\'s live versions are deleted directly)')
         if not isinstance(body, dict):
             raise DepositError(422, 'invalid', 'the body is {"reason": ...}' + (', "confirm": "<ref>@v<N>"}'
                                                                                if action == 'hard' else ''))
@@ -1152,8 +1161,69 @@ class ArtefactDepositService(DepositService):
         row = self.store._rows('SELECT * FROM artefact_purges WHERE id = ?', (request_id,))[0]
         return self._purge_answer(row, entry.ref, number, action)
 
+    def request_withdraw(self, identity: Identity, context: ArtefactContext, group_id: str, scope: str,
+                         artefact_id: str, body: Any) -> Dict[str, Any]:
+        """``POST /artefacts/{group}/{scope}/{id}/withdraw`` (admins, 2.47.1): withdraw the whole artefact. Its
+        versions stay listed and downloadable, marked withdrawn; no new version is accepted; an admin may then
+        delete its versions, the last one included. Reversible (``unwithdraw``)."""
+        return self._withdraw_request(identity, context, group_id, scope, artefact_id, body, 'withdraw')
+
+    def request_unwithdraw(self, identity: Identity, context: ArtefactContext, group_id: str, scope: str,
+                           artefact_id: str, body: Any) -> Dict[str, Any]:
+        """``POST /artefacts/{group}/{scope}/{id}/unwithdraw`` (admins): undo a withdrawal."""
+        return self._withdraw_request(identity, context, group_id, scope, artefact_id, body, 'unwithdraw')
+
+    def _withdraw_request(self, identity: Identity, context: ArtefactContext, group_id: str, scope: str,
+                          artefact_id: str, body: Any, action: str) -> Dict[str, Any]:
+        self._require_artefacts_active()
+        if self.settings.central_watcher:
+            raise DepositError(409, 'central_watcher', f'this site sends its deposits to a central watcher: ask an '
+                                                       f'admin of the central site to {action} the artefact')
+        if not identity.is_admin:
+            raise DepositError(403, 'forbidden', f'only admins {action} an artefact')
+        service = artefacts.ArtefactService(context.store_root, {})
+        try:
+            entry = service.resolve(context.index, context.policy, context.viewer, group_id, scope, artefact_id)
+        except artefacts.ArtefactError as exc:
+            raise DepositError(exc.status, exc.body['status'], exc.body['message'])
+        waiting = self.store._rows("SELECT * FROM artefact_purges WHERE UPPER(ref) = UPPER(?) AND version = ? AND "
+                                   "state IN ('requested', 'purging')", (entry.ref, ARTEFACT_LEVEL))
+        if waiting:
+            if waiting[0].get('action') == action:
+                return self._purge_answer(waiting[0], entry.ref, ARTEFACT_LEVEL, action)
+            raise DepositError(409, 'busy', f'a {waiting[0].get("action")} request of {entry.ref} is waiting for '
+                                            f'the watcher')
+        if (entry.withdrawn is not None) == (action == 'withdraw'):
+            return {'ref': entry.ref, 'action': action, 'state': 'done', 'changed': False,
+                    'withdrawn': artefacts.withdrawn_payload(entry, context.viewer),
+                    'message': f'{entry.ref} is {"already" if action == "withdraw" else "not"} withdrawn'}
+        if not isinstance(body, dict):
+            raise DepositError(422, 'invalid', 'the body is {"reason": ...}')
+        reason = clean_note(body.get('reason'), 500)
+        if action == 'withdraw' and len(reason) < 5:
+            raise DepositError(422, 'invalid', 'reason: why the artefact is withdrawn (at least 5 characters)')
+        now = self.clock()
+        try:
+            with self.store._lock:
+                cursor = self.store.conn.execute(
+                    'INSERT INTO artefact_purges (ref, version, group_folder, scope, kind, artefact_id, requested_by, '
+                    'by_admin, reason, state, requested, updated, action) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (entry.ref, ARTEFACT_LEVEL, entry.path.group, entry.path.scope, entry.path.kind,
+                     entry.path.artefact_id, identity.user, 1, reason, 'requested', now, now, action))
+                request_id = cursor.lastrowid
+        except sqlite3.IntegrityError:
+            raise DepositError(409, 'busy', f'another request of {entry.ref} is waiting for the watcher')
+        row = self.store._rows('SELECT * FROM artefact_purges WHERE id = ?', (request_id,))[0]
+        return self._purge_answer(row, entry.ref, ARTEFACT_LEVEL, action)
+
     @staticmethod
     def _purge_answer(row: Dict[str, Any], ref: str, number: int, action: str) -> Dict[str, Any]:
+        if action in ('withdraw', 'unwithdraw'):
+            after = ('is withdrawn (versions stay downloadable, no new versions)' if action == 'withdraw'
+                     else 'accepts new versions again')
+            return {'ref': ref, 'action': action, 'state': 'requested', 'changed': True, 'request_id': row['id'],
+                    'requested': _iso(row['requested']),
+                    'next': f'the watcher carries it out on its next poll; the artefact then {after}'}
         after = {'soft': 'shows as purged (files kept)', 'unpurge': 'is live again',
                  'hard': 'is deleted permanently (a tombstone stays)'}[action]
         return {'ref': ref, 'version': number, 'action': action, 'state': 'requested', 'changed': True,

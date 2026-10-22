@@ -384,6 +384,9 @@ def validate_head_record(head: Mapping[str, Any], expected: ArtefactPath) -> Lis
         problems.append('created missing')
     if head.get('title') is not None and not isinstance(head.get('title'), str):
         problems.append('title is not text')
+    withdrawn = head.get('withdrawn')
+    if withdrawn is not None and not (isinstance(withdrawn, dict) and _nonempty_str(withdrawn.get('date'), 40)):
+        problems.append('withdrawn is not a block with a date')
     versions = head.get('versions')
     if not isinstance(versions, list) or not versions:
         problems.append('versions missing')
@@ -717,6 +720,24 @@ class ArtefactEntry:
     def owner(self) -> Optional[str]:
         owner = self.head.get('owner')
         return owner if isinstance(owner, str) else None
+
+    @property
+    def withdrawn(self) -> Optional[Dict[str, Any]]:
+        """The head record's ``withdrawn`` block (2.47.1: an admin withdrew the whole artefact; its versions stay
+        downloadable, no new version is accepted, an admin may delete the last version) or None."""
+        block = self.head.get('withdrawn')
+        return block if isinstance(block, dict) and block.get('date') else None
+
+
+def withdrawn_payload(entry: 'ArtefactEntry', viewer: Optional['Viewer'] = None) -> Optional[Dict[str, Any]]:
+    """What the API says about a withdrawn artefact: date and reason; who withdrew it for admins."""
+    block = entry.withdrawn
+    if block is None:
+        return None
+    out = {'date': block.get('date'), 'reason': block.get('reason') or ''}
+    if viewer is not None and getattr(viewer, 'is_admin', False):
+        out['by'] = block.get('by')
+    return out
 
 
 def _read_limited(path: Path) -> bytes:
@@ -1156,6 +1177,7 @@ class ArtefactService:
             'main_file': main, 'preview': preview,
             'access': 'internal' if entry.access_internal else 'inherit',
             'path': api_path(entry),
+            'withdrawn': withdrawn_payload(entry, viewer),
         }
 
     def files_payload(self, entry: ArtefactEntry, number: int) -> List[Dict[str, Any]]:

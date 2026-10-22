@@ -20,6 +20,7 @@
   .art-versions tr.art-purged td:first-child a { color: var(--text-muted); }
   .art-purge input[type=text] { width: min(420px, 100%); }
   .art-purge .msg { margin-left: 8px; }
+  .art-withdrawn { border-left: 3px solid var(--effect-up, #b45309); padding: 4px 10px; margin: 8px 0; }
   .art-tag { display: inline-block; font-size: 10px; padding: 0 5px; border-radius: 3px; margin-left: 6px;
              border: 1px solid var(--border); color: var(--text-muted); vertical-align: 2px; }
   @media (max-width: 600px) { .art-facts { grid-template-columns: 1fr; } .art-facts dt { margin-top: 4px; } }
@@ -40,6 +41,9 @@
     page. More in the <a href="/help#artefacts">help</a>.</p>
   {% endcall %}
 
+  {% if a.withdrawn %}
+  <p class="art-withdrawn" id="art-withdrawn">This artefact was withdrawn on {{ a.withdrawn.date }}{% if is_admin and a.withdrawn.by %} by {{ a.withdrawn.by }}{% endif %}{% if a.withdrawn.reason %}: {{ a.withdrawn.reason }}{% endif %}. Its files stay available, but it takes no new versions.</p>
+  {% endif %}
   {% if purged_version %}
   <p class="muted">Version v{{ purged_version.version }} was deleted permanently{% if purged_version.deleted %} on {{ purged_version.deleted }}{% endif %}{% if purged_version.deleted_by %} by {{ purged_version.deleted_by }}{% endif %}{% if purged_version.delete_reason %}: {{ purged_version.delete_reason }}{% endif %}. Its files are gone.</p>
   {% elif a.shown_purge %}
@@ -112,7 +116,7 @@
         <td data-label="Version">{% if v.state in ('live', 'purged') and not v.is_shown %}<a href="?version={{ v.version }}">v{{ v.version }}</a>{% else %}v{{ v.version }}{% endif %}{% if v.version == a.latest %} <span class="muted">(latest)</span>{% endif %}</td>
         <td data-label="State">{% if v.state == 'purged' %}purged by {{ v.purged_by or 'a member' }} on {{ v.purged }}{% if v.purge_reason %}: {{ v.purge_reason }}{% endif %}{% elif v.state == 'deleted' %}deleted{% if v.deleted %} on {{ v.deleted }}{% endif %}{% if v.deleted_by %} by {{ v.deleted_by }}{% endif %}{% if v.delete_reason %}: {{ v.delete_reason }}{% endif %}{% else %}{{ v.state }}{% endif %}</td>
         <td data-label="Published">{{ v.published or '' }}</td>
-        <td>{% if a.may_purge and v.state == 'live' and a.latest and v.version != a.latest %}<button type="button" class="btn-link art-purge-open" data-version="{{ v.version }}">purge</button>{% endif %}{% if a.may_purge and v.state == 'purged' %}<button type="button" class="btn-link art-unpurge" data-version="{{ v.version }}">unpurge</button>{% endif %}{% if is_admin and v.state in ('purged', 'failed') %} <button type="button" class="btn-link art-delete-open" data-version="{{ v.version }}">delete permanently</button>{% endif %}</td>
+        <td>{% if a.may_purge and v.state == 'live' and a.latest and (v.version != a.latest or a.withdrawn) %}<button type="button" class="btn-link art-purge-open" data-version="{{ v.version }}">purge</button>{% endif %}{% if a.may_purge and v.state == 'purged' %}<button type="button" class="btn-link art-unpurge" data-version="{{ v.version }}">unpurge</button>{% endif %}{% if is_admin and (v.state in ('purged', 'failed') or (a.withdrawn and v.state == 'live')) %} <button type="button" class="btn-link art-delete-open" data-version="{{ v.version }}">delete permanently</button>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>
@@ -134,6 +138,19 @@
     <button type="submit">Delete permanently</button><span class="msg muted" role="status"></span>
   </form>
   <p class="art-purge muted" id="art-unpurge-msg" role="status" hidden></p>
+  {% if is_admin %}
+  {% if a.withdrawn %}
+  <p class="art-purge"><button type="button" class="btn-link" id="art-unwithdraw">undo the withdrawal</button><span class="msg muted" role="status"></span></p>
+  {% else %}
+  <p class="art-purge"><button type="button" class="btn-link" id="art-withdraw-open">withdraw this artefact</button></p>
+  <form class="art-purge" id="art-withdraw-form" hidden>
+    <p>Withdraw the whole artefact: its versions stay listed and downloadable, marked withdrawn, and it takes no new
+    versions. An admin can then delete its versions, the latest one too. The withdrawal can be undone.</p>
+    <label>Reason <input type="text" name="reason" minlength="5" maxlength="500" required></label>
+    <button type="submit">Withdraw</button><span class="msg muted" role="status"></span>
+  </form>
+  {% endif %}
+  {% endif %}
   <script>
   (function () {
     var base = {{ a.api_base|tojson }}, ref = {{ a.ref|tojson }};
@@ -179,6 +196,34 @@
         send('unpurge', btn.getAttribute('data-version'), {}, document.getElementById('art-unpurge-msg'));
       });
     });
+    function artefactAction(action, payload, msg) {
+      msg.hidden = false;
+      msg.textContent = 'sending';
+      fetch(base + '/' + action, {
+        method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      }).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          msg.textContent = response.ok ? (body.changed === false ? (body.message || 'nothing to do')
+                                                                  : 'Requested. It takes effect after the next publication run.')
+                                        : (body.message || body.detail || ('refused (' + response.status + ')'));
+        });
+      }).catch(function () { msg.textContent = 'the request failed; try again'; });
+    }
+    var withdrawOpen = document.getElementById('art-withdraw-open'), withdrawForm = document.getElementById('art-withdraw-form');
+    if (withdrawOpen && withdrawForm) {
+      withdrawOpen.addEventListener('click', function () { withdrawForm.hidden = false; withdrawForm.reason.focus(); });
+      withdrawForm.addEventListener('submit', function (event) {
+        event.preventDefault();
+        artefactAction('withdraw', {reason: withdrawForm.reason.value}, withdrawForm.querySelector('.msg'));
+      });
+    }
+    var unwithdraw = document.getElementById('art-unwithdraw');
+    if (unwithdraw) {
+      unwithdraw.addEventListener('click', function () {
+        artefactAction('unwithdraw', {}, unwithdraw.parentNode.querySelector('.msg'));
+      });
+    }
   })();
   </script>
   {% endif %}

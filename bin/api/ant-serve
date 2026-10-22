@@ -17704,6 +17704,36 @@ def _purge_call(request: Request, method: str, group_id: str, scope: str, artefa
     return JSONResponse(answer, status_code=202 if answer.get('state') == 'requested' else 200)
 
 
+def _withdraw_call(request: Request, method: str, group_id: str, scope: str, artefact_id: str, body: Any):
+    """A withdraw or unwithdraw request of a whole artefact (2.47.1, admins): 202 recorded, 200 done."""
+    from dataset_deposit import DepositError  # noqa: PLC0415
+    identity, forbidden = _signed_in_identity(request)
+    if forbidden is not None:
+        return forbidden
+    try:
+        answer = getattr(_deposit_service(), method)(identity, _artefact_context(request), group_id, scope,
+                                                     artefact_id, body)
+    except DepositError as exc:
+        return JSONResponse(exc.body, status_code=exc.status, headers=exc.headers or None)
+    return JSONResponse(answer, status_code=202 if answer.get('state') == 'requested' else 200)
+
+
+@app.post("/artefacts/{group_id}/{scope}/{artefact_id}/withdraw", tags=["artefacts"], include_in_schema=False)
+def withdraw_artefact(request: Request, group_id: str, scope: str, artefact_id: str, body: Any = Body(None)):
+    """Withdraw a whole artefact ``{reason}`` (admins, 2.47.1). The watcher marks the head record withdrawn: the
+    versions stay listed and downloadable (``withdrawn: {date, reason}`` in every payload), no new version is
+    accepted (409 ``withdrawn``), and an admin may then purge or delete any version, the last one included. 202
+    ``{ref, action: "withdraw", state: "requested", changed: true, request_id, requested, next}``; 200 ``{...,
+    state: "done", changed: false}`` when it is withdrawn already."""
+    return _withdraw_call(request, 'request_withdraw', group_id, scope, artefact_id, body)
+
+
+@app.post("/artefacts/{group_id}/{scope}/{artefact_id}/unwithdraw", tags=["artefacts"], include_in_schema=False)
+def unwithdraw_artefact(request: Request, group_id: str, scope: str, artefact_id: str, body: Any = Body(None)):
+    """Undo a withdrawal ``{reason?}`` (admins). Same answers (action ``unwithdraw``)."""
+    return _withdraw_call(request, 'request_unwithdraw', group_id, scope, artefact_id, body)
+
+
 @app.post("/artefacts/{group_id}/{scope}/{artefact_id}/{version}/purge", tags=["artefacts"],
           include_in_schema=False)
 def purge_artefact_version(request: Request, group_id: str, scope: str, artefact_id: str, version: str,

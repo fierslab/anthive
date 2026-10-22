@@ -565,3 +565,71 @@ def test_the_watcher_calls_the_publisher_and_survives_its_failures(tmp_path):
     assert seen and seen[0] == [f'{env.settings["prefix"]}Fiers2026/artefacts/dep_{"1" * 20}/a.png']
     assert isinstance(counts, dict)
     assert env.db.items() == []                      # no dataset item from an artefact key
+
+
+# ── withdrawal of a whole artefact (2.47.1) ───────────────────────────────────
+
+def _withdraw(service, identity=ADMIN, reason='retracted analysis'):
+    return service.request_withdraw(identity, context(service.store_root), 'PU1', 'int', 'volcano', {'reason': reason})
+
+
+def test_an_admin_withdraws_an_artefact_its_files_stay_and_no_new_version_is_taken(tmp_path, clock):
+    service, s3, publisher, db, git = _live_two_versions(tmp_path, clock)
+    with pytest.raises(dd.DepositError) as caught:
+        _withdraw(service, ANALYST)
+    assert caught.value.status == 403
+    answer = _withdraw(service)
+    assert answer['state'] == 'requested' and answer['action'] == 'withdraw'
+    assert _withdraw(service)['request_id'] == answer['request_id']               # waiting: the same request
+    publisher.poll(listing(s3))
+    entry = _index(tmp_path).get('PU1', 'int', 'volcano')
+    assert entry.withdrawn['reason'] == 'retracted analysis' and entry.withdrawn['by'] == 'root'
+    assert entry.latest == 2 and entry.versions[2].servable                         # still downloadable
+    reader = artefacts.ArtefactService(tmp_path / 'store', {})
+    summary = reader.summary(entry, artefacts.Viewer(sees_internal=True, user='alice'))
+    assert summary['withdrawn'] == {'date': entry.withdrawn['date'], 'reason': 'retracted analysis'}
+    assert reader.summary(entry, artefacts.Viewer(sees_internal=True, is_admin=True, user='root'))['withdrawn']['by'] \
+        == 'root'
+    assert _committed(git, 'withdraw PU1/int/volcano')
+    again = _withdraw(service)
+    assert again['state'] == 'done' and again['changed'] is False
+    with pytest.raises(dd.DepositError) as caught:                                  # no new version
+        deposit(service, s3, ANALYST, {'volcano.png': PNG + b'3'}, new_version_of=2, change_note='v3', **INTERNAL)
+    assert caught.value.status == 409 and caught.value.body['status'] == 'withdrawn'
+
+
+def test_a_withdrawn_artefacts_last_version_can_be_deleted_and_the_withdrawal_undone(tmp_path, clock):
+    service, s3, publisher, db, git = _live_two_versions(tmp_path, clock)
+    with pytest.raises(dd.DepositError) as caught:                                  # not withdrawn: refused
+        _delete(service, 2)
+    assert caught.value.body['status'] == 'not_purged'
+    _withdraw(service)
+    publisher.poll(listing(s3))
+    _purge(service, ANALYST, 2)                                                     # the latest may be purged now
+    publisher.poll(listing(s3))
+    assert _index(tmp_path).get('PU1', 'int', 'volcano').versions[2].state == 'purged'
+    _delete(service, 1)                                                             # a live version: deleted directly
+    publisher.poll(listing(s3))
+    _delete(service, 2)
+    publisher.poll(listing(s3))
+    entry = _index(tmp_path).get('PU1', 'int', 'volcano')
+    assert entry is None or (entry.versions[1].state == 'deleted' and entry.versions[2].state == 'deleted')
+    base = f'{CATALOG}Public2021/static/artefacts/int/figure/volcano/'
+    assert not [key for key in s3.objects if key.startswith(base + 'v1/files') or key.startswith(base + 'v2/files')]
+    head = (tmp_path / 'store' / 'Public2021/static/artefacts/int/figure/volcano/artefact.md').read_text()
+    assert 'withdrawn:' in head
+    service.request_unwithdraw(ADMIN, context(service.store_root), 'PU1', 'int', 'volcano', {})
+    publisher.poll(listing(s3))
+    head = (tmp_path / 'store' / 'Public2021/static/artefacts/int/figure/volcano/artefact.md').read_text()
+    assert 'unwithdrawn:' in head and '\nwithdrawn:' not in head
+
+
+def test_the_watcher_refuses_a_new_version_of_a_withdrawn_artefact(tmp_path, clock):
+    """A deposit created before the withdrawal is refused at publication."""
+    service, s3, publisher, db, git = _live_two_versions(tmp_path, clock)
+    answer = deposit(service, s3, ANALYST, {'volcano.png': PNG + b'3'}, new_version_of=2, change_note='v3', **INTERNAL)
+    _withdraw(service)
+    publisher.process_purges(dd.DepositStore(tmp_path / 'state' / dd.DB_FILE))
+    poll_until_final(publisher, s3, clock)
+    row = watch_row(db, answer['deposit_id'])
+    assert row['state'] == 'failed' and 'withdrawn' in row['error']

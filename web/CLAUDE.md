@@ -1025,7 +1025,9 @@ These rules come from the site audit (Fable, 2026-10-13) with Mark's overrides. 
   live versions other than the latest (`#art-purge-form`, POST `/api/artefacts/.../v{N}/purge` with a reason),
   purged versions are greyed (`tr.art-purged`, "purged by X on D: reason", still linked and downloadable) with an
   unpurge button (`.art-unpurge`, POST `.../unpurge`), and admins get "delete permanently" on purged and failed
-  versions (`#art-delete-form`, POST `.../delete` with reason + typed ref). Purge controls show to the artefact
+  versions (`#art-delete-form`, POST `.../delete` with reason + typed ref). Withdrawal (2.47.1): `#art-withdrawn`
+  mark, admin `#art-withdraw-form` / `#art-unwithdraw` (POST `/api/artefacts/{g}/{s}/{id}/withdraw|unwithdraw`), and on
+  a withdrawn artefact purge and delete buttons also on the latest (delete on live versions for admins). Purge controls show to the artefact
   owner, the latest version's uploader and admins (`_may_purge`); the API is the authority. A shown purged
   version carries `#art-shown-purged`; a deleted one the tombstone line. Help box `art-purge-help`.
 - **Depositor text is never rendered raw**: titles through `safe_markdown.plain`, descriptions and change notes
