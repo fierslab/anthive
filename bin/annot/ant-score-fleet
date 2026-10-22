@@ -190,14 +190,13 @@ def print_plan(plan: List[Dict[str, Any]], out: Optional[str]) -> None:
 
 def _proc_load_other(busy_workers: int) -> float:
     """1 minute load average minus the load this fleet contributes (CPUS_PER_WORKER per busy worker)."""
-    return float(open('/proc/loadavg').read().split()[0]) - CPUS_PER_WORKER * busy_workers
+    from host_load import load_average  # noqa: PLC0415  (shared with the watcher's h5ad merge)
+    return load_average() - CPUS_PER_WORKER * busy_workers
 
 
 def _mem_available_gb() -> float:
-    for line in open('/proc/meminfo'):
-        if line.startswith('MemAvailable:'):
-            return int(line.split()[1]) / 1024 / 1024
-    return 0.0
+    from host_load import mem_available_gb  # noqa: PLC0415
+    return mem_available_gb()
 
 
 class Fleet:
