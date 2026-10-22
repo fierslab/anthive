@@ -142,59 +142,148 @@ def header_problems(header: str, specs: Sequence[Mapping[str, Any]]) -> List[str
     return problems
 
 
-def read_table(path: Path, specs: Sequence[Mapping[str, Any]], max_rows: int = MAX_ROWS) -> Tuple[Any, List[str]]:
-    """``(DataFrame indexed by cell_name, problems)``; values typed by their declaration."""
+CHUNK_ROWS = 50_000
+MISSING = ('', 'NA', 'NaN', 'nan')
+
+
+class TableColumns:
+    """The columns of a streamed table, laid out on the dataset's cells (``cell_names`` order).
+
+    Numerical columns are float64 arrays (NaN where the table gives no value), categorical columns integer codes
+    into ``categories`` (-1 where missing). Memory is about ``cells x columns x 8`` bytes plus the cell name
+    index, whatever the size of the file."""
+
+    def __init__(self, cell_names: Sequence[str], specs: Sequence[Mapping[str, Any]]):
+        import numpy as np  # noqa: PLC0415
+        self.cell_names = list(cell_names)
+        self.specs = list(specs)
+        self.numbers: Dict[str, Any] = {}
+        self.codes: Dict[str, Any] = {}
+        self.categories: Dict[str, Dict[str, int]] = {}
+        for spec in self.specs:
+            if spec['dtype'] == 'numerical':
+                self.numbers[spec['name']] = np.full(len(self.cell_names), np.nan, dtype='f8')
+            else:
+                self.codes[spec['name']] = np.full(len(self.cell_names), -1, dtype='i4')
+                self.categories[spec['name']] = {}
+
+    def series(self, name: str) -> Any:
+        """One column as a pandas Series indexed by cell name (for ``AnnotationWriter``)."""
+        import numpy as np  # noqa: PLC0415
+        import pandas as pd  # noqa: PLC0415
+        index = pd.Index(self.cell_names, dtype=object)
+        if name in self.numbers:
+            return pd.Series(self.numbers[name], index=index, copy=False)
+        labels = np.array(list(self.categories[name]) + [None], dtype=object)
+        return pd.Series(labels[self.codes[name]], index=index, dtype=object)   # code -1: the trailing None
+
+    def frame(self, cell_ids: Any) -> Any:
+        """Every column with a ``cell_id`` column (``cell_ids`` in ``cell_names`` order) for
+        ``AnnotationWriter.add_frame``: float64 arrays and pandas Categoricals, no per-value Python objects."""
+        import pandas as pd  # noqa: PLC0415
+        data: Dict[str, Any] = {'cell_id': cell_ids}
+        for spec in self.specs:
+            name = spec['name']
+            if name in self.numbers:
+                data[name] = self.numbers[name]
+            else:
+                data[name] = pd.Categorical.from_codes(self.codes[name], categories=list(self.categories[name]))
+        return pd.DataFrame(data, copy=False)
+
+    def distinct(self, name: str) -> List[str]:
+        return list(self.categories.get(name, {}))
+
+    def given(self, name: str) -> int:
+        if name in self.numbers:
+            import numpy as np  # noqa: PLC0415
+            return int((~np.isnan(self.numbers[name])).sum())
+        return int((self.codes[name] >= 0).sum())
+
+
+def stream_table(path: Path, specs: Sequence[Mapping[str, Any]], cell_names: Sequence[str],
+                 max_rows: int = MAX_ROWS, chunk_rows: int = CHUNK_ROWS) -> Tuple[Optional[TableColumns],
+                                                                                  List[str], Dict[str, Any]]:
+    """Read the table in chunks of ``chunk_rows`` against the dataset's cells: ``(columns, problems, coverage)``.
+
+    Per chunk the cell names are looked up (any unknown name fails the table; the first few are named),
+    duplicates found with a bitmap, numerical values parsed, categorical values coded (at most
+    ``MAX_CATEGORIES`` distinct). ``coverage`` is ``{cells, given, unknown, unknown_sample, without_value}``.
+    Problems stop the reading early where the answer is already known (too many rows, too many categories)."""
+    import numpy as np  # noqa: PLC0415
     import pandas as pd  # noqa: PLC0415
 
     opener = gzip.open if str(path).lower().endswith('.gz') else open
     with opener(path, 'rb') as handle:
         header = handle.readline().decode('utf-8', errors='replace').rstrip('\r\n')
+    cover: Dict[str, Any] = {'cells': len(cell_names), 'given': 0, 'unknown': 0, 'unknown_sample': [],
+                             'without_value': {}}
     problems = header_problems(header, specs)
     if problems:
-        return None, problems
+        return None, problems, cover
+    position = {name: index for index, name in enumerate(cell_names)}
+    columns = TableColumns(cell_names, specs)
+    seen = np.zeros(len(cell_names), dtype=bool)
+    rows = 0
+    duplicates: List[str] = []
+    bad_numbers: Dict[str, Tuple[int, str]] = {}
+    unknown_sample: List[str] = []
+    unknown = 0
+    empty_names = 0
     try:
-        table = pd.read_csv(path, sep='\t', dtype=str, keep_default_na=False, na_values=['', 'NA', 'NaN', 'nan'],
-                            compression='infer', nrows=max_rows + 1)
+        reader = pd.read_csv(path, sep='\t', dtype=str, keep_default_na=False, na_values=list(MISSING),
+                             compression='infer', chunksize=chunk_rows, engine='c')
+        for chunk in reader:
+            rows += len(chunk)
+            if rows > max_rows:
+                return None, [f'more than {max_rows} rows'], cover
+            names = chunk['cell_name']
+            empty_names += int(names.isna().sum())
+            looked_up = names.map(position)
+            missing = looked_up.isna() & names.notna()
+            if missing.any():
+                unknown += int(missing.sum())
+                unknown_sample.extend(str(name) for name in names[missing].head(5 - len(unknown_sample)))
+            valid = looked_up.notna().to_numpy()
+            index = looked_up[valid].to_numpy(dtype='i8')
+            repeated = seen[index]
+            if repeated.any() or len(np.unique(index)) != len(index):
+                within = pd.Series(index).duplicated().to_numpy()
+                clash = repeated | within
+                duplicates.extend(str(name) for name in names[valid][clash].head(5 - len(duplicates)))
+            seen[index] = True
+            for spec in specs:
+                values = chunk[spec['name']][valid]
+                if spec['dtype'] == 'numerical':
+                    parsed = pd.to_numeric(values, errors='coerce')
+                    bad = values.notna() & parsed.isna()
+                    if bad.any():
+                        count, example = bad_numbers.get(spec['name'], (0, str(values[bad].iloc[0])[:40]))
+                        bad_numbers[spec['name']] = (count + int(bad.sum()), example)
+                    columns.numbers[spec['name']][index] = parsed.to_numpy(dtype='f8')
+                else:
+                    mapping = columns.categories[spec['name']]
+                    present = values.notna().to_numpy()
+                    for label in pd.unique(values[present]):
+                        if label not in mapping:
+                            mapping[label] = len(mapping)
+                    if len(mapping) > MAX_CATEGORIES:
+                        return None, [f'{spec["name"]}: more than {MAX_CATEGORIES} distinct values (a column of '
+                                      f'cell ids is not a category)'], cover
+                    codes = values.map(mapping).fillna(-1).to_numpy(dtype='i4')
+                    columns.codes[spec['name']][index] = codes
     except Exception as exc:  # noqa: BLE001
-        return None, [f'the table cannot be read as TSV ({type(exc).__name__}: {str(exc)[:200]})']
-    if len(table) > max_rows:
-        return None, [f'more than {max_rows} rows']
-    if table.empty:
-        return None, ['the table has no rows']
-    names = table['cell_name']
-    if names.isna().any():
-        problems.append('empty cell_name values')
-    duplicated = names[names.duplicated()].unique()[:5]
-    if len(duplicated):
-        problems.append(f'duplicate cell names: {", ".join(map(str, duplicated))}')
-    out = pd.DataFrame(index=names.astype(str))
-    for spec in specs:
-        values = table[spec['name']]
-        if spec['dtype'] == 'numerical':
-            parsed = pd.to_numeric(values, errors='coerce')
-            bad = values.notna() & parsed.isna()
-            if bad.any():
-                problems.append(f'{spec["name"]}: {int(bad.sum())} values are not numbers (for example '
-                                f'{values[bad].iloc[0][:40]!r})')
-            out[spec['name']] = parsed.to_numpy(dtype='float64')
-        else:
-            distinct = values.dropna().nunique()
-            if distinct > MAX_CATEGORIES:
-                problems.append(f'{spec["name"]}: {distinct} distinct values (at most {MAX_CATEGORIES}; a column of '
-                                f'cell ids is not a category)')
-            out[spec['name']] = values.to_numpy(dtype=object)
-    return out, problems
-
-
-def coverage(table: Any, cell_names: Sequence[str]) -> Dict[str, Any]:
-    """``{cells, given, unknown, unknown_sample, without_value: {column: n}}`` of a table against the dataset."""
-    cells = set(cell_names)
-    given = set(table.index)
-    unknown = sorted(given - cells)
-    known = table[table.index.isin(cells)]
-    without = {column: int(len(cells) - known[column].notna().sum()) for column in table.columns}
-    return {'cells': len(cells), 'given': len(given & cells), 'unknown': len(unknown),
-            'unknown_sample': unknown[:5], 'without_value': without}
+        return None, [f'the table cannot be read as TSV ({type(exc).__name__}: {str(exc)[:200]})'], cover
+    cover.update(given=int(seen.sum()), unknown=unknown, unknown_sample=unknown_sample[:5])
+    if rows == 0:
+        problems.append('the table has no rows')
+    if empty_names:
+        problems.append(f'{empty_names} rows have no cell_name')
+    if duplicates:
+        problems.append(f'duplicate cell names: {", ".join(duplicates[:5])}')
+    for name, (count, example) in bad_numbers.items():
+        problems.append(f'{name}: {count} values are not numbers (for example {example!r})')
+    cover['without_value'] = {spec['name']: len(cell_names) - columns.given(spec['name']) for spec in specs}
+    return columns, problems, cover
 
 
 def version_part(specs: Sequence[Mapping[str, Any]]) -> str:
@@ -258,14 +347,15 @@ def dataset_obs_names(duckdb_path: Path, api_config: Optional[Mapping[str, Any]]
     return out
 
 
-def cell_names(duckdb_path: Path) -> List[str]:
-    """The cell names of a served dataset (``__cells``), read-only."""
+def cells_table(duckdb_path: Path) -> Tuple[Any, List[str]]:
+    """``(cell ids, cell names)`` of a served dataset (``__cells``, ordered by cell id), read-only."""
     import duckdb  # noqa: PLC0415
     connection = duckdb.connect(str(duckdb_path), read_only=True)
     try:
-        return [str(row[0]) for row in connection.execute('SELECT cell_name FROM __cells').fetchall()]
+        frame = connection.execute('SELECT cell_id, cell_name FROM __cells ORDER BY cell_id').fetchdf()
     finally:
         connection.close()
+    return frame['cell_id'].to_numpy(), frame['cell_name'].astype(str).tolist()
 
 
 def written_by(duckdb_path: Path, deposit_id: str) -> List[str]:

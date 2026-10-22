@@ -405,3 +405,42 @@ def test_records_of_another_site_may_carry_the_kind():
     assert 'obs_columns' in dr.DEPOSIT_KINDS
     import remote_deposits
     assert 'obs_columns' in remote_deposits.UPDATE_KINDS
+
+
+# ── the streamed reader ──────────────────────────────────────────────────────
+
+SPECS = [{'name': 'state', 'dtype': 'categorical'}, {'name': 'score', 'dtype': 'numerical'}]
+
+
+def test_streaming_across_chunks_lays_values_on_the_dataset_cells(tmp_path):
+    path = tmp_path / 't.tsv.gz'
+    rows = list(reversed(FULL[:8]))                                  # table order differs from the cell order
+    path.write_bytes(table_bytes(rows, gz=True))
+    table, problems, cover = obs_columns.stream_table(path, SPECS, CELLS, chunk_rows=3)
+    assert problems == [] and cover['given'] == 8 and cover['without_value'] == {'state': 2, 'score': 2}
+    series = table.series('state')
+    assert list(series.index) == CELLS and series['c1'] == 'A' and series['c0'] == 'B' and series['c9'] is None
+    assert table.series('score')['c7'] == pytest.approx(0.7) and table.distinct('state') == ['A', 'B']
+
+
+def test_duplicates_across_chunks_and_unknown_cells_are_found(tmp_path):
+    path = tmp_path / 't.tsv'
+    path.write_bytes(table_bytes(FULL[:4] + [FULL[1], ('nope', 'A', 1)]))
+    _table, problems, cover = obs_columns.stream_table(path, SPECS, CELLS, chunk_rows=2)
+    assert any(problem.startswith('duplicate cell names: c1') for problem in problems)
+    assert cover['unknown'] == 1 and cover['unknown_sample'] == ['nope']
+
+
+def test_row_and_category_caps_stop_the_reading(tmp_path):
+    path = tmp_path / 't.tsv'
+    path.write_bytes(table_bytes(FULL))
+    assert obs_columns.stream_table(path, SPECS, CELLS, max_rows=5, chunk_rows=2)[1] == ['more than 5 rows']
+    many = [(cell, f'label{index}', 1) for index, cell in enumerate(CELLS)]
+    path.write_bytes(table_bytes(many))
+    original = obs_columns.MAX_CATEGORIES
+    try:
+        obs_columns.MAX_CATEGORIES = 5
+        problems = obs_columns.stream_table(path, SPECS, CELLS, chunk_rows=4)[1]
+    finally:
+        obs_columns.MAX_CATEGORIES = original
+    assert 'more than 5 distinct values' in problems[0]

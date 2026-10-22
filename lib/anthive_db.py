@@ -2756,6 +2756,89 @@ class AnnotationWriter:
             record_pending=record_pending,
         )
 
+    def add_frame(
+        self,
+        frame: pd.DataFrame,
+        kinds: Dict[str, str],
+        *,
+        source_hash: Optional[str] = None,
+        on_conflict: Literal['fail', 'overwrite'] = 'fail',
+        overwrite: Sequence[str] = (),
+        max_cardinality: int = 10000,
+        record_pending: bool = True,
+        memory_limit: str = '2GB',
+        threads: int = 2,
+    ) -> None:
+        """Add several obs columns at once from a frame with a ``cell_id`` column (one row per cell to set).
+
+        The bulk path of :meth:`add_numerical` / :meth:`add_categorical` for large tables (obs-columns
+        deposits): one ``ALTER TABLE ... ADD COLUMN`` per new column and ONE ``UPDATE ... FROM`` per target
+        table over the registered frame, so memory stays near the frame's own size (a categorical column can be
+        a pandas Categorical). ``kinds``: column -> ``num`` or ``cat``. Columns in ``overwrite`` (or every column
+        with ``on_conflict='overwrite'``) may exist and get the frame's values (cells the frame leaves out keep
+        theirs; a NaN or None sets NULL). Same transaction, ``__pending_cols``, view rebuild and lock as the
+        single-column methods.
+        """
+        if self._conn is None:
+            raise AnnotationWriterError("Writer not entered (use `with`).")
+        if self._committed:
+            raise AnnotationWriterError("Writer already committed.")
+        if 'cell_id' not in frame.columns:
+            raise AnnotationWriterError("add_frame needs a cell_id column")
+        columns = [name for name in frame.columns if name != 'cell_id']
+        if set(columns) != set(kinds) or any(kind not in ('num', 'cat') for kind in kinds.values()):
+            raise AnnotationWriterError("kinds must name every value column as num or cat")
+        for name in columns:
+            _validate_anno_col_name(name)
+            if kinds[name] == 'cat':
+                distinct = frame[name].nunique(dropna=True)
+                if distinct > max_cardinality:
+                    raise AnnotationWriterError(
+                        f"Categorical '{name}' has {distinct:,} unique values (>{max_cardinality:,} limit). "
+                        f"Refusing as likely cell-id-like.")
+        # this connection only (never persisted): DuckDB's default, 80% of RAM and every core, let one bulk
+        # UPDATE of 5 million cells x 40 columns take 10 GB
+        self._conn.execute(f"SET memory_limit = '{memory_limit}'")
+        self._conn.execute(f"SET threads = {int(threads)}")
+        self._conn.register('temp_frame', frame)
+        try:
+            unknown = self._conn.execute(
+                "SELECT count(*) FROM temp_frame f ANTI JOIN __cells c ON f.cell_id = c.cell_id").fetchone()[0]
+            if unknown:
+                raise AnnotationWriterError(f"{unknown:,} cell_ids of the frame are not in __cells")
+            for kind, target, sql_type in (('num', 'obsnum', 'DOUBLE'), ('cat', 'obscat', 'VARCHAR')):
+                names = [name for name in columns if kinds[name] == kind]
+                if not names:
+                    continue
+                table = f"__{target}"
+                if not self._table_exists(table):
+                    self._conn.execute(f"CREATE TABLE {safe_ident(table)} (cell_id INTEGER PRIMARY KEY)")
+                    self._conn.execute(f"INSERT INTO {safe_ident(table)} SELECT cell_id FROM __cells")
+                existing = {name.lower(): name for name in self._column_names(table)}
+                for name in names:
+                    if name.lower() in existing:
+                        if on_conflict != 'overwrite' and name not in overwrite:
+                            raise AnnotationWriterError(
+                                f"Column '{name}' already exists in {table}; pass on_conflict='overwrite' to replace.")
+                        if existing[name.lower()] != name:
+                            raise AnnotationWriterError(
+                                f"Column '{name}' exists as '{existing[name.lower()]}' in {table}; a replacement "
+                                f"keeps the exact name")
+                        continue
+                    self._conn.execute(f"ALTER TABLE {safe_ident(table)} ADD COLUMN {self._ident(name)} {sql_type}")
+                    self._txn_cols.append((name, target))
+                cast = 'DOUBLE' if kind == 'num' else 'VARCHAR'
+                assignments = ', '.join(f"{self._ident(name)} = CAST(f.{self._ident(name)} AS {cast})"
+                                        for name in names)
+                self._conn.execute(f"UPDATE {safe_ident(table)} t SET {assignments} FROM temp_frame f "
+                                   f"WHERE t.cell_id = f.cell_id")
+                if record_pending:
+                    for name in names:
+                        self._record_pending(name, target, kind, source_hash)
+                self._refresh_view(target, table)
+        finally:
+            self._conn.unregister('temp_frame')
+
     def commit(self) -> None:
         """COMMIT the with-block's transaction and seal the writer."""
         if self._committed:

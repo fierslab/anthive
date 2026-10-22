@@ -1424,19 +1424,20 @@ class ArtefactPublisher:
         add('files.sha256', 'pass', 'size and sha256 match')
         try:
             written = obs_columns.written_by(duckdb_path, record['id'])
-            cells = obs_columns.cell_names(duckdb_path)
+            cell_ids, cells = obs_columns.cells_table(duckdb_path)
         except Exception as exc:  # noqa: BLE001 - a duckdb being rebuilt or written
             raise TransientError(f'the duckdb of {db_id} cannot be read ({type(exc).__name__}: {exc})') from exc
-        table, problems = obs_columns.read_table(local, specs,
-                                                 int(self.settings.get('obs_columns_max_rows', obs_columns.MAX_ROWS)))
-        if problems:
-            raise fail('table.read', 'the table: ' + '; '.join(problems)[:1500])
-        add('table.read', 'pass', f'{len(table)} rows, values typed as declared')
-        cover = obs_columns.coverage(table, cells)
+        # streamed in chunks against the dataset's cells: memory follows cells x columns, not the file size
+        table, problems, cover = obs_columns.stream_table(
+            local, specs, cells, int(self.settings.get('obs_columns_max_rows', obs_columns.MAX_ROWS)))
+        del cells
         if cover['unknown']:
             raise fail('table.cells', f'{cover["unknown"]} cell names of the table are not cells of {db_id} (for '
                                       f'example {", ".join(cover["unknown_sample"])}); every cell_name must be a '
                                       f'cell of the dataset (the table belongs to another dataset or version)', cover)
+        if problems or table is None:
+            raise fail('table.read', 'the table: ' + '; '.join(problems)[:1500], cover)
+        add('table.read', 'pass', f'{cover["given"]} rows, values typed as declared')
         without = {name: count for name, count in cover['without_value'].items() if count}
         add('table.cells', 'warn' if without else 'pass',
             f'{cover["given"]} of {cover["cells"]} cells given' + (
@@ -1466,7 +1467,7 @@ class ArtefactPublisher:
         if crosswalk_values:
             for spec in specs:
                 if spec['dtype'] == 'categorical':
-                    donors |= {str(value).strip().lower() for value in table[spec['name']].dropna().unique()} \
+                    donors |= {str(value).strip().lower() for value in table.distinct(spec['name'])} \
                         & crosswalk_values
         if donors:
             held.append('donor_identifiers')
@@ -1488,17 +1489,17 @@ class ArtefactPublisher:
         names = ', '.join(spec['name'] for spec in specs)
         if not written:
             try:
+                frame = table.frame(cell_ids)
+                del table
                 with AnnotationWriter(duckdb_path, annotator=obs_columns.ANNOTATOR, run_id=record['id'], db_id=db_id,
                                       ant_serve_url=getattr(self.api, 'base_url', None)) as writer:
-                    for spec in specs:
-                        conflict = 'overwrite' if spec['replaces'] else 'fail'
-                        if spec['dtype'] == 'numerical':
-                            writer.add_numerical(spec['name'], table[spec['name']], source_hash=check.sha256,
-                                                 on_conflict=conflict)
-                        else:
-                            writer.add_categorical(spec['name'], table[spec['name']], source_hash=check.sha256,
-                                                   on_conflict=conflict, max_cardinality=obs_columns.MAX_CATEGORIES)
+                    # one bulk UPDATE per table (add_frame): memory near the frame, not per-value objects
+                    writer.add_frame(frame, {spec['name']: 'num' if spec['dtype'] == 'numerical' else 'cat'
+                                             for spec in specs},
+                                     source_hash=check.sha256, max_cardinality=obs_columns.MAX_CATEGORIES,
+                                     overwrite=[spec['name'] for spec in specs if spec['replaces']])
                     writer.commit()
+                del frame
             except AnnotationWriterError as exc:
                 if 'lock' in str(exc).lower() or 'rebuilt' in str(exc).lower():
                     raise TransientError(f'the duckdb of {db_id} is busy ({exc})') from exc
