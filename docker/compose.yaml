@@ -79,7 +79,7 @@ services:
       retries: 5
 
   caddy:
-    image: ${ANTHIVE_IMAGE_CADDY:-caddy:2.11-alpine}
+    image: ${ANTHIVE_IMAGE_CADDY:-caddy:2.11.7-alpine@sha256:24ec7b05bc532c7bb57f727030c5056e257ff7138b4b50460306819ff79362bd}
     restart: unless-stopped
     command: ["caddy", "run", "--config", "/srv/caddy-config/config/Caddyfile", "--adapter", "caddyfile"]
     environment:
@@ -108,7 +108,7 @@ services:
     logging: *logging
 
   authelia:
-    image: ${ANTHIVE_IMAGE_AUTHELIA:-authelia/authelia:4.39}
+    image: ${ANTHIVE_IMAGE_AUTHELIA:-authelia/authelia:4.39.28@sha256:bd97cff4fcbf715b5ff1f9ae286afbe6033afce385302520b0368122d43a6f54}
     profiles: ["authelia"]
     restart: unless-stopped
     environment:

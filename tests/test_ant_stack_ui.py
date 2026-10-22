@@ -94,6 +94,13 @@ def test_plan_lists_the_parts_that_are_off(tmp_path, ant_stack, capsys):
     assert ' mcp' not in out.split('services')[-1]
 
 
+def test_plan_shows_no_admins_on_auth_mode_none(tmp_path, ant_stack, capsys):
+    """2.46.5 scratch-site check: nobody signs in on auth.mode none, so the plan names no admins."""
+    ant_stack.print_plan(_site(ant_stack, tmp_path, auth={'mode': 'none'}))
+    out = capsys.readouterr().out
+    assert 'admins:' not in out and 'no admins (nobody signs in on auth.mode none)' in out
+
+
 @pytest.mark.parametrize('ui,message', [
     ({'facets': 'no'}, 'ui.facets must be true or false'),
     ({'mcp': 0}, 'ui.mcp must be true or false'),

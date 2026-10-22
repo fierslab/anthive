@@ -289,6 +289,22 @@ of the lab's data come from the maintainers together with the keys (see
 --tags` prints it). `site.example.yaml` carries the number of its own release,
 so a fresh `site.yaml` starts right; when you upgrade, change it by hand.
 
+**Caddy and Authelia images.** `images.caddy` and `images.authelia` default to
+a version pinned by digest (`caddy:2.11.7-alpine@sha256:24ec7b05bc532c7bb57f727030c5056e257ff7138b4b50460306819ff79362bd`). A bare tag such as `caddy:2.11-alpine`
+moves: the next `ant-stack pull` would then fetch another build and report the
+image as `updated` although you changed nothing. Leave the defaults unless you
+mirror the images. To move to a newer Caddy or Authelia yourself:
+
+```sh
+docker buildx imagetools inspect caddy:2.11.8-alpine     # prints "Digest: sha256:..."
+nano site.yaml      # images: caddy: caddy:2.11.8-alpine@sha256:<that digest>
+bin/ops/ant-stack pull && bin/ops/ant-stack up
+```
+
+The same works for `authelia/authelia:<version>`. New releases of anthive
+update the pinned defaults in `site.example.yaml`; copy them into your
+`site.yaml` when you upgrade if you set these keys yourself.
+
 Then run `init` a second time. It creates `state_dir`, all secrets and a
 password for every user:
 

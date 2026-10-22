@@ -4585,22 +4585,47 @@ def _lower_thread_priority() -> None:
         pass
 
 
-def _warm_facet_results() -> None:
+def _disk_counts() -> Tuple[int, int]:
+    """(loaded, built) entries of the persistent facet cache so far (0, 0 without one)."""
+    disk = getattr(_facet_results(), "disk", None)
+    return (int(disk.hits), int(disk.misses)) if disk is not None else (0, 0)
+
+
+def _cache_note(before: Tuple[int, int], after: Tuple[int, int], has_cache: bool) -> str:
+    """How a warm-up phase got its tables: from the cache, built, or partly both."""
+    if not has_cache:
+        return 'no cache'
+    loaded, built = after[0] - before[0], after[1] - before[1]
+    if built == 0 and loaded > 0:
+        return 'loaded from cache'
+    if loaded == 0:
+        return 'built' if built else 'nothing to do'
+    return f'{loaded} loaded, {built} built'
+
+
+def _warm_facet_results(phases: Optional[List[Tuple[str, float, str]]] = None) -> None:
     """Build the facet gene tables, replication families, module families and gene detection table for the
-    datasets the current caller sees (``_warm_caches`` sets the visibility of the thread).
+    datasets the current caller sees (``_warm_caches`` sets the visibility of the thread). ``phases`` collects
+    (phase, seconds, cache note) for the summary line of the warm-up.
 
     Never raises: a failure only means the first request builds the cache itself.
     """
+    phases = phases if phases is not None else []
     started = time.monotonic()
     try:
+        has_cache = getattr(_facet_results(), "disk", None) is not None
+        before = _disk_counts()
         datasets = _facet_test_datasets()
         built = _facet_results().warm(datasets)
+        phases.append(('facet results', time.monotonic() - started, _cache_note(before, _disk_counts(), has_cache)))
         log.info("facet results warm-up: %d replication families in %.1f s (%s)", built, time.monotonic() - started,
                  ', '.join(f'{name} {seconds:.1f} s' for name, seconds in
                            (getattr(_facet_results(), 'last_warm_seconds', None) or {}).items()))
         started = time.monotonic()
+        before = _disk_counts()
         built = _module_results().warm(datasets)
         log.info("module results warm-up: %d (facet, scope) families in %.1f s", built, time.monotonic() - started)
+        phases.append(('module families', time.monotonic() - started, _cache_note(before, _disk_counts(), has_cache)))
         disk = getattr(_facet_results(), "disk", None)
         if disk is not None:
             rebuilt = sorted({name for name, outcome in list(disk.events)
@@ -4610,8 +4635,10 @@ def _warm_facet_results() -> None:
         started = time.monotonic()
         _detection_tables()
         log.info("gene detection table warm-up in %.1f s", time.monotonic() - started)
+        phases.append(('gene detection', time.monotonic() - started, 'built'))
     except Exception as exc:  # noqa: BLE001
         log.warning("facet results warm-up failed: %s", exc)
+        phases.append(('facet results', time.monotonic() - started, f'failed ({type(exc).__name__})'))
 
 
 def _warmup_visitor_kinds(anonymous: bool) -> List[Tuple[str, frozenset]]:
@@ -4679,8 +4706,10 @@ def _module_rank_warm_ids(mode: str, priority: Sequence[str]) -> List[str]:
     return first + sorted(db_id for db_id in served if db_id not in set(first))
 
 
-def _warm_module_ranks(db_ids: Sequence[str], workers: int, pause: float) -> int:
+def _warm_module_ranks(db_ids: Sequence[str], workers: int, pause: float,
+                       counts: Optional[Dict[str, int]] = None) -> int:
     """Load or build the rank tables of ``db_ids`` with at most ``workers`` at once; returns how many are ready.
+    ``counts`` receives how many tables were built (the rest of the ready ones came from the cache).
 
     ``pause`` follows a build only: a table read from ``<tmp_dir>/module_rank`` or a dataset without a score
     sidecar costs milliseconds, and pausing after each of them made a restart with every table cached take
@@ -4694,14 +4723,20 @@ def _warm_module_ranks(db_ids: Sequence[str], workers: int, pause: float) -> int
         except Exception as exc:  # noqa: BLE001
             log.debug("module rank warm-up %s: %s", db_id, exc)
             means = None
-        if pause and status['built']:
-            time.sleep(pause)
+        if status['built']:
+            built_tables.append(db_id)
+            if pause:
+                time.sleep(pause)
         return means is not None
 
+    built_tables: List[str] = []
     if not db_ids:
         return 0
     with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix='warmup-rank') as pool:
-        return sum(pool.map(one, db_ids))
+        ready = sum(pool.map(one, db_ids))
+    if counts is not None:
+        counts['built'] = len(built_tables)
+    return ready
 
 
 # Visitor kinds (their hidden db_id sets, ``_warmup_visitor_kinds``) whose facet caches the start-up warm-up
@@ -4746,6 +4781,8 @@ def _warm_caches() -> None:
     themselves and share the builds (single flight), so the warm-up never makes a request wait for it.
     """
     _lower_thread_priority()
+    warm_started = time.monotonic()
+    phases: List[Tuple[str, float, str]] = []
     try:
         settings = get_warmup_settings()
         kinds = _warmup_visitor_kinds(settings['anonymous'])
@@ -4756,10 +4793,13 @@ def _warm_caches() -> None:
         return
     for label, hidden in kinds:
         log.info("warm-up: facet caches for %s callers", label)
+        kind_phases: List[Tuple[str, float, str]] = []
         try:
-            _as_visitor(hidden, _warm_facet_results)
+            _as_visitor(hidden, _warm_facet_results, kind_phases)
         finally:
             _facet_warmup_done(hidden)
+        prefix = f'{label} callers: ' if len(kinds) > 1 else ''
+        phases.extend((prefix + name, seconds, note) for name, seconds, note in kind_phases)
     with _FACET_WARMUP_LOCK:
         _FACET_WARMUP_PENDING.clear()      # kinds that changed since the start build on demand again
     for label, hidden in kinds:
@@ -4768,16 +4808,25 @@ def _warm_caches() -> None:
             built = _as_visitor(hidden, _warm_donor_values, settings['donor_genes'], settings['donor_cell_type'],
                                 settings['pause_seconds'])
             log.info("warm-up: %d per-donor value sets for %s callers in %.1f s", built, label, time.monotonic() - started)
+            phases.append(((f'{label} callers: ' if len(kinds) > 1 else '') + 'donor values',
+                           time.monotonic() - started, f'{built} built'))
         except Exception as exc:  # noqa: BLE001
             log.warning("donor values warm-up failed: %s", exc)
     started = time.monotonic()
     try:
         ids = _module_rank_warm_ids(settings['module_ranks'], settings['module_rank_datasets'])
-        ready = _warm_module_ranks(ids, settings['workers'], settings['pause_seconds'])
+        rank_counts: Dict[str, int] = {}
+        ready = _warm_module_ranks(ids, settings['workers'], settings['pause_seconds'], rank_counts)
         log.info("warm-up: module rank tables of %d datasets ready (%d looked at) in %.1f s",
                  ready, len(ids), time.monotonic() - started)
+        built = rank_counts.get('built', 0)
+        note = ('nothing to do' if not ready else 'loaded from cache' if not built
+                else 'built' if built >= ready else f'{ready - built} loaded, {built} built')
+        phases.append(('module rank tables', time.monotonic() - started, note))
     except Exception as exc:  # noqa: BLE001
         log.warning("module rank warm-up failed: %s", exc)
+    log.info("warm-up done in %.1f s: %s", time.monotonic() - warm_started,
+             '; '.join(f'{name} {seconds:.1f} s ({note})' for name, seconds, note in phases) or 'nothing to do')
 
 
 def _start_warmup() -> None:

@@ -366,3 +366,15 @@ def test_render_docs_base_url_only_when_set(tmp_path, ant_stack):
     site = _site(tmp_path, ant_stack, site={'docs_base_url': 'https://fork.example/doc'})
     rendered = yaml.safe_load((ant_stack.render(site, quiet=True) / 'anthive.yaml').read_text())
     assert rendered['docs_base_url'] == 'https://fork.example/doc'
+
+
+def test_caddy_and_authelia_images_are_pinned_by_digest_everywhere():
+    """2.46.5 scratch-site check: a moving tag made `ant-stack pull` report "updated" without a release."""
+    import re
+    images = yaml.safe_load((REPO / 'site.example.yaml').read_text())['images']
+    compose = (REPO / 'docker' / 'compose.yaml').read_text()
+    for which in ('caddy', 'authelia'):
+        ref = images[which]
+        assert re.fullmatch(r'[a-z0-9./-]+:[0-9][0-9A-Za-z.-]*@sha256:[0-9a-f]{64}', ref), ref
+        assert ref in compose
+    assert f"ARG CADDY_IMAGE={images['caddy']}" in (REPO / 'docker' / 'Dockerfile').read_text()

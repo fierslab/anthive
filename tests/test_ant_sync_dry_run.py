@@ -315,6 +315,34 @@ def test_primary_budget_never_counts_kept_sidecars_as_freed(ant_sync, tmp_path):
     assert primary_rows[1]['sidecars'][0][3] == 'KEEP'
 
 
+@pytest.mark.parametrize('limit', ['max_local_gb', 'min_free'])
+def test_the_dry_run_cutoff_names_the_binding_limit_and_smaller_datasets_below_it(ant_sync, tmp_path, capsys,
+                                                                                   limit):
+    """2.46.5 scratch-site check: the cutoff line named min_free when max_local_gb bound, and said
+    "everything below stays on S3" while a smaller dataset below it was still pulled."""
+    store = tmp_path / 'store'
+    store.mkdir()
+    s3_meta = {'G/big.duckdb': (500, MTIME), 'G/small.duckdb': (50, MTIME), 'G/first.duckdb': (100, MTIME)}
+    priorities = {'G/first.duckdb': 90, 'G/big.duckdb': 80, 'G/small.duckdb': 70}
+    policy = {'mode': 'priority', 'max_local_bytes': 200 if limit == 'max_local_gb' else None,
+              'min_free_bytes': 100 if limit == 'min_free' else None, 'priority_default': 50}
+    rows, baseline = ant_sync._build_priority_plan(s3_meta, priorities, store, policy, 300)
+    assert [row['status'] for row in rows] == ['PULL', 'SKIP', 'PULL']
+    assert rows[1]['limits'] == [limit] and rows[1]['reason'] == f'does not fit: {limit}'
+    ant_sync._print_priority_plan(rows, policy, 300, baseline)
+    out = capsys.readouterr().out
+    cutoff = next(line for line in out.splitlines() if 'cutoff' in line)
+    assert (('max_local_gb cap' in cutoff) == (limit == 'max_local_gb')
+            and ('min_free floor' in cutoff) == (limit == 'min_free'))
+    assert 'smaller ones below still fit' in cutoff and 'everything below' not in cutoff
+    assert 'max_local_gb: ' in out.splitlines()[0]
+    # the last dataset that does not fit: everything below stays on S3
+    rows, baseline = ant_sync._build_priority_plan({'G/first.duckdb': (100, MTIME), 'G/big.duckdb': (500, MTIME)},
+                                                   priorities, store, policy, 300)
+    ant_sync._print_priority_plan(rows, policy, 300, baseline)
+    assert 'everything below stays on S3' in capsys.readouterr().out
+
+
 def test_min_free_is_checked_before_every_pull_even_with_evict(ant_sync, monkeypatch, tmp_path):
     store = _store(tmp_path)
     client = RecordingS3(S3_OBJECTS)

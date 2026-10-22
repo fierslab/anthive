@@ -2117,12 +2117,19 @@ def published_summary(site: dict) -> str:
     return ', '.join(parts)
 
 
+def _admins_summary(site: dict) -> str:
+    """The admins part of the plan line; none on auth.mode none (nobody signs in, so nobody is an admin)."""
+    if site['auth']['mode'] == 'none':
+        return 'no admins (nobody signs in on auth.mode none)'
+    return f"admins: {', '.join(site['auth'].get('admins') or []) or '-'}"
+
+
 def print_plan(site: dict) -> None:
     listen, _ports, _ = _listen_and_ports(site)
     print(f"""
   site           {site['site']['name']}  ({site['_path']})
   public_url     {site['site']['public_url']}
-  auth           {site['auth']['mode']}   admins: {', '.join(site['auth'].get('admins') or []) or '-'}
+  auth           {site['auth']['mode']}   {_admins_summary(site)}
   tls            {site['tls']['mode']}
   caddy          (in container): {listen}
   trusted proxy  {' '.join(site['_trusted_proxies']) or '-'}

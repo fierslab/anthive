@@ -1382,7 +1382,7 @@ def test_endpoint_facet_tests_scope_and_reason_come_from_the_dataset(serve):
 
 _WARMUP_FUNCTIONS = {'_lower_thread_priority', '_warm_facet_results', '_warmup_visitor_kinds', '_as_visitor',
                      '_warm_donor_values', '_module_rank_warm_ids', '_warm_module_ranks', '_warm_caches', '_start_warmup',
-                     '_facet_warm_gate', '_facet_warmup_done'}
+                     '_facet_warm_gate', '_facet_warmup_done', '_disk_counts', '_cache_note'}
 
 
 class _WarmRegistry:
@@ -1436,7 +1436,7 @@ def _warmup_namespace(calls: List[Any], fail: bool = False, hidden: frozenset = 
 
     namespace: Dict[str, Any] = {
         'os': os, 'time': time, 'threading': threading, 'log': logging.getLogger('test-warmup'),
-        'List': List, 'Tuple': Tuple, 'Any': Any, 'Callable': Callable, 'Sequence': Sequence, 'Optional': Optional,
+        'List': List, 'Tuple': Tuple, 'Dict': Dict, 'Any': Any, 'Callable': Callable, 'Sequence': Sequence, 'Optional': Optional,
         'ThreadPoolExecutor': ThreadPoolExecutor, 'get_warmup_settings': config.get_warmup_settings,
         '_HIDDEN_DB_IDS': dataset_access.HIDDEN_DB_IDS, 'registry': _WarmRegistry(hidden),
         '_access_settings': lambda: {'requires_auth': requires_auth, 'auth_mode': auth_mode},
@@ -1663,14 +1663,31 @@ def test_warmup_marks_each_kind_ready_when_its_facet_caches_are_built(warm_env):
     seen: List[Any] = []
     original_warm = namespace['_warm_facet_results']
 
-    def watching_warm():
+    def watching_warm(*args):
         seen.append(set(pending))
-        return original_warm()
+        return original_warm(*args)
     namespace['_warm_facet_results'] = watching_warm
     namespace['_start_warmup']()
     _join_warmup()
     assert seen == [{frozenset(), hidden}, {hidden}]        # signed-in done before the anonymous kind starts
     assert pending == set()
+
+
+def test_warmup_ends_with_one_summary_line_of_its_phases(warm_env, caplog):
+    """2.46.5 scratch-site check: one "warm-up done in N s" line with per-phase timings and the cache use."""
+    calls: List[Any] = []
+    namespace = _warmup_namespace(calls)
+    with caplog.at_level(logging.INFO, logger='test-warmup'):
+        namespace['_warm_caches']()
+    done = [record.getMessage() for record in caplog.records if record.getMessage().startswith('warm-up done in ')]
+    assert len(done) == 1
+    line = done[0]
+    for phase in ('facet results', 'module families', 'gene detection', 'donor values', 'module rank tables'):
+        assert phase in line
+    assert 'facet results' in line and '(no cache)' in line               # this reader has no disk cache
+    assert 'module rank tables' in line and '1 loaded, 1 built' in line   # A/a from the cache, B/b built
+    assert namespace['_cache_note']((5, 0), (9, 0), True) == 'loaded from cache'
+    assert namespace['_cache_note']((5, 0), (5, 3), True) == 'built'
 
 
 def test_warmup_failure_still_releases_the_gate(warm_env):

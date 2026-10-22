@@ -1054,11 +1054,12 @@ def _build_priority_plan(
             sidecar_need = sum(meta[0] for meta in sidecar_meta.values())
         bundle_size = size + sidecar_need
         tentative = cumulative + bundle_size
-        fits = True
+        limits = []                    # the limits this dataset would break (named in the dry-run cutoff)
         if min_free is not None and (baseline_free - tentative) < min_free:
-            fits = False
+            limits.append('min_free')
         if max_local is not None and tentative > max_local:
-            fits = False
+            limits.append('max_local_gb')
+        fits = not limits
         sidecars = []
         if fits:
             cumulative = tentative
@@ -1097,19 +1098,33 @@ def _build_priority_plan(
         else:
             in_target = False
             status = 'EVICT' if is_local else 'SKIP'
-            reason = 'below the cutoff'
+            reason = 'does not fit: ' + ' and '.join(limits)
             for side_rel, (side_size, side_mtime) in sorted(sidecar_meta.items()):
                 local_side = local_meta.get(side_rel)
                 side_status = ('KEEP' if primary else 'EVICT') if local_side else 'SKIP'
                 sidecars.append((side_rel, side_size, side_mtime, side_status,
-                                 local_side[0] if local_side else None, 'below the cutoff'))
+                                 local_side[0] if local_side else None, reason))
         rows.append(dict(
             rel=rel, priority=priority, mtime=mtime, size=size, bundle_size=bundle_size,
             is_local=is_local, local_size=local_size, local_mtime=local_mtime,
-            in_target=in_target, status=status, reason=reason, sidecars=sidecars,
+            in_target=in_target, status=status, reason=reason, sidecars=sidecars, limits=limits,
             cumulative=cumulative, projected_free=baseline_free - cumulative,
         ))
     return rows, baseline_free
+
+
+def _cutoff_banner(row: dict, later: list, min_free, max_local) -> str:
+    """The dry-run line at the first dataset that does not fit: the limit it breaks, and whether smaller
+    datasets below it still fit (they are pulled) or everything below stays on S3."""
+    names = {'min_free': 'min_free floor ' + (_fmt_size(min_free) if min_free is not None else ''),
+             'max_local_gb': 'max_local_gb cap ' + (_fmt_size(max_local) if max_local is not None else '')}
+    label = ' and '.join(names[limit].strip() for limit in row.get('limits') or []) or 'budget reached'
+    if any(entry['in_target'] for entry in later):
+        rest = ('datasets that do not fit stay on S3 (local copies evicted); smaller ones below still fit '
+                'and are pulled')
+    else:
+        rest = 'everything below stays on S3 (local copies evicted)'
+    return f'   ── cutoff: {label}; {rest} ──'
 
 
 def _print_priority_plan(rows: list, policy: dict, free_now: int,
@@ -1117,21 +1132,20 @@ def _print_priority_plan(rows: list, policy: dict, free_now: int,
     """Render the full ordered fill plan (the dry-run view)."""
     import datetime
     min_free = policy['min_free_bytes']
+    max_local = policy.get('max_local_bytes')
     print(f"free now: {_fmt_size(free_now)}    "
           f"budget (free + local datasets): {_fmt_size(baseline_free)}    "
-          f"min_free: {_fmt_size(min_free) if min_free is not None else 'none'}")
+          f"min_free: {_fmt_size(min_free) if min_free is not None else 'none'}    "
+          f"max_local_gb: {_fmt_size(max_local) if max_local is not None else 'unlimited'}")
     print()
     header = (f"{'PRIO':>4}  {'UPDATED':>10}  {'SIZE':>9}  {'CUMUL':>9}  "
               f"{'FREE→':>9}  {'STATUS':6}  DATASET (+sidecars)")
     print(header)
     print('-' * len(header))
     cutoff_printed = False
-    for row in rows:
+    for index, row in enumerate(rows):
         if not row['in_target'] and not cutoff_printed:
-            label = (f"min_free floor {_fmt_size(min_free)}"
-                     if min_free is not None else "cap reached")
-            print(f"   ── cutoff: {label} — everything below stays on S3 "
-                  f"(local copies evicted) ──")
+            print(_cutoff_banner(row, rows[index + 1:], min_free, max_local))
             cutoff_printed = True
         date = datetime.datetime.fromtimestamp(row['mtime'], datetime.timezone.utc).strftime('%Y-%m-%d')
         side_note = ''

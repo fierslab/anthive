@@ -305,6 +305,20 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - Manifest content types: office formats (xlsx, docx) keep their type; only exact active types and `+xml` types
   become `application/octet-stream`.
 
+### Operations fixes from the 2.46.5 scratch-site check
+
+- `ant sync pull --dry-run` (priority mode): the header shows `max_local_gb` next to free now, budget and
+  min_free; the cutoff line names the limit the first dataset that does not fit breaks (`min_free floor`
+  or `max_local_gb cap`) and says "smaller ones below still fit and are pulled" when later rows are PULL;
+  rows that do not fit say why (`does not fit: max_local_gb`).
+- The api's start-up warm-up ends with one line, `warm-up done in N s: facet results ... (loaded from
+  cache); module families ...; gene detection ...; donor values ...; module rank tables ...`.
+- `ant-stack check` on `auth.mode: none` says "no admins" instead of listing `auth.admins`.
+- `images.caddy` and `images.authelia` (site.example.yaml, docker/compose.yaml, the Dockerfile's Caddy
+  stage) are pinned by digest (`caddy:2.11.7-alpine@sha256:...`, `authelia/authelia:4.39.28@sha256:...`);
+  the deploy guide says how to move them.
+- `make test` pins duckdb below 1.6 like the scripts and the image (duckdb 2.0 writes files 1.5 cannot read).
+
 ### One central watcher for several sites
 
 - A site with `datasets_deposit_central_watcher: true` sends its deposits to one watcher on another host
