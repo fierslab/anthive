@@ -548,7 +548,7 @@ def _s3_block(site: dict, role: str) -> dict | None:
 
 
 #: The ui: switches of site.yaml (lib/config.UI_SWITCHES): parts of the web UI a site shows.
-UI_SWITCHES = ('facets', 'caveats', 'api', 'mcp')
+UI_SWITCHES = ('facets', 'caveats', 'api', 'mcp', 'jupyter')
 
 
 def ui_settings(site: dict) -> dict[str, bool]:
@@ -857,6 +857,14 @@ http://:{{$ANTHIVE_TOOLS_PORT:{PORT_TOOLS}}} {{
 """
 
 
+def render_caddy_jupyter(site: dict) -> str:
+    """What Caddy's /jupyter route does (imported inside `handle @jupyter` through ANTHIVE_JUPYTER_SNIPPET):
+    config/caddy-jupyter.on (serve the JupyterLite build) or caddy-jupyter.off (404, ui.jupyter false)."""
+    which = 'on' if ui_settings(site)['jupyter'] else 'off'
+    head = f"# Rendered by bin/ops/ant-stack from ui.jupyter (config/caddy-jupyter.{which}).\n"
+    return head + (REPO / 'config' / f'caddy-jupyter.{which}').read_text()
+
+
 def render_caddy_mcp(site: dict) -> str:
     """What Caddy's /mcp route does (imported inside `handle /mcp*` through ANTHIVE_MCP_SNIPPET).
 
@@ -1126,7 +1134,9 @@ def render_compose_site(site: dict, read_from=None) -> dict:
             'volumes': [_bind(stack / 'caddy', C_CADDY_SNIPPETS, read_only=True)],
             'environment': {'ANTHIVE_HTTP_REDIRECT_SNIPPET': f"{C_CADDY_SNIPPETS}/tools.caddy",
                             # /mcp: proxy to the mcp service, or a JSON 404 when it is off (render_caddy_mcp)
-                            'ANTHIVE_MCP_SNIPPET': f"{C_CADDY_SNIPPETS}/mcp.caddy"},
+                            'ANTHIVE_MCP_SNIPPET': f"{C_CADDY_SNIPPETS}/mcp.caddy",
+                            # /jupyter: the JupyterLite build, or a 404 with ui.jupyter false (render_caddy_jupyter)
+                            'ANTHIVE_JUPYTER_SNIPPET': f"{C_CADDY_SNIPPETS}/jupyter.caddy"},
         },
         'authelia': {'volumes': [_bind(state / 'authelia', '/config')]},
     }
@@ -1151,7 +1161,7 @@ def _config_roles(site: dict) -> dict[str, str]:
 # Files `render` produces, relative to stack/ (configs are 0600 secrets).
 def _rendered_files(site: dict) -> list[str]:
     files = list(_config_roles(site).values()) + ['caddy/auth.caddy', 'caddy/tls.caddy', 'caddy/servers.caddy',
-                                                  'caddy/tools.caddy', 'caddy/mcp.caddy', 'compose.site.yaml', '.env']
+                                                  'caddy/tools.caddy', 'caddy/mcp.caddy', 'caddy/jupyter.caddy', 'compose.site.yaml', '.env']
     if site['auth']['mode'] == 'authelia':
         files.append('authelia/configuration.yml')
     return files
@@ -1311,6 +1321,7 @@ def _render_locked(site: dict, quiet: bool, apply: bool) -> Path:
     _atomic_write(staging / 'caddy' / 'servers.caddy', render_caddy_servers(site).encode())
     _atomic_write(staging / 'caddy' / 'tools.caddy', render_caddy_tools(site).encode())
     _atomic_write(staging / 'caddy' / 'mcp.caddy', render_caddy_mcp(site).encode())
+    _atomic_write(staging / 'caddy' / 'jupyter.caddy', render_caddy_jupyter(site).encode(), CADDY_FILE_MODE)
     if _watcher_enabled(site):
         for folder in [*watcher_dirs(site).values(), state / 'ingest']:
             try:
@@ -2041,6 +2052,9 @@ def _check_ui(site: dict) -> None:
         _say("ui.api is false: no API page, API links or notebook buttons; /api/docs and /api/redoc "
              "answer 404 to visitors who are not signed in. The REST API itself stays (the web UI, "
              "vark and pyvark use it).")
+    if not ui['jupyter']:
+        _say("ui.jupyter is false: no JupyterLite on this site; Caddy answers /jupyter/ with 404 and the web "
+             "UI shows no notebook links or buttons.")
 
 
 def _catalog_dataset_mds(store: Path):

@@ -29,6 +29,19 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.47.1 (unreleased)
+
+Patch release with three additions approved for 2.47.1; nothing is removed or renamed.
+
+### ui.jupyter: a site without JupyterLite
+
+- New `ui.jupyter` switch (site.yaml and anthive.yaml `ui:`, env `ANTHIVE_UI_JUPYTER`, default true). With
+  false the notebook buttons and every JupyterLite link disappear from the web UI and Caddy answers `/jupyter`
+  and `/jupyter/...` with 404 (`config/caddy-jupyter.off`, rendered by ant-stack into
+  `stack/caddy/jupyter.caddy`, set by ant-supervisor). The REST API is unchanged (`/api/notebook/...` stays).
+
+---
+
 ## 2.47.0 (2026-10-22)
 
 Minor release: the artefact store (doc/DESIGN_artefacts.md), phases A1 (read side) and A2 (deposits,

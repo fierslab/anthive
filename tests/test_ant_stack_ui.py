@@ -22,7 +22,7 @@ import yaml
 from tests.test_ant_stack_hardening import (REPO, _caddy, _caddy_env, _free_port, _host_snippets,  # noqa: F401
                                             _site, ant_stack)
 
-ALL_OFF = {'facets': False, 'caveats': False, 'api': False, 'mcp': False}
+ALL_OFF = {'facets': False, 'caveats': False, 'api': False, 'mcp': False, 'jupyter': False}
 
 
 def _rendered(stack, name='anthive.yaml'):
@@ -31,12 +31,12 @@ def _rendered(stack, name='anthive.yaml'):
 
 def test_defaults_render_every_part_on(tmp_path, ant_stack):
     site = _site(ant_stack, tmp_path)
-    assert ant_stack.ui_settings(site) == {'facets': True, 'caveats': True, 'api': True, 'mcp': True}
+    assert ant_stack.ui_settings(site) == {'facets': True, 'caveats': True, 'api': True, 'mcp': True, 'jupyter': True}
     ant_stack.ensure_secrets(site)
     stack = ant_stack.render(site, quiet=True)
     for name in ('anthive.yaml', 'anthive-api.yaml'):
         rendered = _rendered(stack, name)
-        assert rendered['ui'] == {'facets': True, 'caveats': True, 'api': True, 'mcp': True}
+        assert rendered['ui'] == {'facets': True, 'caveats': True, 'api': True, 'mcp': True, 'jupyter': True}
         assert rendered['mcp']['enabled'] is True
     assert 'COMPOSE_PROFILES="mcp,authelia"' in (stack / '.env').read_text()
     compose = _rendered(stack, 'compose.site.yaml')
@@ -126,7 +126,7 @@ def test_rendered_ui_block_is_validated(tmp_path, ant_stack):
 
 def test_site_example_documents_every_ui_key():
     example = yaml.safe_load((REPO / 'site.example.yaml').read_text())
-    assert example['ui'] == {'facets': True, 'caveats': True, 'api': True, 'mcp': True}
+    assert example['ui'] == {'facets': True, 'caveats': True, 'api': True, 'mcp': True, 'jupyter': True}
     text = (REPO / 'site.example.yaml').read_text()
     assert 'data-quality warnings' in text
     default = yaml.safe_load((REPO / 'anthive.default.yaml').read_text())
@@ -188,3 +188,57 @@ def test_caddy_routes_mcp_only_when_on(tmp_path, ant_stack, mcp_on):
         proc.terminate()
         proc.wait(timeout=10)
         server.shutdown()
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+
+@pytest.mark.parametrize('jupyter_on', [True, False])
+def test_caddy_serves_jupyter_only_when_on(tmp_path, ant_stack, jupyter_on, capsys):
+    """ui.jupyter false: /jupyter answers 404 (no redirect into the build), check says so, nothing links to it."""
+    caddy = _caddy()
+    if caddy is None:
+        pytest.skip('caddy not installed')
+    site = _site(ant_stack, tmp_path, auth={'mode': 'none'}, tls={'mode': 'off'}, ports={'bind': '127.0.0.1'},
+                 ui={'jupyter': jupyter_on})
+    ant_stack.ensure_secrets(site)
+    stack = ant_stack.render(site, quiet=True)
+    assert _rendered(stack)['ui']['jupyter'] is jupyter_on
+    _host_snippets(ant_stack, stack)
+    server = http.server.HTTPServer(('127.0.0.1', 0), _Upstream)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = _free_port()
+    env = _caddy_env(ant_stack, site, stack, port, server.server_port, server.server_port)
+    environment = _rendered(stack, 'compose.site.yaml')['services']['caddy']['environment']
+    for name in ('ANTHIVE_MCP_SNIPPET', 'ANTHIVE_JUPYTER_SNIPPET'):
+        env[name] = environment[name].replace(ant_stack.C_CADDY_SNIPPETS, str(stack / 'caddy'))
+    proc = subprocess.Popen([caddy, 'run', '--config', str(REPO / 'config' / 'Caddyfile'), '--adapter', 'caddyfile'],
+                            env=env, cwd=tmp_path, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        deadline = time.monotonic() + 15
+        status = None
+        while time.monotonic() < deadline:
+            try:
+                request = urllib.request.Request(f"http://127.0.0.1:{port}/jupyter",
+                                                 headers={'Host': 'anthive.example.org'})
+                with opener.open(request, timeout=3) as response:
+                    status = response.status
+                break
+            except urllib.error.HTTPError as error:
+                status = error.code
+                break
+            except OSError:
+                if proc.poll() is not None:
+                    pytest.fail(proc.stderr.read().decode()[-2000:])
+                time.sleep(0.3)
+        assert status == (301 if jupyter_on else 404)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+        server.shutdown()
+    capsys.readouterr()
+    ant_stack._check_ui(site)
+    assert ('ui.jupyter is false' in capsys.readouterr().out) is (not jupyter_on)

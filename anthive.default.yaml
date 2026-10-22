@@ -741,6 +741,7 @@ ui:
   caveats: true
   api: true
   mcp: true
+  jupyter: true
 
 # Folder the in-app help links to for detailed docs (doc/MCP_CLIENTS.md,
 # doc/MCP_LINKS.md, ...). They live in the repo so they can be corrected

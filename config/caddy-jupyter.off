@@ -1,0 +1,3 @@
+# /jupyter off: no JupyterLite on this site (ui.jupyter false). Imported inside `handle @jupyter` of
+# config/Caddyfile through ANTHIVE_JUPYTER_SNIPPET: a plain 404, the build is never served.
+respond "Not found" 404

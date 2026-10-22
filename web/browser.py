@@ -235,11 +235,11 @@ templates.env.globals['docs_base_url'] = _docs_base_url
 
 # ── ui switches (site.yaml ui:, anthive.yaml ui:) ───────────────────────────────
 #
-# A public mirror can switch off parts of the UI: facets, caveats, api, mcp
+# A public mirror can switch off parts of the UI: facets, caveats, api, mcp, jupyter
 # (config.get_ui_settings). A part that is off disappears from every page and
 # its own pages answer 404 (`_require_ui`). Read once; tests set `_ui_cfg`.
 
-_UI_PARTS = ('facets', 'caveats', 'api', 'mcp')
+_UI_PARTS = ('facets', 'caveats', 'api', 'mcp', 'jupyter')
 _ui_cfg: Dict[str, bool] = {}
 
 

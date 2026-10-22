@@ -141,7 +141,7 @@ print(client.get_gene_stats("L26/FMG", ["APOE", "TREM2"]))</pre><button type="bu
     <p>With a <code>~/.netrc</code> entry you can leave out <code>auth=</code> entirely: <code>AnthiveClient("{{ api_base }}")</code>.</p>
     <p>If you already registered this site with vark, pyvark can reuse that password. Install the extra and again leave out <code>auth=</code>:</p>
     <div class="cmd"><pre>pip install "pyvark[vark-config]"</pre><button type="button" data-copy-api>Copy</button></div>
-    <p>Notebooks opened from this site (the <em>notebook</em> button on a plot, or <a href="/jupyter/lab/index.html">JupyterLite</a>) run in your browser with pyvark preinstalled and need no setup.</p>
+    {% if ui.jupyter %}<p>Notebooks opened from this site (the <em>notebook</em> button on a plot, or <a href="/jupyter/lab/index.html">JupyterLite</a>) run in your browser with pyvark preinstalled and need no setup.</p>{% endif %}
   </section>
 
   <section id="vark">

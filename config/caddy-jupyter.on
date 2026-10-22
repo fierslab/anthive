@@ -1,0 +1,8 @@
+# /jupyter on: serve the JupyterLite build. Imported inside `handle @jupyter` of config/Caddyfile
+# (ANTHIVE_JUPYTER_SNIPPET, the default). `/jupyter` without a slash is redirected first.
+# COOP/COEP headers are required for SharedArrayBuffer (Pyodide kernel).
+@jupyter_bare path /jupyter
+redir @jupyter_bare /jupyter/ 301
+header Cross-Origin-Opener-Policy "same-origin"
+header Cross-Origin-Embedder-Policy "require-corp"
+file_server

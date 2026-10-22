@@ -164,18 +164,12 @@ import {$ANTHIVE_HTTP_REDIRECT_SNIPPET:caddy-http-redirect.dev}
 		reverse_proxy {$ANTHIVE_BROWSE_HOST:localhost}:{$ANTHIVE_BROWSE_PORT:8081}
 	}
 
-	# Serve static files for JupyterLite
-	# COOP/COEP headers are required for SharedArrayBuffer (Pyodide kernel)
-	# `/jupyter` (no trailing slash) doesn't match `/jupyter/*` globs, so
-	# redirect first — otherwise it falls through to the browser proxy
-	# and 404s.
-	handle /jupyter {
-		redir /jupyter/ 301
-	}
-	handle /jupyter/* {
-		header Cross-Origin-Opener-Policy "same-origin"
-		header Cross-Origin-Embedder-Policy "require-corp"
-		file_server
+	# JupyterLite under /jupyter/. ANTHIVE_JUPYTER_SNIPPET: caddy-jupyter.on serves the build (redirect of
+	# /jupyter, COOP/COEP headers for the Pyodide kernel, file_server); caddy-jupyter.off answers 404
+	# (ui.jupyter false). The container stack renders the chosen one into stack/caddy/jupyter.caddy.
+	@jupyter path /jupyter /jupyter/*
+	handle @jupyter {
+		import {$ANTHIVE_JUPYTER_SNIPPET:caddy-jupyter.on}
 	}
 
 	# Other static bundles under ./webapp (rendered reports, plot exports, the

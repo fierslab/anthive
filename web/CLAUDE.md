@@ -1055,7 +1055,7 @@ ant_donor_uid and the replicate column ("1,499 donors; values not listed") and c
 values contain a value of a donor column. This hides values in the UI only: `/obs_summary` still returns the top
 values of every column, donor columns included, as it did before. Plottable columns are unchanged (top-3 chips).
 
-## ui switches: facets, caveats, API, MCP (public mirrors, 2026-10-21)
+## ui switches: facets, caveats, API, MCP, jupyter (public mirrors, 2026-10-21; jupyter 2.47.1)
 
 A site can switch parts of the UI off (`ui:` in anthive.yaml, rendered from site.yaml by ant-stack;
 `config.get_ui_settings`). `browser._ui()` reads it once (tests set `browser._ui_cfg`; both web test files have an

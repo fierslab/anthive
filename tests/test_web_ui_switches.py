@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'lib'))
 import help_content  # noqa: E402
 from tests.test_web_browser import _fake_api_get, browser  # noqa: E402
 
-ALL_ON = {'facets': True, 'caveats': True, 'api': True, 'mcp': True}
+ALL_ON = {'facets': True, 'caveats': True, 'api': True, 'mcp': True, 'jupyter': True}
 SIGNED_IN = {'Remote-User': 'mf', 'Remote-Name': 'Mark'}
 
 
@@ -287,3 +287,21 @@ def test_help_on_a_site_without_login_does_not_ask_to_sign_in(make_client, monke
     monkeypatch.setattr(browser, '_api_guide_site_settings', lambda: {'mode': 'authelia', 'public_base_url': '', 'admins': set(),
                                                                       'upload_groups': ['admins'], 'max_pdf_mb': 25})
     assert 'Sign in and look around' in login_site.get('/help').text
+
+
+# ── jupyter ──────────────────────────────────────────────────────────────────
+
+def test_jupyter_off_hides_notebook_buttons_and_links_but_keeps_the_api(make_client):
+    client = make_client(jupyter=False)
+    page = client.get('/browse/GroupA/ds1').text
+    assert 'id="ds-open-notebook"' not in page
+    plot = client.get('/browse/GroupA/ds1/plot/scatter').text
+    assert 'id="open-notebook"' not in plot
+    about = client.get('/about').text
+    assert 'href="/jupyter/"' not in about and 'href="/api/docs"' in about
+    help_page = client.get('/help').text
+    assert 'href="/jupyter' not in help_page and '/api/docs' in help_page
+    api_guide = client.get('/api-guide').text
+    assert 'href="/jupyter' not in api_guide
+    on = make_client()
+    assert 'href="/jupyter/"' in on.get('/about').text and 'id="ds-open-notebook"' in on.get('/browse/GroupA/ds1').text

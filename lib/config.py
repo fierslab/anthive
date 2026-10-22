@@ -1053,7 +1053,7 @@ def facet_hidden_by_config(facet: str, visible: Optional[List[str]] = None) -> b
     return bool(visible) and facet not in visible
 
 
-UI_SWITCHES = ('facets', 'caveats', 'api', 'mcp')
+UI_SWITCHES = ('facets', 'caveats', 'api', 'mcp', 'jupyter')
 _TRUE_WORDS = ('true', '1', 'yes', 'on')
 _FALSE_WORDS = ('false', '0', 'no', 'off')
 

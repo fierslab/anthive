@@ -407,8 +407,8 @@ vark plot L26/FMG --geom violin --x ant_disease --y APOE --out apoe.png</pre><bu
     <p><a href="https://codeberg.org/mfiers/pyvark" target="_blank" rel="noopener">pyvark</a> is the Python client, for scripts and notebooks:</p>
     <div class="cmd"><pre>pip install pyvark
 python -c "from vark import AnthiveClient; c = AnthiveClient('https://&lt;this site&gt;/api', auth=('&lt;you&gt;', '&lt;password&gt;')); print(len(c.get_databases()))"</pre><button type="button" data-copy-help>Copy</button></div>
-    <h3 class="subsection-head">Notebooks in the browser</h3>
-    <p>The <em>📓 notebook</em> button on a plot, and <a href="/jupyter/lab/index.html">JupyterLite</a>, open notebooks that run in your browser with pyvark preinstalled. Nothing is installed on your computer; download a notebook to keep it.</p>
+    {% if ui.jupyter %}<h3 class="subsection-head">Notebooks in the browser</h3>
+    <p>The <em>📓 notebook</em> button on a plot, and <a href="/jupyter/lab/index.html">JupyterLite</a>, open notebooks that run in your browser with pyvark preinstalled. Nothing is installed on your computer; download a notebook to keep it.</p>{% endif %}
   </details>
   {% endif %}
 

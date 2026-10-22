@@ -168,6 +168,8 @@ ui:
                      # hides /api/docs and /api/redoc from visitors who are not signed in
   mcp: true          # MCP account page, MCP links and MCP help; false also stops the mcp
                      # service (even with services.mcp: true) and /mcp answers 404
+  jupyter: true      # JupyterLite: false removes the notebook buttons and links and Caddy
+                     # answers /jupyter/ with 404 (the build is not served at all)
 
 # Paper library: uploads and the two-way sync (`ant sync library`).
 library:

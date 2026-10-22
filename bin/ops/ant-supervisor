@@ -76,6 +76,7 @@ except Exception:
 try:
     from config import get_ui_settings as _get_ui_settings
     _MCP_UI = _get_ui_settings(_CFG)['mcp'] if _CFG else True
+    _JUPYTER_UI = _get_ui_settings(_CFG)['jupyter'] if _CFG else True
 except Exception:
     _MCP_UI = True
 
@@ -474,6 +475,8 @@ async def _main() -> None:
     caddy_env = _caddy_env_for_mode(args.prod)
     if not _MCP_UI:
         caddy_env = {**caddy_env, 'ANTHIVE_MCP_SNIPPET': 'caddy-mcp.off'}
+    if not _JUPYTER_UI:                  # ui.jupyter false: /jupyter/ answers 404 (config/caddy-jupyter.off)
+        caddy_env = {**caddy_env, 'ANTHIVE_JUPYTER_SNIPPET': 'caddy-jupyter.off'}
     if caddy_env:
         SERVICES['caddy']['env'] = caddy_env
 
