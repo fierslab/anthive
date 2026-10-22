@@ -45,7 +45,8 @@ from ._credentials import (
 from .exceptions import (AnthiveWarmingUpError, ArtefactDownloadError,
                          ArtefactError, ArtefactFileNotFoundError,
                          ArtefactIntegrityError,
-                         ArtefactNotFoundError, DepositHeldError,
+                         ArtefactPurgedWarning, DepositHeldError,
+                         ServerTooOldError,
                          DepositStoppedError, ServerWarmingUpWarning,
                          raise_for_artefact_status, raise_for_deposit_status,
                          raise_for_upload_status)
@@ -53,7 +54,7 @@ from .exceptions import (AnthiveWarmingUpError, ArtefactDownloadError,
 _LOG = logging.getLogger('vark')
 
 
-__version__ = "0.12.0"
+__version__ = "0.12.2"
 __all__ = ["AnthiveClient", "VarkConfigError"]
 
 
@@ -1143,7 +1144,8 @@ class AnthiveClient:
                 - ``window``, ``show_band`` (rolling)
                 - ``kde_n``, ``kde_bw``, ``n_levels``, ``iso_overlay``,
                   ``point_overlay`` (kde2d)
-                - ``marginals``, ``regline`` (XY scatter / hexbin / kde2d)
+                - ``marginals`` (bool), ``regline`` (``'global'`` or
+                  ``'by_group'``) (XY scatter / hexbin / kde2d)
                 - ``study``, ``term``, ``contrast``, ``gene``,
                   ``padj_threshold``, ``log2fc_threshold``, ``n_label``
                   (DE geoms volcano / ma / forest)
@@ -4614,8 +4616,39 @@ class AnthiveClient:
                       params: Optional[Dict[str, Any]] = None) -> Dict:
         """GET an artefact route; non-2xx raises an ArtefactError."""
         response = self._request('GET', path, params=params)
-        raise_for_artefact_status(response)
+        self._raise_for_artefact_response(response)
         return response.json()
+
+    def _raise_for_artefact_response(self, response: 'requests.Response'
+                                     ) -> None:
+        """:func:`raise_for_artefact_status`, but a route the server does
+        not have (404 or 405 without a status word, FastAPI's generic
+        answer) raises :class:`ServerTooOldError` naming the server's
+        version: the artefact store needs REST API 2.47.0+."""
+        if response.status_code in (404, 405):
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            generic = (not isinstance(body, dict)
+                       or ('status' not in body and body.get('detail') in (
+                           'Not Found', 'Method Not Allowed')))
+            if generic:
+                server_version = None
+                try:
+                    server_version = self.get_version().get('version')
+                except Exception:  # noqa: BLE001 - the message still helps
+                    pass
+                response.close()
+                raise ServerTooOldError(
+                    f"this anthive server (REST API "
+                    f"{server_version or 'version unknown'}) has no artefact "
+                    f"store or collection listing; it needs anthive REST API "
+                    f"2.47.0+ (url: {response.url})",
+                    status_code=response.status_code,
+                    body=body if isinstance(body, dict) else {},
+                    response=response, server_version=server_version)
+        raise_for_artefact_status(response)
 
     def list_artefacts(self,
                        db_id: Optional[str] = None,
@@ -4707,15 +4740,18 @@ class AnthiveClient:
 
         Without a version (none in ``ref`` and ``version=None``) this
         returns the summary of :meth:`list_artefacts` plus ``created``,
-        ``versions`` (``[{version, state, published, purged?}]``,
-        ``state`` ``live``, ``purging``, ``purged`` or ``unavailable``),
+        ``versions`` (``[{version, state, published, ...}]``; ``state``
+        is ``live``, ``purged`` (soft: still listed and downloadable,
+        with ``purged``, ``purged_by``, ``purge_reason``; never the
+        latest), ``deleting``, ``deleted`` (removed for good, with the
+        tombstone fields) or ``unavailable``),
         ``manifest`` (schema ``anthive.artefact/1``, or ``None``) and
         ``files`` (``[{name, size, sha256, content_type, role,
         download, preview}]``; ``download`` and ``preview`` are API
         paths, never signed URLs).
 
         With a version it returns :meth:`get_artefact_version` instead
-        (``{ref, version, state, latest, manifest, files}``).
+        (``{ref, version, state, latest, purge, manifest, files}``).
 
         Provenance is in ``manifest``: ``made_from`` (``[{db_id,
         dataset_version, h5ad_sha256}]``; a dataset you may not see
@@ -4738,8 +4774,10 @@ class AnthiveClient:
         Raises:
             ArtefactNotFoundError: 404 (also for an artefact you may not
                 see).
-            ArtefactPurgedError: 410, a purged version was asked.
-            ArtefactPurgingError: 409, that version is being purged.
+            ArtefactDeletedError: 410 ``deleted``, a deleted version was
+                asked (``ArtefactPurgedError`` is an alias). A
+                soft-purged version is returned, not raised.
+            ArtefactDeletingError: 409 ``deleting``.
             ValueError: malformed reference or version.
         """
         base, from_ref = self._artefact_base(ref)
@@ -4750,13 +4788,16 @@ class AnthiveClient:
 
     def get_artefact_versions(self, ref: str) -> Dict:
         """``GET /artefacts/{group_id}/{scope}/{artefact_id}/versions``.
-        Every version, purged ones as tombstones (REST API 2.47.0+).
+        Every version, deleted ones as tombstones (REST API 2.47.0+).
 
-        Returns ``{ref, latest, versions}``; a live version is
-        ``{version, state, published}``, a purged one ``{version,
-        state: "purged", published, purged, purged_by,
-        purge_reason}``. ``purged_by`` reads "an admin" for non-admins
-        when an admin purged; anonymous callers see no purge reason.
+        Returns ``{ref, latest, versions}``. A live version is
+        ``{version, state, published}``; a soft-purged one adds
+        ``state: "purged"``, ``purged``, ``purged_by`` and
+        ``purge_reason`` (its files are still served); a deleted one is
+        a tombstone ``{version, state: "deleted", published, purged,
+        purged_by, purge_reason, deleted, deleted_by, delete_reason}``.
+        Who did it reads "an admin" for non-admins when an admin did,
+        "a member" without a sign-in; anonymous callers see no reasons.
 
         Args:
             ref: ``<group_id>/<scope>/<artefact_id>`` (a ``@v<N>`` is
@@ -4773,9 +4814,12 @@ class AnthiveClient:
         """``GET /artefacts/{group_id}/{scope}/{artefact_id}/{version}``.
         One version (REST API 2.47.0+).
 
-        Returns ``{ref, version, state, latest, manifest, files}``;
-        ``ref`` carries ``@v<N>``. ``files`` and the manifest (with
-        ``made_from`` and ``previews``) are as in :meth:`get_artefact`.
+        Returns ``{ref, version, state, latest, purge, manifest,
+        files}``; ``ref`` carries ``@v<N>``. ``purge`` is ``{purged,
+        purged_by, purge_reason}`` for a soft-purged version (``state``
+        ``purged``; still served) and ``None`` otherwise. ``files`` and
+        the manifest (with ``made_from`` and ``previews``) are as in
+        :meth:`get_artefact`.
 
         Args:
             ref: The reference; its ``@v<N>`` is used when ``version``
@@ -4784,8 +4828,9 @@ class AnthiveClient:
 
         Raises:
             ArtefactNotFoundError: 404, no such version.
-            ArtefactPurgedError: 410 with ``tombstone``.
-            ArtefactPurgingError: 409.
+            ArtefactDeletedError: 410 ``deleted`` with ``tombstone``
+                (``ArtefactPurgedError`` is an alias).
+            ArtefactDeletingError: 409 ``deleting``.
         """
         base, from_ref = self._artefact_base(ref)
         return self._artefact_get(
@@ -4813,7 +4858,7 @@ class AnthiveClient:
         label = self._version_label(version, from_ref)
         response = self._request(
             'GET', f'{base}/{label}/preview/{_quote_file_name(name)}')
-        raise_for_artefact_status(response)
+        self._raise_for_artefact_response(response)
         return response.content
 
     def _artefact_file_response(self, path: str, *, stream: bool,
@@ -4826,7 +4871,7 @@ class AnthiveClient:
         if response.status_code not in (301, 302, 303, 307, 308):
             if not response.ok:
                 try:
-                    raise_for_artefact_status(response)
+                    self._raise_for_artefact_response(response)
                 finally:
                     response.close()
             return response
@@ -4920,6 +4965,22 @@ class AnthiveClient:
         finally:
             response.close()
 
+    @staticmethod
+    def _warn_if_purged(payload: Mapping[str, Any]) -> None:
+        """Emit :class:`ArtefactPurgedWarning` for a soft-purged version
+        (its files are still served; the download goes ahead)."""
+        purge = payload.get('purge')
+        if payload.get('state') != 'purged' and not purge:
+            return
+        purge = purge or {}
+        reason = purge.get('purge_reason')
+        warnings.warn(
+            f"{payload.get('ref')} was purged (withdrawn) on "
+            f"{purge.get('purged') or '?'} by {purge.get('purged_by') or '?'}"
+            + (f": {reason}" if reason else '')
+            + "; its files are still served, but check with the owner "
+              "before you rely on them", ArtefactPurgedWarning, stacklevel=3)
+
     def download_artefact_file(self, ref: str, name: str,
                                dest: Union[str, Path, None] = None,
                                version: Union[int, str, None] = None,
@@ -4935,6 +4996,13 @@ class AnthiveClient:
         your credentials or :attr:`headers`, and the signed URL is never
         logged or put into an exception (it works for anyone who has it
         until it expires).
+
+        A soft-purged version (state ``purged``) is still served: the
+        download goes ahead and emits :class:`ArtefactPurgedWarning`
+        (who, when and why are in :meth:`get_artefact_version`'s
+        ``purge``). ``warnings.simplefilter('error',
+        ArtefactPurgedWarning)`` turns it into an error. A deleted
+        version raises :class:`ArtefactDeletedError`.
 
         Args:
             ref: The reference; ``@v<N>`` picks the version.
@@ -4966,6 +5034,7 @@ class AnthiveClient:
         """
         base, from_ref = self._artefact_base(ref)
         payload = self.get_artefact_version(ref, version)
+        self._warn_if_purged(payload)
         label = f"v{payload['version']}"
         entry = next((item for item in payload.get('files') or []
                       if item.get('name') == name), None)
@@ -5000,6 +5069,13 @@ class AnthiveClient:
         written under their manifest names (one subfolder allowed), each
         verified against the manifest's size and sha256.
 
+        A soft-purged version (state ``purged``) is still served: the
+        download goes ahead and emits :class:`ArtefactPurgedWarning`
+        (who, when and why are in :meth:`get_artefact_version`'s
+        ``purge``). ``warnings.simplefilter('error',
+        ArtefactPurgedWarning)`` turns it into an error. A deleted
+        version raises :class:`ArtefactDeletedError`.
+
         Args:
             ref: The reference; ``@v<N>`` picks the version, else the
                 latest live one.
@@ -5031,6 +5107,7 @@ class AnthiveClient:
         """
         base, _from_ref = self._artefact_base(ref)
         payload = self.get_artefact_version(ref, version)
+        self._warn_if_purged(payload)
         label = f"v{payload['version']}"
         entries = list(payload.get('files') or [])
         if files is not None:
@@ -5096,61 +5173,16 @@ class AnthiveClient:
                 f"format must be 'json' or 'dataframe', got {format!r}")
         return result
 
-    def list_analysis_collections(self, scan_datasets: bool = False
-                                  ) -> List[Dict]:
+    def list_analysis_collections(self) -> List[Dict]:
         """Analysis collections you may see (REST API 2.47.0+):
-        ``list_collections(kind='analysis')['collections']``.
+        ``list_collections(kind='analysis')['collections']``, sorted by
+        ``group_id``.
 
-        Only when the server has no ``/collections`` route (404) and its
-        ``/version`` is older than 2.47.0, this falls back to asking
-        :meth:`get_group` for the group id of every visible artefact
-        (and, with ``scan_datasets``, of every served dataset); that
-        misses analysis collections without artefacts. The fallback
-        rows have the same keys as :meth:`list_collections`.
-
-        Args:
-            scan_datasets: Fallback only: also check the collections of
-                served datasets (one request per collection).
-
-        Returns:
-            The collection rows of :meth:`list_collections`, sorted by
-            ``group_id``.
+        Analysis collections, like artefacts, exist from 2.47.0 on; an
+        older server raises :class:`ServerTooOldError`.
         """
-        try:
-            return list(self.list_collections(kind='analysis')
-                        .get('collections') or [])
-        except ArtefactError as exc:
-            if exc.status_code != 404 or not self._server_older_than(
-                    (2, 47, 0)):
-                raise
-        listing = self.list_artefacts(limit=200, all_pages=True)
-        group_ids = {row.get('group_id')
-                     for row in listing.get('artefacts') or []
-                     if row.get('group_id')}
-        if scan_datasets:
-            for row in self.get_databases():
-                db_id = row.get('db_id') if isinstance(row, dict) else None
-                if db_id and '/' in db_id:
-                    group_ids.add(db_id.split('/', 1)[0])
-        collections = []
-        for group_id in sorted(group_ids):
-            try:
-                group = self.get_group(group_id)
-            except requests.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code == 404:
-                    continue
-                raise
-            if group.get('collection_kind') == 'analysis':
-                collections.append({
-                    'group_id': group_id, 'group': group.get('group'),
-                    'title': group.get('title'),
-                    'collection_kind': 'analysis',
-                    'access': group.get('access'),
-                    'n_datasets': len(group.get('datasets') or []),
-                    'artefacts_count': group.get('artefacts_count'),
-                    'authors': group.get('authors'),
-                    'year': group.get('year')})
-        return collections
+        return list(self.list_collections(kind='analysis')
+                    .get('collections') or [])
 
     def _server_older_than(self, version: Tuple[int, int, int]) -> bool:
         """Whether the server's ``/version`` is older than ``version``
@@ -5161,26 +5193,38 @@ class AnthiveClient:
             return True
         return tuple(int(part) for part in match.groups()) < version
 
-    def list_artefact_purges(self, state: Optional[str] = None) -> Dict:
-        """``GET /artefacts/purges``. Your purge requests, newest first;
-        admins see everyone's (REST API 2.47.0+).
+    def list_artefact_purges(self, state: Optional[str] = None,
+                             action: Optional[str] = None) -> Dict:
+        """``GET /artefacts/purges``. Your purge, unpurge and delete
+        requests, newest first; admins see everyone's (REST API 2.47.0+).
 
-        Returns ``{purges}``; each is ``{ref, version, state, reason,
-        requested, updated, requested_by, detail}``. ``state`` is
+        Returns ``{purges}``; each is ``{id, ref, version, action,
+        state, reason, requested, updated, requested_by, detail}``.
+        ``action`` is ``soft`` (purge: the version is withdrawn but its
+        files stay downloadable), ``unpurge`` (live again) or ``hard``
+        (an admin's delete: files removed, tombstone); requests from
+        before the two-stage purge are ``hard``. ``state`` is
         ``requested``, ``purging``, ``done``, ``needs_decision`` or
         ``failed``; ``detail`` says why a request needs a decision.
-        Purges are requested with the Go CLI (``vark artefacts purge``).
+        Requests are made with the Go CLI (``vark artefacts purge``);
+        pyvark has no write methods.
 
         Args:
             state: Only requests in this state; sent only when given.
+            action: Only ``'soft'``, ``'unpurge'`` or ``'hard'``
+                requests; sent only when given.
 
         Raises:
             ArtefactError: 403 without a sign-in (``status``
-                ``forbidden``), 422 ``invalid_state``.
+                ``forbidden``), 422 ``invalid_state`` or
+                ``invalid_action``.
         """
-        return self._artefact_get(
-            '/artefacts/purges',
-            {'state': state} if state is not None else None)
+        params: Dict[str, Any] = {}
+        if state is not None:
+            params['state'] = state
+        if action is not None:
+            params['action'] = action
+        return self._artefact_get('/artefacts/purges', params or None)
 
     # ── Plot cache admin ────────────────────────────────────────────────
 

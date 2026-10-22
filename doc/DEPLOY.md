@@ -48,6 +48,20 @@ not listen on 443 (or the dev shim on 8501) every save, purge or link change fro
   with a port and a `Host` without one is this case.
 - Request bodies must be JSON (or multipart uploads); scripts that post forms or text get 415.
 
+The watcher (`ant-ingest-watch`, run by systemd or `make ingest-watch`) gains work in 2.47.0:
+
+- It merges obs columns that annotators or obs-columns deposits added to a served duckdb into a new h5ad version
+  between 01:00 and 06:00 host time (`ingest_watch.merge_window`; empty: only `ant ingest-watch merge-pending
+  --now`), while the 1 minute load is at most `merge_max_load` (8) and `merge_min_free_gb` (40) of memory is
+  free. It needs free disk next to each h5ad for one more copy. `ant ingest-watch status` lists the datasets
+  with pending columns.
+- Its script header now lists pandas (uv installs it on the next run; nothing to do).
+- New optional `anthive.yaml` keys, all with defaults: `ingest_watch.keep_local_versions`, `merge_window`,
+  `merge_max_load`, `merge_min_free_gb`, `copy_mode`, `incoming_s3`; top level `obs_columns_max_file_gb`,
+  `obs_columns_max_columns`, `obs_columns_max_rows`, `datasets_deposit_decision_days`. The central watcher keys
+  (`incoming_bucket`, `incoming_s3`, `sites_dir`, `trusted_admin_sites`) stay unset in 2.47.0.
+- Restart the watcher together with api, web and mcp after the upgrade.
+
 ## Upgrading a host install to 2.45
 
 2.45.0 changed who may see what, and every part of a host install takes

@@ -166,6 +166,30 @@ class ArtefactError(AnthiveAPIError):
         self.retry_after = retry_after
 
 
+class ServerTooOldError(ArtefactError):
+    """The server does not have this route: the artefact store and the
+    collection listing need anthive REST API 2.47.0 or newer.
+
+    Raised instead of a bare 404 when a route answers FastAPI's generic
+    ``{"detail": "Not Found"}`` (a 2.47 server always sends a status
+    word on these routes).
+
+    Attributes:
+        required_version: The REST API version the call needs.
+        server_version: What the server's ``/version`` reports, if known.
+    """
+
+    def __init__(self, message: str, *, status_code: int,
+                 body: Optional[Dict[str, Any]] = None,
+                 response: Optional[requests.Response] = None,
+                 required_version: str = '2.47.0',
+                 server_version: Optional[str] = None):
+        super().__init__(message, status_code=status_code, body=body,
+                         response=response)
+        self.required_version = required_version
+        self.server_version = server_version
+
+
 class ArtefactNotFoundError(ArtefactError):
     """404 ``not_found``: no such artefact, version or file, or one the
     caller may not see (the server does not tell them apart)."""
@@ -184,19 +208,42 @@ class ArtefactNotOnThisSiteError(ArtefactError):
     another site."""
 
 
-class ArtefactPurgedError(ArtefactError):
-    """410 ``purged``: the version was purged. ``tombstone`` holds
-    ``{version, state, published, purged, purged_by, purge_reason}``
-    when the server sent it (not when every version is purged and
-    ``latest`` was asked)."""
+class ArtefactDeletedError(ArtefactError):
+    """410 ``deleted``: the version was deleted for good (an admin's
+    hard purge; REST API 2.47.0, two-stage purge). ``tombstone`` holds
+    ``{version, state: "deleted", published, purged, purged_by,
+    purge_reason, deleted, deleted_by, delete_reason}`` when the server
+    sent it (not when every version is gone and ``latest`` was asked).
+
+    A soft-purged version (state ``purged``) is not an error: it is
+    still listed and downloadable, and its payload carries ``purge``.
+    Servers from before the two-stage purge answered 410 ``purged`` for
+    a removed version; that word maps here too.
+    """
 
     @property
     def tombstone(self) -> Optional[Dict[str, Any]]:
         return self.body.get('tombstone')
 
 
-class ArtefactPurgingError(ArtefactError):
-    """409 ``purging``: a purge of this version is running."""
+#: Compatibility alias (pyvark 0.12.0 and 0.12.1): raised only for a
+#: deleted version now, never for a soft-purged one.
+ArtefactPurgedError = ArtefactDeletedError
+
+
+class ArtefactDeletingError(ArtefactError):
+    """409 ``deleting``: the version is being deleted (the older word
+    ``purging`` maps here too)."""
+
+
+#: Compatibility alias (pyvark 0.12.0 and 0.12.1).
+ArtefactPurgingError = ArtefactDeletingError
+
+
+class ArtefactPurgedWarning(UserWarning):
+    """Emitted when a download reads a soft-purged version (state
+    ``purged``): the files are still served, but the owner or an admin
+    withdrew the version (see its ``purge`` block for who and why)."""
 
 
 class ArtefactIntegrityError(ArtefactError):
@@ -370,8 +417,10 @@ _ARTEFACT_ERRORS_BY_WORD = {
     'not_found': ArtefactNotFoundError,
     'file_not_found': ArtefactFileNotFoundError,
     'not_on_this_site': ArtefactNotOnThisSiteError,
-    'purged': ArtefactPurgedError,
-    'purging': ArtefactPurgingError,
+    'deleted': ArtefactDeletedError,
+    'purged': ArtefactDeletedError,      # servers before the two-stage purge
+    'deleting': ArtefactDeletingError,
+    'purging': ArtefactDeletingError,    # servers before the two-stage purge
     'integrity_error': ArtefactIntegrityError,
     'storage_unavailable': ArtefactStorageUnavailableError,
     'rate_limited': ArtefactRateLimitedError,

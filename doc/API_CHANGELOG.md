@@ -29,12 +29,17 @@ the spec drifting away from the running code.
 
 ---
 
-## 2.47.0 (unreleased)
+## 2.47.0 (2026-10-22)
 
 Minor release: the artefact store (doc/DESIGN_artefacts.md), phases A1 (read side) and A2 (deposits,
 publication, versions, purge). Nothing is removed or renamed. Artefact and collection deposits need
 `artefacts_enabled: true` (off by default); the read routes serve what the store holds, which on most sites
 is nothing yet.
+
+Also in 2.47.0 (sections below): obs-columns deposits (`deposit_kind: obs_columns`) and the watcher's
+versioned merge of pending obs columns into the h5ad; version classes (patch, minor additive, major) and the
+purge policy; the two-stage artefact purge; QC companion datasets; and support for one central watcher for
+several sites, which ships off and is not to be enabled before a test against the real buckets.
 
 An artefact is a versioned, immutable set of analysis files of one dataset or one collection: kind
 `de_table`, `figure`, `table`, `notebook`, `report`, `model` or `other`. A reference is
@@ -277,7 +282,7 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 - `manifest.json` is a reserved top-level file name in artefact deposits (422 `invalid_name`): vark and pyvark
   write the version's manifest beside downloaded files under that name. `_manifest.json` (pyvark's fallback) was
   already refused by the name rule. Inside a subfolder the name is allowed.
-- `API_VERSION` is `2.47.0` (unreleased).
+- `API_VERSION` is `2.47.0`, released 2026-10-22.
 - New `GET /artefacts/purges` (`?state=requested|purging|done|needs_decision|failed`): the caller's own purge
   requests, admins everyone's, newest first, as `{purges: [{ref, version, state, reason, requested, updated,
   requested_by, detail}]}`; `detail` says why a request needs a decision. Any signed-in caller; 403 without a
@@ -468,7 +473,10 @@ Collection deposits create `<Group>/index.md`; a public one is held.
 ### Client sync (audit 2026-10-20)
 
 - `API_COMPATIBLE_PYVARK` (and `compatible_pyvark` / `compatible_antclient` in `/version`) is `>=0.11.0`: older
-  clients lack the warming_up retry and the deposit reads. JupyterLite vendors pyvark 0.12.0 (eb24aab).
+  clients lack the warming_up retry and the deposit reads. JupyterLite vendors pyvark 0.12.2 (8427dbb).
+- Clients for 2.47.0: vark main 101c869 or later (artefacts, two-stage purge, `datasets add-columns`, central-site
+  fix with `--resend-h5ad`), pyvark 0.12.2 (artefact reads, obs_columns status, two-stage purge); the agent skills
+  follow (artefact deposit, add columns, version classes).
 - `GET /facets` rows add `status` (registered or deprecated) and `facet_scopes` (the scopes the facet is tested
   in); facet definitions (`/facets/{name}` `definition`) add `controlled_values`.
 - MCP:
