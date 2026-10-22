@@ -8,14 +8,12 @@ Both must run the same versions, or a script environment refreshed on one host w
   writes database files 1.5 cannot read), anndata <0.13 (h5ad encodings change between 0.x minors), pandas <3
   (another default string dtype; anndata 0.12 untested with it), h5py <4 (HDF5 2.x; see
   ``tests/test_h5ad_round_trip.py``);
-* every header range of a package the lock pins contains the locked version (the scripts gen-lock leaves out of the
-  image, the starCAT tools, run in their own environment and are exempt);
+* every header range of a package the lock pins contains the locked version, also in the starCAT tools that gen-lock
+  leaves out of the image (their exact scikit-learn pin was dropped on 2026-10-22, see their headers);
 * the lock overrides and the lock input carry the same caps, and ``make test`` pins duckdb.
 """
 from __future__ import annotations
 
-import importlib.machinery
-import importlib.util
 import re
 from pathlib import Path
 
@@ -32,14 +30,6 @@ ITEM = re.compile(r'"([^"]+)"|\'([^\']+)\'')
 CAPS = {'duckdb': Version('1.6'), 'anndata': Version('0.13'), 'pandas': Version('3.0'), 'h5py': Version('4')}
 # packages whose header ranges must contain the locked version (all others in the lock are checked as well)
 KEY_PACKAGES = ('duckdb', 'anndata', 'pandas', 'numpy', 'h5py', 'pyarrow', 'scipy')
-
-
-def _gen_lock():
-    loader = importlib.machinery.SourceFileLoader('gen_lock_for_caps', str(REPO / 'docker' / 'gen-lock'))
-    spec = importlib.util.spec_from_loader('gen_lock_for_caps', loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
 
 
 def _headers(patterns) -> list:
@@ -87,14 +77,11 @@ def test_every_declaration_carries_the_caps():
 
 
 def test_every_header_range_contains_the_locked_version():
-    excluded = set(_gen_lock().EXCLUDED_SCRIPTS)
     locked = _locked()
     for name in KEY_PACKAGES:
         assert name in locked, name
     problems = []
     for path, requirements in _headers(['bin/*/*', 'web/*']):
-        if path.name in excluded:
-            continue
         for requirement in requirements:
             name = canonicalize_name(requirement.name)
             if name in locked and not requirement.specifier.contains(locked[name], prereleases=True):
