@@ -312,7 +312,8 @@ ant ingest purge --all --keep 1 --yes       # every dataset, no question
 ```
 
 Purge only removes archived versions (`_versions/` folders and the matching S3 keys); `--local-only` leaves
-S3 alone. The watcher never purges (but see `keep_local_versions` below).
+S3 alone and removes a local copy only when its S3 copy is verified (with `--keep N` as well), so it never
+deletes the last copy of a version. The watcher never purges (but see `keep_local_versions` below).
 
 What can go without losing data (design section 25):
 

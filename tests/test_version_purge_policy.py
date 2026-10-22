@@ -125,3 +125,13 @@ def test_the_watcher_can_drop_the_local_copy_right_after_a_verified_s3_archive(t
     group = env.store / 'WatchTest2026'
     assert not (group / '_versions' / 'micro' / '1.0.0').exists()
     assert any(key.endswith('_versions/micro/1.0.0/micro.h5ad') for key in env.s3.objects)
+
+
+def test_a_plain_local_only_purge_checks_s3_first(tmp_path):
+    s3 = FakeS3()
+    entry = _store(tmp_path, s3, mismatch='1.0.0')
+    plan = iv.plan_purge('G1/ds', entry['dataset_dir'], 'G', 'ds', '2.0.0', 1)
+    assert plan.remove_versions == ['1.0.0', '1.1.0']
+    iv.verify_local_plan(plan, s3, 'b', '')
+    assert plan.remove_versions == ['1.1.0'] and plan.s3_keys == [] and 'expected' in plan.blocked['1.0.0'][0]
+    assert [folder.name for folder in plan.local_dirs] == ['1.1.0']

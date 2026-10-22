@@ -1163,7 +1163,7 @@ def cmd_purge(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
     if args.superseded_minor and args.local_only:
         _err('--superseded-minor removes S3 and local copies; leave out --local-only')
         return 2
-    client = _s3_client(s3_cfg) if (not args.local_only or args.verified) else None
+    client = _s3_client(s3_cfg)          # --local-only checks the S3 copy too: a local copy goes only when S3 has it
     bucket = s3_cfg['bucket']
     refs = None
     if not args.local_only:                      # versions others point at stay unless --force (design 25)
@@ -1180,8 +1180,11 @@ def cmd_purge(args: argparse.Namespace, s3_cfg: dict, data_folder: Path) -> int:
                                                    force=args.force)
         else:
             plan = ingest_versions.plan_purge(entry['db_id'], entry['dataset_dir'], entry['rel_dir'],
-                                              entry['basename'], entry['version'], args.keep, s3=client,
+                                              entry['basename'], entry['version'], args.keep,
+                                              s3=None if args.local_only else client,
                                               bucket=bucket, catalog_prefix=args.catalog_prefix)
+            if args.local_only:
+                ingest_versions.verify_local_plan(plan, client, bucket, args.catalog_prefix)
             if refs is not None:
                 ingest_versions.protect_plan(plan, refs, force=args.force, s3=client, bucket=bucket,
                                              catalog_prefix=args.catalog_prefix)
@@ -1275,7 +1278,8 @@ def main() -> int:
                               help='versions to keep, the current one included (default 1: only the current)')
     purge_parser.add_argument('--dry-run', action='store_true', help='show what would be removed')
     purge_parser.add_argument('--yes', action='store_true', help='do not ask for confirmation')
-    purge_parser.add_argument('--local-only', action='store_true', help='leave S3 alone')
+    purge_parser.add_argument('--local-only', action='store_true',
+                              help='leave S3 alone; a local copy goes only when its S3 copy is verified')
     purge_parser.add_argument('--verified', action='store_true',
                               help='with --local-only: remove only local copies whose S3 copy is verified '
                                    '(sha256), whatever --keep says')

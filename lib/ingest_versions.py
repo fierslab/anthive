@@ -508,6 +508,22 @@ def plan_local_verified(entry: Dict[str, Any], s3: Any, bucket: str, catalog_pre
     return plan
 
 
+def verify_local_plan(plan: PurgePlan, s3: Any, bucket: str, catalog_prefix: str) -> PurgePlan:
+    """A local-only plan (``purge --local-only [--keep N]``) keeps every version whose S3 copy is not verified:
+    S3 is canonical, so a local copy goes only when S3 holds the same version (design 25)."""
+    kept = []
+    for version in list(plan.remove_versions):
+        sha = str(archived_meta(plan.dataset_dir, plan.basename, version).get('sha256') or '')
+        ok, why = verify_s3_version(s3, bucket, catalog_prefix, plan.rel_dir, plan.basename, version, sha)
+        if not ok:
+            plan.blocked.setdefault(version, []).append(why)
+            kept.append(version)
+    plan.remove_versions = [version for version in plan.remove_versions if version not in kept]
+    plan.local_dirs = [folder for folder in plan.local_dirs if folder.name not in kept]
+    plan.s3_keys = []
+    return plan
+
+
 def drop_local_if_verified(dataset_dir: Path, basename: str, version: str, s3: Any, bucket: str,
                            catalog_prefix: str, rel_dir: str) -> Tuple[bool, str]:
     """``ingest_watch.keep_local_versions: false``: remove one archived version's local folder once its S3
