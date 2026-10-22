@@ -8442,20 +8442,61 @@ def test_dataset_body_repeated_in_the_description_renders_once(client, monkeypat
     assert info["title"] in top and "Title of the dataset" not in overview   # the title stays at the top
 
 
-def test_dataset_description_different_from_the_body_stays_at_the_top(client, monkeypatch):
+def _description_placement(text: str, needle: str) -> tuple:
+    """(times on the page, times in the Overview tab, times above the tab bar) of ``needle``."""
+    overview = text.split('id="tab-overview"')[1].split("</section>")[0] if 'id="tab-overview"' in text else ""
+    return text.count(needle), overview.count(needle), text.split('id="ds-tab-bar"')[0].count(needle)
+
+
+def test_dataset_description_key_only_shows_once_in_overview(client, monkeypatch):
+    info = dict(_INFO["GroupA/ds1"], description="Microglia from 12 donors.", markdown="# Dataset One\n")
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": info}))
+    text = client.get("/browse/GroupA/ds1").text
+    assert _description_placement(text, "Microglia from 12 donors.") == (1, 1, 0)
+    assert 'class="ds-desc-oneline"' not in text
+    assert '<button type="button" class="tab-btn active" data-tab="overview"' in text
+
+
+def test_dataset_body_only_shows_once_in_overview(client, monkeypatch):
+    info = dict(_INFO["GroupA/ds1"], markdown="# Dataset One\n\nMicroglia from 12 donors, **sorted**.")
+    info.pop("description", None)
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": info}))
+    text = client.get("/browse/GroupA/ds1").text
+    assert _description_placement(text, "Microglia from 12 donors, <strong>sorted</strong>.") == (1, 1, 0)
+
+
+def test_dataset_description_and_different_body_both_show_once_in_overview(client, monkeypatch):
+    # F26/PFC: a front-matter description that differs from the body. Both go to Overview, description first.
     info = dict(_INFO["GroupA/ds1"], description="Microglia from 12 donors.", markdown="## Notes\nSome **markdown**.")
     monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": info}))
     text = client.get("/browse/GroupA/ds1").text
-    assert '<div class="ds-desc-oneline">Microglia from 12 donors.</div>' in text
-    assert text.count("Microglia from 12 donors.") == 1
+    assert _description_placement(text, "Microglia from 12 donors.") == (1, 1, 0)
+    assert _description_placement(text, "Some <strong>markdown</strong>.") == (1, 1, 0)
+    overview = text.split('id="tab-overview"')[1].split("</section>")[0]
+    assert overview.index("Microglia from 12 donors.") < overview.index("Some <strong>markdown</strong>.")
+    assert info["title"] in text.split('id="ds-tab-bar"')[0]                  # the title stays at the top
 
 
-def test_description_repeats_body_compares_plain_text():
-    body = browser._store_markdown("Some *cohort* of donors, it's 12.\n\nMore text.")
-    assert browser._description_repeats_body("Some cohort of donors, it's 12.", body)
-    assert browser._description_repeats_body("more   TEXT", body)
-    assert not browser._description_repeats_body("Another text.", body)
-    assert not browser._description_repeats_body("", body) and not browser._description_repeats_body("x", None)
+def test_dataset_body_inside_the_description_shows_the_description_once(client, monkeypatch):
+    info = dict(_INFO["GroupA/ds1"], description="Microglia from 12 donors. Sorted by FACS.",
+                markdown="# Dataset One\n\nMicroglia from 12 donors.")
+    monkeypatch.setattr(browser, "_api_get", _api_with({"/databases/GroupA/ds1/info": info}))
+    text = client.get("/browse/GroupA/ds1").text
+    assert _description_placement(text, "Microglia from 12 donors.") == (1, 1, 0)
+    assert "Sorted by FACS." in text.split('id="tab-overview"')[1].split("</section>")[0]
+
+
+def test_overview_markdown_keeps_one_copy_when_one_text_holds_the_other():
+    assert browser._overview_markdown("Some cohort of donors, it's 12.", "Some *cohort* of donors, it's 12.\n\nMore.") \
+        == "Some *cohort* of donors, it's 12.\n\nMore."
+    assert browser._overview_markdown("Long text. More   TEXT.", "more text") == "Long text. More   TEXT."
+    assert browser._overview_markdown("A.", "B.") == "A.\n\nB."
+    stale_body = ("Integrated object of 304,723 microglia from 1,499 donors. obs keeps sex_harmonised and age_harmonised."
+                  "\n\n## Notes\nSeparate notes.")
+    newer_description = ("Integrated object of 304,723 microglia from 1,499 donors. obs keeps sex_harmonised, age_harmonised "
+                         "and cerad_harmonised. disease_braak_cerad is AD for Braak III or higher.")
+    assert browser._overview_markdown(newer_description, stale_body) == newer_description + "\n\n## Notes\nSeparate notes."
+    assert browser._overview_markdown("  ", None) is None and browser._overview_markdown(None, "B") == "B"
 
 
 # ── Categorical tab: most common values of high-cardinality columns ──────────
