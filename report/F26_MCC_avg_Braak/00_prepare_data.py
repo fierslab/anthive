@@ -2,11 +2,11 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#   "duckdb>=0.10",
+#   "duckdb>=1.3,<1.6",
 #   "pandas>=2.0",
 #   "pyarrow>=14.0",
 #   "numpy>=1.24",
-#   "anndata>=0.10",
+#   "anndata>=0.10,<0.13",
 # ]
 # ///
 """
