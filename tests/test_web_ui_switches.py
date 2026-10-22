@@ -79,7 +79,7 @@ def test_ui_defaults_leave_every_part_on(make_client):
     assert browser._ui() == ALL_ON
     home = client.get('/', headers=SIGNED_IN).text
     assert 'href="/facets"' in _main_nav(home)
-    assert 'id="topbar-api-link"' in home and 'id="api-menu-link"' in home
+    assert 'id="topbar-api-link"' not in home and 'id="api-menu-link"' in home
     assert 'id="mcp-menu-link"' in home
     assert 'href="/api/changelog"' in home
     page = client.get('/browse/GroupA/ds1').text

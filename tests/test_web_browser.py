@@ -2501,11 +2501,14 @@ def test_topbar_menu_button(client):
     assert 'aria-controls="topbar-menu"' in tag
     assert 'aria-expanded="false"' in tag
     assert 'aria-label="Open menu"' in tag
-    # the panel holds the nav links, Help, API, version and the user menu
+    # the panel holds the nav links, Help, version and the user menu (with API)
     menu = text.split('id="topbar-menu"')[1].split('<script>')[0]
-    for needle in ('href="/"', 'href="/facets"', 'href="/help"', 'id="topbar-api-link"',
+    for needle in ('href="/"', 'href="/facets"', 'href="/help"', 'id="api-menu-link"',
                    'id="stack-version"', 'id="user-menu-toggle"', 'id="authelia-signout"'):
         assert needle in menu, needle
+    assert 'id="topbar-api-link"' not in menu
+    # the flattened phone menu must not hide the dropdown's API entry
+    assert "#api-menu-link { display: none; }" not in text
     # CSS: hidden on desktop, shown under the 640px breakpoint; JS toggles state
     assert "@media (max-width: 640px)" in text
     assert "#topbar .topbar-menu { display: contents; }" in text
@@ -2864,26 +2867,27 @@ def test_topbar_help_link_present(client):
     assert 'href="/help"' in resp.text
 
 
-def test_topbar_api_link_goes_to_api_guide(client):
-    # The top-bar 'API' link lands on the on-site API page first (login,
-    # curl, pyvark, vark), not straight on the Swagger UI.
-    resp = client.get("/")
-    assert resp.status_code == 200
-    idx = resp.text.find('id="topbar-api-link"')
-    assert idx >= 0, "API link missing from topbar"
-    tag = resp.text[resp.text.rfind("<a ", 0, idx):resp.text.find(">", idx) + 1]
-    assert 'href="/api-guide"' in tag
-    assert 'target="_blank"' not in tag
+def test_topbar_has_no_api_link(client):
+    # API is not a top-level item: the top bar (main nav and utility row
+    # outside the user dropdown) has no link to /api-guide, signed in or not.
+    for headers in ({}, {"Remote-User": "mf", "Remote-Name": "Mark Fiers"}):
+        html = client.get("/", headers=headers).text
+        assert 'id="topbar-api-link"' not in html
+        bar = html.split('id="topbar-menu"', 1)[1].split('<script>', 1)[0]
+        outside_menu = bar.split('class="dropdown topbar-auth"', 1)[0]
+        assert 'href="/api-guide"' not in outside_menu
 
 
 def test_user_dropdown_has_api_entry(client):
-    # The API page is also in the user dropdown, for signed-in and anonymous
-    # visitors alike, next to Preferences.
+    # The API page lives in the user dropdown, for signed-in and anonymous
+    # visitors alike (auth.mode none has the dropdown too), before Preferences.
     for headers in ({}, {"Remote-User": "mf", "Remote-Name": "Mark Fiers"}):
         html = client.get("/", headers=headers).text
         menu = html.split('class="dropdown-menu right"', 1)[1].split("</span>", 1)[0]
         assert 'id="api-menu-link"' in menu
-        assert 'href="/api-guide"' in menu
+        tag = menu[menu.rfind("<a ", 0, menu.index('id="api-menu-link"')):]
+        assert tag.startswith('<a href="/api-guide"')
+        assert 'target="_blank"' not in tag.split(">", 1)[0]
         assert menu.index('id="api-menu-link"') < menu.index('href="/settings"')
 
 
@@ -6538,7 +6542,7 @@ def test_version_badge_shows_api_version_left_of_help(client, monkeypatch):
     html = client.get("/about").text
     assert 'id="stack-version"' in html
     assert f'<span class="v-prefix">v</span>{browser._WEB_VERSION}' in html
-    assert html.index('id="stack-version"') < html.index('href="/help"') < html.index('id="topbar-api-link"')
+    assert html.index('id="stack-version"') < html.index('href="/help"') < html.index('id="api-menu-link"')
     assert 'href="/api/changelog"' in html
     assert 'class="version-pill" id="stack-version"' in html
 
