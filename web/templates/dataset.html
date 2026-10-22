@@ -114,8 +114,6 @@
   .ds-prov .lnk:hover { color: var(--link); text-decoration: underline; }
   .ds-desc { margin: 2px 0 10px; font-size: 13px; }
   .ds-desc > :first-child { margin-top: 0; }
-  /* One-line curator description (frontmatter `description:`). Distinct
-     from the multi-paragraph body rendered in the Overview tab. */
   .ds-lineage { display: flex; flex-wrap: wrap; gap: 3px 14px; font-size: 11.5px; color: var(--text-muted); margin: 0 0 8px; align-items: center; }
   .ds-lineage .pk { color: #94a3b8; }
   .ds-lineage a { white-space: nowrap; }
@@ -123,7 +121,6 @@
   .lineage-pill.primary { background: #e8f3ee; border-color: #a7d7c0; color: #14532d; }
   .lineage-pill.reanalysis { background: #fdf3e1; border-color: #f0d3a1; color: #7a4b0c; }
   .lineage-pill.qc { background: #eef2ff; border-color: #c7d2fe; color: #3730a3; }
-  .ds-desc-oneline { margin: 4px 0 12px; font-size: 14px; color: var(--text); line-height: 1.4; }
 
   /* Observation columns: filterable table (per tab). */
   .obs-table { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 24px; margin-top: 6px; }
@@ -505,15 +502,6 @@
 </div>
 {% endif %}
 
-{# One-line curator description from the .md frontmatter. Distinct from the
-   long-form markdown body (Overview tab). Rendered under the provenance row
-   so it lands above the fold, next to the title, without pushing the tab
-   bar down when absent. #}
-{% if dataset_description %}
-<div class="ds-desc-oneline">{{ dataset_description }}</div>
-{% endif %}
-
-
 {# ═══════════════════════════════════════════════════════════════════════
    Tab bar, persistent header above; tabs deep-link via URL hash.
    Order: Overview (includes Embeddings), Data, Numerical cols,
@@ -563,7 +551,8 @@
 </div>
 
 {# ── Overview tab ──────────────────────────────────────────────────────
-   Nothing but the rendered index.md. Curated top_cat / top_num chip rows
+   The .md `description` key, then the rendered .md body (one copy when one holds the other); the top of
+   the page shows neither. Curated top_cat / top_num chip rows
    dropped, same information is one click away in the Categorical / Numerical
    tabs, with proper stats. If markdown_content is empty the tab-init JS
    below auto-jumps to Data. #}

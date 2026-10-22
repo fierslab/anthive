@@ -6,6 +6,7 @@ Data is sourced entirely from the ant-serve REST API.
 """
 
 import base64
+import difflib
 import html as html_lib
 import re
 import sys
@@ -666,12 +667,38 @@ def _comparable_text(value: Optional[str]) -> str:
     return re.sub(r'\s+', ' ', text).strip().lower()
 
 
-def _description_repeats_body(description: Optional[str], body_html: Optional[str]) -> bool:
-    """True when the .md ``description`` key says nothing the rendered body does not: its text is part of the body.
-    Deposits accept the description as the key or the body and many write the same paragraph to both, so the
-    dataset page would show it twice (top of the page and Overview tab). The body wins; the top keeps the title."""
-    short = _comparable_text(description)
-    return bool(short) and short in _comparable_text(body_html)
+def _text_covered_by(short_text: str, long_text: str) -> bool:
+    """True when ``short_text`` (already ``_comparable_text``) is inside ``long_text`` or nearly so: at least 90 percent of
+    its characters fall in blocks that match ``long_text`` in order. The near case catches a description that is a
+    later edit of a body paragraph (F26/PFC: the same paragraph plus a sentence). Texts under 40 characters must be
+    contained exactly."""
+    if not short_text:
+        return True
+    if short_text in long_text:
+        return True
+    if len(short_text) < 40 or len(short_text) > 20000 or len(long_text) > 20000:
+        return False
+    matcher = difflib.SequenceMatcher(None, short_text, long_text, autojunk=False)
+    matched = sum(block.size for block in matcher.get_matching_blocks() if block.size >= 8)
+    return matched >= 0.9 * len(short_text)
+
+
+def _overview_markdown(description: Optional[str], body_md: Optional[str]) -> Optional[str]:
+    """Markdown for the dataset Overview tab: the .md ``description`` key first, then the body.
+    The top of the page never shows either (Mark's decision, 2026-10-22). Deposits often write one paragraph to
+    both, sometimes edited in one place only, so: a description the body already holds is dropped (body only);
+    otherwise every body paragraph the description already holds is dropped. None when both are empty."""
+    description = (description or '').strip()
+    body_md = (body_md or '').strip()
+    if not description or not body_md:
+        return description or body_md or None
+    short_description = _comparable_text(_store_markdown(description))
+    if _text_covered_by(short_description, _comparable_text(_store_markdown(body_md))):
+        return body_md
+    kept_paragraphs = [paragraph for paragraph in re.split(r'\n\s*\n', body_md)
+                       if paragraph.strip()
+                       and not _text_covered_by(_comparable_text(_store_markdown(paragraph)), short_description)]
+    return '\n\n'.join([description] + kept_paragraphs)
 
 
 def _expand_plot_thumbnails(html_text: Optional[str], default_db: Optional[str] = None) -> Optional[str]:
@@ -3297,7 +3324,10 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
     _md_lines = raw_md.lstrip().split('\n')
     _desc_md = ('\n'.join(_md_lines[1:]) if (_md_lines and _md_lines[0].lstrip().startswith('#'))
                 else raw_md).strip()
-    markdown_content = _store_markdown(_desc_md) if _desc_md else None
+    # Overview tab = the .md `description` key, then the body (one copy when one holds the other). Nothing of it
+    # goes to the top of the page: that keeps the title and the one-line essentials only.
+    _overview_md = _overview_markdown(db.get('description'), _desc_md)
+    markdown_content = _store_markdown(_overview_md) if _overview_md else None
     markdown_content = _expand_plot_thumbnails(markdown_content, default_db=db_id)
 
     # Context bar — same abbrev maps as landing / folder pages.  Uses single-db
@@ -3403,11 +3433,6 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "data_project": group_folder_name,       # collection folder name (e.g. Sierksma2025)
         "basename": db.get('basename'),           # .md filename stem (from API when available)
         "dataset_name": dataset_title,
-        # One-line description from the .md frontmatter (edited via the admin
-        # editor's Basics tab). Rendered near the title in dataset.html.
-        # the Overview tab shows the body; a description the body already holds is not repeated at the top
-        "dataset_description": (None if _description_repeats_body(db.get('description'), markdown_content)
-                                else (db.get('description') or '').strip() or None),
         "file_id": file_id,
         "db_id": db_id,
         # is_secondary marker (surfaced next to the title + h1 gets the
