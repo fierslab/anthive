@@ -29,6 +29,25 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.47.2 (unreleased)
+
+Patch release: fixes found while setting up the production site as a deposit site for a central watcher.
+No API contract change; nothing is removed or renamed.
+
+- A site with `datasets.central_watcher` needs only the ingestion key pair
+  (`secrets/s3_ingest_access_key_id` + `s3_ingest_secret_access_key`) for dataset and artefact deposits.
+  `s3.enabled: false` is accepted there: `ant-stack` renders the deposits on, presigns with the ingestion pair
+  (`datasets_deposit_s3`) into `__deposits/<site_id>/` of the ingestion bucket, and `check` no longer asks for
+  the read-write data-bucket pair. Sites without a central watcher are unchanged.
+- `ant-stack check` of an artefact deposit site with a central watcher checks the ingestion pair (it asked for
+  `s3_incoming_*` or the read-write pair).
+- `ant-sync pull` never downloads the files of the artefact store that the h5adstore repository tracks
+  (`artefact.md`, `v<N>/manifest.json`); an untracked copy blocks `git pull --ff-only`. The artefact pull
+  refuses them too.
+- `ant-stack check` and `ant-stack pull` warn when the docker root has less free space than twice the images
+  to pull (about 6.3 GB per release for the app and ingest pair); `pull` lists the old anthive image tags and
+  prints the `docker rmi` command, and removes nothing.
+
 ## 2.47.1 (2026-10-22)
 
 Patch release with three additions approved for 2.47.1 and the fixes from the 2.47.0 scratch-site check;

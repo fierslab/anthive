@@ -220,6 +220,10 @@ datasets:
   # watcher copies into __incoming/ itself), and reads the watcher's signed result.json back. No watcher runs on
   # this site (`ant-stack watch` refuses). The api gets it as datasets_deposit_s3 in its anthive.yaml; the
   # watcher host names the same bucket in datasets_deposit_s3 of its own anthive.yaml.
+  # Since 2.47.2 this key pair is all such a site needs for dataset and artefact deposits: s3.enabled can
+  # stay false (data-bucket keys host-only), and `check` asks for no read-write pair in secrets/. Then a
+  # metadata-only update (it reuses the published h5ad from the data bucket) asks the depositor to send the
+  # h5ad again, and artefact download links need secrets/s3_artefacts_read_* plus s3.bucket.
   central_watcher:
     ingestion_bucket: null  # e.g. anthive-ingest: holds __deposits/<site_id>/ and __incoming/
     endpoint: null          # default s3.endpoint
