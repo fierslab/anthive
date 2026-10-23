@@ -29,7 +29,7 @@ the spec drifting away from the running code.
 
 ---
 
-## 2.47.2 (unreleased)
+## 2.47.2 (2026-10-23)
 
 Patch release: fixes found while setting up the production site as a deposit site for a central watcher.
 No API contract change; nothing is removed or renamed.

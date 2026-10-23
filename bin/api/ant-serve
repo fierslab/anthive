@@ -2047,7 +2047,7 @@ API_VERSION = "2.47.2"
 # Release date (YYYY-MM-DD) of API_VERSION; None while it is unreleased. Set it
 # in the release commit together with the changelog heading
 # (tests/test_version_sync.py keeps the two in step).
-API_VERSION_RELEASED: Optional[str] = None
+API_VERSION_RELEASED: Optional[str] = "2026-10-23"
 # Oldest pyvark (codeberg.org/mfiers/pyvark, `from vark import AnthiveClient`)
 # that works with this API.
 API_COMPATIBLE_PYVARK = ">=0.11.0"
