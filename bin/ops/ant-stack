@@ -571,13 +571,20 @@ def mcp_enabled(site: dict) -> bool:
     return bool((site.get('services') or {}).get('mcp')) and ui_settings(site)['mcp']
 
 
+def _can_presign(site: dict) -> bool:
+    """Whether the api has an object store to presign deposits into: s3.enabled, or (2.47.2) a central watcher
+    site, which needs only the ingestion key pair (datasets.central_watcher.ingestion_bucket)."""
+    return bool((site.get('s3') or {}).get('enabled')) or _central_block(site) is not None
+
+
 def _deposit_enabled(site: dict) -> bool:
-    return bool((site.get('services') or {}).get('dataset_deposit')) and bool((site.get('s3') or {}).get('enabled'))
+    return bool((site.get('services') or {}).get('dataset_deposit')) and _can_presign(site)
 
 
 def _artefacts_enabled(site: dict) -> bool:
-    """Artefact and collection deposits (site.yaml artefacts.enabled; presigned S3 uploads, so s3.enabled)."""
-    return bool((site.get('artefacts') or {}).get('enabled')) and bool((site.get('s3') or {}).get('enabled'))
+    """Artefact and collection deposits (site.yaml artefacts.enabled; presigned S3 uploads, so s3.enabled or a
+    central watcher site, whose ingestion key pair presigns)."""
+    return bool((site.get('artefacts') or {}).get('enabled')) and _can_presign(site)
 
 
 def _central_block(site: dict) -> dict | None:
@@ -611,8 +618,8 @@ def _watcher_enabled(site: dict) -> bool:
 def _artefacts_read_block(site: dict) -> dict | None:
     """artefacts_s3 of the api config: the read-only pair in secrets/s3_artefacts_read_*, or None."""
     s3 = site.get('s3') or {}
-    if not s3.get('enabled'):
-        return None
+    if not (s3.get('enabled') or (_central_block(site) is not None and s3.get('bucket'))):
+        return None            # a central site without s3.enabled may still sign reads from its data bucket
     secrets_dir = site['_state'] / 'secrets'
     key_id, secret = (_read_secret(secrets_dir / name) for name in S3_ARTEFACTS_READ_KEY_FILES)
     if not (key_id and secret):
@@ -1605,8 +1612,9 @@ def _check_datasets(site: dict) -> list[str]:
     if not (site.get('services') or {}).get('dataset_deposit'):
         _say("dataset deposits: off (services.dataset_deposit)")
         return problems
-    if not (site.get('s3') or {}).get('enabled'):
-        problems.append("services.dataset_deposit is on but s3.enabled is false: deposits are presigned S3 uploads")
+    if not _can_presign(site):
+        problems.append("services.dataset_deposit is on but s3.enabled is false: deposits are presigned S3 uploads "
+                        "(a site with datasets.central_watcher needs only the ingestion key pair instead)")
         return problems
     if site['auth']['mode'] == 'none':
         _warn("services.dataset_deposit is on but auth.mode is none: nobody can deposit (a login is required)")
@@ -1686,6 +1694,10 @@ def _check_central(site: dict, central: dict, groups: str) -> list[str]:
         problems.append(f"datasets.central_watcher is set but the site secret {secret} is missing: run "
                         f"`ant-stack up` (or init), which creates it on the host; then copy it to the watcher host "
                         f"as <sites_dir>/{site_id}.keys (mode 600), line \"{central.get('key_id') or 'k1'} <secret>\"")
+    if not (site.get('s3') or {}).get('enabled'):
+        _say("dataset deposits: s3.enabled is false, which is fine here: only the ingestion key pair is used. A "
+             "metadata-only update reuses the published h5ad from the catalogue bucket, which that pair usually "
+             "cannot read; the depositor is then told to deposit the h5ad again")
     _say("dataset deposits: approve, reject and purges happen on the central watcher host; this api shows the "
          "results and e-mails its depositors")
     return problems
@@ -1713,24 +1725,47 @@ def _check_artefacts(site: dict) -> list[str]:
         # the read-key and .gitignore advice matter only to a site that publishes artefacts (2.47.1)
         _say("artefact deposits: off (artefacts.enabled); the artefact read routes serve what the store holds")
         return problems
-    if not s3.get('enabled'):
-        problems.append("artefacts.enabled is on but s3.enabled is false: artefact deposits are presigned S3 uploads")
+    central = _central_block(site)
+    if not _can_presign(site):
+        problems.append("artefacts.enabled is on but s3.enabled is false: artefact deposits are presigned S3 uploads "
+                        "(a site with datasets.central_watcher needs only the ingestion key pair instead)")
     else:
         if site['auth']['mode'] == 'none':
             _warn("artefacts.enabled is on but auth.mode is none: nobody can deposit artefacts (a login is required)")
-        source = _deposit_key_source(site)
-        if source is None:
-            problems.append(f"artefacts.enabled is on but neither secrets/{S3_INCOMING_KEY_FILES[0]} (+ "
-                            f"{S3_INCOMING_KEY_FILES[1]}) nor the read-write pair exists for presigning")
-        elif not _deposit_enabled(site):        # the dataset check says these two otherwise
-            if source == 'write':
-                _warn(f"artefact deposits presign with the read-write S3 keys, so the api container holds them; "
-                      f"put a key pair limited to the incoming prefixes in secrets/{S3_INCOMING_KEY_FILES[0]} "
-                      f"and {S3_INCOMING_KEY_FILES[1]} if the object store can scope keys")
-            _say(f"artefact deposits: {lifecycle_hint(site)}")
+        if central is not None:
+            # presigned into the ingestion bucket with the s3_ingest_* pair (datasets_deposit_s3, _central_s3_block);
+            # the rest of the central checks (watcher keys, site secret) are _check_datasets' when deposits are on
+            if not (site.get('services') or {}).get('dataset_deposit'):
+                missing = [name for name in S3_INGEST_KEY_FILES if not _read_secret(secrets_dir / name)]
+                if missing:
+                    problems.append(f"artefacts.enabled is on and datasets.central_watcher is set but secrets/"
+                                    f"{' and secrets/'.join(missing)} are missing: the key pair of the ingestion "
+                                    f"bucket {central['ingestion_bucket']!r}")
+                site_id = (site.get('datasets') or {}).get('site_id') or site['site']['name']
+                if not central.get('watcher_public_keys'):
+                    problems.append("datasets.central_watcher.watcher_public_keys is empty: the site cannot check "
+                                    "the watcher's results (run `ant ingest-watch result-key` on the watcher host)")
+                if not (secrets_dir / DEPOSIT_SITE_SECRET_FILE).is_file():
+                    problems.append(f"datasets.central_watcher is set but the site secret "
+                                    f"{secrets_dir / DEPOSIT_SITE_SECRET_FILE} is missing: run `ant-stack up` (or "
+                                    f"init), then copy it to the watcher host as <sites_dir>/{site_id}.keys")
+            _say(f"artefact deposits: uploads are presigned into s3://{central['ingestion_bucket']}/"
+                 f"{DEPOSIT_STAGING_PREFIX}{(site.get('datasets') or {}).get('site_id') or site['site']['name']}/ "
+                 f"with the ingestion key pair, never into the data bucket")
+        else:
+            source = _deposit_key_source(site)
+            if source is None:
+                problems.append(f"artefacts.enabled is on but neither secrets/{S3_INCOMING_KEY_FILES[0]} (+ "
+                                f"{S3_INCOMING_KEY_FILES[1]}) nor the read-write pair exists for presigning")
+            elif not _deposit_enabled(site):        # the dataset check says these two otherwise
+                if source == 'write':
+                    _warn(f"artefact deposits presign with the read-write S3 keys, so the api container holds them; "
+                          f"put a key pair limited to the incoming prefixes in secrets/{S3_INCOMING_KEY_FILES[0]} "
+                          f"and {S3_INCOMING_KEY_FILES[1]} if the object store can scope keys")
+                _say(f"artefact deposits: {lifecycle_hint(site)}")
         groups = block.get('upload_groups') or ['admins', 'analysts']
         publisher = ("the central watcher publishes them (do not run `ant-stack watch` on this host)"
-                     if _central_block(site) is not None else
+                     if central is not None else
                      "the same watcher publishes them: `bin/ops/ant-stack watch`")
         _say(f"artefact deposits: on for {', '.join(groups)} (collections: "
              f"{', '.join(block.get('collections_create_groups') or ['admins', 'analysts'])}); {publisher}")
@@ -1739,10 +1774,10 @@ def _check_artefacts(site: dict) -> list[str]:
         elif site['auth']['mode'] == 'authelia' and any(group not in ('admins',) for group in groups):
             _say(f"artefact deposits: put depositors in the Authelia group(s) {', '.join(g for g in groups if g != 'admins')} "
                  f"(authelia/users_database.yml, or auth.users[].groups before the first init)")
-    if s3.get('enabled'):
+    if s3.get('enabled') or (central is not None and s3.get('bucket')):
         if all(present):
             _say("artefact files: served by signed links made with the read-only pair secrets/s3_artefacts_read_*")
-        elif s3.get('api_access') in ('read', 'write'):
+        elif s3.get('enabled') and s3.get('api_access') in ('read', 'write'):
             _say(f"artefact files: served by signed links made with the api's {s3['api_access']} key pair "
                  f"(a separate read-only pair in secrets/{S3_ARTEFACTS_READ_KEY_FILES[0]} is preferred)")
         else:
@@ -1981,6 +2016,9 @@ def check(site: dict, running: bool = False) -> list[str]:
                                 capture_output=True, text=True)
         if result.returncode != 0:
             problems.append("docker compose v2 plugin not available")
+        space_warning = image_space_warning(site, only_missing=True)
+        if space_warning:
+            _warn(space_warning)
     uid, gid = site['_uid'], site['_gid']
     for field, path in (('data.h5adstore', site['_h5adstore']),
                         ('data.genesetstore', site['_genesetstore']),
@@ -2393,6 +2431,73 @@ def _image_id(ref: str) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+# Compressed-to-disk estimate of one release's images (anthive-app + anthive-ingest is about 6.3 GB); a pull
+# needs room for the layers and their unpacked copy, so the warnings use twice the size (2.47.2).
+APP_IMAGE_BYTES = 3_000_000_000
+INGEST_IMAGE_BYTES = 3_300_000_000
+IMAGE_SPACE_FACTOR = 2
+
+
+def docker_root_dir() -> Path:
+    """The docker data root (`docker info --format '{{.DockerRootDir}}'`), /var/lib/docker when unknown."""
+    try:
+        result = subprocess.run(['docker', 'info', '--format', '{{.DockerRootDir}}'], capture_output=True,
+                                text=True, timeout=30)
+        text = result.stdout.strip() if result.returncode == 0 else ''
+    except (OSError, subprocess.SubprocessError):
+        text = ''
+    return Path(text or '/var/lib/docker')
+
+
+def docker_free_bytes(root: Path) -> int | None:
+    """Free bytes on the filesystem of ``root``; the nearest readable parent when ``root`` itself is not
+    (/var/lib/docker is usually closed to other users); None when nothing answers."""
+    for candidate in (root, *root.parents):
+        try:
+            return shutil.disk_usage(candidate).free
+        except OSError:
+            continue
+    return None
+
+
+def image_space_warning(site: dict, include_ingest: bool = True, only_missing: bool = False) -> str | None:
+    """A warning text when the docker root has less free space than IMAGE_SPACE_FACTOR times the images about
+    to be pulled (all of them, or with ``only_missing`` the ones not present locally); None when there is room
+    or nothing to pull. Never a problem: the caller only prints it."""
+    sizes = {'app': APP_IMAGE_BYTES, 'ingest': INGEST_IMAGE_BYTES}
+    wanted = [role for role in ('app', 'ingest') if role == 'app' or include_ingest]
+    if only_missing:
+        wanted = [role for role in wanted if _image_id(image_ref(site, role)) is None]
+    needed = IMAGE_SPACE_FACTOR * sum(sizes[role] for role in wanted)
+    if not needed:
+        return None
+    root = docker_root_dir()
+    free = docker_free_bytes(root)
+    if free is None or free >= needed:
+        return None
+    return (f"the docker root {root} has {free / 1e9:.1f} GB free; pulling {' and '.join(wanted)} needs about "
+            f"{needed / 1e9:.1f} GB ({IMAGE_SPACE_FACTOR} x the images); free space first (old anthive image tags: "
+            f"`ant-stack pull` lists them with the command to remove them)")
+
+
+def old_image_tags(site: dict, include_ingest: bool = True) -> list[tuple[str, str]]:
+    """(ref, size) of local anthive-app and anthive-ingest tags that site.yaml does not name now."""
+    current = {image_ref(site, role) for role in ('app', 'ingest')}
+    repositories = {image_ref(site, role).rsplit(':', 1)[0] for role in ('app', 'ingest')
+                    if role == 'app' or include_ingest}
+    found: list[tuple[str, str]] = []
+    for repository in sorted(repositories):
+        result = subprocess.run(['docker', 'image', 'ls', repository, '--format', '{{.Repository}}:{{.Tag}}\t{{.Size}}'],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            continue
+        for line in result.stdout.splitlines():
+            ref, _, size = line.partition('\t')
+            if ref and ref not in current and not ref.endswith(':<none>'):
+                found.append((ref, size))
+    return found
+
+
 def cmd_pull(args: argparse.Namespace) -> int:
     """Pull every image the site runs, by the refs site.yaml names NOW.
 
@@ -2408,6 +2513,9 @@ def cmd_pull(args: argparse.Namespace) -> int:
     for key, ref in after.items():
         if before.get(key) and before[key] != ref:
             _say(f"{key}: the running stack uses {before[key]}, site.yaml now names {ref}")
+    warning = image_space_warning(site, include_ingest=not args.no_ingest)
+    if warning:
+        _warn(warning)
     failed = 0
     report: list[str] = []
     for role, ref in images_to_pull(site, include_ingest=not args.no_ingest):
@@ -2424,6 +2532,13 @@ def cmd_pull(args: argparse.Namespace) -> int:
     print('\n'.join(['', 'ant-stack pull:'] + report))
     if args.no_ingest:
         print(f"  skipped    ingest   {image_ref(site, 'ingest')} (--no-ingest)")
+    old = old_image_tags(site, include_ingest=not args.no_ingest)
+    if old:
+        print("  old anthive image tags on this host (nothing is removed automatically; keep the one the running "
+              "stack uses until `ant-stack up` has run):")
+        for ref, size in old:
+            print(f"    {ref}  {size}")
+        print(f"  remove them with: docker rmi {' '.join(ref for ref, _size in old)}")
     if failed:
         _warn(f"{failed} image(s) failed to pull; `ant-stack up` will refuse a missing app image")
         return 1
