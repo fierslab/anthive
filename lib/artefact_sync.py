@@ -120,6 +120,16 @@ def selected(pattern: Optional[str], ref: str, version: int) -> bool:
                for candidate in (ref, f'{ref}@v{version}'))
 
 
+def is_git_tracked_record(rel: str) -> bool:
+    """Whether ``rel`` is a head record (``artefact.md``) or a version manifest (``v<N>/manifest.json``): files
+    that come with the h5adstore ``git pull`` and are never downloaded (an untracked copy blocks the pull)."""
+    parts = PurePosixPath(rel).parts
+    if parts and parts[-1] == artefacts.HEAD_RECORD_NAME:
+        return True
+    return (len(parts) >= 2 and parts[-1] == artefacts.MANIFEST_NAME and parts[-2][:1] == 'v'
+            and parts[-2][1:].isdigit())
+
+
 def plan(store_root: Path, s3: Any, bucket: str, catalog_prefix: str, inline_max_bytes: int,
          pattern: Optional[str] = None) -> List[Action]:
     """What a pull would do (reads the checkout, lists preview prefixes and HEADs previews; writes nothing)."""
@@ -215,6 +225,10 @@ def apply(actions: Sequence[Action], store_root: Path, s3: Any, bucket: str, *, 
             target = checked_path(store_root, action.rel)
         except UnsafePath as exc:
             log(f'  REFUSED {action.rel}: {exc}')
+            counts['failed'] += 1
+            continue
+        if action.action == 'download' and is_git_tracked_record(action.rel):
+            log(f'  REFUSED {action.rel}: head records and manifests come from the h5adstore git repository')
             counts['failed'] += 1
             continue
         if action.action == 'delete':
