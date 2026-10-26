@@ -1107,3 +1107,15 @@ pages resolve).
   which shows the stored `ant_*` names (`.ann-raw`) next to the plain labels. All data-tab names are unchanged, so old
   hashes work. Data tab card `#ds-annotations` lists the `ant_*` columns with vocabulary labels (`annotation_label`
   Jinja global, from `lib/obscol_tags_vocab.yaml`), `ant_donor_uid` left out.
+
+## Search in the top bar, smaller logo (2026-10-26, round 2)
+
+- `base.html` has `form#topbar-search` (GET `/search`) outside `#topbar-menu`; CSS `order` puts it between the spacer
+  and Help on desktop. Below 641px it is the icon `#topbar-search-toggle`, which opens `.ts-field` as a row under the
+  bar (`#topbar.search-open`; closes the menu panel; Escape, outside click, widening close it). `/` focuses it except
+  on the collection list (its own box). The results page passes `search_query` so the field keeps the words.
+  No live suggestions.
+- `/search` groups: genes, datasets, collections, gene sets, papers, artefacts, facets (only `ui.facets`), help; count
+  per group, `_SEARCH_TOP_N` (5) rows, "show all N" opens `?kind=<group>` (API `limit=500`); empty groups hidden.
+  Rows are built in `_search_rows` (one shape: title, href, meta, note, mark).
+- Nav: the front-door link is now labelled `home` (`#nav-home`). Top bar: logo 22px, wordmark 14px, padding 6px.

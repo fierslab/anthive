@@ -2664,16 +2664,99 @@ _MATCHED_IN_WORDS = {'title': 'title', 'collection': 'collection', 'disease': 'd
                      'description': 'description'}
 
 
+_SEARCH_TOP_N = 5          # rows per group on the mixed results page; "show all N" opens one group
+_SEARCH_GROUP_ORDER = ('genes', 'datasets', 'collections', 'genesets', 'papers', 'artefacts', 'facets', 'help')
+_SEARCH_GROUP_TITLES = {'genes': 'Genes', 'datasets': 'Datasets', 'collections': 'Collections',
+                        'genesets': 'Gene sets', 'papers': 'Papers', 'artefacts': 'Artefacts',
+                        'facets': 'Facets', 'help': 'Help'}
+# (singular, plural) for counts in the summary line and the "show all" links
+_SEARCH_GROUP_NOUNS = {'genes': ('gene', 'genes'), 'datasets': ('dataset', 'datasets'),
+                       'collections': ('collection', 'collections'), 'genesets': ('gene set', 'gene sets'),
+                       'papers': ('paper', 'papers'), 'artefacts': ('artefact', 'artefacts'),
+                       'facets': ('facet', 'facets'), 'help': ('help entry', 'help entries')}
+_ARTEFACT_KIND_WORDS = {'de_table': 'DE table', 'figure': 'figure', 'table': 'table', 'notebook': 'notebook',
+                        'report': 'report', 'model': 'model', 'other': 'file'}
+
+
+def _search_rows(kind: str, result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Result rows of one group in one shape: title, href, meta (short strings), note, mark."""
+    rows: List[Dict[str, Any]] = []
+    for row in result.get(kind) or []:
+        if kind == 'genes':
+            n = row.get('n_datasets') or 0
+            rows.append({'title': row['gene'], 'href': '/genes/' + url_quote(row['gene'], safe=''),
+                         'meta': [f"in {n} dataset{'' if n == 1 else 's'}"], 'note': '', 'mark': ''})
+        elif kind == 'datasets':
+            meta = [row.get('collection') or '', ', '.join(row.get('organism') or []), ', '.join(row.get('tissue') or []),
+                    ', '.join(row.get('cell_types') or []), ', '.join(row.get('diseases') or []),
+                    (format_number_count(row.get('n_cells')) + ' cells') if row.get('n_cells') else '']
+            matched = [_MATCHED_IN_WORDS.get(m, m) for m in row.get('matched_in') or []]
+            rows.append({'title': row.get('title') or row.get('db_id'), 'href': _search_dataset_href(row),
+                         'meta': [m for m in meta if m], 'note': ('found in ' + ', '.join(matched)) if matched else '',
+                         'mark': 'reanalysis' if row.get('designation') == 'reanalysis' else ''})
+        elif kind == 'collections':
+            n, hit = row.get('n_datasets') or 0, row.get('n_matching') or 0
+            meta = ['analysis collection' if row.get('kind') == 'analysis' else f"{n} dataset{'' if n == 1 else 's'}",
+                    str(row.get('year') or ''), row.get('summary') or '']
+            rows.append({'title': row.get('title') or row.get('group_id'),
+                         'href': '/browse/' + url_quote(str(row.get('group_id') or ''), safe=''),
+                         'meta': [m for m in meta if m],
+                         'note': (f"{hit} matching dataset{'' if hit == 1 else 's'}" if hit else 'found in the collection'),
+                         'mark': ''})
+        elif kind == 'genesets':
+            meta = [f"{row.get('study')}, {row.get('experiment')}",
+                    f"{row.get('n_genes')} genes" if row.get('n_genes') else '', row.get('description') or '']
+            rows.append({'title': row.get('display_name') or row.get('name'),
+                         'href': '/genesets/' + '/'.join(url_quote(str(row.get(k) or ''), safe='')
+                                                         for k in ('study', 'experiment', 'name')),
+                         'meta': [m for m in meta if m], 'note': '', 'mark': ''})
+        elif kind == 'papers':
+            n = row.get('n_datasets') or 0
+            meta = [row.get('citation') or row.get('first_author') or '', row.get('journal') or '',
+                    f"{n} linked dataset{'' if n == 1 else 's'}" if n else '']
+            rows.append({'title': row.get('title') or row.get('citekey'),
+                         'href': '/papers/' + url_quote(str(row.get('citekey') or ''), safe=''),
+                         'meta': [m for m in meta if m], 'note': '', 'mark': ''})
+        elif kind == 'artefacts':
+            belongs = row.get('db_id') or row.get('group_id') or ''
+            meta = [_ARTEFACT_KIND_WORDS.get(row.get('kind') or '', row.get('kind') or ''),
+                    f'belongs to {belongs}' if belongs else '', (row.get('updated') or '')[:10],
+                    safe_markdown.plain(row.get('description') or '')]
+            rows.append({'title': row.get('title') or row.get('artefact_id'),
+                         'href': '/artefacts/' + '/'.join(url_quote(str(row.get(k) or ''), safe='')
+                                                          for k in ('group_id', 'scope', 'artefact_id')),
+                         'meta': [m for m in meta if m], 'note': '', 'mark': 'withdrawn' if row.get('withdrawn') else ''})
+        elif kind == 'facets':
+            n = row.get('n_datasets') or 0
+            rows.append({'title': row.get('label') or row.get('column'),
+                         'href': '/facets/' + url_quote(str(row.get('column') or ''), safe=''),
+                         'meta': [m for m in (f"in {n} dataset{'' if n == 1 else 's'}", row.get('summary') or '') if m],
+                         'note': '', 'mark': ''})
+        elif kind == 'help':
+            where = 'glossary term' if row.get('kind') == 'term' else (
+                f"help, part of {row['parent']}" if row.get('parent') else 'help topic')
+            rows.append({'title': row.get('title'), 'href': '/help#' + url_quote(str(row.get('anchor') or ''), safe=''),
+                         'meta': [m for m in (where, row.get('summary') or '') if m], 'note': '', 'mark': ''})
+    return rows
+
+
+def format_number_count(value: Any) -> str:
+    return _short_count(value) if value else ''
+
+
 @router.get("/search", response_class=HTMLResponse)
-async def search_view(request: Request, q: str = ''):
-    """Search results for the words typed on the front page, grouped by kind (GET /api/search)."""
+async def search_view(request: Request, q: str = '', kind: str = ''):
+    """Search results for everything the site has, grouped by kind (GET /api/search): the top few per group
+    and a "show all N" link that opens one group (``?kind=``). Empty groups are left out."""
     query = (q or '').strip()[:300]
     if not query:
         return RedirectResponse(url='/', status_code=302)
+    only = kind if kind in _SEARCH_GROUP_ORDER else ''
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     try:
-        result = _api_get(_api_url(request), '/search?' + urlencode({'q': query, 'limit': 50}), timeout=30)
+        result = _api_get(_api_url(request), '/search?' + urlencode({'q': query, 'limit': 500 if only else 50}),
+                          timeout=30)
     except requests.HTTPError as exc:
         status = getattr(getattr(exc, 'response', None), 'status_code', None)
         error = ('This server does not offer search yet (it needs API 2.48). Use the collection list '
@@ -2682,23 +2765,34 @@ async def search_view(request: Request, q: str = ''):
     except Exception as exc:
         print(f"API error: {exc}")
         error = 'The search did not answer. Try again in a minute.'
-    datasets = []
-    for row in (result or {}).get('datasets') or []:
-        datasets.append(dict(row, href=_search_dataset_href(row),
-                             matched=[_MATCHED_IN_WORDS.get(m, m) for m in row.get('matched_in') or []]))
-    genesets = []
-    for row in (result or {}).get('genesets') or []:
-        genesets.append(dict(row, href='/genesets/' + '/'.join(
-            url_quote(str(row.get(k) or ''), safe='') for k in ('study', 'experiment', 'name'))))
+    groups: List[Dict[str, Any]] = []
+    if result:
+        hide = set()
+        if not _ui()['facets']:
+            hide.add('facets')
+        if not _library_available(request):
+            hide.add('papers')
+        for key in _SEARCH_GROUP_ORDER:
+            if key in hide or result.get(key) is None or (only and key != only):
+                continue
+            rows = _search_rows(key, result)
+            total = len(rows) if key == 'genes' else int(result.get(f'n_{key}') or len(rows))
+            if not total:
+                continue
+            singular, plural = _SEARCH_GROUP_NOUNS[key]
+            groups.append({'key': key, 'title': _SEARCH_GROUP_TITLES[key], 'n': total,
+                           'noun': singular if total == 1 else plural, 'plural': plural,
+                           'rows': rows if only else rows[:_SEARCH_TOP_N],
+                           'more_href': ('/search?' + urlencode({'q': query, 'kind': key}))
+                           if not only and total > _SEARCH_TOP_N else ''})
     return templates.TemplateResponse(request, "search.html", {
         "q": query,
+        "search_query": query,
+        "only": only,
+        "only_title": _SEARCH_GROUP_TITLES.get(only, ''),
         "result": result,
-        "datasets": datasets,
-        "genes": (result or {}).get('genes'),
-        "genesets": genesets if (result or {}).get('genesets') is not None else None,
-        "papers": (result or {}).get('papers'),
+        "groups": groups,
         "error": error,
-        "show_papers": _library_available(request),
     })
 
 

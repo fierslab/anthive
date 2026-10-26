@@ -29,7 +29,14 @@ def _fake_with_search(api_url, path, **kwargs):
         query = parse_qs(urlparse(path).query)['q'][0]
         databases = _fake_api_get(api_url, '/databases')['databases']
         index = catalog_search.GeneIndex([(db['id'], 'TREM2') for db in databases])
-        return catalog_search.search(query, databases, gene_index=index, genesets=[], labels={})
+        artefacts = [{'ref': f'GroupA/ds1/umap-{n}', 'artefact_id': f'umap-{n}', 'kind': 'figure', 'group_id': 'GroupA',
+                      'scope': 'ds1', 'db_id': 'GroupA/ds1', 'title': f'Microglia UMAP {n}', 'description': 'clusters',
+                      'withdrawn': n == 0} for n in range(7)]
+        facets = [{'column': 'ant_sex', 'tag': 'sex', 'label': 'Sex', 'summary': 'Biological sex of the donor',
+                   'definition': '', 'n_datasets': 2}]
+        return catalog_search.search(query, databases, gene_index=index, genesets=[], labels={},
+                                     artefacts=artefacts, facets=facets, help_hidden=[],
+                                     limit=int(parse_qs(urlparse(path).query).get('limit', ['50'])[0]))
     return _fake_api_get(api_url, path, **kwargs)
 
 
@@ -92,11 +99,45 @@ def test_old_landing_links_go_to_the_collection_list(client):
     assert client.get('/datasets', follow_redirects=False).headers['location'] == '/collections'
 
 
-def test_nav_has_the_search_link_as_preview_and_datasets_on_the_collection_list(client):
-    nav = client.get('/help').text.split('<nav aria-label="Main">')[1].split('</nav>')[0]
-    search = nav.split('id="nav-search"')[1].split('</a>')[0]
-    assert 'vw-preview' in nav.split('href="/"')[1].split('</a>')[0] and 'preview' in search
+def test_nav_has_home_as_preview_a_search_field_and_datasets_on_the_collection_list(client):
+    page = client.get('/help').text
+    nav = page.split('<nav aria-label="Main">')[1].split('</nav>')[0]
+    home = nav.split('id="nav-home"')[1].split('</a>')[0]
+    assert 'vw-preview' in nav.split('href="/"')[1].split('</a>')[0] and 'preview' in home
     assert 'vw-preview' not in nav.split('href="/collections"')[1].split('</a>')[0]
+    form = page.split('id="topbar-search"')[1].split('</form>')[0]
+    assert 'action="/search"' in page.split('id="topbar-search"')[0].rsplit('<form', 1)[1] + form
+    assert 'name="q"' in form and 'id="topbar-search-toggle"' in form and 'aria-expanded="false"' in form
+    # outside the phone menu panel, so the icon stays in the bar
+    assert page.index('id="topbar-search"') < page.index('id="topbar-menu"')
+    for path in ('/', '/collections', '/browse/GroupA/ds1', '/genes', '/diseases'):
+        assert 'id="topbar-search-input"' in client.get(path).text, path
+
+
+def test_search_field_keeps_the_query_on_the_results_page(client):
+    html = client.get('/search', params={'q': 'microglia'}).text
+    assert re.search(r'id="topbar-search-input" value="microglia"', html)
+
+
+def test_search_groups_top_few_and_show_all(client):
+    html = client.get('/search', params={'q': 'microglia'}).text
+    artefacts = html.split('id="search-artefacts"')[1].split('</section>')[0]
+    assert artefacts.count('<li>') == 5 and 'show all 7 artefacts' in artefacts
+    assert 'href="/search?q=microglia&amp;kind=artefacts"' in artefacts
+    assert 'href="/artefacts/GroupA/ds1/umap-1"' in artefacts and 'withdrawn' in artefacts
+    assert 'id="search-collections"' in html and 'href="/browse/GroupA"' in html
+    assert 'id="search-facets"' not in html                       # no facet matches microglia: group hidden
+    one = client.get('/search', params={'q': 'microglia', 'kind': 'artefacts'}).text
+    assert one.split('id="search-artefacts"')[1].split('</section>')[0].count('<li>') == 7
+    assert 'id="search-datasets"' not in one and '<title>Artefacts · Search · anthive</title>' in one
+
+
+def test_search_finds_help_and_facets_and_respects_ui_facets(client, monkeypatch):
+    html = client.get('/search', params={'q': 'sex'}).text
+    assert 'href="/facets/ant_sex"' in html.split('id="search-facets"')[1].split('</section>')[0]
+    assert 'href="/help#' in html.split('id="search-help"')[1].split('</section>')[0]
+    monkeypatch.setattr(browser, '_ui_cfg', {'facets': False, 'caveats': True, 'api': True, 'mcp': True, 'jupyter': True})
+    assert 'id="search-facets"' not in client.get('/search', params={'q': 'sex'}).text
 
 
 def test_search_results_grouped_by_kind(client):

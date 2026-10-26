@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% from "_macros.html" import review_banner, doc_block, doc_toggle %}
-{% from "_front_door.html" import fd_styles, fd_search, fd_dataset_row %}
+{% from "_front_door.html" import fd_styles, fd_search %}
 
-{% block title %}Search · anthive{% endblock %}
+{% block title %}{{ only_title ~ ' · ' if only_title }}Search · anthive{% endblock %}
 
 {% block content %}
 {{ fd_styles() }}
@@ -15,72 +15,38 @@
   {% set _words = result.words or [] %}
   <p class="fd-sum" id="search-summary">
     {%- if not _words %}No search words left after dropping filler words such as "in" or "expression". Try a gene, a disease or a cell type.
-    {%- else %}Searched for {% for word in _words %}<b>{{ word }}</b>{% if not loop.last %}, {% endif %}{% endfor %}.{{ doc_toggle('search-how', 'How the search works') }}{% endif %}</p>
+    {%- else %}Searched for {% for word in _words %}<b>{{ word }}</b>{% if not loop.last %}, {% endif %}{% endfor %}{% if only %} in {{ groups[0].plural if groups else only_title|lower }} (<a href="/search?q={{ q|urlencode }}">all kinds</a>){% else %}{% if groups %}: {% for group in groups %}<a href="#search-{{ group.key }}">{{ group.n }} {{ group.noun }}</a>{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}{% endif %}.{{ doc_toggle('search-how', 'How the search works') }}{% endif %}</p>
   {% call doc_block('How the search works', id='search-how') %}
-    <p>Filler words ("expression", "in", "across", "which", "datasets") are dropped. A word that is the name of a gene is shown as a gene and does not filter the datasets, because nearly every dataset measures nearly every gene; open the gene to see its expression in every dataset. A word that names a disease, cell type, organism or tissue recorded in the catalogue must match that field, so "microglia" finds datasets recorded as microglia and not a neuron dataset whose description mentions microglia. Every other word must occur in a dataset's title, collection, description, method or the names of its cell annotation columns. A word also matches inside a longer word ("microglia" finds "microglial cell"), a plural s is optional, and AD, PD, MS, ALS, FTD and APOE4 are expanded. A dataset that has a column such as "APOE e4 carrier" is listed even if few of its donors carry the allele; open it to see the values.</p>
+    <p>One search covers datasets, collections, genes, gene sets, papers, artefacts{% if ui.facets %}, facets{% endif %} and the help pages, and only what you may see. Filler words ("expression", "in", "across", "which", "datasets") are dropped. A word that is the name of a gene is shown as a gene and does not filter the datasets, because nearly every dataset measures nearly every gene; open the gene to see its expression in every dataset. A word that names a disease, cell type, organism or tissue recorded in the catalogue must match that field, so "microglia" finds datasets recorded as microglia and not a neuron dataset whose description mentions microglia. Every other word must occur in a dataset's title, collection, description, method or the names of its cell annotation columns. A collection is listed when its own text holds every word or when it holds a matching dataset. Artefacts match on their title, description, kind and what they belong to; facets on their name and definition; help on the text of each topic and glossary term. A word also matches inside a longer word ("microglia" finds "microglial cell"), a plural s is optional, and AD, PD, MS, ALS, FTD and APOE4 are expanded. A dataset that has a column such as "APOE e4 carrier" is listed even if few of its donors carry the allele; open it to see the values.</p>
   {% endcall %}
 
-  {% if genes is not none %}
-  <section class="fd-group" id="search-genes">
-    <h2 class="section-head">Genes <span class="muted">{{ genes|length }}</span></h2>
-    {% if genes %}
+  {% for group in groups %}
+  <section class="fd-group" id="search-{{ group.key }}">
+    <h2 class="section-head">{{ group.title }} <span class="muted">{{ group.n }}</span></h2>
+    {% if group.key == 'genes' %}
     <div class="fd-genes">
-      {% for gene in genes %}<a href="/genes/{{ gene.gene|urlencode }}" title="Expression of {{ gene.gene }} in every dataset, grouped by cell type"><b>{{ gene.gene }}</b><span class="n">in {{ gene.n_datasets }} dataset{{ '' if gene.n_datasets == 1 else 's' }}</span></a>{% endfor %}
+      {% for row in group.rows %}<a href="{{ row.href }}" title="Expression of {{ row.title }} in every dataset, grouped by cell type"><b>{{ row.title }}</b><span class="n">{{ row.meta|join(' ') }}</span></a>{% endfor %}
     </div>
-    {% if result.datasets_basis == 'words' %}<p class="fd-more">The gene page shows the expression in every dataset; the datasets below match your other words.</p>{% endif %}
-    {% elif result.suggestions %}
-    <p class="fd-none">No gene with that exact name. Genes that start with it: {% for name in result.suggestions %}<a href="/genes/{{ name|urlencode }}">{{ name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+    {% if result.datasets_basis == 'words' and result.n_datasets %}<p class="fd-more">The gene page shows the expression in every dataset; the datasets below match your other words.</p>{% endif %}
     {% else %}
-    <p class="fd-none">No gene named in the search.</p>
-    {% endif %}
-  </section>
-  {% endif %}
-
-  <section class="fd-group" id="search-datasets">
-    <h2 class="section-head">Datasets <span class="muted">{{ result.n_datasets }}</span></h2>
-    {% if result.datasets_basis == 'mentions' and datasets %}<p class="fd-more">Datasets whose description or annotations mention {{ result.gene_words|join(', ') }}.</p>{% endif %}
-    {% if datasets %}
+    {% if group.key == 'datasets' and result.datasets_basis == 'mentions' %}<p class="fd-more">Datasets whose description or annotations mention {{ result.gene_words|join(', ') }}.</p>{% endif %}
     <ul class="fd-list">
-      {% for row in datasets %}{{ fd_dataset_row(row) }}{% endfor %}
-    </ul>
-    {% if result.n_datasets > datasets|length %}<p class="fd-more">Showing {{ datasets|length }} of {{ result.n_datasets }}. Add a word to narrow the list.</p>{% endif %}
-    {% else %}
-    <p class="fd-none">No dataset matches every word.{% if _words|length > 1 %} Try fewer words.{% endif %} You can also <a href="/diseases">browse by disease</a>, <a href="/cell-types">by cell type</a> or <a href="/collections">by dataset</a>.</p>
-    {% endif %}
-  </section>
-
-  {% if genesets is not none %}
-  <section class="fd-group" id="search-genesets">
-    <h2 class="section-head">Gene sets <span class="muted">{{ result.n_genesets }}</span></h2>
-    {% if genesets %}
-    <ul class="fd-list">
-      {% for row in genesets %}
-      <li><a class="t" href="{{ row.href }}">{{ row.display_name|no_dash }}</a>
-        <div class="m"><span>{{ row.study }}, {{ row.experiment }}</span>{% if row.n_genes %}<span class="sep">·</span><span>{{ row.n_genes }} genes</span>{% endif %}{% if row.description %}<span class="sep">·</span><span>{{ row.description|truncate(140)|no_dash }}</span>{% endif %}</div></li>
+      {% for row in group.rows %}
+      <li><a class="t" href="{{ row.href }}">{{ row.title|no_dash }}</a>{% if row.mark %} <span class="fd-mark">{{ row.mark }}</span>{% endif %}
+        {% if row.meta %}<div class="m">{% for item in row.meta %}<span>{{ item|truncate(160)|no_dash }}</span>{% if not loop.last %}<span class="sep">·</span>{% endif %}{% endfor %}</div>{% endif %}
+        {% if row.note %}<div class="why">{{ row.note }}</div>{% endif %}</li>
       {% endfor %}
     </ul>
-    {% if result.n_genesets > genesets|length %}<p class="fd-more">Showing {{ genesets|length }} of {{ result.n_genesets }}; <a href="/genesets?q={{ (_words|join(' '))|urlencode }}">search all gene sets</a>.</p>{% endif %}
-    {% else %}
-    <p class="fd-none">No gene set matches.</p>
     {% endif %}
+    {% if group.more_href %}<p class="fd-more"><a href="{{ group.more_href }}" class="fd-show-all">show all {{ group.n }} {{ group.plural }}</a></p>{% elif only and group.n > group.rows|length %}<p class="fd-more">Showing {{ group.rows|length }} of {{ group.n }}. Add a word to narrow the list.</p>{% endif %}
   </section>
-  {% endif %}
+  {% endfor %}
 
-  {% if papers is not none and show_papers %}
-  <section class="fd-group" id="search-papers">
-    <h2 class="section-head">Papers <span class="muted">{{ result.n_papers }}</span></h2>
-    {% if papers %}
-    <ul class="fd-list">
-      {% for paper in papers[:20] %}
-      <li><a class="t" href="/papers/{{ paper.citekey|urlencode }}">{{ (paper.title or paper.citekey)|no_dash }}</a>
-        <div class="m"><span>{{ paper.citation or paper.first_author or '' }}</span>{% if paper.journal %}<span class="sep">·</span><span>{{ paper.journal }}</span>{% endif %}{% if paper.n_datasets %}<span class="sep">·</span><span>{{ paper.n_datasets }} linked dataset{{ '' if paper.n_datasets == 1 else 's' }}</span>{% endif %}</div></li>
-      {% endfor %}
-    </ul>
-    {% if result.n_papers > 20 %}<p class="fd-more">Showing 20 of {{ result.n_papers }}; <a href="/library">open the library</a> to search inside the papers.</p>{% endif %}
-    {% else %}
-    <p class="fd-none">No paper in the library holds every word.</p>
-    {% endif %}
-  </section>
+  {% if not groups and _words %}
+  {% if result.suggestions %}
+  <p class="fd-none" id="search-suggestions">No gene with that exact name. Genes that start with it: {% for name in result.suggestions %}<a href="/genes/{{ name|urlencode }}">{{ name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+  {% endif %}
+  <p class="fd-none" id="search-nothing">Nothing matches every word.{% if _words|length > 1 %} Try fewer words.{% endif %} You can also <a href="/diseases">browse by disease</a>, <a href="/cell-types">by cell type</a> or <a href="/collections">by dataset</a>.</p>
   {% endif %}
   {% endif %}
 </div>
