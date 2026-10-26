@@ -773,7 +773,8 @@
             {% macro navlink(key, href, label, tip, link_id='') -%}
             <a href="{{ href }}"{% if link_id %} id="{{ link_id }}"{% endif %} class="{{ view_class(key) }}" title="{{ view_tip(key, tip) }}">{{ label }}{% if not view_approved(key) %}<span class="exp-badge">preview</span>{% endif %}</a>
             {%- endmacro %}
-            {{ navlink('datasets', '/', 'datasets', 'The dataset catalogue') }}
+            {{ navlink('front-door', '/', 'search', 'Search datasets, genes, gene sets and papers; browse by disease or cell type', 'nav-search') }}
+            {{ navlink('datasets', '/collections', 'datasets', 'The dataset catalogue: every collection and its datasets') }}
             {% if request.app.state.genesets_available %}
             {{ navlink('genesets', '/genesets', 'gene sets', 'Gene sets: search by name, then see where a set is expressed') }}
             {% endif %}

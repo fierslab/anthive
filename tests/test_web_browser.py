@@ -1513,7 +1513,7 @@ def client(monkeypatch):
 
 
 def test_index_renders(client):
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     # collection appears in the rendered catalog
@@ -1524,7 +1524,7 @@ def test_chat_widget_present_and_status_gated(client):
     # The sitewide data-assistant widget ships in base.html on every page, but
     # is gated entirely client-side on GET /api/chat/status — so the launcher
     # markup is present yet hidden, and the page never assumes chat is on.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'id="chat-launcher"' in resp.text
     assert 'id="chat-panel"' in resp.text
@@ -1537,7 +1537,7 @@ def test_chat_widget_present_and_status_gated(client):
 
 def test_chat_consent_gate_present(client):
     # One-time privacy consent gate lives in the panel and acks via POST.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'id="chat-gate"' in resp.text
     assert 'id="chat-ack-btn"' in resp.text
@@ -1580,11 +1580,11 @@ def test_settings_link_in_topbar_when_authed(client):
     (moved from the Authelia account dropdown in P1.14 — settings are
     localStorage / per-browser, so they don't need SSO)."""
     # Authed: link present.
-    resp = client.get("/", headers={"Remote-User": "test-user", "Remote-Name": "Test User"})
+    resp = client.get("/collections", headers={"Remote-User": "test-user", "Remote-Name": "Test User"})
     assert resp.status_code == 200
     assert 'href="/settings"' in resp.text
     # Un-authenticated: link ALSO present (no SSO gate on preferences).
-    resp2 = client.get("/")
+    resp2 = client.get("/collections")
     assert resp2.status_code == 200
     assert 'href="/settings"' in resp2.text
 
@@ -1666,7 +1666,7 @@ def test_facets_index_renders(client):
 
 def test_facets_link_in_topbar(client):
     # Facets link is visible in the topbar nav on any page.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert '>facets<' in resp.text
 
@@ -1706,7 +1706,7 @@ def test_facets_pages_carry_the_preview_banner_not_the_experimental_box(client, 
 
 
 def test_facets_nav_entry_has_experimental_badge(client):
-    text = client.get("/").text
+    text = client.get("/collections").text
     assert '<a href="/facets"' in text
     nav_entry = text.split('<a href="/facets"')[1].split("</a>")[0]
     assert 'class="exp-badge"' in nav_entry
@@ -1809,10 +1809,14 @@ def test_dataset_page_facets_card(client):
     assert '<div class="table-wrap">\n<table class="ds-facets">' in facets_tab
     data_tab = text.split('id="tab-data"')[1].split("</section>")[0]
     assert 'id="ds-facets"' not in data_tab
-    assert 'Facets: see the <a href="#facets">Facet tab</a>; their effects are in its <a href="#facet-gene">Gene</a> sub-tab.' in data_tab
+    assert ('Donor-level comparisons (facets) are in the <a href="#facet-gene">Facets &amp; DE</a> tab; how the columns '
+            'map onto the facets is under <a href="#facets">Technical details</a>.') in data_tab
+    # the facet mapping, Numerical and Categorical sit behind Technical details (closed by default)
+    tech = text.split('id="ds-tech-bar"')[1].split("</div>")[0]
+    assert 'data-tab="facets"' in tech and '<span class="tab-count">' in tech.split('data-tab="facets"')[1]
+    assert tech.index('data-tab="num"') < tech.index('data-tab="cat"') < tech.index('data-tab="facets"')
     bar = text.split('id="ds-tab-bar"')[1].split("</div>")[0]
-    assert 'data-tab="facets"' in bar and '<span class="tab-count">' in bar.split('data-tab="facets"')[1]
-    assert bar.index('data-tab="data"') < bar.index('data-tab="num"') < bar.index('data-tab="cat"') < bar.index('data-tab="facets"')
+    assert 'data-tab="num"' not in bar and 'data-tab="facets"' not in bar
     assert 'id="fx-unit-line"' in facets_tab and 'id="fx-cohort"' in facets_tab
 
 
@@ -1845,29 +1849,29 @@ def test_admin_feedback_page_renders(client):
 
 def test_chat_feedback_link_left_the_user_menu(client):
     # Replaced by "Report an issue"; the page itself stays reachable for admins.
-    admin = client.get("/", headers={"Remote-User": "mf", "Remote-Groups": "admins"})
+    admin = client.get("/collections", headers={"Remote-User": "mf", "Remote-Groups": "admins"})
     assert 'href="/admin/feedback"' not in admin.text
     assert client.get("/admin/feedback", headers={"Remote-Groups": "admins"}).status_code == 200
 
 
 def test_issue_tracker_link_for_signed_in_users(client, monkeypatch):
     monkeypatch.setenv("ANTHIVE_ISSUE_TRACKER_URL", "https://tracker.example/issues")
-    plain = client.get("/", headers={"Remote-User": "mf", "Remote-Groups": "users"})
+    plain = client.get("/collections", headers={"Remote-User": "mf", "Remote-Groups": "users"})
     assert 'id="issue-tracker-link"' in plain.text
     assert 'href="https://tracker.example/issues"' in plain.text
     assert 'target="_blank"' in plain.text.split('id="issue-tracker-link"')[1][:80]
     assert "Report an issue" in plain.text
-    assert 'id="issue-tracker-link"' not in client.get("/").text      # anonymous
+    assert 'id="issue-tracker-link"' not in client.get("/collections").text      # anonymous
 
 
 def test_issue_tracker_link_hidden_when_unconfigured(client, monkeypatch):
     monkeypatch.setenv("ANTHIVE_ISSUE_TRACKER_URL", "")
-    resp = client.get("/", headers={"Remote-User": "mf"})
+    resp = client.get("/collections", headers={"Remote-User": "mf"})
     assert 'id="issue-tracker-link"' not in resp.text
 
 
 def test_user_menu_dropdown_has_hover_bridge_and_tap_toggle(client):
-    resp = client.get("/", headers={"Remote-User": "mf"})
+    resp = client.get("/collections", headers={"Remote-User": "mf"})
     text = resp.text
     assert ".dropdown-menu::before" in text            # no hover gap under the toggle
     assert ".dropdown.open .dropdown-menu" in text     # click/tap opens it
@@ -1897,7 +1901,7 @@ def test_dataset_editor_mus_section_present(client):
 def test_index_renders_with_multiple_collections_no_redirect(client):
     # Sanity: with the default fake (two groups), '/' renders the overview;
     # the single-collection auto-jump must not fire here.
-    resp = client.get("/", follow_redirects=False)
+    resp = client.get("/collections", follow_redirects=False)
     assert resp.status_code == 200
 
 
@@ -1912,7 +1916,7 @@ def test_index_auto_redirects_to_only_collection(client, monkeypatch):
         return _fake_api_get(api_url, path)
 
     monkeypatch.setattr(browser, "_api_get", fake)
-    resp = client.get("/", follow_redirects=False)
+    resp = client.get("/collections", follow_redirects=False)
     assert resp.status_code == 302
     assert resp.headers["location"] == "/browse/GroupA"
 
@@ -1930,7 +1934,7 @@ def test_index_no_redirect_when_query_string_present(client, monkeypatch):
 
     monkeypatch.setattr(browser, "_api_get", fake)
     for qs in ("?all=1", "?search=foo", "?organism=human"):
-        resp = client.get(f"/{qs}", follow_redirects=False)
+        resp = client.get(f"/collections{qs}", follow_redirects=False)
         assert resp.status_code == 200, f"unexpected redirect for {qs!r}"
         assert "Group A Study" in resp.text
 
@@ -1944,7 +1948,7 @@ def test_index_zero_collections_no_redirect(client, monkeypatch):
         return _fake_api_get(api_url, path)
 
     monkeypatch.setattr(browser, "_api_get", fake)
-    resp = client.get("/", follow_redirects=False)
+    resp = client.get("/collections", follow_redirects=False)
     assert resp.status_code == 200
 
 
@@ -1952,7 +1956,7 @@ def test_index_survives_api_failure(client, monkeypatch):
     def boom(api_url, path):  # pyright: ignore
         raise requests.HTTPError("API down")
     monkeypatch.setattr(browser, "_api_get", boom)
-    resp = client.get("/")
+    resp = client.get("/collections")
     # route catches the error and renders an empty catalog rather than 500
     assert resp.status_code == 200
 
@@ -2350,7 +2354,7 @@ def test_folder_view_shows_secondary_badge(client):
 def test_index_view_shows_secondary_badge_when_any_member(client):
     """Landing page rolls the flag up — GroupA has ds2 (secondary), so the
     collection row carries a (2) badge on the collection name."""
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     # The has_secondary aggregate must fire the collection-level tooltip.
     assert 'This collection contains one or more secondary datasets' in resp.text
@@ -2397,7 +2401,7 @@ def test_about_page_renders(client):
 
 def test_about_link_on_brand_logo(client):
     # the topbar brand/logo links to /about (no standalone About nav item)
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'href="/about" class="brand"' in resp.text
     # the standalone "about" nav link was removed
@@ -2429,7 +2433,7 @@ def test_gene_atlas_multigene_route(client):
 def test_topbar_has_no_gene_search_box(client):
     # The top-bar gene search was removed (it ate a whole row on phones);
     # a plain "genes" nav link to /genes replaces it.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'class="gene-search"' not in resp.text
     assert "gene atlas\u2026" not in resp.text
@@ -2440,7 +2444,7 @@ def test_storage_notice_is_a_slim_bar_on_phones(client):
     # The privacy notice used to be a multi-line card covering the bottom of
     # a phone screen. On narrow screens it is now a one-line bar (message,
     # details, dismiss) and the body gets bottom padding while it shows.
-    text = client.get("/").text
+    text = client.get("/collections").text
     assert 'id="storage-notice" style="display:none"' in text
     assert 'class="sn-line"' in text and 'class="sn-extra"' in text
     # since the bar is used at every width, the one-line rules are global and
@@ -2457,7 +2461,7 @@ def test_storage_notice_is_a_slim_bar_on_phones(client):
 
 
 def test_topbar_genes_link(client):
-    text = client.get("/").text
+    text = client.get("/collections").text
     idx = text.find('id="nav-genes"')
     assert idx >= 0, "genes link missing from the top bar"
     tag = text[text.rfind("<a ", 0, idx):text.find("</a>", idx)]
@@ -2494,7 +2498,7 @@ def test_gene_atlas_page_has_lookup_form_and_breadcrumb(client):
 
 def test_topbar_menu_button(client):
     # Narrow screens collapse the nav into a panel behind an accessible button.
-    text = client.get("/", headers={"Remote-User": "mf", "Remote-Name": "Mark Fiers"}).text
+    text = client.get("/collections", headers={"Remote-User": "mf", "Remote-Name": "Mark Fiers"}).text
     idx = text.find('id="nav-toggle"')
     assert idx >= 0
     tag = text[text.rfind("<button", 0, idx):text.find(">", idx) + 1]
@@ -2518,7 +2522,7 @@ def test_topbar_menu_button(client):
 
 
 def test_exp_badge_is_small_inline(client):
-    text = client.get("/").text
+    text = client.get("/collections").text
     nav_entry = text.split('<a href="/facets"')[1].split("</a>")[0]
     assert 'class="vw-preview"' in nav_entry          # facets is not approved yet: muted nav link
     assert '<span class="exp-badge">preview</span>' in nav_entry
@@ -2542,7 +2546,7 @@ def test_favicon_routes_served(client):
 
 
 def test_favicon_links_in_head(client):
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert 'rel="manifest"' in resp.text
     assert "/favicon.svg" in resp.text
     assert 'name="theme-color"' in resp.text
@@ -2794,8 +2798,8 @@ def test_de_study_view_404_on_missing_study(client, monkeypatch):
 def test_table_wrap_present_on_table_pages(client):
     # Every data table is wrapped in .table-wrap (overflow-x guard) so a wide
     # table scrolls inside its box rather than widening the page on mobile.
-    for path in ("/", "/browse/GroupA", "/browse/GroupA/ds1", "/genesets",
-                 "/genesets/StudyX/Exp1"):
+    for path in ("/collections", "/browse/GroupA", "/browse/GroupA/ds1", "/genesets",
+                 "/genesets/StudyX/Exp1", "/diseases"):
         resp = client.get(path)
         assert resp.status_code == 200
         assert 'class="table-wrap"' in resp.text, f"missing .table-wrap on {path}"
@@ -2803,7 +2807,7 @@ def test_table_wrap_present_on_table_pages(client):
 
 def test_table_wrap_style_defined(client):
     # The .table-wrap rule itself ships in base.html's <style>.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert ".table-wrap" in resp.text
     assert "overflow-x: auto" in resp.text
 
@@ -2811,7 +2815,7 @@ def test_table_wrap_style_defined(client):
 def test_card_table_rule_defined(client):
     # The shared mobile card-grid layout lives in base.html, keyed on
     # table.card-table, and triggers at <=760px.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert "table.card-table" in resp.text
     assert "@media (max-width: 760px)" in resp.text
     assert "grid-template-columns: 1fr 1fr" in resp.text
@@ -2835,7 +2839,7 @@ def test_topbar_authelia_identity_and_signout(client):
     # dropdown surfaces the user + a Logout action wired to the Authelia logout
     # endpoint. The old separate "account settings" (/authelia/) item was
     # collapsed into a single Logout line 2026-08-24.
-    resp = client.get("/", headers={
+    resp = client.get("/collections", headers={
         "Remote-User": "mf", "Remote-Name": "Mark Fiers",
         "Remote-Email": "mark@example.org",
     })
@@ -2853,7 +2857,7 @@ def test_topbar_no_auth_section_without_header(client):
     # Direct / un-proxied access (no Remote-User) → the Logout item disappears
     # and the auth-only "signed in as" header disappears, but the dropdown
     # itself stays (Preferences is per-browser / no SSO needed).
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'id="authelia-signout"' not in resp.text
     assert "signed in as" not in resp.text
@@ -2863,7 +2867,7 @@ def test_topbar_no_auth_section_without_header(client):
 
 def test_topbar_help_link_present(client):
     # The 'Help' link lives in the top-right utility cluster on every page.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'href="/help"' in resp.text
 
@@ -2872,7 +2876,7 @@ def test_topbar_has_no_api_link(client):
     # API is not a top-level item: the top bar (main nav and utility row
     # outside the user dropdown) has no link to /api-guide, signed in or not.
     for headers in ({}, {"Remote-User": "mf", "Remote-Name": "Mark Fiers"}):
-        html = client.get("/", headers=headers).text
+        html = client.get("/collections", headers=headers).text
         assert 'id="topbar-api-link"' not in html
         bar = html.split('id="topbar-menu"', 1)[1].split('<script>', 1)[0]
         outside_menu = bar.split('class="dropdown topbar-auth"', 1)[0]
@@ -2883,7 +2887,7 @@ def test_user_dropdown_has_api_entry(client):
     # The API page lives in the user dropdown, for signed-in and anonymous
     # visitors alike (auth.mode none has the dropdown too), before Preferences.
     for headers in ({}, {"Remote-User": "mf", "Remote-Name": "Mark Fiers"}):
-        html = client.get("/", headers=headers).text
+        html = client.get("/collections", headers=headers).text
         menu = html.split('class="dropdown-menu right"', 1)[1].split("</span>", 1)[0]
         assert 'id="api-menu-link"' in menu
         tag = menu[menu.rfind("<a ", 0, menu.index('id="api-menu-link"')):]
@@ -3026,7 +3030,7 @@ def test_topbar_preferences_moved_into_dropdown(client):
     # 'Preferences' is no longer a top-level nav entry — it lives INSIDE the
     # user dropdown (linking to /settings). The main <nav> at the start of the
     # topbar must not carry it any more.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     # The dropdown item is called "Preferences" (capitalised) and points to /settings.
     assert ">Preferences<" in resp.text
@@ -3042,7 +3046,7 @@ def test_topbar_preferences_moved_into_dropdown(client):
 def test_topbar_dropdown_shows_without_sso(client):
     # Un-authed users still get a dropdown (for Preferences). The "signed in
     # as" header line only renders when Authelia headers are present.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'class="dropdown-menu right"' in resp.text
     assert 'href="/settings"' in resp.text
@@ -3052,7 +3056,7 @@ def test_topbar_dropdown_shows_without_sso(client):
 def test_topbar_dropdown_header_shown_when_authed(client):
     # When Authelia identifies the user, the dropdown carries a small header
     # "signed in as <user>" above the menu items.
-    resp = client.get("/", headers={
+    resp = client.get("/collections", headers={
         "Remote-User": "mf", "Remote-Name": "Mark Fiers",
     })
     assert resp.status_code == 200
@@ -3189,7 +3193,7 @@ def test_help_page_issue_link_follows_config(client, monkeypatch):
 
 def test_help_link_reachable_from_landing(client):
     # A user landing on / can click Help without knowing the URL.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'href="/help"' in resp.text
 
@@ -3198,7 +3202,7 @@ def test_landing_popover_filter_guard(client):
     # Regression: the column-header popover click handler must ignore clicks
     # that originate inside the open popover — otherwise filter checkboxes
     # close the popover before they register.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert "activePopover.contains(e.target)" in resp.text
 
@@ -3207,7 +3211,7 @@ def test_landing_popover_uses_fixed_positioning(client):
     # The .col-popover must use position:fixed (not position:absolute) so it
     # escapes any overflow:auto ancestor (.table-wrap) and is never clipped
     # when the table is narrowed to a single row by a filter.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert "position:fixed" in resp.text, \
         ".col-popover must use position:fixed to escape overflow:auto clipping"
@@ -3225,7 +3229,7 @@ def test_landing_popover_uses_fixed_positioning(client):
 def test_landing_popover_appended_to_body(client):
     # The popover JS must append to document.body (not th.appendChild) so the
     # DOM element is outside .table-wrap and never subject to its overflow clip.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert "document.body.appendChild(pop)" in resp.text, \
         "popover must be appended to document.body, not the <th>"
@@ -3234,7 +3238,7 @@ def test_landing_popover_appended_to_body(client):
 def test_landing_popover_positioned_via_bounding_rect(client):
     # The popover must position itself via getBoundingClientRect() on the
     # anchor <th>, setting top/left from the viewport rectangle.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert "getBoundingClientRect()" in resp.text, \
         "popover positioning must use getBoundingClientRect()"
@@ -3245,7 +3249,7 @@ def test_landing_popover_positioned_via_bounding_rect(client):
 def test_landing_popover_closes_on_scroll_and_resize(client):
     # Scroll and resize listeners must call closePopover so the fixed-position
     # popover doesn't drift away from its anchor after the page moves.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert "window.addEventListener('scroll', closePopover" in resp.text, \
         "missing scroll listener to close popover"
@@ -3261,7 +3265,7 @@ def test_tissue_popover_is_hierarchical(client):
     # angular gyrus, …).
     import json as _json
 
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     # Column now advertises tissue as a filter target
     assert 'data-col="tissue"' in resp.text
@@ -3315,7 +3319,7 @@ def test_landing_access_pub_icon_inline(client):
     # Access and publication_status collapse to a single .ap-icon inline before
     # the collection name; their filters live under the Collection header
     # popover (data-filter-fields="acc,pub"). Old .acc-src two-glyph pair gone.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'class="ap-icon"' in resp.text
     assert 'data-filter-fields="acc,pub"' in resp.text
@@ -3485,7 +3489,7 @@ def test_landing_mobile_card_markup(client):
     # the card title, and the scalar columns are labelled for the 2-column
     # card grid. Cell + Disease are their own columns (no longer packed into
     # a card-span "context" cluster).
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'id="coll-table" class="card-table"' in resp.text
     assert 'class="card-title"' in resp.text
@@ -3500,7 +3504,7 @@ def test_landing_mobile_card_markup(client):
 def test_btn_edit_class_defined_sitewide(client):
     # The muted-red .btn-edit style lives in base.html so both the group and
     # dataset pages render the Edit affordance with identical treatment.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert ".btn-edit" in resp.text
     # (line below is the palette-amber recolour done 2026-08)
@@ -3535,7 +3539,7 @@ def test_folder_edit_button_top_right(client):
 def test_tab_bar_css_shared_in_base(client):
     # The .tab-bar / .tab-btn / .tab-panel styles live in base.html so both the
     # dataset page and the edit page pick them up.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert ".tab-bar" in resp.text
     assert ".tab-btn" in resp.text
@@ -3915,7 +3919,7 @@ def test_group_static_download_rejects_hidden_suffix(client, tmp_path, monkeypat
 def test_landing_uses_unified_icon(client):
     # index.html renders the new .ap-icon (single glyph with fixed-width
     # container) — no more two-glyph access/source pair.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert "ap-icon" in resp.text
     # class definition ships in base.html (sitewide)
@@ -3993,14 +3997,14 @@ def test_folder_page_default_sort_date_desc(client):
 def test_landing_description_moved_to_title_attr(client):
     # The grey per-collection description block is gone; the summary rides on
     # the <a> title= tooltip instead.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'coll-desc' not in resp.text
 
 
 def test_landing_removed_modified_column(client):
     # New Region + Date columns replace Modified.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert 'data-col="date"' in resp.text
     assert 'data-col="tissue"' in resp.text          # new Region column
@@ -4050,7 +4054,7 @@ def test_dataset_page_context_pills_uniform_color(client):
 
 def test_base_html_dark_teal_palette(client):
     # Palette refresh — dark teal (#335C67) is the primary --link colour.
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert "#335C67" in resp.text
     # cream + red + amber tokens present
@@ -4059,7 +4063,7 @@ def test_base_html_dark_teal_palette(client):
 
 
 def test_base_html_roboto_loaded(client):
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert "fonts.googleapis.com" in resp.text
 
@@ -5279,7 +5283,7 @@ def test_breadcrumb_home_link(client, path: str):
 
 def test_breadcrumb_font_size_in_base_css(client):
     """base.html must declare font-size:12px on .breadcrumb (sitewide uniformity)."""
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     # CSS block in base.html contains the rule
     assert ".breadcrumb" in resp.text
@@ -5294,7 +5298,7 @@ def test_breadcrumb_font_size_in_base_css(client):
 
 def test_breadcrumb_current_bold_css(client):
     """base.html must declare font-weight:700 on .bc-current."""
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert ".bc-current" in resp.text, ".bc-current CSS class not declared in base.html"
     idx = resp.text.find(".bc-current {")
@@ -5325,7 +5329,7 @@ def test_breadcrumb_id_chips_on_context_pages(client, path: str, expected_ids: l
 
 def test_breadcrumb_id_chip_css_in_base(client):
     """base.html must declare .bc-id-chip CSS with user-select:all and cursor:pointer."""
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert ".bc-id-chip" in resp.text, ".bc-id-chip CSS not in base.html"
     # user-select:all makes the chip content directly selectable
@@ -5334,7 +5338,7 @@ def test_breadcrumb_id_chip_css_in_base(client):
 
 def test_breadcrumb_copy_js_in_base(client):
     """base.html must include the click handler that calls navigator.clipboard.writeText."""
-    resp = client.get("/")
+    resp = client.get("/collections")
     assert resp.status_code == 200
     assert "navigator.clipboard.writeText" in resp.text, (
         "clipboard copy JS missing from base.html"
@@ -6266,7 +6270,7 @@ def test_module_view_tissue_tree_has_descendants_cascade(client):
 
 
 def test_mcp_menu_entry_only_when_signed_in(client):
-    authed = client.get("/", headers={"Remote-User": "mf"})
+    authed = client.get("/collections", headers={"Remote-User": "mf"})
     assert 'id="mcp-menu-link"' in authed.text
     assert 'href="/account/mcp"' in authed.text
     # Hidden until /api/me/mcp says enabled (client-side gate, like chat).
@@ -6275,12 +6279,12 @@ def test_mcp_menu_entry_only_when_signed_in(client):
     # One entry: "Connect an MCP client" until the user has links, then "MCP links".
     assert ">Connect an MCP client</a>" in authed.text
     assert "n ? 'MCP links' : 'Connect an MCP client'" in authed.text
-    anon = client.get("/")
+    anon = client.get("/collections")
     assert 'id="mcp-menu-link"' not in anon.text
 
 
 def test_no_separate_admin_mcp_menu_entry(client):
-    admin = client.get("/", headers={"Remote-User": "mf", "Remote-Groups": "admins"})
+    admin = client.get("/collections", headers={"Remote-User": "mf", "Remote-Groups": "admins"})
     assert 'href="/admin/mcp-links"' not in admin.text
     assert admin.text.count('href="/account/mcp"') == 1
 
@@ -6439,7 +6443,7 @@ def _landing_index(resp_text):
 
 
 def test_landing_search_index_covers_relevant_fields(client):
-    resp = client.get("/?all=1")
+    resp = client.get("/collections?all=1")
     assert resp.status_code == 200
     group_a = _landing_index(resp.text)["GroupA"]["text"]
     # titles, file ids and DOIs of the datasets inside, plus the biology,
@@ -6482,7 +6486,7 @@ def test_landing_labels():
 
 
 def test_landing_list_search_first_and_table_toggle(client):
-    text = client.get("/?all=1").text
+    text = client.get("/collections?all=1").text
     # the prominent search sits above everything else in the content
     assert text.index('id="cat-q"') < text.index('id="cat-list"') < text.index('id="table-view"')
     assert 'id="cat-table-toggle"' in text
@@ -6499,7 +6503,7 @@ def test_landing_list_search_first_and_table_toggle(client):
 
 
 def test_landing_phone_layout_markers(client):
-    text = client.get("/?all=1").text
+    text = client.get("/collections?all=1").text
     assert "@media (max-width: 760px)" in text
     assert ".cat-item { flex-direction: column" in text
     # the table view's paper line stays attached to its card on phones
@@ -6523,7 +6527,7 @@ def test_landing_access_mark_only_where_it_differs():
 
 
 def test_landing_access_still_searchable_and_in_table(client):
-    text = client.get("/?all=1").text
+    text = client.get("/collections?all=1").text
     index = _landing_index(text)
     assert "public" in index["GroupA"]["text"] and "internal" in index["GroupB"]["text"]
     assert 'data-acc=' in text            # table view keeps its access filter data
@@ -6880,9 +6884,9 @@ def test_dataset_facets_tab_unit_line_has_replicate_unit_and_disease_basis(clien
     assert 'id="fx-replicate"><th>Replicate unit' in unit_line and '<span class="fx-tag">donor (ant_donor)</span>' in unit_line
     assert 'Disease basis' in unit_line and '<span class="fx-tag">AD vs control: pathologic (Braak x CERAD)</span>' in unit_line
     assert 'id="fx-overlap-unknown"' in unit_line and "not checked" in unit_line
-    # the Biology card of the Data tab repeats the unit, small
+    # the Biology card of the Data tab repeats the unit in plain words; the stored column shows with Technical details
     bio = text.split('id="bio-replicate-unit"')[1].split("</tr>")[0]
-    assert "donor (ant_donor)" in bio
+    assert '>donor<span class="ann-raw">ant_donor</span>' in bio
 
 
 def test_dataset_facets_tab_replicate_unit_not_recorded(client, monkeypatch):
@@ -7243,13 +7247,13 @@ def test_doc_block_macro_renders_a_hidden_box_toggled_by_an_info_button():
 
 
 def test_base_toggles_doc_boxes_and_opens_them_for_a_hash(client):
-    text = client.get("/").text
+    text = client.get("/collections").text
     assert "closest('.help-btn, .doc-toggle')" in text
     assert "node.classList.contains('doc-box')" in text and ".doc-box[hidden]" in text
 
 
 def test_base_has_doc_block_styles_hash_opening_and_remembering(client):
-    text = client.get("/").text
+    text = client.get("/collections").text
     for needle in ("details.doc-block", "openTarget", "antDocRestore", "doc.open.", "info-pop-link"):
         assert needle in text, needle
 
@@ -7376,7 +7380,7 @@ def test_fx_forest_single_cohort_wording_is_not_replication():
 
 
 def test_storage_notice_is_a_bottom_bar_at_every_width(client):
-    text = client.get("/").text
+    text = client.get("/collections").text
     css = text.split("/* GDPR storage notice")[1].split("/* ── data-assistant")[0]
     rule = css.split("#storage-notice {")[1].split("}")[0]
     assert "left: 0" in rule and "right: 0" in rule and "bottom: 0" in rule
@@ -7841,11 +7845,11 @@ def test_dataset_facet_gs_tab_follows_genesets_and_facets_and_is_greyed(client, 
     html = client.get("/browse/GroupA/ds1").text
     bar = html.split('id="ds-tab-bar"')[1].split("</div>")[0]
     tabs = re.findall(r'data-tab="([^"]+)"', bar)
-    # The Facet group (label, Gene pill when facets exist, GS pill) follows Genesets
-    following = ["facets", "facet-gene", "facet-gs"] if "facet-gene" in tabs else ["facets", "facet-gs"]
+    # The Facets & DE group (label, Genes pill when facets exist, Gene sets pill) follows Gene sets
+    following = ["facets-de", "facet-gene", "facet-gs"] if "facet-gene" in tabs else ["facets-de", "facet-gs"]
     assert tabs[tabs.index("modules") + 1:tabs.index("modules") + 1 + len(following)] == following
     button = re.search(r'<button[^>]*data-tab="facet-gs"[^>]*>[^<]*', bar).group(0)
-    assert "vw-preview" in button and button.endswith(">GS")
+    assert "vw-preview" in button and button.endswith(">Gene sets")
     assert browser.VIEW_PREVIEW_TIP in button
     assert "vw-preview" not in re.search(r'<button[^>]*data-tab="modules"[^>]*>', bar).group(0)
     assert "dataset-facet-gs" in browser.VIEW_REGISTRY and "dataset-facet-gs" not in browser.APPROVED_VIEWS
@@ -7912,11 +7916,15 @@ def test_dataset_tab_order_follows_the_agreed_sequence(client, monkeypatch):
         return result
     monkeypatch.setattr(browser, "_api_get", everything)
     tabs, bar = _tab_order(client.get("/browse/GroupA/ds1").text)
-    expected = ["overview", "data", "num", "cat", "genes", "modules", "facets", "facet-gene", "facet-gs", "de", "papers", "artefacts", "downloads", "caveats"]
+    # Reading view (2026-10-26): Overview, Data, Genes, Gene sets, Facets & DE, Papers, (Artefacts), Downloads, Caveats
+    expected = ["overview", "data", "genes", "modules", "facets-de", "facet-gene", "facet-gs", "de", "papers", "artefacts", "downloads", "caveats"]
     present = [name for name in expected if name in tabs]
     assert tabs == present, tabs
-    for name in ("data", "num", "cat", "modules", "facet-gs", "downloads", "caveats"):
+    for name in ("data", "modules", "facets-de", "facet-gs", "downloads", "caveats"):
         assert name in tabs, name
+    html = client.get("/browse/GroupA/ds1").text
+    tech = re.findall(r'data-tab="([^"]+)"', html.split('id="ds-tech-bar"')[1].split("</div>")[0])
+    assert tech == ["num", "cat", "facets"]
     caveat_button = re.search(r'<button[^>]*data-tab="caveats"[^>]*>', bar).group(0)
     assert "caveat-tab lvl-medium" in caveat_button and "tab-empty" not in caveat_button
 
@@ -7941,12 +7949,12 @@ def test_dataset_facet_group_holds_label_gene_and_gs(client, monkeypatch):
     text = client.get("/browse/GroupA/ds1").text
     bar = text.split('id="ds-tab-bar"')[1].split("</div>")[0]
     group = bar.split('id="tab-group-facet"')[1].split("</span>\n")[0]
-    assert re.findall(r'data-tab="([^"]+)"', group) == ["facets", "facet-gene", "facet-gs"]
-    label = re.search(r'<button[^>]*data-tab="facets"[^>]*>Facet', group).group(0)
-    assert "tab-group-label" in label and "vw-preview" not in label and "tab-empty" not in label
-    gene = re.search(r'<button[^>]*data-tab="facet-gene"[^>]*>Gene', group).group(0)
+    assert re.findall(r'data-tab="([^"]+)"', group)[:3] == ["facets-de", "facet-gene", "facet-gs"]
+    label = re.search(r'<button[^>]*data-tab="facets-de"[^>]*>Facets &amp; DE', group).group(0)
+    assert "tab-group-label" in label and "vw-preview" not in label and 'data-default="facet-gene"' in label
+    gene = re.search(r'<button[^>]*data-tab="facet-gene"[^>]*>Genes', group).group(0)
     assert "tab-sub" in gene and "vw-preview" in gene        # the matrix view is not approved yet
-    gs = re.search(r'<button[^>]*data-tab="facet-gs"[^>]*>GS', group).group(0)
+    gs = re.search(r'<button[^>]*data-tab="facet-gs"[^>]*>Gene sets', group).group(0)
     assert "tab-sub" in gs and "vw-preview" in gs
     assert 'data-tab="facet-gs" role="tab" id="tab-btn-facet-gs"' in group
     # the label panel keeps the description; the effects live in the Gene panel
@@ -7971,8 +7979,10 @@ def test_dataset_facet_group_without_facets_keeps_gs_and_greys_the_label(client,
     text = client.get("/browse/GroupA/ds2").text
     bar = text.split('id="ds-tab-bar"')[1].split("</div>")[0]
     group = bar.split('id="tab-group-facet"')[1].split("</span>\n")[0]
-    assert re.findall(r'data-tab="([^"]+)"', group) == ["facets", "facet-gs"]
-    assert "tab-empty" in re.search(r'<button[^>]*data-tab="facets"[^>]*>', group).group(0)
+    assert re.findall(r'data-tab="([^"]+)"', group)[:2] == ["facets-de", "facet-gs"]
+    assert 'data-default="facet-gs"' in group
+    tech = text.split('id="ds-tech-bar"')[1].split("</div>")[0]
+    assert "tab-empty" in re.search(r'<button[^>]*data-tab="facets"[^>]*>', tech).group(0)
     assert 'id="ds-no-facets"' in text and 'id="tab-facet-gene"' not in text
 
 
@@ -8299,7 +8309,7 @@ def test_error_pages_use_one_template(client):
     assert unknown_geom.status_code == 404 and 'id="error-card"' in unknown_geom.text and "nosuchgeom" in unknown_geom.text
     missing = client.get("/browse/ZZ9/ZZZ")
     assert missing.status_code == 404 and 'id="error-card"' in missing.text
-    assert client.get("/datasets", follow_redirects=False).headers["location"] == "/"
+    assert client.get("/datasets", follow_redirects=False).headers["location"] == "/collections"
 
 
 def test_install_error_pages_renders_html_for_pages_and_json_for_api():

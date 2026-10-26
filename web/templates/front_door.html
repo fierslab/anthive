@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% from "_macros.html" import review_banner, doc_block %}
+{% from "_front_door.html" import fd_styles, fd_search %}
+
+{% block title %}Find data · anthive{% endblock %}
+
+{% block content %}
+{{ fd_styles() }}
+<div class="fd-wrap" id="front-door">
+  {{ review_banner('front-door') }}
+  <section class="fd-hero" aria-label="Search the catalogue">
+    <h1>Search datasets, genes, gene sets{% if library_available(request) %} and papers{% endif %}</h1>
+    {{ fd_search('', autofocus=True) }}
+    <p class="fd-try" id="fd-examples">Try {% for example in examples %}<a href="{{ example.href }}">{{ example.text }}</a>{% if not loop.last %} or {% endif %}{% endfor %}</p>
+
+    <nav class="fd-browse" aria-label="Browse">
+      <a href="/diseases" id="fd-browse-disease" class="{{ view_class('browse-disease') }}" title="{{ view_tip('browse-disease', 'Datasets grouped by the disease of their donors') }}">Browse by disease<span class="n">{{ n_diseases }}</span></a>
+      <a href="/cell-types" id="fd-browse-celltype" class="{{ view_class('browse-celltype') }}" title="{{ view_tip('browse-celltype', 'Datasets grouped by the cell types they hold') }}">Browse by cell type<span class="n">{{ n_celltypes }}</span></a>
+      <a href="/collections" id="fd-browse-dataset" title="Every collection (one per study) with its datasets">Browse by dataset<span class="n">{{ summary.n_collections }} collections</span></a>
+    </nav>
+  </section>
+
+  {% if error %}<p class="fd-error" id="fd-error">{{ error }}</p>{% endif %}
+
+  <section class="fd-what" id="fd-what-here" aria-label="What is here">
+    <div>{{ summary.n_datasets }} datasets in {{ summary.n_collections }} collections. <button type="button" class="doc-toggle fd-what-toggle" data-help-for="fd-what" aria-controls="fd-what" aria-expanded="false" title="What is here: show or hide">What is here</button></div>
+    {% call doc_block('What is here', id='fd-what') %}
+      <p>This site holds {{ summary.n_datasets }} datasets in {{ summary.n_collections }} collections (one collection per study){% if summary.n_cells_primary %}, with {{ format_count(summary.n_cells_primary) }} cells or nuclei (samples, for bulk data) in the {{ summary.n_primary }} datasets that are primary data; reanalyses reuse cells another dataset already serves and are not counted twice{% endif %}.
+      {{ summary.n_human }} of the {{ summary.n_datasets }} datasets are human and {{ summary.n_microglia }} include microglia. {% set _rest = summary.n_datasets - summary.n_single_nucleus - summary.n_single_cell %}{{ summary.n_single_nucleus }} profile single nuclei and {{ summary.n_single_cell }} single cells{% if _rest > 0 %}; the other {{ _rest }} are bulk RNA-seq, spatial, proteomics or do not record it{% endif %}.
+      You can look at the cells of a dataset (maps and cell annotations), at the expression of any gene or gene set across datasets, and at differential expression as the authors published it{% if ui.facets %}, plus donor-level comparisons such as disease against control where a dataset has enough donors{% endif %}.
+      A cell count is not a sample size: donors are the independent replicates, so judge a comparison by its number of donors, not cells.
+      Only the datasets you are allowed to see are counted. To start, type a gene or a disease in the box, or browse by disease or cell type.</p>
+    {% endcall %}
+  </section>
+</div>
+{% endblock %}

@@ -34,6 +34,7 @@ from facet_aliases import canonical_facet  # noqa: E402
 import help_content  # noqa: E402
 import safe_markdown  # noqa: E402
 import celltype_groups  # noqa: E402
+import catalog_search  # noqa: E402
 from cell_level_scope import DONOR_COLUMNS  # noqa: E402
 
 from canonical_columns import is_canonical_column, strip_ant_prefix  # noqa: E402
@@ -105,6 +106,10 @@ VIEW_REGISTRY: Dict[str, str] = {
     'older-views': 'The Older views menu of the gene, gene set and facet pages (earlier designs)',
     'dataset-facet-gs': 'Dataset page, Facet GS tab (gene set scores by annotation column, per cell)',
     'artefacts': 'Artefacts: the Artefacts tab of a dataset, the artefact list of a collection, the artefact page',
+    'front-door': 'Front page: one search box, browse entry points, example questions, what is here',
+    'search': 'Search results: datasets, genes, gene sets and papers for the words typed',
+    'browse-disease': 'Browse by disease: dataset counts per disease and the dataset list of one disease',
+    'browse-celltype': 'Browse by cell type: dataset counts per cell type and the dataset list of one cell type',
 }
 APPROVED_VIEWS = frozenset({
     'datasets', 'genes', 'genesets', 'gene-expression', 'geneset-expression',
@@ -2057,7 +2062,8 @@ def _collection_facets(dbs: List[Dict]) -> Dict[str, List[str]]:
                 raw = _as_list(db.get(source_field)) or (
                     _as_list(db.get('cell_type')) if field == 'celltype' else [])
             for item in raw:
-                for part in str(item).split(','):
+                # disease names contain commas ('leukoencephalopathy, diffuse hereditary, with spheroids 1')
+                for part in ([str(item)] if field == 'disease' else str(item).split(',')):
                     if part.strip().lower() in _FACET_SKIP:
                         continue
                     plain = _plain_facet_value(field, part)
@@ -2522,9 +2528,9 @@ def get_collection_datasets(api_url: str, group_id: str) -> tuple:
 
 # ── routes ─────────────────────────────────────────────────────────────────────
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/collections", response_class=HTMLResponse)
 async def index(request: Request):
-    """Catalog landing page.
+    """The collection list ("Browse by dataset"; the landing page until the front door took /).
 
     UX shortcut: when the (post-filter) catalog contains exactly one
     collection, skip the overview and redirect straight into that
@@ -2580,6 +2586,166 @@ async def index(request: Request):
         "facet_defaults": {k: sorted(v) for k, v in facet_defaults.items()},
         "landing_facets": LANDING_FACETS,
     })
+
+
+
+# ── Front door: search box, browse by disease / cell type (2026-10-26, preview) ─────────────────
+#
+# "/" is the front page for biologists: one search box (GET /api/search), three browse entry points and
+# two example questions. The collection list it replaced lives at /collections ("Browse by dataset").
+# Everything is computed from GET /databases on behalf of the visitor (_api_get forwards the identity),
+# so counts and lists hold exactly the datasets that visitor may see. Rules: lib/catalog_search.py.
+
+# Query parameters of the old landing page (the collection list); a link that carries one goes there.
+_COLLECTION_LIST_PARAMS = ('q', 'org', 'cell', 'tissue', 'method', 'disease', 'sort', 'view', 'search')
+
+# Two example questions under the search box. Each runs as a search; checked on the dev catalogue
+# (2026-10-26) to return the gene and datasets for a visitor who is not signed in.
+FRONT_DOOR_EXAMPLES: List[Dict[str, str]] = [
+    {'text': "TREM2 expression in microglia across Alzheimer's datasets",
+     'q': "TREM2 expression in microglia across Alzheimer's datasets"},
+    {'text': 'Which datasets have APOE4 carriers?',
+     'q': 'Which datasets have APOE4 carriers?'},
+]
+
+_BROWSE_KINDS = {
+    'disease': {'path': '/diseases', 'view': 'browse-disease', 'title': 'Browse by disease',
+                'noun': 'disease', 'nouns': 'diseases', 'field': 'disease'},
+    'celltype': {'path': '/cell-types', 'view': 'browse-celltype', 'title': 'Browse by cell type',
+                 'noun': 'cell type', 'nouns': 'cell types', 'field': 'cell type'},
+}
+
+
+def _front_door_databases(request: Request) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """The datasets the visitor may see, and an error sentence when the API did not answer."""
+    try:
+        return _all_databases(_api_url(request)), None
+    except Exception as error:
+        print(f"API error: {error}")
+        return [], 'The catalogue could not be loaded just now. Try again in a minute.'
+
+
+@router.get("/", response_class=HTMLResponse)
+async def front_door(request: Request):
+    """The front page: search box, browse entry points, examples and a closed "What is here" box.
+
+    A query string of the old landing page (``?q=``, ``?disease=``, ``?view=table``, ...) redirects to
+    the collection list so old links keep working. A site with a single collection still jumps straight
+    into it (any query string, for example ``/?all=1``, opts out), as the landing page always did.
+    """
+    params = request.query_params
+    if any(name in params for name in _COLLECTION_LIST_PARAMS):
+        return RedirectResponse(url='/collections?' + request.url.query, status_code=302)
+    databases, error = _front_door_databases(request)
+    groups = sorted({db.get('group_id') or str(db.get('id', '')).split('/')[0] for db in databases})
+    if len(groups) == 1 and not request.url.query:
+        return RedirectResponse(url=f"/browse/{url_quote(groups[0])}", status_code=302)
+    summary = catalog_search.catalogue_summary(databases)
+    diseases = catalog_search.browse_counts(databases, 'disease')
+    celltypes = catalog_search.browse_counts(databases, 'celltype')
+    return templates.TemplateResponse(request, "front_door.html", {
+        "summary": summary,
+        "n_diseases": len([e for e in diseases['entries'] if e['key'] != 'control donors']),
+        "n_celltypes": len(celltypes['entries']),
+        "examples": [dict(example, href='/search?' + urlencode({'q': example['q']}))
+                     for example in FRONT_DOOR_EXAMPLES],
+        "error": error,
+        "genesets_available": getattr(request.app.state, 'genesets_available', False),
+    })
+
+
+def _search_dataset_href(row: Dict[str, Any]) -> str:
+    return f"/browse/{url_quote(str(row.get('group_id') or ''))}/{url_quote(str(row.get('file_id') or ''))}"
+
+
+_MATCHED_IN_WORDS = {'title': 'title', 'collection': 'collection', 'disease': 'disease',
+                     'cell type': 'cell type', 'organism': 'organism', 'tissue': 'tissue',
+                     'technology': 'method', 'cell annotations': 'cell annotations',
+                     'description': 'description'}
+
+
+@router.get("/search", response_class=HTMLResponse)
+async def search_view(request: Request, q: str = ''):
+    """Search results for the words typed on the front page, grouped by kind (GET /api/search)."""
+    query = (q or '').strip()[:300]
+    if not query:
+        return RedirectResponse(url='/', status_code=302)
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    try:
+        result = _api_get(_api_url(request), '/search?' + urlencode({'q': query, 'limit': 50}), timeout=30)
+    except requests.HTTPError as exc:
+        status = getattr(getattr(exc, 'response', None), 'status_code', None)
+        error = ('This server does not offer search yet (it needs API 2.48). Use the collection list '
+                 'or the gene page instead.' if status in (404, 405, None) else
+                 'The search did not answer. Try again in a minute.')
+    except Exception as exc:
+        print(f"API error: {exc}")
+        error = 'The search did not answer. Try again in a minute.'
+    datasets = []
+    for row in (result or {}).get('datasets') or []:
+        datasets.append(dict(row, href=_search_dataset_href(row),
+                             matched=[_MATCHED_IN_WORDS.get(m, m) for m in row.get('matched_in') or []]))
+    genesets = []
+    for row in (result or {}).get('genesets') or []:
+        genesets.append(dict(row, href='/genesets/' + '/'.join(
+            url_quote(str(row.get(k) or ''), safe='') for k in ('study', 'experiment', 'name'))))
+    return templates.TemplateResponse(request, "search.html", {
+        "q": query,
+        "result": result,
+        "datasets": datasets,
+        "genes": (result or {}).get('genes'),
+        "genesets": genesets if (result or {}).get('genesets') is not None else None,
+        "papers": (result or {}).get('papers'),
+        "error": error,
+        "show_papers": _library_available(request),
+    })
+
+
+def _browse_view(request: Request, kind: str, key: Optional[str] = None) -> HTMLResponse:
+    meta = _BROWSE_KINDS[kind]
+    databases, error = _front_door_databases(request)
+    counts = catalog_search.browse_counts(databases, kind)
+    entry = None
+    rows: List[Dict[str, Any]] = []
+    if key is not None:
+        wanted = catalog_search.fold(key)
+        entry = next((e for e in counts['entries'] if e['key'] == wanted), None)
+        if entry is None and not error:
+            return _error_page(request, f"No dataset you can see is recorded with the {meta['noun']} '{key}'.",
+                               hint=f"See all {meta['nouns']} with datasets.",
+                               back=(meta['path'], meta['title']))
+        rows = [dict(row, href=_search_dataset_href(row))
+                for row in catalog_search.browse_datasets(databases, kind, wanted)]
+    for item in counts['entries']:
+        item['href'] = meta['path'] + '/' + url_quote(item['key'], safe='')
+    return templates.TemplateResponse(request, "browse.html", {
+        "kind": kind, "meta": meta, "counts": counts, "entry": entry, "rows": rows, "error": error,
+    })
+
+
+@router.get("/diseases", response_class=HTMLResponse)
+async def browse_diseases(request: Request):
+    """Dataset counts per disease (the ``disease`` field of each dataset)."""
+    return _browse_view(request, 'disease')
+
+
+@router.get("/diseases/{key:path}", response_class=HTMLResponse)
+async def browse_disease(request: Request, key: str):
+    """The datasets recorded with one disease."""
+    return _browse_view(request, 'disease', key)
+
+
+@router.get("/cell-types", response_class=HTMLResponse)
+async def browse_celltypes(request: Request):
+    """Dataset counts per cell type (the dataset-level ``celltype`` field)."""
+    return _browse_view(request, 'celltype')
+
+
+@router.get("/cell-types/{key:path}", response_class=HTMLResponse)
+async def browse_celltype(request: Request, key: str):
+    """The datasets recorded with one cell type."""
+    return _browse_view(request, 'celltype', key)
 
 
 def _is_admin(request: Request) -> bool:
@@ -3053,8 +3219,8 @@ _PLOT_GEOM_GROUPS = (
 
 @router.get("/datasets")
 def datasets_redirect():
-    """The nav label is "datasets": the catalogue lives at /."""
-    return RedirectResponse("/", status_code=307)
+    """The nav label is "datasets": the collection list lives at /collections."""
+    return RedirectResponse("/collections", status_code=307)
 
 
 @router.get("/browse/{folder_browse_id}/{dataset_browse_id}/plot/donor", response_class=HTMLResponse, dependencies=[Depends(_require_ui('facets'))])
@@ -3246,6 +3412,31 @@ async def de_study_view(request: Request, folder_browse_id: str,
         "api_url":          "/api",
         "is_secondary":     is_secondary,
     })
+
+
+_ANNOTATION_LABELS: Dict[str, str] = {}
+
+
+def _annotation_label(column: str) -> str:
+    """Human label of a standard ``ant_*`` cell annotation column ('ant_apoe4_carrier' -> 'APOE e4 carrier'),
+    from the tag vocabulary (lib/obscol_tags_vocab.yaml); the reading view shows it instead of the stored name."""
+    if not _ANNOTATION_LABELS:
+        _ANNOTATION_LABELS.update(catalog_search.vocabulary_labels())
+    return catalog_search.annotation_label(column, _ANNOTATION_LABELS)
+
+
+templates.env.globals['annotation_label'] = _annotation_label
+
+# Standard columns the reading view leaves out: donor uids are identifiers, not a property of the cells.
+_ANNOTATION_READING_SKIP = {'ant_donor_uid'}
+
+
+def _annotation_columns(obs_columns: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """The standard ``ant_*`` columns of a dataset with their human labels, in label order, for the Data tab."""
+    rows = [{'name': col['name'], 'type': col['type'], 'label': _annotation_label(col['name'])}
+            for col in obs_columns
+            if str(col.get('name', '')).startswith('ant_') and col['name'] not in _ANNOTATION_READING_SKIP]
+    return sorted(rows, key=lambda row: row['label'].lower())
 
 
 @router.get("/browse/{folder_browse_id}/{dataset_browse_id:path}", response_class=HTMLResponse)
@@ -3527,6 +3718,7 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "info": info,
         "markdown_content": markdown_content,
         "obs_columns": obs_columns,
+        "annotation_columns": _annotation_columns(obs_columns),
         "default_embedding": default_embedding,
         "gene_panel": gene_panel,
         "layer_stats_rows": layer_stats_rows,

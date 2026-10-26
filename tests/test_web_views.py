@@ -483,16 +483,16 @@ def test_view_registry_and_initial_approval_list():
 
 
 def test_nav_greys_only_unapproved_views(client):
-    nav = client.get("/").text.split('<nav aria-label="Main">')[1].split("</nav>")[0]
+    nav = client.get("/collections").text.split('<nav aria-label="Main">')[1].split("</nav>")[0]
     facets = nav.split('href="/facets"')[1].split("</a>")[0]
     assert 'class="vw-preview"' in facets and "preview" in facets and browser.VIEW_PREVIEW_TIP in facets
-    for href in ('href="/"', 'href="/genesets"', 'href="/genes"'):
+    for href in ('href="/collections"', 'href="/genesets"', 'href="/genes"'):
         entry = nav.split(href)[1].split("</a>")[0]
         assert "vw-preview" not in entry and "preview" not in entry
 
 
 def test_approving_a_view_removes_its_marker(client, monkeypatch):
-    monkeypatch.setattr(browser, "APPROVED_VIEWS", browser.APPROVED_VIEWS | {"facets"})
+    monkeypatch.setattr(browser, "APPROVED_VIEWS", browser.APPROVED_VIEWS | {"facets", "front-door"})
     text = client.get("/facets").text
     assert 'class="review-banner"' not in text
     assert 'class="vw-preview"' not in text.split('<nav aria-label="Main">')[1].split("</nav>")[0]
@@ -506,7 +506,7 @@ def test_unapproved_pages_show_banner_but_stay_reachable(client, path):
         assert 'class="review-banner"' in response.text and browser.VIEW_PREVIEW_TIP in response.text
 
 
-@pytest.mark.parametrize("path", ["/about", "/help", "/privacy", "/settings", "/api-guide", "/"])
+@pytest.mark.parametrize("path", ["/about", "/help", "/privacy", "/settings", "/api-guide", "/collections"])
 def test_utility_and_approved_pages_have_no_banner(client, path):
     assert 'class="review-banner"' not in client.get(path).text
 

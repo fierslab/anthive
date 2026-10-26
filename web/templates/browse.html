@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% from "_macros.html" import review_banner, breadcrumb, doc_block, doc_toggle %}
+{% from "_front_door.html" import fd_styles, fd_dataset_row %}
+
+{% block title %}{{ entry.label|capitalize if entry else meta.title }} · anthive{% endblock %}
+
+{% block content %}
+{{ fd_styles() }}
+<div class="fd-results" id="browse-{{ kind }}">
+  {% if entry %}
+  {{ breadcrumb([(meta.title, meta.path), (entry.label, None)]) }}
+  {% else %}
+  {{ breadcrumb([(meta.title, None)]) }}
+  {% endif %}
+  {{ review_banner(meta.view) }}
+  {% if error %}<p class="fd-error">{{ error }}</p>{% endif %}
+
+  {% if not entry %}
+  <h1 class="page-title" style="font-size:18px;font-weight:500;margin:4px 0 2px">{{ meta.title }}</h1>
+  <p class="fd-sum" id="browse-coverage">{{ counts.n_with_value }} of {{ counts.n_datasets }} datasets record a {{ meta.noun }}{% if counts.n_without_value %}; the other {{ counts.n_without_value }} are not listed here{% endif %}.{{ doc_toggle('browse-about', 'About this list') }}</p>
+  {% call doc_block('About this list', id='browse-about') %}
+    {% if kind == 'disease' %}
+    <p>Each dataset records the diseases of its donors in its metadata, set by the curators. A dataset with patients and controls is listed under the disease and under control donors, so the counts add up to more than the number of datasets. The counts are datasets, not donors: one large cohort and one small study count the same. Datasets that record no disease are left out; their cells may still carry a disease column, which you find on the dataset page.</p>
+    {% else %}
+    <p>Each dataset records the cell types it holds at the level of the whole dataset (for example "microglia" for a sorted microglia study, or several types for whole-tissue data). A dataset with several cell types is listed under each, so the counts add up to more than the number of datasets. "Several cell types" means the curators recorded the dataset as mixed. The counts are datasets, not cells or donors.</p>
+    {% endif %}
+  {% endcall %}
+  {% if counts.entries %}
+  <div class="table-wrap"><table class="fd-counts" id="browse-counts">
+    <thead><tr><th>{{ meta.noun|capitalize }}</th><th class="num">Datasets</th><th class="num opt">Collections</th></tr></thead>
+    <tbody>
+      {% for item in counts.entries %}
+      <tr><td><a href="{{ item.href }}">{{ item.label }}</a></td><td class="num">{{ item.n_datasets }}</td><td class="num opt">{{ item.n_collections }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}
+  <p class="fd-none">No dataset you can see records a {{ meta.noun }}.</p>
+  {% endif %}
+  <p class="fd-more">You can also <a href="/collections">browse by dataset</a>{% if kind == 'disease' %} or <a href="/cell-types">by cell type</a>{% else %} or <a href="/diseases">by disease</a>{% endif %}.</p>
+
+  {% else %}
+  <h1 class="page-title" style="font-size:18px;font-weight:500;margin:4px 0 2px">{{ entry.label|capitalize }}</h1>
+  <p class="fd-sum" id="browse-entry-summary">{{ entry.n_datasets }} dataset{{ '' if entry.n_datasets == 1 else 's' }} in {{ entry.n_collections }} collection{{ '' if entry.n_collections == 1 else 's' }}{% if entry.recorded_as|length > 1 or entry.recorded_as[0] != entry.label %}<span class="muted" title="As recorded in the metadata"> (recorded as {{ entry.recorded_as|join(', ') }})</span>{% endif %}.</p>
+  <ul class="fd-list" id="browse-datasets">
+    {% for row in rows %}{{ fd_dataset_row(row) }}{% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endblock %}

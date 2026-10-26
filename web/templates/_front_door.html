@@ -1,0 +1,100 @@
+{# Shared pieces of the front door, the search results and the browse pages (2026-10-26, preview views
+   front-door, search, browse-disease, browse-celltype). The look follows the collection list (index.html):
+   one wide rounded search box, plain rows, muted metadata. #}
+
+{% macro fd_styles() -%}
+<style>
+  .fd-wrap { max-width: 1100px; margin: 0 auto; }
+  .fd-wrap [hidden] { display: none !important; }
+  .fd-hero { max-width: 720px; margin: 7vh auto 0; text-align: center; }
+  .fd-hero h1 { font-size: 20px; font-weight: 500; color: #335c67; margin: 0 0 14px; letter-spacing: .1px; }
+  .fd-search { position: relative; display: flex; gap: 8px; }
+  .fd-search input[type=search] {
+    flex: 1; min-width: 0; font: inherit; font-size: 17px; line-height: 1.4;
+    padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--bg); color: var(--text); outline: none;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .04); transition: border-color .15s, box-shadow .15s;
+  }
+  .fd-search input[type=search]:focus { border-color: var(--link); box-shadow: 0 0 0 3px rgba(51, 92, 103, .14); }
+  .fd-search button {
+    flex: none; font: inherit; font-size: 15px; padding: 0 18px; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--link); background: var(--link); color: #fff;
+  }
+  .fd-search button:hover { filter: brightness(1.1); }
+  .fd-try { margin: 10px 0 0; font-size: 13px; color: #8a929b; line-height: 1.6; }
+  .fd-try a { color: #8a929b; text-decoration: underline; text-decoration-color: #d1d5db; text-underline-offset: 2px; }
+  .fd-try a:hover { color: var(--link); text-decoration-color: currentColor; }
+  .fd-browse { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 10px; margin: 26px 0 0; }
+  .fd-browse a {
+    display: inline-block; font-size: 14px; padding: 6px 14px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--text); background: var(--bg);
+  }
+  .fd-browse a:hover { border-color: var(--link); color: var(--link); text-decoration: none; }
+  .fd-browse a .n { color: var(--text-muted); font-size: 12px; margin-left: 4px; }
+  .fd-what { margin: 30px auto 0; max-width: 720px; text-align: left; font-size: 13px; color: var(--text-muted); }
+  .fd-what .doc-toggle.fd-what-toggle { font-size: 13px; margin-left: 0; padding: 0; color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+  .fd-what .doc-box { margin-top: 8px; }
+  .fd-what .doc-body p { margin: 0 0 6px; color: var(--text); font-size: 13px; line-height: 1.55; }
+  .fd-error { max-width: 720px; margin: 12px auto; color: #9E2A2B; font-size: 13px; }
+
+  /* results and browse lists */
+  .fd-results { max-width: 1100px; margin: 0 auto; }
+  .fd-results .fd-search { max-width: 720px; margin: 6px 0 4px; }
+  .fd-results .fd-search input[type=search] { font-size: 16px; padding: 9px 14px; }
+  .fd-sum { font-size: 13px; color: var(--text-muted); margin: 6px 0 2px; }
+  .fd-group { margin: 18px 0 0; }
+  .fd-list { list-style: none; margin: 4px 0 0; padding: 0; }
+  .fd-list li { padding: 9px 4px; border-top: 1px solid var(--border-light); }
+  .fd-list li:first-child { border-top: 0; }
+  .fd-list li:hover { background: var(--hover); }
+  .fd-list .t { font-size: 15px; color: var(--text); font-weight: 500; }
+  .fd-list a.t:hover { color: var(--link); text-decoration: none; }
+  .fd-list .m { font-size: 12.5px; color: var(--text-muted); margin-top: 2px; line-height: 1.5; }
+  .fd-list .m .sep { margin: 0 6px; color: #c4c9cf; }
+  .fd-list .why { font-size: 11.5px; color: #8a929b; }
+  .fd-more { font-size: 12.5px; color: var(--text-muted); margin: 6px 4px 0; }
+  .fd-none { font-size: 13px; color: var(--text-muted); margin: 4px 4px 0; }
+  .fd-genes { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 0; }
+  .fd-genes a { display: inline-block; padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); }
+  .fd-genes a:hover { border-color: var(--link); color: var(--link); text-decoration: none; }
+  .fd-genes a b { font-weight: 600; }
+  .fd-genes a .n { color: var(--text-muted); font-size: 12px; margin-left: 6px; }
+  .fd-counts { width: 100%; max-width: 720px; border-collapse: collapse; font-size: 13.5px; }
+  .fd-counts th { text-align: left; font-weight: 500; color: var(--text-muted); font-size: 12px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .fd-counts td { padding: 7px 8px; border-bottom: 1px solid var(--border-light); }
+  .fd-counts td.num, .fd-counts th.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .fd-counts tr:hover td { background: var(--hover); }
+  @media (max-width: 640px) {
+    .fd-hero { margin-top: 3vh; }
+    .fd-search input[type=search] { font-size: 16px; }
+    .fd-search button { padding: 0 12px; }
+    .fd-counts .opt { display: none; }
+  }
+</style>
+{%- endmacro %}
+
+{# The search form. q: the current query (empty on the front page). #}
+{% macro fd_search(q='', autofocus=False, placeholder='') -%}
+<form class="fd-search" action="/search" method="get" role="search">
+  <input type="search" name="q" value="{{ q }}" aria-label="Search the catalogue" autocomplete="off" spellcheck="false"
+         placeholder="{{ placeholder or 'A gene, disease, cell type, brain region or author' }}"{% if autofocus %} autofocus{% endif %}>
+  <button type="submit">Search</button>
+</form>
+{%- endmacro %}
+
+{# One dataset row: title link, collection, organism, tissue, cell type, disease, cells. #}
+{% macro fd_dataset_row(row) -%}
+<li>
+  <a class="t" href="{{ row.href }}">{{ row.title|no_dash }}</a>
+  <div class="m">
+    <span>{{ row.collection|no_dash }}</span>
+    {%- if row.organism %}<span class="sep">·</span><span>{{ row.organism|join(', ') }}</span>{% endif -%}
+    {%- if row.tissue %}<span class="sep">·</span><span>{{ row.tissue|join(', ') }}</span>{% endif -%}
+    {%- if row.cell_types %}<span class="sep">·</span><span>{{ row.cell_types|join(', ') }}</span>{% endif -%}
+    {%- if row.diseases %}<span class="sep">·</span><span>{{ row.diseases|join(', ') }}</span>{% endif -%}
+    {%- if row.n_cells %}<span class="sep">·</span><span>{{ format_count(row.n_cells) }} {{ 'cells' }}</span>{% endif -%}
+    {%- if row.designation == 'reanalysis' %}<span class="sep">·</span><span title="These cells are also served by another dataset">reanalysis</span>{% endif -%}
+  </div>
+  {%- if row.matched %}<div class="why">found in {{ row.matched|join(', ') }}</div>{% endif %}
+</li>
+{%- endmacro %}
