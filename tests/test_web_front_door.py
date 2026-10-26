@@ -50,6 +50,7 @@ def client(monkeypatch):
     monkeypatch.setattr(browser, '_caveats_mode_cfg', ['all'])
     monkeypatch.setattr(browser, '_facets_visible_cfg', [[]])
     CALLS.clear()
+    browser._FRONT_DOOR_CACHE.clear()
     app = FastAPI()
     app.state.api_url = 'http://testapi'
     app.state.reports = []
@@ -226,3 +227,48 @@ def test_dataset_without_facets_ui_keeps_de_as_a_plain_tab(client, monkeypatch):
     assert 'tab-group-facet' not in bar and 'Facets &amp; DE' not in bar
     tech = html.split('id="ds-tech-bar"')[1].split('</div>')[0]
     assert 'data-tab="facets"' not in tech
+
+
+# ── front page numbers (2026-10-26, round 3) ──────────────────────────────────
+
+def _tiles(html):
+    block = html.split('id="fd-stats"')[1].split('</div>')[0]
+    return dict(re.findall(r'id="fd-tile-([a-z]+)"[^>]*>\s*<span class="fd-n">([^<]+)', block)), block
+
+
+def test_front_door_shows_live_numbers_under_the_search_box(client):
+    html = client.get('/').text
+    assert html.index('class="fd-search"') < html.index('id="fd-stats"') < html.index('id="fd-browse-disease"')
+    tiles, block = _tiles(html)
+    assert tiles['datasets'] == '3' and tiles['collections'] == '2'
+    assert 'genes' not in tiles and 'papers' not in tiles      # no gene index or library behind the fake API
+    assert 'href="/collections"' in block and 'id="fd-tile-genesets"' not in block   # older API: no count
+    assert 'primary datasets only' in block.split('id="fd-tile-cells"')[1].split('</a>')[0]
+    assert 'id="fd-tile-species"' in block and 'human / mouse' in block
+
+
+def test_front_door_numbers_come_from_api_stats_and_are_cached_per_access_level(client, monkeypatch):
+    calls = []
+
+    def with_stats(api_url, path, **kwargs):
+        calls.append(path)
+        if path == '/stats':
+            return {'n_datasets': 3, 'n_collections': 2, 'n_cells_primary': 1500, 'n_genes': 27000,
+                    'n_genesets': 128, 'n_papers': 346, 'n_artefacts': 2, 'n_human': 3, 'n_mouse': 0,
+                    'n_single_nucleus': 2, 'n_single_cell': 1,
+                    'recently_updated': [{'db_id': 'GroupA/ds1', 'group_id': 'GroupA', 'file_id': 'ds1',
+                                          'title': 'Dataset One', 'collection': 'Group A Study',
+                                          'updated': '2026-10-05'}]}
+        return _fake_api_get(api_url, path, **kwargs)
+    monkeypatch.setattr(browser, '_api_get', with_stats)
+    monkeypatch.setattr(browser, '_library_available', lambda request: True)
+    html = client.get('/').text
+    tiles, _ = _tiles(html)
+    assert tiles['genes'] == '27,000' and tiles['genesets'] == '128' and tiles['papers'] == '346'
+    assert tiles['artefacts'] == '2' and tiles['cells'] == '1.5k'
+    recent = html.split('id="fd-recent"')[1].split('</section>')[0]
+    assert 'href="/browse/GroupA/ds1"' in recent and '2026-10-05' in recent
+    client.get('/')
+    assert calls.count('/stats') == 1                           # second visit served from the cache
+    client.get('/', headers={'Remote-User': 'mf', 'Remote-Groups': 'admins'})
+    assert calls.count('/stats') == 2                           # another access level asks again

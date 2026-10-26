@@ -9,9 +9,23 @@
 <div class="fd-wrap" id="front-door">
   {{ review_banner('front-door') }}
   <section class="fd-hero" aria-label="Search the catalogue">
-    <h1>Search datasets, genes, gene sets{% if library_available(request) %} and papers{% endif %}</h1>
+    <h1>Search datasets, genes, gene sets{% if library_available(request) %}, papers{% endif %} and more</h1>
     {{ fd_search('', autofocus=True) }}
     <p class="fd-try" id="fd-examples">Try {% for example in examples %}<a href="{{ example.href }}">{{ example.text }}</a>{% if not loop.last %} or {% endif %}{% endfor %}</p>
+
+    {# Live numbers for this visitor (GET /api/stats, cached per access level for 5 minutes). #}
+    <div class="fd-stats" id="fd-stats" role="list" aria-label="What this site holds">
+      {% for tile in tiles %}
+      {% set _n = format_count(tile.n) if tile.short else '{:,}'.format(tile.n) %}
+      {% if tile.href %}<a class="fd-tile" role="listitem" id="fd-tile-{{ tile.id }}" href="{{ tile.href }}" title="{{ tile.tip }}">{% else %}<span class="fd-tile" role="listitem" id="fd-tile-{{ tile.id }}" title="{{ tile.tip }}" tabindex="0">{% endif %}
+        {%- if tile.n2 is defined -%}
+        <span class="fd-n">{{ '{:,}'.format(tile.n) }}<span class="fd-sep">/</span>{{ '{:,}'.format(tile.n2 or 0) }}</span><span class="fd-l">{{ tile.label }} / {{ tile.label2 }}</span>
+        {%- else -%}
+        <span class="fd-n">{{ _n }}</span><span class="fd-l">{{ tile.label }}{% if tile.id == 'cells' %} <span class="fd-i" aria-hidden="true">&#9432;</span>{% endif %}</span>
+        {%- endif -%}
+      {% if tile.href %}</a>{% else %}</span>{% endif %}
+      {% endfor %}
+    </div>
 
     <nav class="fd-browse" aria-label="Browse">
       <a href="/diseases" id="fd-browse-disease" class="{{ view_class('browse-disease') }}" title="{{ view_tip('browse-disease', 'Datasets grouped by the disease of their donors') }}">Browse by disease<span class="n">{{ n_diseases }}</span></a>
@@ -21,6 +35,15 @@
   </section>
 
   {% if error %}<p class="fd-error" id="fd-error">{{ error }}</p>{% endif %}
+
+  {% if recent %}
+  <section class="fd-recent" id="fd-recent" aria-label="Recently updated datasets">
+    <h2 class="fd-recent-head">Recently updated</h2>
+    <ul>
+      {% for row in recent %}<li><a href="{{ row.href }}">{{ row.title|no_dash }}</a> <span class="muted">{{ row.collection|no_dash }}</span><span class="fd-date">{{ row.updated }}</span></li>{% endfor %}
+    </ul>
+  </section>
+  {% endif %}
 
   <section class="fd-what" id="fd-what-here" aria-label="What is here">
     <div>{{ summary.n_datasets }} datasets in {{ summary.n_collections }} collections. <button type="button" class="doc-toggle fd-what-toggle" data-help-for="fd-what" aria-controls="fd-what" aria-expanded="false" title="What is here: show or hide">What is here</button></div>

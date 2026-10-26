@@ -1119,3 +1119,13 @@ pages resolve).
   per group, `_SEARCH_TOP_N` (5) rows, "show all N" opens `?kind=<group>` (API `limit=500`); empty groups hidden.
   Rows are built in `_search_rows` (one shape: title, href, meta, note, mark).
 - Nav: the front-door link is now labelled `home` (`#nav-home`). Top bar: logo 22px, wordmark 14px, padding 6px.
+
+## Front page numbers (2026-10-26, round 3)
+
+- Under the search box `#fd-stats`: tiles (`_front_door_tiles`) from `GET /api/stats` (API 2.48; the web falls back
+  to `catalogue_stats` over `/databases` on an older API, without genes, gene sets, papers or artefacts). Tiles
+  without a number are left out; papers only with a library, gene sets only when the store is up. Artefacts has
+  no list page, so its tile is not a link. `#fd-recent` lists the 5 most recently updated datasets.
+- `_front_door_context` caches the page's numbers per access level (signed in, admin) for `_FRONT_DOOR_TTL`
+  (300 s); ant-serve caches `/stats` per access level for 300 s too. Tests clear `browser._FRONT_DOOR_CACHE`.
+- No donor count on purpose: `ant_donor_uid` is not in every dataset and donor groups share people.
