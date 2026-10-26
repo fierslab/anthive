@@ -18008,7 +18008,12 @@ def search_catalog(request: Request,
     case ignored; with ``n_datasets`` counted over visible datasets only), the
     gene sets whose name or description holds the words (or that contain the
     gene, for a query of gene names only) and the library papers that hold
-    the words. Filler words ("expression", "in", "which", "datasets", ...)
+    the words. Also searched (API 2.48): collections (their own text, or
+    holding a matching dataset), artefacts (id, title, description, kind,
+    scope; only those ``GET /artefacts`` lists for the caller), facets
+    (name, label, summary, definition; only when ``ui.facets`` is on, and
+    outside ``facets_visible`` for admins only) and the help topics and
+    glossary terms (without the parts switched off). Filler words ("expression", "in", "which", "datasets", ...)
     are dropped; AD, PD, MS, ALS, FTD and APOE4 are expanded. Rules:
     ``lib/catalog_search.py``.
 
@@ -18038,8 +18043,58 @@ def search_catalog(request: Request,
     except Exception as exc:
         log.warning("search: gene index unavailable: %s", exc)
         gene_index = None
+    # Artefacts and analysis collections: the access rules of GET /artefacts and GET /groups/{id}
+    # (the artefact policy over the full maps, applied to this caller). Fails closed: no group.
+    artefacts = None
+    analysis_collections: List[Dict[str, Any]] = []
+    try:
+        policy = _artefact_policy()
+        viewer = _artefact_viewer(request)
+        for group_id, collection in (registry.collection_registry() or {}).items():
+            if collection.kind == 'analysis' and policy.collection_visible(group_id, viewer):
+                analysis_collections.append({**(collection.meta or {}), 'group_id': group_id,
+                                             'title': collection.title, 'description': collection.description})
+        artefacts = _artefact_service().searchable(registry.artefact_index(), policy, viewer)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("search: artefacts unavailable: %s", exc)
+    ui = _ui_settings()
+    facets = None
+    if ui.get('facets', True):
+        try:
+            facets = _search_facets(request, databases)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("search: facets unavailable: %s", exc)
+    help_hidden = [part for part in help_content.UI_PARTS if not ui.get(part, True)]
     return catalog_search.search(q, databases, gene_index=gene_index, genesets=genesets,
-                                 genesets_with_gene=genesets_with_gene, papers=papers, limit=limit)
+                                 genesets_with_gene=genesets_with_gene, papers=papers,
+                                 analysis_collections=analysis_collections, artefacts=artefacts, facets=facets,
+                                 help_hidden=help_hidden, limit=limit)
+
+
+def _search_facets(request: Request, databases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Registered facets for the search: label and texts from the tag vocabulary, the number of the caller's
+    datasets that carry the column. Facets outside ``facets_visible`` are left out except for admins, as
+    on the facet pages."""
+    import obscol_tags  # noqa: PLC0415
+    tags = (obscol_tags.load_vocab() or {}).get('tags') or {}
+    visible = _facets_visible()
+    is_admin = _caller_is_admin(request)
+    carriers: Dict[str, int] = {}
+    for db in databases:
+        obs = db.get('obs') or {}
+        for name in set((obs.get('categorical') or []) + (obs.get('numerical') or [])):
+            carriers[name] = carriers.get(name, 0) + 1
+    rows = []
+    for tag, entry in obscol_tags.facet_registry().items():
+        if entry['status'] != 'registered':
+            continue
+        if facet_hidden_by_config(entry['column'], visible) and not is_admin:
+            continue
+        block = (tags.get(tag) or {}).get('facet') or {}
+        rows.append({'column': entry['column'], 'tag': tag, 'label': (tags.get(tag) or {}).get('label') or tag,
+                     'summary': block.get('summary') or '', 'definition': block.get('definition') or '',
+                     'n_datasets': carriers.get(entry['column'], 0)})
+    return rows
 
 
 @app.get("/search/literature", tags=["library"])

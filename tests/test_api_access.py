@@ -33,6 +33,7 @@ from fastapi.testclient import TestClient
 
 import config
 import dataset_access
+import help_content
 from metadata import parse_md_file
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -65,6 +66,7 @@ _SERVE_WANTED = {
     '_artefact_s3_client', '_artefact_viewer', '_artefact_policy', '_artefact_count',
     # GET /search (API 2.48): the catalogue search lists only what /databases lists
     'search_catalog', '_catalog_gene_index', '_CATALOG_GENE_INDEX', '_CATALOG_GENE_INDEX_LOCK',
+    '_search_facets', '_ui_settings', '_UI_SETTINGS',
 }
 
 
@@ -142,6 +144,9 @@ def _serve(tmp_path: Path, auth_mode: str = 'authelia', requires_auth: bool = Tr
         'dataset_access': dataset_access, 'parse_md_file': parse_md_file,
         'connection_pool': _FakePool(), 'AnthiveDB': _FakeDb, 'EvictedDatabaseError': RuntimeError,
         'lib_de_storage': _FakeDe, 'time': __import__('time'), 'ConnectionPool': _FakePool,
+        'help_content': help_content, 'get_ui_settings': lambda cfg_arg=None: {},
+        'facet_hidden_by_config': lambda facet, visible: bool(visible) and facet not in visible,
+        '_facets_visible': lambda: [],
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     namespace['registry'] = _registry(namespace, tmp_path)
@@ -232,6 +237,20 @@ def test_search_finds_only_datasets_the_caller_may_see(tmp_path):
     signed_in = client.get('/search', params={'q': 'G1'}, headers=USER).json()
     assert sorted(row['db_id'] for row in signed_in['datasets']) == sorted([PUBLIC_ID, INTERNAL_ID])
     assert client.get('/search', params={'q': 'internal'}).json()['n_datasets'] == 0
+
+
+def test_search_follows_the_ui_switches(tmp_path):
+    client = _serve(tmp_path)
+    on = client.get('/search', params={'q': 'facet'}).json()
+    assert on['facets'] is not None and on['n_help'] > 0
+    client.namespace['_UI_SETTINGS'].update({'facets': False, 'caveats': True, 'api': True, 'mcp': False})
+    off = client.get('/search', params={'q': 'facet'}).json()
+    assert off['facets'] is None
+    import help_content as hc
+    hidden_topics = {topic.id for topic in hc.topics() if topic.ui in ('facets', 'mcp')}
+    assert hidden_topics and not hidden_topics & {row['anchor'] for row in off['help']}
+    assert not any(row['anchor'] == f'glossary-{term.slug}' for row in off['help'] for term in hc.glossary()
+                   if term.ui in ('facets', 'mcp'))
 
 
 def test_anonymous_gets_404_on_internal_routes(tmp_path):

@@ -1268,6 +1268,18 @@ class ArtefactService:
         next_cursor = encode_cursor(rows[limit - 1].key) if len(rows) > limit else None
         return {'artefacts': [self.summary(entry, viewer) for entry in rows[:limit]], 'next_cursor': next_cursor}
 
+    def searchable(self, index: ArtefactIndex, policy: AccessPolicy, viewer: Viewer) -> List[Dict[str, Any]]:
+        """Every artefact the default ``GET /artefacts`` listing shows ``viewer`` (a live version, visible scope,
+        no orphans), as its summary plus the latest version's ``description``, for the catalogue search."""
+        rows = []
+        for key in sorted(index.entries):
+            entry = index.entries[key]
+            if entry.latest is None or not policy.artefact_visible(entry, viewer):
+                continue
+            manifest = entry.versions[entry.latest].manifest or {}
+            rows.append(dict(self.summary(entry, viewer), description=str(manifest.get('description') or '')))
+        return rows
+
     def count(self, index: ArtefactIndex, policy: AccessPolicy, viewer: Viewer, *, group_id: Optional[str] = None,
               db_id: Optional[str] = None) -> int:
         """Artefacts with a live version the viewer sees, of one collection (all scopes) or one dataset."""

@@ -36,6 +36,7 @@ from fastapi.testclient import TestClient
 
 import artefacts
 import dataset_access
+import help_content
 from metadata import parse_md_file
 from tests.artefact_helpers import StrictFakeS3, write_artefact, write_dataset_md, write_index_md
 
@@ -76,6 +77,9 @@ _SERVE_WANTED = {
     '_artefact_service_instance', '_artefact_service_lock', '_artefact_s3_client', '_artefact_service',
     '_artefact_viewer', '_artefact_policy', '_artefact_error', '_artefact_resolve', '_artefact_count',
     *(name for path, name in ARTEFACT_ROUTES.items() if path not in WRITE_ROUTES | OWN_ROUTES),
+    # GET /search (API 2.48): artefacts and collections under the same rules
+    'search_catalog', '_catalog_gene_index', '_CATALOG_GENE_INDEX', '_CATALOG_GENE_INDEX_LOCK',
+    '_search_facets', '_ui_settings', '_UI_SETTINGS', 'list_databases',
 }
 
 USER = {'Remote-User': 'alice', 'Remote-Groups': 'users'}
@@ -173,6 +177,9 @@ def _serve(store: Path, auth_mode: str = 'authelia', requires_auth: bool = True,
         'get_internal_requires_auth': lambda cfg_arg=None: requires_auth,
         'dataset_access': dataset_access, 'parse_md_file': parse_md_file, 'time': time,
         'ConnectionPool': object, 'EvictedDatabaseError': RuntimeError,
+        'help_content': help_content, 'get_ui_settings': lambda cfg_arg=None: {},
+        'facet_hidden_by_config': lambda facet, visible: bool(visible) and facet not in visible,
+        '_facets_visible': lambda: [],
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     namespace['registry'] = _registry(namespace, store)
@@ -624,3 +631,45 @@ def test_a_missing_file_is_a_named_file_not_found(client):
     body = response.json()
     assert body['status'] == 'file_not_found' and body['file'] == 'nothere.png'
     assert 'nothere.png' in body['message'] and body['ref'] == 'PU1/pub/fig-public@v2'
+
+
+# ── GET /search (API 2.48): artefacts and collections follow the same rules ────
+
+def _search(client: TestClient, q: str, headers: Dict[str, str]) -> Dict[str, Any]:
+    response = client.get('/search', params={'q': q, 'limit': 200}, headers=headers)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+@pytest.mark.parametrize('who', ['anonymous', 'user', 'admin', 'anonymous_tool'])
+def test_search_lists_exactly_the_artefacts_the_listing_shows(store, client, who):
+    headers = {'anonymous': ANON, 'user': USER, 'admin': ADMIN, 'anonymous_tool': {'X-Anthive-Anonymous': '1'}}[who]
+    caller = _serve(store[0], client_host='127.0.0.1') if who == 'anonymous_tool' else client
+    expected = sorted(_listed(caller, headers))
+    found = _search(caller, 'figure', headers)['artefacts'] + _search(caller, 'table', headers)['artefacts'] \
+        + _search(caller, 'report', headers)['artefacts'] + _search(caller, 'notebook', headers)['artefacts']
+    assert sorted({row['ref'] for row in found}) == expected
+    if who in ('anonymous', 'anonymous_tool'):
+        assert not {'PU1/pub/fig-secret', 'MX0/int/fig-mx-int', 'IN2/int/in-fig', 'NO6/_group/notes'} & {
+            row['ref'] for row in found}
+    assert 'PU1/pub/gone-fig' not in {row['ref'] for row in found}            # purged: not listed either
+    assert ORPHAN not in {row['ref'] for row in found}
+
+
+def test_search_collections_follow_the_group_rules(client):
+    anonymous = {row['group_id'] for row in _search(client, 'analyses', ANON)['collections']}
+    assert anonymous == {'AT6'}                                               # NO6 is internal
+    signed_in = {row['group_id'] for row in _search(client, 'analyses', USER)['collections']}
+    assert signed_in == {'AT6', 'NO6'}
+    assert 'BA6' not in {row['group_id'] for row in _search(client, 'authors', ADMIN)['collections']}
+    assert _search(client, 'IN2', ANON)['collections'] == []                 # every dataset internal
+    assert [row['group_id'] for row in _search(client, 'IN2', USER)['collections']] == ['IN2']
+    mixed = _search(client, 'MX0', ANON)
+    assert [row['n_datasets'] for row in mixed['collections']] == [1]         # only the public dataset counts
+
+
+def test_search_help_and_facets_groups(client):
+    result = _search(client, 'replicate unit', ANON)
+    assert any(row['anchor'] == 'facet-replicate-unit' for row in result['help'])
+    assert result['facets'] is not None
+    assert _search(client, 'APOE', ANON)['facets'][0]['column'].startswith('ant_apoe')

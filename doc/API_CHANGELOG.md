@@ -46,6 +46,13 @@ Minor, additive. Nothing is removed or renamed; `API_VERSION` is bumped at relea
   names only). A group the site does not have (no gene index, no gene set store, no library) is `null`.
   Filler words are dropped and AD, PD, MS, ALS, FTD and APOE4 are expanded; the rules live in
   `lib/catalog_search.py`. Exploratory keyword matching, not a ranking model.
+- `GET /search` also returns `collections` / `n_collections` (collections of visible datasets, plus visible
+  analysis collections, whose own text holds every word or that hold a matching dataset), `artefacts` /
+  `n_artefacts` (exactly the artefacts the default `GET /artefacts` listing shows the caller, matched on id,
+  title, description, kind and scope; `withdrawn` marked; via `ArtefactService.searchable`), `facets` / `n_facets`
+  (registered facets on name, label, summary and definition; `null` when `ui.facets` is off; facets outside
+  `facets_visible` for admins only) and `help` / `n_help` (help topics and glossary terms, without the parts the
+  site's `ui` switches off; `anchor` is the id on the help page). `limit` now also caps the gene sets group.
 
 ## 2.47.2 (2026-10-23)
 

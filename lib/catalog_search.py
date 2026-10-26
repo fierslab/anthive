@@ -399,11 +399,151 @@ def _geneset_row(summary: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _title_hits(words: Sequence[str], title: str) -> int:
+    folded = fold(title)
+    return sum(1 for word in words if word_matches(word, folded))
+
+
+def search_collections(databases: Sequence[Mapping[str, Any]], words: Sequence[str],
+                       matched_db_ids: Set[str],
+                       analysis_collections: Optional[Sequence[Mapping[str, Any]]] = None,
+                       limit: int = 50) -> Tuple[List[Dict[str, Any]], int]:
+    """Collections whose own text (title, folder name, code, summary, description, authors, year, DOI,
+    PubMed id, accession) holds every word, or that hold a matching dataset.
+
+    Collections come from the visible datasets (a collection is visible when it has a visible dataset, as
+    ``GET /groups/{id}``) plus the visible analysis collections the caller passes.
+    """
+    if not words:
+        return [], 0
+    groups: Dict[str, Dict[str, Any]] = {}
+    for db in databases:
+        group_id = str(db.get('group_id') or str(db.get('id', '')).split('/')[0])
+        entry = groups.setdefault(group_id, {'group_id': group_id, 'meta': db.get('collection') or {},
+                                             'db_ids': [], 'kind': 'datasets'})
+        entry['db_ids'].append(str(db.get('id')))
+    for collection in analysis_collections or []:
+        group_id = str(collection.get('group_id') or '')
+        if group_id and group_id not in groups:
+            groups[group_id] = {'group_id': group_id, 'meta': dict(collection), 'db_ids': [], 'kind': 'analysis'}
+    hits = []
+    for group_id, entry in groups.items():
+        meta = entry['meta']
+        title = str((meta.get('title') or '').strip() or meta.get('group') or group_id)
+        text = fold(' '.join([title, str(meta.get('group') or ''), group_id, str(meta.get('summary') or ''),
+                              str(meta.get('description') or '')[:2000], ' '.join(as_list(meta.get('authors'))),
+                              str(meta.get('year') or ''), str(meta.get('doi') or ''), str(meta.get('pmid') or ''),
+                              str(meta.get('accession') or '')]))
+        n_matching = len(matched_db_ids.intersection(entry['db_ids']))
+        own = all(word_matches(word, text) for word in words)
+        if not own and not n_matching:
+            continue
+        summary = str(meta.get('summary') or '').strip()
+        hits.append(((-int(own) * 1000 - _title_hits(words, title) * 100 - n_matching, title.lower()), {
+            'group_id': group_id, 'title': title, 'kind': entry['kind'],
+            'summary': '' if summary.lower() in ('', 'na') else summary[:300],
+            'year': meta.get('year'), 'n_datasets': len(entry['db_ids']), 'n_matching': n_matching,
+            'matched_in': ['collection'] if own else ['its datasets'],
+        }))
+    hits.sort(key=lambda item: item[0])
+    return [row for _, row in hits[:limit]], len(hits)
+
+
+def search_artefacts(artefacts: Sequence[Mapping[str, Any]], words: Sequence[str],
+                     limit: int = 50) -> Tuple[List[Dict[str, Any]], int]:
+    """Artefacts (already filtered to what the caller may see) whose id, title, description, kind, scope or
+    dataset hold every word. Title hits first."""
+    if not words:
+        return [], 0
+    hits = []
+    for item in artefacts:
+        title = str(item.get('title') or item.get('artefact_id') or '')
+        kind = str(item.get('kind') or '')
+        text = fold(' '.join([str(item.get('artefact_id') or ''), title, str(item.get('description') or ''),
+                              kind, kind.replace('_', ' '), str(item.get('scope') or ''), str(item.get('db_id') or ''),
+                              str(item.get('group_id') or ''), str(item.get('ref') or '')]))
+        if not all(word_matches(word, text) for word in words):
+            continue
+        hits.append(((-_title_hits(words, title), title.lower()), {
+            'ref': item.get('ref'), 'artefact_id': item.get('artefact_id'), 'title': title, 'kind': kind,
+            'group_id': item.get('group_id'), 'scope': item.get('scope'), 'db_id': item.get('db_id'),
+            'description': str(item.get('description') or '')[:300], 'updated': item.get('updated'),
+            'withdrawn': bool(item.get('withdrawn')),
+        }))
+    hits.sort(key=lambda item: item[0])
+    return [row for _, row in hits[:limit]], len(hits)
+
+
+def search_facets(facets: Sequence[Mapping[str, Any]], words: Sequence[str],
+                  limit: int = 50) -> Tuple[List[Dict[str, Any]], int]:
+    """Facets (``{column, tag, label, summary, definition, n_datasets}``) whose name, label, summary or
+    definition hold every word. Label hits first."""
+    if not words:
+        return [], 0
+    hits = []
+    for facet in facets:
+        label = str(facet.get('label') or facet.get('tag') or '')
+        text = fold(' '.join(str(facet.get(key) or '') for key in ('column', 'tag', 'label', 'summary', 'definition'))
+                    + ' ' + str(facet.get('tag') or '').replace('_', ' '))
+        if not all(word_matches(word, text) for word in words):
+            continue
+        hits.append(((-_title_hits(words, label), label.lower()), {
+            'column': facet.get('column'), 'label': label, 'summary': str(facet.get('summary') or '')[:300],
+            'n_datasets': facet.get('n_datasets')}))
+    hits.sort(key=lambda item: item[0])
+    return [row for _, row in hits[:limit]], len(hits)
+
+
+def help_entries(hidden: Sequence[str] = ()) -> List[Dict[str, str]]:
+    """The help topics (with their subsections) and glossary terms as searchable entries, without the topics,
+    terms and passages of parts switched off (``hidden``). ``anchor`` is the id on the help page."""
+    import help_content  # noqa: PLC0415
+    hidden = set(hidden or ())
+    topics = {topic.id: topic for topic in help_content.topics()}
+    parent_of = {child: topic.id for topic in topics.values() for child in topic.children}
+    entries = []
+    for topic in topics.values():
+        parent = topics.get(parent_of.get(topic.id, ''))
+        if (topic.ui and topic.ui in hidden) or (parent is not None and parent.ui and parent.ui in hidden):
+            continue
+        body = help_content.html_to_text(help_content.strip_ui(topic.body_html, hidden))
+        entries.append({'kind': 'topic', 'anchor': topic.id, 'title': topic.title, 'summary': topic.summary,
+                        'text': ' '.join([topic.title, ' '.join(topic.aliases), topic.summary, body]),
+                        'parent': parent.title if parent is not None else ''})
+    for term in help_content.glossary():
+        if term.ui and term.ui in hidden:
+            continue
+        definition = help_content.html_to_text(help_content.strip_ui(term.definition_html, hidden))
+        entries.append({'kind': 'term', 'anchor': f'glossary-{term.slug}', 'title': term.term,
+                        'summary': definition[:240], 'text': f'{term.term} {definition}', 'parent': 'Glossary'})
+    return entries
+
+
+def search_help(entries: Sequence[Mapping[str, str]], words: Sequence[str],
+                limit: int = 50) -> Tuple[List[Dict[str, Any]], int]:
+    """Help topics and glossary terms whose title, aliases, summary or text hold every word; title hits first,
+    then topics before glossary terms."""
+    if not words:
+        return [], 0
+    hits = []
+    for entry in entries:
+        if not all(word_matches(word, fold(entry['text'])) for word in words):
+            continue
+        hits.append(((-_title_hits(words, entry['title']), entry['kind'] != 'topic', entry['title'].lower()),
+                     {key: entry[key] for key in ('kind', 'anchor', 'title', 'summary', 'parent')}))
+    hits.sort(key=lambda item: item[0])
+    return [row for _, row in hits[:limit]], len(hits)
+
+
 def search(query: str, databases: Sequence[Mapping[str, Any]], *,
            gene_index: Optional[GeneIndex] = None,
            genesets: Optional[Sequence[Mapping[str, Any]]] = None,
            genesets_with_gene: Optional[Callable[[str], Sequence[Mapping[str, Any]]]] = None,
            papers: Optional[Callable[[str], Sequence[Mapping[str, Any]]]] = None,
+           analysis_collections: Optional[Sequence[Mapping[str, Any]]] = None,
+           artefacts: Optional[Sequence[Mapping[str, Any]]] = None,
+           facets: Optional[Sequence[Mapping[str, Any]]] = None,
+           help_hidden: Optional[Sequence[str]] = None,
            labels: Optional[Mapping[str, str]] = None,
            limit: int = 50) -> Dict[str, Any]:
     """Unified keyword search, grouped by kind.
@@ -415,12 +555,18 @@ def search(query: str, databases: Sequence[Mapping[str, Any]], *,
         genesets: gene set summaries; None skips the gene set group.
         genesets_with_gene: gene sets that contain a gene (for a query of gene words only).
         papers: callable taking the joined words and returning paper summaries; None skips papers.
+        analysis_collections: visible analysis collections (no datasets) to search besides the collections
+            of the visible datasets.
+        artefacts: artefacts the caller may see (``ArtefactService.searchable``); None skips the group.
+        facets: facets to search (``{column, tag, label, summary, definition, n_datasets}``); None skips.
+        help_hidden: parts switched off on the site, for the help group; None skips the help group.
         labels: ``{tag: label}`` of the ant_* annotation columns.
         limit: most rows per group (totals are reported separately).
 
     Returns:
-        ``{query, words, gene_words, datasets, n_datasets, genes, genesets, n_genesets, papers, n_papers,
-        suggestions, datasets_basis}``. A group that was skipped is None; an empty match is an empty list.
+        ``{query, words, gene_words, datasets, n_datasets, datasets_basis, collections, n_collections, genes,
+        suggestions, genesets, n_genesets, papers, n_papers, artefacts, n_artefacts, facets, n_facets, help,
+        n_help}``. A group that was skipped is None; an empty match is an empty list.
     """
     words = query_words(query)
     labels = labels if labels is not None else vocabulary_labels()
@@ -440,7 +586,7 @@ def search(query: str, databases: Sequence[Mapping[str, Any]], *,
     other_words = [word for word in words if word not in gene_words]
 
     if other_words:
-        dataset_rows, n_datasets = search_datasets(databases, other_words, labels, limit)
+        all_rows, n_datasets = search_datasets(databases, other_words, labels, limit=10_000)
         basis = 'words'
     elif gene_words:
         # Gene words only: the datasets that mention one of the genes in their description or annotations.
@@ -449,29 +595,38 @@ def search(query: str, databases: Sequence[Mapping[str, Any]], *,
             rows, _ = search_datasets(databases, [word], labels, limit=10_000, scoped=False)
             for row in rows:
                 found.setdefault(row['db_id'], row)
-        dataset_rows, n_datasets = list(found.values())[:limit], len(found)
+        all_rows, n_datasets = list(found.values()), len(found)
         basis = 'mentions'
     else:
-        dataset_rows, n_datasets, basis = [], 0, 'none'
+        all_rows, n_datasets, basis = [], 0, 'none'
+    dataset_rows = all_rows[:limit]
+    text_words = other_words or gene_words
+    collection_rows, n_collections = search_collections(
+        databases, text_words, {row['db_id'] for row in all_rows}, analysis_collections, limit)
 
     geneset_rows: Optional[List[Dict[str, Any]]] = None
     n_genesets = 0
     if genesets is not None:
         if other_words:
-            geneset_rows, n_genesets = search_genesets(genesets, other_words, limit=20)
+            geneset_rows, n_genesets = search_genesets(genesets, other_words, limit=limit)
         elif gene_words and genesets_with_gene is not None:
             seen: Dict[str, Dict[str, Any]] = {}
             for word in gene_words:
                 for summary in genesets_with_gene(gene_index.canonical(word) or word):
                     row = _geneset_row(summary)
                     seen.setdefault(f"{row['study']}/{row['experiment']}/{row['name']}", row)
-            geneset_rows, n_genesets = list(seen.values())[:20], len(seen)
+            geneset_rows, n_genesets = list(seen.values())[:limit], len(seen)
         else:
             geneset_rows = []
 
     paper_rows: Optional[List[Dict[str, Any]]] = None
     if papers is not None:
         paper_rows = list(papers(paper_query(words))) if words else []
+    artefact_rows, n_artefacts = (search_artefacts(artefacts, words, limit) if artefacts is not None
+                                  else (None, 0))
+    facet_rows, n_facets = search_facets(facets, words, limit) if facets is not None else (None, 0)
+    help_rows, n_help = (search_help(help_entries(help_hidden), words, limit) if help_hidden is not None
+                         else (None, 0))
     return {
         'query': query,
         'words': words,
@@ -479,12 +634,20 @@ def search(query: str, databases: Sequence[Mapping[str, Any]], *,
         'datasets': dataset_rows,
         'n_datasets': n_datasets,
         'datasets_basis': basis,
+        'collections': collection_rows,
+        'n_collections': n_collections,
         'genes': genes,
         'suggestions': suggestions,
         'genesets': geneset_rows,
         'n_genesets': n_genesets,
         'papers': paper_rows[:limit] if paper_rows is not None else None,
         'n_papers': len(paper_rows) if paper_rows is not None else 0,
+        'artefacts': artefact_rows,
+        'n_artefacts': n_artefacts,
+        'facets': facet_rows,
+        'n_facets': n_facets,
+        'help': help_rows,
+        'n_help': n_help,
     }
 
 
