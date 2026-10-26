@@ -29,6 +29,24 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.48.0 (unreleased)
+
+Minor, additive. Nothing is removed or renamed; `API_VERSION` is bumped at release.
+
+- New `GET /search?q=&limit=` (tag `databases`): keyword search over the catalogue for the web UI's front page,
+  grouped by kind. Returns `{query, words, gene_words, datasets, n_datasets, datasets_basis, genes, suggestions,
+  genesets, n_genesets, papers, n_papers}`. `datasets` are the datasets the caller may see (the access rules of
+  `GET /databases`) whose title, collection, description, organism, tissue, cell type, disease, condition,
+  technology or standard cell annotation column labels hold every non-gene word (a word that names a recorded
+  disease, cell type, organism or tissue must match that field); each row carries `db_id`,
+  `group_id`, `file_id`, `title`, `collection`, `organism`, `tissue`, `cell_types`, `diseases`, `n_cells`,
+  `designation` and `matched_in`. `genes` lists the query words that are exact gene names of the precomputed gene
+  statistics index (case ignored) with `n_datasets` counted over visible datasets only; gene words do not filter
+  the datasets. `genesets` and `papers` match the same words (gene sets that contain the gene for a query of gene
+  names only). A group the site does not have (no gene index, no gene set store, no library) is `null`.
+  Filler words are dropped and AD, PD, MS, ALS, FTD and APOE4 are expanded; the rules live in
+  `lib/catalog_search.py`. Exploratory keyword matching, not a ranking model.
+
 ## 2.47.2 (2026-10-23)
 
 Patch release: fixes found while setting up the production site as a deposit site for a central watcher.

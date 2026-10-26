@@ -63,6 +63,8 @@ _SERVE_WANTED = {
     # get_group_info / get_database_info count artefacts (REST 2.47, tests/test_artefacts_api.py)
     '_caller_is_admin', '_artefact_service_instance', '_artefact_service_lock', '_artefact_service',
     '_artefact_s3_client', '_artefact_viewer', '_artefact_policy', '_artefact_count',
+    # GET /search (API 2.48): the catalogue search lists only what /databases lists
+    'search_catalog', '_catalog_gene_index', '_CATALOG_GENE_INDEX', '_CATALOG_GENE_INDEX_LOCK',
 }
 
 
@@ -220,6 +222,16 @@ def test_anonymous_listing_has_public_datasets_only(tmp_path):
     assert ids == [PUBLIC_ID]
     ids = [db['id'] for db in client.get('/databases', headers=USER).json()['databases']]
     assert ids == sorted([PUBLIC_ID, INTERNAL_ID, NO_ACCESS_ID])
+
+
+def test_search_finds_only_datasets_the_caller_may_see(tmp_path):
+    client = _serve(tmp_path)
+    anonymous = client.get('/search', params={'q': 'G1'}).json()
+    assert [row['db_id'] for row in anonymous['datasets']] == [PUBLIC_ID]
+    assert anonymous['genes'] is None and anonymous['genesets'] is None and anonymous['papers'] is None
+    signed_in = client.get('/search', params={'q': 'G1'}, headers=USER).json()
+    assert sorted(row['db_id'] for row in signed_in['datasets']) == sorted([PUBLIC_ID, INTERNAL_ID])
+    assert client.get('/search', params={'q': 'internal'}).json()['n_datasets'] == 0
 
 
 def test_anonymous_gets_404_on_internal_routes(tmp_path):

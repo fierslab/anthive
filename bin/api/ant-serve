@@ -17972,6 +17972,76 @@ def get_paper(request: Request, citekey: str):
     return service.record(paper)
 
 
+_CATALOG_GENE_INDEX: Dict[str, Any] = {'frame_id': None, 'index': None}
+_CATALOG_GENE_INDEX_LOCK = Lock()
+
+
+def _catalog_gene_index() -> Any:
+    """The gene names of the precomputed gene statistics index as a ``catalog_search.GeneIndex``, rebuilt
+    when the index is reloaded; None when no index is loaded."""
+    import catalog_search  # noqa: PLC0415
+    stats_index = getattr(registry, 'gene_stats_index', None) if registry is not None else None
+    frame_of = getattr(stats_index, 'frame', None)
+    frame = frame_of() if callable(frame_of) else None
+    if frame is None or 'dataset' not in frame or 'gene' not in frame:
+        return None
+    with _CATALOG_GENE_INDEX_LOCK:
+        if _CATALOG_GENE_INDEX['frame_id'] != id(frame):
+            pairs = frame[['dataset', 'gene']].drop_duplicates().itertuples(index=False, name=None)
+            _CATALOG_GENE_INDEX['index'] = catalog_search.GeneIndex(pairs)
+            _CATALOG_GENE_INDEX['frame_id'] = id(frame)
+        return _CATALOG_GENE_INDEX['index']
+
+
+@app.get("/search", tags=["databases"])
+def search_catalog(request: Request,
+                   q: str = Query(..., min_length=1, max_length=300, description="Words as a person types them, e.g. 'TREM2 microglia Alzheimer'"),
+                   limit: int = Query(50, ge=1, le=500, description="Most rows per group")):
+    """Keyword search over the catalogue, grouped by kind (API 2.48, additive).
+
+    Returns the datasets the caller may see whose text (title, collection,
+    description, organism, tissue, cell type, disease, condition, technology,
+    labels of the standard cell annotation columns) holds every word (a
+    word that names a recorded disease, cell type, organism or tissue must
+    match that field), the
+    genes named in the query (exact gene names of the precomputed gene index,
+    case ignored; with ``n_datasets`` counted over visible datasets only), the
+    gene sets whose name or description holds the words (or that contain the
+    gene, for a query of gene names only) and the library papers that hold
+    the words. Filler words ("expression", "in", "which", "datasets", ...)
+    are dropped; AD, PD, MS, ALS, FTD and APOE4 are expanded. Rules:
+    ``lib/catalog_search.py``.
+
+    A group the site does not have is ``null``: ``genes`` without a gene
+    index, ``genesets`` without a gene set store, ``papers`` without a
+    library. Access rules are those of ``GET /databases``.
+    """
+    import catalog_search  # noqa: PLC0415
+    databases = registry.list_databases()
+    genesets = None
+    genesets_with_gene = None
+    store = globals().get('geneset_registry')
+    if store is not None:
+        try:
+            genesets = [g.to_summary() for g in store.list_genesets()]
+        except Exception as exc:  # a broken store must not break the dataset search
+            log.warning("search: gene sets unavailable: %s", exc)
+        by_gene = globals().get('_by_gene_index') or {}
+        genesets_with_gene = lambda gene: [m for m in by_gene.get(gene.upper(), [])  # noqa: E731
+                                           if m.get('kind') == 'geneset']
+    papers = None
+    library = globals().get('_library_service')
+    if library is not None:
+        papers = lambda words: library.list(q=words)  # noqa: E731
+    try:
+        gene_index = _catalog_gene_index()
+    except Exception as exc:
+        log.warning("search: gene index unavailable: %s", exc)
+        gene_index = None
+    return catalog_search.search(q, databases, gene_index=gene_index, genesets=genesets,
+                                 genesets_with_gene=genesets_with_gene, papers=papers, limit=limit)
+
+
 @app.get("/search/literature", tags=["library"])
 def search_literature(request: Request, q: str = Query(..., min_length=2),
                       k: int = Query(10, ge=1, le=50),
