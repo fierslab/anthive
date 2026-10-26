@@ -53,6 +53,11 @@ Minor, additive. Nothing is removed or renamed; `API_VERSION` is bumped at relea
   (registered facets on name, label, summary and definition; `null` when `ui.facets` is off; facets outside
   `facets_visible` for admins only) and `help` / `n_help` (help topics and glossary terms, without the parts the
   site's `ui` switches off; `anchor` is the id on the help page). `limit` now also caps the gene sets group.
+- New `GET /stats` (tag `databases`): the front page numbers for the caller, under the access rules of
+  `GET /databases` and `GET /artefacts`: datasets, collections, cells (all, and of primary datasets only),
+  human, mouse, microglia, single-nucleus and single-cell datasets, organisms, genes with precomputed
+  statistics in a visible dataset, gene sets, papers, artefacts and the 5 most recently updated datasets.
+  A group the site lacks is `null`. Cached 5 minutes per access level. No donor count.
 
 ## 2.47.2 (2026-10-23)
 

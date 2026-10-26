@@ -287,6 +287,11 @@ class GeneIndex:
     def datasets(self, word: str) -> Set[str]:
         return set(self._datasets.get(word.lower(), set()))
 
+    def count_in(self, db_ids: Set[str]) -> int:
+        """Distinct gene names (case ignored, so a human gene and its mouse spelling count once) that the index
+        holds for at least one of ``db_ids``."""
+        return sum(1 for datasets in self._datasets.values() if not datasets.isdisjoint(db_ids))
+
     def prefixed(self, prefix: str, limit: int = 8) -> List[str]:
         """Up to ``limit`` gene names starting with ``prefix`` (case ignored), shortest first."""
         prefix = prefix.lower()
@@ -737,3 +742,28 @@ def catalogue_summary(databases: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         'n_microglia': n_microglia,
         'organisms': dict(sorted(organisms.items(), key=lambda item: -item[1])),
     }
+
+
+def recently_updated(databases: Sequence[Mapping[str, Any]], n: int = 5) -> List[Dict[str, Any]]:
+    """The ``n`` datasets with the latest ``updated`` stamp (metadata or data change), newest first."""
+    stamped = [(str(db.get('updated') or '')[:10], db) for db in databases if db.get('updated')]
+    stamped.sort(key=lambda item: (item[0], str(item[1].get('id'))), reverse=True)
+    return [dict(dataset_row(db), updated=date) for date, db in stamped[:n]]
+
+
+def catalogue_stats(databases: Sequence[Mapping[str, Any]], *, gene_index: Optional[GeneIndex] = None,
+                    n_genesets: Optional[int] = None, n_papers: Optional[int] = None,
+                    n_artefacts: Optional[int] = None) -> Dict[str, Any]:
+    """The numbers of the front page for one caller: :func:`catalogue_summary` of the visible datasets plus
+    genes with expression statistics in them (None without a gene index), gene sets, papers and artefacts (None
+    when the site does not have them), the number of mouse datasets and the 5 most recently updated datasets.
+    Donors are not counted: there is no reliable cross-dataset donor count (see the help page)."""
+    summary = catalogue_summary(databases)
+    visible = {str(db.get('id')) for db in databases}
+    summary.update({
+        'n_mouse': sum(1 for db in databases if 'mouse' in [v.lower() for v in as_list(db.get('organism'))]),
+        'n_genes': gene_index.count_in(visible) if gene_index is not None else None,
+        'n_genesets': n_genesets, 'n_papers': n_papers, 'n_artefacts': n_artefacts,
+        'recently_updated': recently_updated(databases),
+    })
+    return summary

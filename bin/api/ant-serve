@@ -18097,6 +18097,58 @@ def _search_facets(request: Request, databases: List[Dict[str, Any]]) -> List[Di
     return rows
 
 
+_CATALOG_STATS_CACHE: Dict[Tuple, Tuple[float, Dict[str, Any]]] = {}
+_CATALOG_STATS_TTL = 300.0
+
+
+@app.get("/stats", tags=["databases"])
+def catalog_stats(request: Request):
+    """Numbers for the front page, for this caller (API 2.48, additive): ``n_datasets``, ``n_collections``,
+    ``n_cells`` and ``n_cells_primary`` (primary datasets only: reanalyses reuse cells), ``n_primary``,
+    ``n_human``, ``n_mouse``, ``n_microglia``, ``n_single_nucleus``, ``n_single_cell``, ``organisms``,
+    ``n_genes`` (distinct gene names with precomputed expression statistics in a visible dataset; null without
+    the index), ``n_genesets``, ``n_papers`` (null without a library), ``n_artefacts`` (as ``GET /artefacts``
+    lists them) and ``recently_updated`` (5 datasets). Access rules of ``GET /databases`` and ``GET /artefacts``.
+    Cached for 5 minutes per access level (internal visible or not, admin or not, hidden datasets).
+    Donors are not counted: no reliable cross-dataset donor count exists."""
+    import catalog_search  # noqa: PLC0415
+    try:
+        viewer = _artefact_viewer(request)
+        key: Tuple = (viewer.sees_internal, viewer.is_admin, frozenset(viewer.hidden or ()))
+    except Exception:  # noqa: BLE001
+        viewer, key = None, (_caller_sees_internal(request), _caller_is_admin(request), frozenset(_hidden_db_ids() or ()))
+    now = time.time()
+    cached = _CATALOG_STATS_CACHE.get(key)
+    if cached is not None and now - cached[0] < _CATALOG_STATS_TTL:
+        return cached[1]
+    databases = registry.list_databases()
+    n_genesets = None
+    store = globals().get('geneset_registry')
+    if store is not None:
+        try:
+            n_genesets = len(store.list_genesets())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("stats: gene sets unavailable: %s", exc)
+    library = globals().get('_library_service')
+    n_papers = len(library.list()) if library is not None else None
+    n_artefacts = None
+    try:
+        n_artefacts = len(_artefact_service().searchable(registry.artefact_index(), _artefact_policy(), viewer))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("stats: artefacts unavailable: %s", exc)
+    try:
+        gene_index = _catalog_gene_index()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("stats: gene index unavailable: %s", exc)
+        gene_index = None
+    payload = catalog_search.catalogue_stats(databases, gene_index=gene_index, n_genesets=n_genesets,
+                                             n_papers=n_papers, n_artefacts=n_artefacts)
+    if len(_CATALOG_STATS_CACHE) > 64:
+        _CATALOG_STATS_CACHE.clear()
+    _CATALOG_STATS_CACHE[key] = (now, payload)
+    return payload
+
+
 @app.get("/search/literature", tags=["library"])
 def search_literature(request: Request, q: str = Query(..., min_length=2),
                       k: int = Query(10, ge=1, le=50),

@@ -67,6 +67,7 @@ _SERVE_WANTED = {
     # GET /search (API 2.48): the catalogue search lists only what /databases lists
     'search_catalog', '_catalog_gene_index', '_CATALOG_GENE_INDEX', '_CATALOG_GENE_INDEX_LOCK',
     '_search_facets', '_ui_settings', '_UI_SETTINGS',
+    'catalog_stats', '_CATALOG_STATS_CACHE', '_CATALOG_STATS_TTL',
 }
 
 
@@ -489,3 +490,13 @@ def test_stack_counts_internal_datasets_and_warns(tmp_path, ant_stack, capsys):
     site['auth']['internal_requires_auth'] = True
     ant_stack._check_internal_access(site)
     assert 'hidden on this site' in capsys.readouterr().out
+
+
+def test_stats_count_only_what_the_caller_may_see(tmp_path):
+    client = _serve(tmp_path)
+    anonymous = client.get('/stats').json()
+    assert anonymous['n_datasets'] == 1 and anonymous['n_collections'] == 1
+    assert [row['db_id'] for row in anonymous['recently_updated']] == []
+    signed_in = client.get('/stats', headers=USER).json()
+    assert signed_in['n_datasets'] == 3 and signed_in['n_collections'] == 2
+    assert client.get('/stats').json()['n_datasets'] == 1          # the cache keeps access levels apart

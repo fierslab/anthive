@@ -149,3 +149,12 @@ def test_annotation_labels_come_from_the_vocabulary():
     assert labels.get('apoe4_carrier') == 'APOE e4 carrier' and labels.get('sex') == 'Sex'
     assert cs.annotation_label('ant_braak', labels) == 'Braak stage'
     assert cs.annotation_label('ant_made_up_thing', labels) == 'Made up thing'
+
+
+def test_catalogue_stats_and_recently_updated():
+    dbs = [dict(db, updated=f'2026-10-0{n}') for n, db in enumerate(DATABASES, start=1)]
+    stats = cs.catalogue_stats(dbs, gene_index=_gene_index(), n_genesets=4, n_papers=None, n_artefacts=0)
+    assert stats['n_genes'] == 4            # TREM2 (with Trem2), APOE, TREM1, CAT; Z9/HIDDEN is not visible
+    assert stats['n_mouse'] == 1 and stats['n_genesets'] == 4 and stats['n_papers'] is None
+    assert [row['db_id'] for row in stats['recently_updated']] == ['C3/MM', 'B2/WT', 'A1/RE', 'A1/MG']
+    assert cs.catalogue_stats(DATABASES)['n_genes'] is None
