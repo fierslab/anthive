@@ -9,4 +9,4 @@ aliases:
 - left out of the facet analysis
 - facet exclusion
 body_html: |
-  <p>The analysis needs single cells or nuclei that can be grouped by cell type and donor. Spatial data (a spot is not a cell), proteomics, metacell sets (each row an aggregate of cells), pure mouse datasets and a few sets set aside by the curators are therefore left out: they keep their facet columns for browsing and plotting, but have no tests and no replication. Their dataset page says why in plain words in the Gene sub-tab of the Facet tab (<a href="#glossary-facet-exclusion">glossary</a>).</p>
+  <p>The analysis needs single cells or nuclei that can be grouped by cell type and donor. Spatial data (a spot is not a cell), proteomics, metacell sets (each row an aggregate of cells), pure mouse datasets and a few sets set aside by the curators are therefore left out: they keep their facet columns for browsing and plotting, but have no tests and no replication. Their dataset page says why in plain words in the Genes sub-tab of the Facets &amp; DE tab (<a href="#glossary-facet-exclusion">glossary</a>).</p>

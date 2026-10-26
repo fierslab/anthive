@@ -1,14 +1,23 @@
 id: finding
 title: Finding data
-summary: How to find a dataset on the front page by free-text search, filters, sorting and the table view.
+summary: How to find data from the front page (one search box for datasets, genes, gene sets and papers; browse by disease, cell type or dataset) and in the collection list (free-text search, filters, sorting, table view).
 related:
 - pages
 aliases:
 - search
 - filters
 - find datasets
+- browse by disease
+- browse by cell type
 body_html: |
-  <p>The <a href="/">front page</a> lists every collection, newest first.</p>
+  <p>The <a href="/">front page</a> has one search box and three ways to browse. It is a preview while it is reviewed.</p>
+  <ul>
+    <li><strong>Search.</strong> Type words as you would ask a colleague, for example <code>TREM2 microglia Alzheimer</code>. The results are grouped into genes, datasets, gene sets and, when the site has a paper library, papers. Filler words such as <em>expression</em>, <em>in</em>, <em>across</em>, <em>which</em> and <em>datasets</em> are dropped. A word that is the exact name of a gene (case does not matter) is listed as a gene: open it to see its expression in every dataset, grouped by cell type. A gene name does not narrow the datasets, because nearly every dataset measures nearly every gene. A word that names a disease, cell type, organism or tissue recorded in the catalogue must match that field (<em>microglia</em> finds datasets recorded as microglia, not a neuron dataset whose description mentions microglia); every other word must occur in a dataset's title, collection, description, method or the names of its cell annotation columns. A word also matches inside a longer word (<em>microglia</em> finds <em>microglial cell</em>), a plural s is optional, and AD, PD, MS, ALS, FTD and APOE4 are expanded. Searching for <code>APOE4 carriers</code> finds datasets with an APOE e4 carrier column; how many of their donors carry the allele is on the dataset page. Only the datasets you may see are searched.</li>
+    <li><strong>Browse by disease.</strong> <a href="/diseases">One row per disease</a> with the number of datasets and collections that record it; click a disease for its datasets. A dataset with patients and controls is listed under both, and datasets that record no disease are left out (the page says how many). The counts are datasets, not donors.</li>
+    <li><strong>Browse by cell type.</strong> <a href="/cell-types">One row per cell type</a> recorded for whole datasets (microglia for a sorted microglia study, several types for whole-tissue data), with the same counts and lists.</li>
+    <li><strong>Browse by dataset.</strong> <a href="/collections">The collection list</a>: every collection (one per study), newest first, described below.</li>
+  </ul>
+  <p>In the collection list:</p>
   <ul>
     <li><strong>Search box.</strong> Type anything: a paper title, an author, a journal or year, a DOI or PubMed id, a tissue, cell type, disease or method, a collection or dataset code, or the name of a dataset inside a collection. Several words must all match (so <code>microglia prefrontal</code> narrows the list). Case and accents do not matter, and matching words are highlighted.</li>
     <li><strong>Shortcut and sharing.</strong> Press <code>/</code> anywhere on the page to jump to the search box. The search is kept in the address bar, so you can copy the URL to share exactly the list you see.</li>

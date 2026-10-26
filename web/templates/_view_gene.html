@@ -67,7 +67,7 @@
   <div id="vwg-ode" hidden>
     {% call section_help('Other DE (author and custom)', 'vwg-ode-help') %}
       <p>Differential expression stored with a dataset: the authors' own analysis as published, or an analysis added by the lab. Each study has its own method (cell-level models or pseudobulk tests), covariates and group definitions, so these rows are not donor-level facet tests, are never counted towards replication and should not be compared with the matrix above. Cell-level models give very small p values with many cells.</p>
-      <p>One row per study and contrast where the gene was tested; the effect is the log2 fold change or a z value, as the study stored it. The dataset link opens that dataset's Other DE matrices (Facet &gt; Gene).</p>
+      <p>One row per study and contrast where the gene was tested; the effect is the log2 fold change or a z value, as the study stored it. The dataset link opens that dataset's Other DE matrices (Facets &amp; DE &gt; Genes).</p>
     {% endcall %}
     {{ review_banner('gene-other-de') }}
     <p class="vw-fnote">As published or added by the lab; not donor-level facet tests, not counted towards replication; methods differ, so do not compare with the facet results above.</p>

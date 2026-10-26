@@ -1,7 +1,7 @@
 id: facet-effects
 ui: facets
 title: Facets and facet effects
-summary: A facet is a standardised donor-level or animal-level variable; facet effects are donor-level tests (limma-voom on pseudobulks) per dataset and cell type, shown in the Gene sub-tab of a dataset's Facet tab and on the facet pages. Exploratory.
+summary: A facet is a standardised donor-level or animal-level variable; facet effects are donor-level tests (limma-voom on pseudobulks) per dataset and cell type, shown in the Genes sub-tab of a dataset's Facets & DE tab and on the facet pages. Exploratory.
 related:
 - facet-counting
 - facet-howto
@@ -22,6 +22,6 @@ aliases:
 - facet effect
 - facet tests
 body_html: |
-  <p>A facet is a donor-level (or animal-level) variable that anthive has standardised across datasets: the same name and the same values in every dataset that has it. Each dataset declares how its own columns map onto a facet, and the Facet tab of a dataset shows that mapping value by value (its Gene sub-tab shows the effects). A facet is constant for all cells of one donor, so a facet effect is a difference between donors, not between cells.</p>
+  <p>A facet is a donor-level (or animal-level) variable that anthive has standardised across datasets: the same name and the same values in every dataset that has it. Each dataset declares how its own columns map onto a facet, and the facet mapping of a dataset (under Technical details) shows that mapping value by value (the Genes sub-tab of Facets &amp; DE shows the effects). A facet is constant for all cells of one donor, so a facet effect is a difference between donors, not between cells.</p>
   <p id="facet-effects-warming-up">Right after a server restart the facet effects are computed once in the background, which takes a minute or two. Until that is done a facet panel says "warming up, try again in a minute"<span data-ui="api"> (the API answers 503 with <code>status: warming_up</code> and a <code>Retry-After</code> header)</span> instead of making the page wait.</p>
-  <p id="facet-effects-visible">The facets that are tested are sex, pathologic AD (disease), APOE e4 carrier status, Braak stage, age (per decade of age, both unadjusted and adjusted for pathology) and, in mouse and xenograft hosts, App NL-G-F genotype. The tissue facet uses umbrella terms (for example cortex) so that datasets with different dissections can be compared. Only the tested facets are shown on the <a href="/facets">facet pages</a> while the audit of the facet definitions is open; the Facet tab of a dataset still lists every facet it has, the others under "Not analysed yet". The other <code>ant_</code> columns stay in the data, the plots, SQL and the API.</p>
+  <p id="facet-effects-visible">The facets that are tested are sex, pathologic AD (disease), APOE e4 carrier status, Braak stage, age (per decade of age, both unadjusted and adjusted for pathology) and, in mouse and xenograft hosts, App NL-G-F genotype. The tissue facet uses umbrella terms (for example cortex) so that datasets with different dissections can be compared. Only the tested facets are shown on the <a href="/facets">facet pages</a> while the audit of the facet definitions is open; the facet mapping of a dataset still lists every facet it has, the others under "Not analysed yet". The other <code>ant_</code> columns stay in the data, the plots, SQL and the API.</p>

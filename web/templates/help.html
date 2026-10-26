@@ -85,7 +85,7 @@
 
   <details class="help-section quickstart" id="quickstart" open><summary><h2 class="section-head">Quick start</h2></summary>
     <ol>
-      <li>{% if auth_mode == 'none' %}<strong>Look around.</strong>{% else %}<strong>Sign in and look around.</strong> The site asks for your login once per session.{% endif %} The <a href="/">front page</a> lists every collection; type in the search box (a gene, a disease, an author, a dataset code) or open <em>Filters</em>, then open a dataset to see its cells, plots and papers.</li>
+      <li>{% if auth_mode == 'none' %}<strong>Look around.</strong>{% else %}<strong>Sign in and look around.</strong> The site asks for your login once per session.{% endif %} Type a gene, a disease or a cell type in the search box on the <a href="/">front page</a>, or browse by disease, cell type or dataset (the <a href="/collections">collection list</a>, with its own search and <em>Filters</em>), then open a dataset to see its cells, plots and papers (<a href="#finding">finding data</a>).</li>
       {% if ui.mcp %}<li><strong>Connect your AI client.</strong> MCP is the way AI assistants use outside tools; a personal MCP link lets yours use anthive as you. Open your name at the top right and choose <strong>Connect an MCP client</strong>, which takes you to <a href="/account/mcp" id="quickstart-mcp-link">your MCP page</a>, and create a link there. Keep it private, it works like a password.
         <ul>
           <li><strong>Agents that can run commands</strong> (Claude Code, Codex, OpenCode, Cursor) are quickest. Copy the setup prompt from your MCP page and paste it into the agent: it connects anthive and installs the skills in one go, so you can skip step 3.</li>

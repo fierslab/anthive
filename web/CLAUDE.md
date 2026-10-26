@@ -64,7 +64,10 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 
 | Path | Renders | Template |
 | --- | --- | --- |
-| `/` | dataset catalog (grouped by collection) | `index.html` |
+| `/` | front door (preview `front-door`): search box, browse entry points, two examples, closed "What is here"; old landing query strings (`?q=`, `?disease=`, `?view=`...) 302 to `/collections`; one visible collection still jumps into it (`?all=1` opts out) | `front_door.html` |
+| `/collections` | dataset catalog (grouped by collection), "Browse by dataset"; `/datasets` redirects here | `index.html` |
+| `/search?q=` | search results grouped by kind (preview `search`), from `GET /api/search` (API 2.48) | `search.html` |
+| `/diseases`, `/diseases/{key}` · `/cell-types`, `/cell-types/{key}` | dataset counts per disease / cell type and the dataset list of one (previews `browse-disease`, `browse-celltype`), from `/databases` via `lib/catalog_search.py` | `browse.html` |
 | `/browse/{group}` | one collection | `folder.html` |
 | `/browse/{group}/{file}` | one dataset (info + viz launcher) | `dataset.html` |
 | `/browse/{group}/{file}/plot/{geom}` | interactive plot UI for one geom on one dataset | `plot.html` |
@@ -1087,3 +1090,20 @@ whole topics and glossary terms with `ui: <part>` and passages with `data-ui="<p
 `help_content.strip_ui` through `_help_topic_html` / `_help_glossary_html` (hidden parts from `_ui_hidden()`).
 Tests: `tests/test_web_ui_switches.py` (each switch off, all off, defaults on, glossary links of the remaining
 pages resolve).
+
+## Front door and dataset reading view (2026-10-26, preview)
+
+- `/` is the biologist front door (`front_door.html`, shared pieces in `_front_door.html`: `fd_styles`, `fd_search`,
+  `fd_dataset_row`). Counts, browse lists and the search use the datasets `/databases` returns for the visitor
+  (identity forwarded), so access filtering is the API's. Rules of the search and the browse counts live in
+  `lib/catalog_search.py` (shared with ant-serve `GET /search`); `FRONT_DOOR_EXAMPLES` in browser.py holds the two
+  example questions (checked on the dev catalogue). Nav: `search` (key `front-door`, preview) links `/`, `datasets`
+  links `/collections`.
+- Dataset page tab bar in reading order: Overview, Data, Genes, Gene sets, Facets & DE (group `#tab-group-facet`:
+  label `data-tab="facets-de"` opens its `data-default` sub-tab; pills Genes `facet-gene`, Gene sets `facet-gs`, DE
+  studies `de`), Papers, Artefacts, Downloads, Caveats. With `ui.facets` off DE is a plain tab. Numerical, Categorical
+  and the facet mapping (`#tab-facets`) are in `#ds-tech-bar` behind `#tech-toggle` ("Technical details", closed by
+  default); `activateTab` opens it for a technical tab, `#technical` opens it alone, and open adds `body.ds-tech-names`,
+  which shows the stored `ant_*` names (`.ann-raw`) next to the plain labels. All data-tab names are unchanged, so old
+  hashes work. Data tab card `#ds-annotations` lists the `ant_*` columns with vocabulary labels (`annotation_label`
+  Jinja global, from `lib/obscol_tags_vocab.yaml`), `ant_donor_uid` left out.
