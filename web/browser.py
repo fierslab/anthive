@@ -2841,7 +2841,6 @@ async def search_view(request: Request, q: str = '', kind: str = ''):
                            if not only and total > _SEARCH_TOP_N else ''})
     return templates.TemplateResponse(request, "search.html", {
         "q": query,
-        "search_query": query,
         "only": only,
         "only_title": _SEARCH_GROUP_TITLES.get(only, ''),
         "result": result,

@@ -76,22 +76,11 @@
            the dark background - invert + brightness pushes it to white/cream so
            it clears WCAG AA contrast against #335C67. */
         #topbar .brand img { height: 22px; width: auto; display: block; filter: brightness(0) invert(1); }
-        /* Search field in the bar (2026-10-26): every page, before Help on desktop; an icon on phones that opens
-           the field in a row under the bar. Order: logo, nav, spacer, search, help and account. */
+        /* Order of the bar: logo, nav, spacer, help and account. No search field in the bar since 2026-10-27:
+           the front page (/home, the nav "home" link) is the search page. */
         #topbar nav[aria-label="Main"] { order: 1; }
         #topbar .topbar-spacer { order: 2; }
-        #topbar .topbar-search { order: 3; display: flex; align-items: center; margin: 0; }
         #topbar .topbar-util { order: 4; }
-        #topbar .topbar-search .ts-field { position: relative; display: flex; align-items: center; }
-        #topbar .topbar-search .ts-field svg { position: absolute; left: 8px; width: 13px; height: 13px; color: rgba(255,255,255,.7); pointer-events: none; }
-        #topbar .topbar-search input[type=search] {
-            width: 200px; font: inherit; font-size: 12.5px; line-height: 1.4; padding: 3px 10px 3px 27px; color: #fff;
-            background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.22); border-radius: 14px; outline: none;
-            transition: width .15s, background .15s, border-color .15s;
-        }
-        #topbar .topbar-search input[type=search]::placeholder { color: rgba(255,255,255,.65); }
-        #topbar .topbar-search input[type=search]:focus { width: 260px; background: rgba(255,255,255,.2); border-color: rgba(255,255,255,.55); }
-        #topbar .topbar-search .ts-icon { display: none; }
         #topbar nav { display: flex; align-items: center; gap: 16px; }
         /* Desktop: the menu wrapper is layout-transparent, so the nav links,
            spacer and utility cluster sit directly in the topbar flex row. */
@@ -114,20 +103,7 @@
         @media (max-width: 640px) {
             #topbar { position: relative; z-index: 400; padding: 5px 14px; min-height: 44px; gap: 10px; }
             #topbar .brand img { height: 22px; }
-            #topbar .nav-toggle { display: inline-flex; margin-left: 0; order: 2; }
-            #topbar .topbar-search { order: 1; margin-left: auto; }
-            #topbar .topbar-search .ts-icon {
-                display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 34px; padding: 0;
-                border: 1px solid rgba(255,255,255,.28); border-radius: 6px; background: transparent; color: var(--bar-link); cursor: pointer;
-            }
-            #topbar .topbar-search .ts-icon svg { width: 17px; height: 17px; display: block; }
-            #topbar .topbar-search .ts-field {
-                display: none; position: absolute; top: 100%; left: 0; right: 0; padding: 8px 14px 10px;
-                background: var(--bar-bg); border-bottom: 1px solid #274a52; box-shadow: 0 8px 18px rgba(0,0,0,.18);
-            }
-            #topbar.search-open .topbar-search .ts-field { display: flex; }
-            #topbar .topbar-search .ts-field svg { left: 23px; top: 50%; margin-top: -1px; transform: translateY(-50%); }
-            #topbar .topbar-search input[type=search], #topbar .topbar-search input[type=search]:focus { width: 100%; font-size: 16px; padding: 7px 12px 7px 30px; }
+            #topbar .nav-toggle { display: inline-flex; margin-left: auto; order: 2; }
             #topbar .topbar-menu {
                 display: none; position: absolute; top: 100%; left: 0; right: 0;
                 flex-direction: column; padding: 4px 14px 12px;
@@ -792,28 +768,17 @@
 </head>
 <body>
     <div id="topbar">
-        <a href="/about" class="brand">{% if topbar_logo %}<img src="{{ topbar_logo }}" alt="">{% endif %}anthive</a>
+        <a href="/" class="brand" id="topbar-brand" title="anthive: start page">{% if topbar_logo %}<img src="{{ topbar_logo }}" alt="">{% endif %}anthive</a>
         <button type="button" class="nav-toggle" id="nav-toggle" aria-controls="topbar-menu" aria-expanded="false" aria-label="Open menu">
             <svg class="icon-open" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
             <svg class="icon-close" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </button>
-        {# Search everything (GET /search): datasets, collections, genes, gene sets, papers, artefacts, facets, help.
-           Outside the phone menu panel; on desktop CSS order puts it between the spacer and Help. #}
-        <form class="topbar-search" id="topbar-search" action="/search" method="get" role="search" title="{{ view_tip('search', 'Search datasets, collections, genes, gene sets, papers, artefacts' ~ (', facets' if ui.facets else '') ~ ' and help') }}">
-            <button type="button" class="ts-icon" id="topbar-search-toggle" aria-controls="topbar-search-field" aria-expanded="false" aria-label="Open search">
-                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12.6 12.6L17 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-            </button>
-            <span class="ts-field" id="topbar-search-field">
-                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12.6 12.6L17 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-                <input type="search" name="q" id="topbar-search-input" value="{{ search_query|default('') }}" placeholder="Search anthive" aria-label="Search datasets, genes, gene sets, papers, artefacts and help" autocomplete="off" spellcheck="false">
-            </span>
-        </form>
         <div class="topbar-menu" id="topbar-menu">
         <nav aria-label="Main">
             {% macro navlink(key, href, label, tip, link_id='') -%}
             <a href="{{ href }}"{% if link_id %} id="{{ link_id }}"{% endif %} class="{{ view_class(key) }}" title="{{ view_tip(key, tip) }}">{{ label }}{% if not view_approved(key) %}<span class="exp-badge">preview</span>{% endif %}</a>
             {%- endmacro %}
-            {{ navlink('front-door', '/', 'home', 'The front page: search, and browse by disease, cell type or dataset', 'nav-home') }}
+            {{ navlink('front-door', '/home', 'home', 'The front page: search everything, and browse by disease, cell type or dataset', 'nav-home') }}
             {{ navlink('datasets', '/collections', 'datasets', 'The dataset catalogue: every collection and its datasets') }}
             {% if request.app.state.genesets_available %}
             {{ navlink('genesets', '/genesets', 'gene sets', 'Gene sets: search by name, then see where a set is expressed') }}
@@ -860,6 +825,7 @@
                     {% endif %}
                     {% if ui.api %}<a href="/api-guide" id="api-menu-link">API</a>{% endif %}
                     <a href="/settings">Preferences</a>
+                    <a href="/about" id="about-menu-link">About anthive</a>
                     {% if _auth_user %}
                     <a href="#" id="authelia-signout">Logout</a>
                     {% endif %}
@@ -883,51 +849,6 @@
                 link.style.display = '';
             })
             .catch(function () {});
-    })();
-    (function () {
-        // Phone: the search icon opens the search field in a row under the bar (closing the menu panel);
-        // Escape, an outside click or widening past the breakpoint closes it. Desktop shows the field itself.
-        var bar = document.getElementById('topbar');
-        var btn = document.getElementById('topbar-search-toggle');
-        var input = document.getElementById('topbar-search-input');
-        if (!bar || !btn || !input) return;
-        function setOpen(on) {
-            bar.classList.toggle('search-open', on);
-            btn.setAttribute('aria-expanded', on ? 'true' : 'false');
-            btn.setAttribute('aria-label', on ? 'Close search' : 'Open search');
-            if (on) {
-                bar.classList.remove('menu-open');
-                var menuBtn = document.getElementById('nav-toggle');
-                if (menuBtn) menuBtn.setAttribute('aria-expanded', 'false');
-                setTimeout(function () { input.focus(); }, 0);
-            }
-        }
-        btn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            setOpen(!bar.classList.contains('search-open'));
-        });
-        document.addEventListener('click', function (e) {
-            if (bar.classList.contains('search-open') && !document.getElementById('topbar-search').contains(e.target)) setOpen(false);
-        });
-        document.addEventListener('keydown', function (e) {
-            if (e.key === 'Escape' && bar.classList.contains('search-open')) { setOpen(false); btn.focus(); }
-        });
-        var toggle = document.getElementById('nav-toggle');
-        if (toggle) toggle.addEventListener('click', function () { if (bar.classList.contains('search-open')) setOpen(false); });
-        if (window.matchMedia) {
-            var wide = window.matchMedia('(min-width: 641px)');
-            var onWide = function () { if (wide.matches) setOpen(false); };
-            if (wide.addEventListener) wide.addEventListener('change', onWide);
-            else if (wide.addListener) wide.addListener(onWide);
-        }
-        // the collection list keeps "/" for its own box; elsewhere "/" jumps to this field
-        document.addEventListener('keydown', function (e) {
-            if (e.key !== '/' || e.defaultPrevented || document.getElementById('cat-q')) return;
-            var tag = (document.activeElement && document.activeElement.tagName) || '';
-            if (/INPUT|TEXTAREA|SELECT/.test(tag) || (document.activeElement && document.activeElement.isContentEditable)) return;
-            e.preventDefault();
-            if (window.matchMedia && !window.matchMedia('(min-width: 641px)').matches) setOpen(true); else input.focus();
-        });
     })();
     (function () {
         // Narrow-screen menu button: opens the panel with the nav links, Help,

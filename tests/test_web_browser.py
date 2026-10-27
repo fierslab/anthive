@@ -2400,12 +2400,13 @@ def test_about_page_renders(client):
     assert "REST API" in resp.text
 
 
-def test_about_link_on_brand_logo(client):
-    # the topbar brand/logo links to /about (no standalone About nav item)
+def test_about_link_in_the_user_menu_and_brand_to_the_landing(client):
+    # the topbar brand/logo links to "/" (the site's landing); About is in the user menu (2026-10-27)
     resp = client.get("/collections")
     assert resp.status_code == 200
-    assert 'href="/about" class="brand"' in resp.text
-    # the standalone "about" nav link was removed
+    assert 'href="/" class="brand"' in resp.text
+    assert 'href="/about" id="about-menu-link"' in resp.text
+    # no standalone "about" nav link
     assert '<a href="/about">about</a>' not in resp.text
 
 
@@ -2509,7 +2510,7 @@ def test_topbar_menu_button(client):
     assert 'aria-label="Open menu"' in tag
     # the panel holds the nav links, Help, version and the user menu (with API)
     menu = text.split('id="topbar-menu"')[1].split('<script>')[0]
-    for needle in ('href="/"', 'href="/facets"', 'href="/help"', 'id="api-menu-link"',
+    for needle in ('href="/home"', 'id="about-menu-link"', 'href="/facets"', 'href="/help"', 'id="api-menu-link"',
                    'id="stack-version"', 'id="user-menu-toggle"', 'id="authelia-signout"'):
         assert needle in menu, needle
     assert 'id="topbar-api-link"' not in menu

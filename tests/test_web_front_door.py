@@ -122,9 +122,10 @@ def test_configured_home_collection_opens_its_page(client, monkeypatch):
     # ?all=1 and /home still reach the front door; the collection list stays at /collections
     assert 'id="front-door"' in client.get('/?all=1').text
     assert 'Group A Study' in client.get('/collections').text
-    # the nav home link goes to "/", the configured landing
-    nav = client.get('/help').text.split('<nav aria-label="Main">')[1].split('</nav>')[0]
-    assert 'href="/" id="nav-home"' in nav
+    # the logo goes to "/", the configured landing; the nav home link always to the front door
+    page = client.get('/help').text
+    assert '<a href="/" class="brand"' in page
+    assert 'href="/home" id="nav-home"' in page.split('<nav aria-label="Main">')[1].split('</nav>')[0]
 
 
 def test_unknown_or_invisible_home_collection_falls_back_to_the_front_door(client, monkeypatch, capsys):
@@ -166,24 +167,26 @@ def test_old_landing_links_go_to_the_collection_list(client):
     assert client.get('/datasets', follow_redirects=False).headers['location'] == '/collections'
 
 
-def test_nav_has_home_a_search_field_and_datasets_on_the_collection_list(client):
+def test_nav_home_is_the_front_door_and_the_bar_has_no_search_field(client):
     page = client.get('/help').text
     nav = page.split('<nav aria-label="Main">')[1].split('</nav>')[0]
     home = nav.split('id="nav-home"')[1].split('</a>')[0]
-    assert 'vw-preview' not in nav.split('href="/"')[1].split('</a>')[0] and 'preview' not in home
+    assert 'href="/home" id="nav-home"' in nav and 'vw-preview' not in home and 'preview' not in home
     assert 'vw-preview' not in nav.split('href="/collections"')[1].split('</a>')[0]
-    form = page.split('id="topbar-search"')[1].split('</form>')[0]
-    assert 'action="/search"' in page.split('id="topbar-search"')[0].rsplit('<form', 1)[1] + form
-    assert 'name="q"' in form and 'id="topbar-search-toggle"' in form and 'aria-expanded="false"' in form
-    # outside the phone menu panel, so the icon stays in the bar
-    assert page.index('id="topbar-search"') < page.index('id="topbar-menu"')
-    for path in ('/', '/collections', '/browse/GroupA/ds1', '/genes', '/diseases'):
-        assert 'id="topbar-search-input"' in client.get(path).text, path
+    # the logo goes to "/" (the site's landing); About moved into the user menu
+    assert '<a href="/" class="brand" id="topbar-brand"' in page
+    assert 'href="/about" id="about-menu-link"' in page
+    for path in ('/', '/home', '/collections', '/browse/GroupA/ds1', '/genes', '/diseases', '/search?q=microglia'):
+        html = client.get(path).text
+        for gone in ('id="topbar-search"', 'id="topbar-search-toggle"', 'id="topbar-search-input"', 'search-open'):
+            assert gone not in html, (path, gone)
 
 
-def test_search_field_keeps_the_query_on_the_results_page(client):
+def test_search_results_page_keeps_its_own_box_with_the_query(client):
     html = client.get('/search', params={'q': 'microglia'}).text
-    assert re.search(r'id="topbar-search-input" value="microglia"', html)
+    box = html.split('class="fd-search"')[1].split('</form>')[0]
+    assert 'name="q"' in box and 'value="microglia"' in box
+    assert '<form class="fd-search" action="/search"' in html
 
 
 def test_search_groups_top_few_and_show_all(client):

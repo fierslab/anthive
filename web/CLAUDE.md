@@ -1098,7 +1098,7 @@ pages resolve).
   `fd_dataset_row`). Counts, browse lists and the search use the datasets `/databases` returns for the visitor
   (identity forwarded), so access filtering is the API's. Rules of the search and the browse counts live in
   `lib/catalog_search.py` (shared with ant-serve `GET /search`); `FRONT_DOOR_EXAMPLES` in browser.py holds the two
-  example questions (checked on the dev catalogue). Nav: `home` (key `front-door`, approved) links `/`, `datasets`
+  example questions (checked on the dev catalogue). Nav: `home` (key `front-door`, approved) links `/home`, `datasets`
   links `/collections`.
 - Dataset page tab bar in reading order: Overview, Data, Genes, Gene sets, Facets & DE (group `#tab-group-facet`:
   label `data-tab="facets-de"` opens its `data-default` sub-tab; pills Genes `facet-gene`, Gene sets `facet-gs`, DE
@@ -1109,13 +1109,9 @@ pages resolve).
   hashes work. Data tab card `#ds-annotations` lists the `ant_*` columns with vocabulary labels (`annotation_label`
   Jinja global, from `lib/obscol_tags_vocab.yaml`), `ant_donor_uid` left out.
 
-## Search in the top bar, smaller logo (2026-10-26, round 2)
+## Search results, smaller logo (2026-10-26, round 2)
 
-- `base.html` has `form#topbar-search` (GET `/search`) outside `#topbar-menu`; CSS `order` puts it between the spacer
-  and Help on desktop. Below 641px it is the icon `#topbar-search-toggle`, which opens `.ts-field` as a row under the
-  bar (`#topbar.search-open`; closes the menu panel; Escape, outside click, widening close it). `/` focuses it except
-  on the collection list (its own box). The results page passes `search_query` so the field keeps the words.
-  No live suggestions.
+- (Removed 2026-10-27, round 5: the top-bar search field and phone search icon, see below.)
 - `/search` groups: genes, datasets, collections, gene sets, papers, artefacts, facets (only `ui.facets`), help; count
   per group, `_SEARCH_TOP_N` (5) rows, "show all N" opens `?kind=<group>` (API `limit=500`); empty groups hidden.
   Rows are built in `_search_rows` (one shape: title, href, meta, note, mark).
@@ -1138,3 +1134,13 @@ pages resolve).
   case ignored, among the datasets `/databases` returns for the visitor. No match (unknown, or not visible to this
   visitor): the front door and one printed warning per value (`_HOME_COLLECTION_WARNED`). `/home` never redirects
   and makes no API call. Help links to the front page use `/home`.
+
+## No search in the top bar (2026-10-27, round 5)
+
+- Mark: the front page is the search page, so `form#topbar-search`, the phone icon `#topbar-search-toggle`, their
+  CSS, the open/close script and the `/` keyboard shortcut are gone from `base.html`; `/search` no longer passes
+  `search_query`. The results page keeps its own `fd_search(q)` box for changing the words.
+- Links: the brand (`#topbar-brand`, logo + wordmark) goes to `/`, the site's landing (`web_home_collection` or
+  the front door); the nav `home` (`#nav-home`) always goes to `/home`, so search stays one click away on a site
+  that lands on a collection. `/about`, formerly the brand's target, is `#about-menu-link` ("About anthive") in
+  the user menu. On phones the menu button takes `margin-left: auto`.
