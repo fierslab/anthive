@@ -473,7 +473,8 @@ def test_landing_keeps_the_multi_gene_comparison_separate_and_notes_it_on_the_pa
 
 def test_view_registry_and_initial_approval_list():
     assert browser.APPROVED_VIEWS <= set(browser.VIEW_REGISTRY)
-    assert browser.APPROVED_VIEWS == {"datasets", "genes", "genesets", "gene-expression", "geneset-expression"}
+    assert browser.APPROVED_VIEWS == {"datasets", "genes", "genesets", "gene-expression", "geneset-expression",
+                                      "front-door"}
     assert browser.view_approved("datasets") and not browser.view_approved("facets")
     assert browser.view_class("facets") == "vw-preview" and browser.view_class("genes") == ""
     assert browser.VIEW_PREVIEW_TIP in browser.view_tip("facets", "Facets")

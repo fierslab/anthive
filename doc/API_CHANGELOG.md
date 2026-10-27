@@ -57,7 +57,8 @@ Minor, additive. Nothing is removed or renamed; `API_VERSION` is bumped at relea
   `GET /databases` and `GET /artefacts`: datasets, collections, cells (all, and of primary datasets only),
   human, mouse, microglia, single-nucleus and single-cell datasets, organisms, genes with precomputed
   statistics in a visible dataset, gene sets, papers, artefacts and the 5 most recently updated datasets.
-  A group the site lacks is `null`. Cached 5 minutes per access level. No donor count.
+  A group the site lacks is `null`. Cached 5 minutes per access level. No donor count. The web front page no longer
+  shows these numbers (2026-10-27); the endpoint stays for clients.
 
 ## 2.47.2 (2026-10-23)
 

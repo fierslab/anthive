@@ -64,7 +64,8 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 
 | Path | Renders | Template |
 | --- | --- | --- |
-| `/` | front door (preview `front-door`): search box, browse entry points, two examples, closed "What is here"; old landing query strings (`?q=`, `?disease=`, `?view=`...) 302 to `/collections`; one visible collection still jumps into it (`?all=1` opts out) | `front_door.html` |
+| `/` | the site's landing: `web_home_collection` (anthive.yaml, env `ANTHIVE_WEB_HOME_COLLECTION`, site.yaml `site.home_collection`) 302s to that collection when the visitor sees it, else the front door; old landing query strings (`?q=`, `?disease=`, `?view=`...) 302 to `/collections`; one visible collection still jumps into it (`?all=1` opts out of both) | `front_door.html` |
+| `/home` | the front door, always (approved `front-door`): ant head, search box, one browse line, two examples shown after 60 s idle | `front_door.html` |
 | `/collections` | dataset catalog (grouped by collection), "Browse by dataset"; `/datasets` redirects here | `index.html` |
 | `/search?q=` | search results grouped by kind (preview `search`), from `GET /api/search` (API 2.48) | `search.html` |
 | `/diseases`, `/diseases/{key}` · `/cell-types`, `/cell-types/{key}` | dataset counts per disease / cell type and the dataset list of one (previews `browse-disease`, `browse-celltype`), from `/databases` via `lib/catalog_search.py` | `browse.html` |
@@ -1097,7 +1098,7 @@ pages resolve).
   `fd_dataset_row`). Counts, browse lists and the search use the datasets `/databases` returns for the visitor
   (identity forwarded), so access filtering is the API's. Rules of the search and the browse counts live in
   `lib/catalog_search.py` (shared with ant-serve `GET /search`); `FRONT_DOOR_EXAMPLES` in browser.py holds the two
-  example questions (checked on the dev catalogue). Nav: `search` (key `front-door`, preview) links `/`, `datasets`
+  example questions (checked on the dev catalogue). Nav: `home` (key `front-door`, approved) links `/`, `datasets`
   links `/collections`.
 - Dataset page tab bar in reading order: Overview, Data, Genes, Gene sets, Facets & DE (group `#tab-group-facet`:
   label `data-tab="facets-de"` opens its `data-default` sub-tab; pills Genes `facet-gene`, Gene sets `facet-gs`, DE
@@ -1120,12 +1121,20 @@ pages resolve).
   Rows are built in `_search_rows` (one shape: title, href, meta, note, mark).
 - Nav: the front-door link is now labelled `home` (`#nav-home`). Top bar: logo 22px, wordmark 14px, padding 6px.
 
-## Front page numbers (2026-10-26, round 3)
+## Minimal front page, configurable landing (2026-10-27, round 4)
 
-- Under the search box `#fd-stats`: tiles (`_front_door_tiles`) from `GET /api/stats` (API 2.48; the web falls back
-  to `catalogue_stats` over `/databases` on an older API, without genes, gene sets, papers or artefacts). Tiles
-  without a number are left out; papers only with a library, gene sets only when the store is up. Artefacts has
-  no list page, so its tile is not a link. `#fd-recent` lists the 5 most recently updated datasets.
-- `_front_door_context` caches the page's numbers per access level (signed in, admin) for `_FRONT_DOOR_TTL`
-  (300 s); ant-serve caches `/stats` per access level for 300 s too. Tests clear `browser._FRONT_DOOR_CACHE`.
-- No donor count on purpose: `ant_donor_uid` is not in every dataset and donor groups share people.
+- The number tiles, the recently updated list and "What is here" are gone (Mark: more minimal). `GET /api/stats`
+  stays in the API (2.48); the web no longer calls it, and `_front_door_context`, `_front_door_tiles` and the
+  per-access-level cache were removed. `front_door.html`: `#fd-logo` (the `topbar_logo` ant head, 45x48, as the
+  h1 with alt "anthive"), `fd_search`, `#fd-browse` (one muted line: Browse by disease, cell type, dataset), then
+  `#fd-examples`, `hidden` on load with `data-delay-ms` (`FRONT_DOOR_EXAMPLES_DELAY_MS`, 60000). Inline script:
+  keydown, input, pointermove, pointerdown, scroll, wheel, touchstart (window, capture) and focus on the search box
+  restart the timer; when it fires the paragraph is shown (class `fd-fade`, a CSS fade that
+  `prefers-reduced-motion` turns off) and stays. Search with an empty query 302s to `/home`.
+- `front-door` is in `APPROVED_VIEWS` (no banner, no nav badge). Search and the browse pages stay previews; the
+  browse links on the front page keep `view_class` / `view_tip` of their target views (tooltip only).
+- Landing: `_home_collection()` reads `config.get_web_home_collection` once (tests set `_home_collection_cfg`);
+  `_home_collection_browse_id` matches the value against `group_id` or the folder name (`collection.group`),
+  case ignored, among the datasets `/databases` returns for the visitor. No match (unknown, or not visible to this
+  visitor): the front door and one printed warning per value (`_HOME_COLLECTION_WARNED`). `/home` never redirects
+  and makes no API call. Help links to the front page use `/home`.

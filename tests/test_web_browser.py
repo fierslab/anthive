@@ -49,7 +49,7 @@ def _all_facets_visible(monkeypatch):
     # every part of the UI on (a local anthive.yaml with ui: switches must not change the results)
     monkeypatch.setattr(browser, "_ui_cfg", {"facets": True, "caveats": True, "api": True, "mcp": True})
     monkeypatch.setattr(browser, "_caveats_mode_cfg", ["all"])
-    browser._FRONT_DOOR_CACHE.clear()       # the front page caches per access level
+    monkeypatch.setattr(browser, "_home_collection_cfg", [""])   # "/" is the front door unless a test says so
 
 
 # ── unit tests: _as_list ───────────────────────────────────────────────────────

@@ -36,7 +36,7 @@ def make_client(monkeypatch):
     def build(**off):
         monkeypatch.setattr(browser, '_ui_cfg', {**ALL_ON, **off})
         monkeypatch.setattr(browser, '_caveats_mode_cfg', ['all'])
-        browser._FRONT_DOOR_CACHE.clear()
+        monkeypatch.setattr(browser, '_home_collection_cfg', [''])
         app = FastAPI()
         app.state.api_url = 'http://testapi'
         app.state.reports = []

@@ -106,13 +106,14 @@ VIEW_REGISTRY: Dict[str, str] = {
     'older-views': 'The Older views menu of the gene, gene set and facet pages (earlier designs)',
     'dataset-facet-gs': 'Dataset page, Facet GS tab (gene set scores by annotation column, per cell)',
     'artefacts': 'Artefacts: the Artefacts tab of a dataset, the artefact list of a collection, the artefact page',
-    'front-door': 'Front page: one search box, browse entry points, example questions, what is here',
+    'front-door': 'Front page: the ant head, one search box, a browse line, example questions after a minute idle',
     'search': 'Search results: datasets, genes, gene sets and papers for the words typed',
     'browse-disease': 'Browse by disease: dataset counts per disease and the dataset list of one disease',
     'browse-celltype': 'Browse by cell type: dataset counts per cell type and the dataset list of one cell type',
 }
 APPROVED_VIEWS = frozenset({
     'datasets', 'genes', 'genesets', 'gene-expression', 'geneset-expression',
+    'front-door',   # approved by Mark 2026-10-27 (minimal version: logo, search box, delayed examples)
 })
 VIEW_PREVIEW_TIP = 'This view is still being reviewed; results may change.'
 
@@ -2589,12 +2590,13 @@ async def index(request: Request):
 
 
 
-# ── Front door: search box, browse by disease / cell type (2026-10-26, preview) ─────────────────
+# ── Front door: search box, browse by disease / cell type (2026-10-26; front door approved 2026-10-27) ──
 #
-# "/" is the front page for biologists: one search box (GET /api/search), three browse entry points and
-# two example questions. The collection list it replaced lives at /collections ("Browse by dataset").
-# Everything is computed from GET /databases on behalf of the visitor (_api_get forwards the identity),
-# so counts and lists hold exactly the datasets that visitor may see. Rules: lib/catalog_search.py.
+# "/" (or /home) is the front page for biologists: the ant head, one search box (GET /api/search), one line of
+# browse links and two example questions that appear after a minute without activity. The collection list
+# it replaced lives at /collections ("Browse by dataset"). The browse pages are computed from GET /databases
+# on behalf of the visitor (_api_get forwards the identity), so counts and lists hold exactly the datasets that
+# visitor may see. Rules: lib/catalog_search.py.
 
 # Query parameters of the old landing page (the collection list); a link that carries one goes there.
 _COLLECTION_LIST_PARAMS = ('q', 'org', 'cell', 'tissue', 'method', 'disease', 'sort', 'view', 'search')
@@ -2607,6 +2609,10 @@ FRONT_DOOR_EXAMPLES: List[Dict[str, str]] = [
     {'text': 'Which datasets have APOE4 carriers?',
      'q': 'Which datasets have APOE4 carriers?'},
 ]
+
+# The examples appear only after this long without activity on the front page (keys, pointer, scroll, touch,
+# focus in the search box); any activity restarts the wait.
+FRONT_DOOR_EXAMPLES_DELAY_MS = 60_000
 
 _BROWSE_KINDS = {
     'disease': {'path': '/diseases', 'view': 'browse-disease', 'title': 'Browse by disease',
@@ -2625,107 +2631,81 @@ def _front_door_databases(request: Request) -> Tuple[List[Dict[str, Any]], Optio
         return [], 'The catalogue could not be loaded just now. Try again in a minute.'
 
 
-# Front page context cached per access level (signed in or not, admin or not) for a few minutes: the numbers
-# change at a rescan, and the page should not wait for /databases, /stats and the browse counts each time.
-_FRONT_DOOR_TTL = 300.0
-_FRONT_DOOR_CACHE: Dict[Tuple[bool, bool], Tuple[float, Dict[str, Any]]] = {}
-_FRONT_DOOR_LOCK = threading.Lock()
+# What "/" shows: the front door, or the one collection a site names in web_home_collection (anthive.yaml,
+# env ANTHIVE_WEB_HOME_COLLECTION; lib/config.get_web_home_collection). Read once; tests set the list.
+_home_collection_cfg: List[str] = []
+_HOME_COLLECTION_WARNED: set = set()
 
 
-def _front_door_context(request: Request) -> Dict[str, Any]:
-    """Databases-derived numbers of the front page for this visitor's access level (cached; errors are not)."""
-    key = (bool((request.headers.get('Remote-User') or '').strip()), _is_admin(request))
-    now = time.monotonic()
-    with _FRONT_DOOR_LOCK:
-        cached = _FRONT_DOOR_CACHE.get(key)
-    if cached is not None and now - cached[0] < _FRONT_DOOR_TTL:
-        return cached[1]
-    databases, error = _front_door_databases(request)
-    groups = sorted({db.get('group_id') or str(db.get('id', '')).split('/')[0] for db in databases})
-    try:
-        stats = _api_get(_api_url(request), '/stats', timeout=20)
-    except Exception as exc:  # older API (no /stats) or a failure: the numbers /databases gives
-        print(f"API /stats unavailable: {exc}")
-        stats = catalog_search.catalogue_stats(databases)
-    diseases = catalog_search.browse_counts(databases, 'disease')
-    celltypes = catalog_search.browse_counts(databases, 'celltype')
-    context = {
-        'groups': groups,
-        'summary': catalog_search.catalogue_summary(databases),
-        'stats': stats,
-        'recent': [dict(row, href=_search_dataset_href(row)) for row in stats.get('recently_updated') or []],
-        'n_diseases': len([e for e in diseases['entries'] if e['key'] != 'control donors']),
-        'n_celltypes': len(celltypes['entries']),
-        'error': error,
-    }
-    if not error:
-        with _FRONT_DOOR_LOCK:
-            _FRONT_DOOR_CACHE[key] = (now, context)
-    return context
+def _home_collection() -> str:
+    """The configured landing collection ('' = the front door)."""
+    if not _home_collection_cfg:
+        try:
+            from config import get_web_home_collection, load_config  # noqa: PLC0415
+            _home_collection_cfg.append(get_web_home_collection(load_config()))
+        except Exception as error:  # noqa: BLE001 - config unavailable or invalid: the front door
+            print(f"web_home_collection not used: {error}")
+            _home_collection_cfg.append('')
+    return _home_collection_cfg[0]
 
 
-def _front_door_tiles(request: Request, stats: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Number + label tiles under the search box; a tile without a number (the site lacks it) is left out."""
-    def count(name):
-        value = stats.get(name)
-        return value if isinstance(value, int) and not isinstance(value, bool) else None
-    tiles = [
-        {'id': 'datasets', 'n': count('n_datasets'), 'label': 'datasets', 'href': '/collections',
-         'tip': 'Datasets you may see, in the collection list'},
-        {'id': 'collections', 'n': count('n_collections'), 'label': 'collections', 'href': '/collections',
-         'tip': 'One collection per study'},
-        {'id': 'cells', 'n': count('n_cells_primary'), 'label': 'cells', 'href': '/collections?sort=cells',
-         'tip': 'Cells or nuclei (samples for bulk data) in the primary datasets only: reanalyses reuse cells '
-                'another dataset serves and are not counted twice', 'short': True},
-        {'id': 'genes', 'n': count('n_genes'), 'label': 'genes', 'href': '/genes',
-         'tip': 'Gene names with precomputed expression statistics in at least one dataset you may see '
-                '(a human gene and its mouse spelling count once)'},
-    ]
-    if getattr(request.app.state, 'genesets_available', False):
-        tiles.append({'id': 'genesets', 'n': count('n_genesets'), 'label': 'gene sets', 'href': '/genesets',
-                      'tip': 'Curated gene sets, searchable on the gene set page'})
-    if _library_available(request):
-        tiles.append({'id': 'papers', 'n': count('n_papers'), 'label': 'papers', 'href': '/library',
-                      'tip': 'Papers in the library: the sources of the datasets and background papers'})
-    tiles.append({'id': 'artefacts', 'n': count('n_artefacts'), 'label': 'artefacts', 'href': '',
-                  'tip': 'Analysis files deposited with datasets and collections (figures, tables, reports); '
-                         'listed on each dataset and collection page'})
-    if count('n_human') is not None:
-        tiles.append({'id': 'species', 'n': count('n_human'), 'label': 'human',
-                      'n2': count('n_mouse'), 'label2': 'mouse', 'href': '/collections',
-                      'tip': 'Datasets by organism; a few hold both or another organism'})
-    if count('n_single_nucleus') is not None:
-        tiles.append({'id': 'suspension', 'n': count('n_single_nucleus'), 'label': 'single-nucleus',
-                      'n2': count('n_single_cell'), 'label2': 'single-cell', 'href': '/collections',
-                      'tip': 'Datasets by what was sequenced; the rest are bulk, spatial, proteomics or not recorded'})
-    for tile in tiles:   # "1 artefact", not "1 artefacts"
-        if tile['n'] == 1 and 'n2' not in tile and tile['label'].endswith('s'):
-            tile['label'] = tile['label'][:-1]
-    return [tile for tile in tiles if tile['n'] is not None]
+def _home_collection_browse_id(databases: List[Dict[str, Any]], wanted: str) -> Optional[str]:
+    """Browse id (group_id) of the collection ``wanted`` names (folder name or group_id, case ignored), when
+    one of the visitor's datasets belongs to it; None when the visitor may not see it or it does not exist."""
+    folded = wanted.strip().casefold()
+    for db in databases:
+        group_id = str(db.get('group_id') or str(db.get('id', '')).split('/')[0])
+        folder = str((db.get('collection') or {}).get('group') or '')
+        if folded in (group_id.casefold(), folder.casefold()):
+            return group_id
+    return None
+
+
+def _render_front_door(request: Request, error: Optional[str] = None) -> HTMLResponse:
+    return templates.TemplateResponse(request, "front_door.html", {
+        "examples": [dict(example, href='/search?' + urlencode({'q': example['q']}))
+                     for example in FRONT_DOOR_EXAMPLES],
+        "examples_delay_ms": FRONT_DOOR_EXAMPLES_DELAY_MS,
+        "error": error,
+    })
 
 
 @router.get("/", response_class=HTMLResponse)
 async def front_door(request: Request):
-    """The front page: search box, a row of live numbers, browse entry points, examples, recently updated
-    datasets and a closed "What is here" box.
+    """The landing page: the configured home collection, else the front door (ant head, search box, one
+    browse line, example questions that appear after a minute without activity).
 
     A query string of the old landing page (``?q=``, ``?disease=``, ``?view=table``, ...) redirects to
-    the collection list so old links keep working. A site with a single collection still jumps straight
-    into it (any query string, for example ``/?all=1``, opts out), as the landing page always did.
+    the collection list so old links keep working. With ``web_home_collection`` set, "/" redirects to that
+    collection's page when the visitor may see it; otherwise a site with a single visible collection still
+    jumps straight into it, as the landing page always did. Any other query string (``/?all=1``) opts out
+    of both; ``/home`` always shows the front door.
     """
     params = request.query_params
     if any(name in params for name in _COLLECTION_LIST_PARAMS):
         return RedirectResponse(url='/collections?' + request.url.query, status_code=302)
-    context = _front_door_context(request)
-    if len(context['groups']) == 1 and not request.url.query:
-        return RedirectResponse(url=f"/browse/{url_quote(context['groups'][0])}", status_code=302)
-    return templates.TemplateResponse(request, "front_door.html", {
-        **context,
-        "tiles": _front_door_tiles(request, context['stats']),
-        "examples": [dict(example, href='/search?' + urlencode({'q': example['q']}))
-                     for example in FRONT_DOOR_EXAMPLES],
-        "genesets_available": getattr(request.app.state, 'genesets_available', False),
-    })
+    if request.url.query:
+        return _render_front_door(request)
+    databases, error = _front_door_databases(request)
+    wanted = _home_collection()
+    if wanted and not error:
+        target = _home_collection_browse_id(databases, wanted)
+        if target:
+            return RedirectResponse(url=f"/browse/{url_quote(target)}", status_code=302)
+        if wanted not in _HOME_COLLECTION_WARNED:
+            _HOME_COLLECTION_WARNED.add(wanted)
+            print(f"WARNING web_home_collection {wanted!r}: not in the catalogue or not visible to this "
+                  f"visitor; showing the front door (logged once)")
+    groups = sorted({db.get('group_id') or str(db.get('id', '')).split('/')[0] for db in databases})
+    if len(groups) == 1:
+        return RedirectResponse(url=f"/browse/{url_quote(groups[0])}", status_code=302)
+    return _render_front_door(request, error)
+
+
+@router.get("/home", response_class=HTMLResponse)
+async def front_door_home(request: Request):
+    """The front door itself, whatever "/" opens on this site (no redirects, no catalogue call)."""
+    return _render_front_door(request)
 
 
 def _search_dataset_href(row: Dict[str, Any]) -> str:
@@ -2824,7 +2804,7 @@ async def search_view(request: Request, q: str = '', kind: str = ''):
     and a "show all N" link that opens one group (``?kind=``). Empty groups are left out."""
     query = (q or '').strip()[:300]
     if not query:
-        return RedirectResponse(url='/', status_code=302)
+        return RedirectResponse(url='/home', status_code=302)
     only = kind if kind in _SEARCH_GROUP_ORDER else ''
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None

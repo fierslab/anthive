@@ -50,7 +50,8 @@ def client(monkeypatch):
     monkeypatch.setattr(browser, '_caveats_mode_cfg', ['all'])
     monkeypatch.setattr(browser, '_facets_visible_cfg', [[]])
     CALLS.clear()
-    browser._FRONT_DOOR_CACHE.clear()
+    monkeypatch.setattr(browser, '_home_collection_cfg', [''])
+    browser._HOME_COLLECTION_WARNED.clear()
     app = FastAPI()
     app.state.api_url = 'http://testapi'
     app.state.reports = []
@@ -60,21 +61,87 @@ def client(monkeypatch):
     return TestClient(app)
 
 
-def test_front_door_has_search_browse_examples_and_a_closed_what_is_here(client):
+def test_front_door_is_minimal_logo_search_browse_line_and_hidden_examples(client):
     html = client.get('/').text
+    page = html.split('id="front-door"')[1].split('</main>')[0]
     assert '<title>Find data · anthive</title>' in html
-    assert 'class="review-banner"' in html and 'data-view="front-door"' in html     # preview until approved
-    form = html.split('class="fd-search"')[1].split('</form>')[0]
-    assert 'action="/search"' in html and 'name="q"' in form
+    # approved (2026-10-27): no review banner, no preview marks on the page itself
+    assert 'class="review-banner"' not in html and 'data-view="front-door"' not in html
+    assert 'exp-badge' not in page and 'Preview.' not in page
+    # the small ant head above the box, no tagline
+    logo = page.split('id="fd-logo"')[1].split('</h1>')[0]
+    assert '<img src="data:image/png;base64,' in logo and 'alt="anthive"' in logo
+    assert 'Search datasets, genes' not in page and '<h1>Search' not in html
+    form = page.split('class="fd-search"')[1].split('</form>')[0]
+    assert 'action="/search"' in page and 'name="q"' in form
+    # no numbers, no recently updated list, no "What is here"
+    for gone in ('id="fd-stats"', 'fd-tile', 'id="fd-recent"', 'Recently updated', 'id="fd-what-here"',
+                 'data-help-for="fd-what"', 'What is here'):
+        assert gone not in html, gone
+    # one small browse line under the box
+    browse = page.split('id="fd-browse"')[1].split('</nav>')[0]
     for link in ('href="/diseases"', 'href="/cell-types"', 'href="/collections"'):
-        assert link in html
-    examples = html.split('id="fd-examples"')[1].split('</p>')[0]
-    assert examples.count('href="/search?q=') == 2 and 'TREM2' in examples and 'APOE4' in examples
-    # one visible line, the paragraph hidden behind its toggle
-    assert 'data-help-for="fd-what"' in html and re.search(r'<div class="doc-box" id="fd-what"[^>]*hidden', html)
-    assert '3 datasets in 2 collections' in html
-    assert 'A cell count is not a sample size' in html
-    assert '—' not in html.split('id="front-door"')[1].split('</main>')[0]
+        assert link in browse
+    assert page.index('class="fd-search"') < page.index('id="fd-browse"')
+    assert '—' not in page
+
+
+def test_front_door_examples_are_hidden_until_a_minute_without_activity(client):
+    html = client.get('/').text
+    examples = re.search(r'<p class="fd-try" id="fd-examples"([^>]*)>(.*?)</p>', html, re.S)
+    assert examples, 'example paragraph missing'
+    attributes, body = examples.groups()
+    assert ' hidden' in attributes and 'data-delay-ms="60000"' in attributes
+    assert body.count('href="/search?q=') == 2 and 'TREM2' in body and 'APOE4' in body
+    assert browser.FRONT_DOOR_EXAMPLES_DELAY_MS == 60_000
+    script = html.split("getElementById('fd-examples')")[1].split('</script>')[0]
+    for event in ("'keydown'", "'input'", "'pointermove'", "'scroll'", "'touchstart'"):
+        assert event in script, event
+    assert "addEventListener('focus', restart)" in script            # focus in the search box counts
+    assert 'clearTimeout(timer)' in script and 'setTimeout(show, delay)' in script
+    assert 'if (shown) return;' in script                           # once shown they stay
+    assert 'prefers-reduced-motion: reduce' in script \
+        and 'prefers-reduced-motion: reduce' in html.split('@keyframes fd-fade-in')[1]
+
+
+def test_home_always_shows_the_front_door(client, monkeypatch):
+    monkeypatch.setattr(browser, '_home_collection_cfg', ['GroupA'])
+    response = client.get('/home', follow_redirects=False)
+    assert response.status_code == 200 and 'id="front-door"' in response.text
+    # an empty search goes back to the front door, not to the configured landing
+    assert client.get('/search', params={'q': ' '}, follow_redirects=False).headers['location'] == '/home'
+
+
+def test_configured_home_collection_opens_its_page(client, monkeypatch):
+    monkeypatch.setattr(browser, '_home_collection_cfg', ['GroupB'])
+    response = client.get('/', follow_redirects=False)
+    assert response.status_code == 302 and response.headers['location'] == '/browse/GroupB'
+    # the folder name (collection.group) works as well as the group_id, case ignored
+    monkeypatch.setattr(browser, '_home_collection_cfg', ['group a study'])
+    assert client.get('/', follow_redirects=False).headers['location'] == '/browse/GroupA'
+    # ?all=1 and /home still reach the front door; the collection list stays at /collections
+    assert 'id="front-door"' in client.get('/?all=1').text
+    assert 'Group A Study' in client.get('/collections').text
+    # the nav home link goes to "/", the configured landing
+    nav = client.get('/help').text.split('<nav aria-label="Main">')[1].split('</nav>')[0]
+    assert 'href="/" id="nav-home"' in nav
+
+
+def test_unknown_or_invisible_home_collection_falls_back_to_the_front_door(client, monkeypatch, capsys):
+    monkeypatch.setattr(browser, '_home_collection_cfg', ['NoSuchStudy'])
+    assert client.get('/', follow_redirects=False).status_code == 200
+    client.get('/')
+    assert capsys.readouterr().out.count("web_home_collection 'NoSuchStudy'") == 1   # warned once
+
+    def public_only(api_url, path, **kwargs):
+        result = _fake_api_get(api_url, path, **kwargs)
+        if path == '/databases':      # an anonymous visitor does not see the internal GroupB
+            result = {'databases': [db for db in result['databases'] if db.get('access') == 'public']}
+        return result
+    monkeypatch.setattr(browser, '_api_get', public_only)
+    monkeypatch.setattr(browser, '_home_collection_cfg', ['GroupB'])
+    # GroupB invisible: the usual rule applies (one visible collection, so straight into it)
+    assert client.get('/', follow_redirects=False).headers['location'] == '/browse/GroupA'
 
 
 def test_front_door_counts_only_what_the_api_returns_for_the_visitor(client, monkeypatch):
@@ -86,8 +153,7 @@ def test_front_door_counts_only_what_the_api_returns_for_the_visitor(client, mon
     monkeypatch.setattr(browser, '_api_get', public_only)
     # one visible collection: the front page jumps into it, as the landing page always did; ?all=1 stays
     assert client.get('/', follow_redirects=False).headers['location'] == '/browse/GroupA'
-    html = client.get('/?all=1').text
-    assert '2 datasets in 1 collections' in html
+    assert 'id="front-door"' in client.get('/?all=1').text
 
 
 def test_old_landing_links_go_to_the_collection_list(client):
@@ -100,11 +166,11 @@ def test_old_landing_links_go_to_the_collection_list(client):
     assert client.get('/datasets', follow_redirects=False).headers['location'] == '/collections'
 
 
-def test_nav_has_home_as_preview_a_search_field_and_datasets_on_the_collection_list(client):
+def test_nav_has_home_a_search_field_and_datasets_on_the_collection_list(client):
     page = client.get('/help').text
     nav = page.split('<nav aria-label="Main">')[1].split('</nav>')[0]
     home = nav.split('id="nav-home"')[1].split('</a>')[0]
-    assert 'vw-preview' in nav.split('href="/"')[1].split('</a>')[0] and 'preview' in home
+    assert 'vw-preview' not in nav.split('href="/"')[1].split('</a>')[0] and 'preview' not in home
     assert 'vw-preview' not in nav.split('href="/collections"')[1].split('</a>')[0]
     form = page.split('id="topbar-search"')[1].split('</form>')[0]
     assert 'action="/search"' in page.split('id="topbar-search"')[0].rsplit('<form', 1)[1] + form
@@ -155,7 +221,7 @@ def test_search_results_grouped_by_kind(client):
 
 
 def test_search_with_nothing_left_and_an_empty_query(client):
-    assert client.get('/search', params={'q': ' '}, follow_redirects=False).headers['location'] == '/'
+    assert client.get('/search', params={'q': ' '}, follow_redirects=False).headers['location'] == '/home'
     html = client.get('/search', params={'q': 'in the'}).text
     assert 'No search words left' in html
 
@@ -185,9 +251,13 @@ def test_browse_by_disease_and_cell_type(client):
     assert missing.status_code == 404 and 'Browse by cell type' in missing.text
 
 
-@pytest.mark.parametrize('key', ['front-door', 'search', 'browse-disease', 'browse-celltype'])
+@pytest.mark.parametrize('key', ['search', 'browse-disease', 'browse-celltype'])
 def test_new_views_are_registered_and_not_approved(key):
     assert key in browser.VIEW_REGISTRY and not browser.view_approved(key)
+
+
+def test_front_door_view_is_approved():
+    assert browser.view_approved('front-door')
 
 
 # ── dataset page: reading view and Technical details ──────────────────────────
@@ -227,48 +297,3 @@ def test_dataset_without_facets_ui_keeps_de_as_a_plain_tab(client, monkeypatch):
     assert 'tab-group-facet' not in bar and 'Facets &amp; DE' not in bar
     tech = html.split('id="ds-tech-bar"')[1].split('</div>')[0]
     assert 'data-tab="facets"' not in tech
-
-
-# ── front page numbers (2026-10-26, round 3) ──────────────────────────────────
-
-def _tiles(html):
-    block = html.split('id="fd-stats"')[1].split('</div>')[0]
-    return dict(re.findall(r'id="fd-tile-([a-z]+)"[^>]*>\s*<span class="fd-n">([^<]+)', block)), block
-
-
-def test_front_door_shows_live_numbers_under_the_search_box(client):
-    html = client.get('/').text
-    assert html.index('class="fd-search"') < html.index('id="fd-stats"') < html.index('id="fd-browse-disease"')
-    tiles, block = _tiles(html)
-    assert tiles['datasets'] == '3' and tiles['collections'] == '2'
-    assert 'genes' not in tiles and 'papers' not in tiles      # no gene index or library behind the fake API
-    assert 'href="/collections"' in block and 'id="fd-tile-genesets"' not in block   # older API: no count
-    assert 'primary datasets only' in block.split('id="fd-tile-cells"')[1].split('</a>')[0]
-    assert 'id="fd-tile-species"' in block and 'human / mouse' in block
-
-
-def test_front_door_numbers_come_from_api_stats_and_are_cached_per_access_level(client, monkeypatch):
-    calls = []
-
-    def with_stats(api_url, path, **kwargs):
-        calls.append(path)
-        if path == '/stats':
-            return {'n_datasets': 3, 'n_collections': 2, 'n_cells_primary': 1500, 'n_genes': 27000,
-                    'n_genesets': 128, 'n_papers': 346, 'n_artefacts': 2, 'n_human': 3, 'n_mouse': 0,
-                    'n_single_nucleus': 2, 'n_single_cell': 1,
-                    'recently_updated': [{'db_id': 'GroupA/ds1', 'group_id': 'GroupA', 'file_id': 'ds1',
-                                          'title': 'Dataset One', 'collection': 'Group A Study',
-                                          'updated': '2026-10-05'}]}
-        return _fake_api_get(api_url, path, **kwargs)
-    monkeypatch.setattr(browser, '_api_get', with_stats)
-    monkeypatch.setattr(browser, '_library_available', lambda request: True)
-    html = client.get('/').text
-    tiles, _ = _tiles(html)
-    assert tiles['genes'] == '27,000' and tiles['genesets'] == '128' and tiles['papers'] == '346'
-    assert tiles['artefacts'] == '2' and tiles['cells'] == '1.5k'
-    recent = html.split('id="fd-recent"')[1].split('</section>')[0]
-    assert 'href="/browse/GroupA/ds1"' in recent and '2026-10-05' in recent
-    client.get('/')
-    assert calls.count('/stats') == 1                           # second visit served from the cache
-    client.get('/', headers={'Remote-User': 'mf', 'Remote-Groups': 'admins'})
-    assert calls.count('/stats') == 2                           # another access level asks again

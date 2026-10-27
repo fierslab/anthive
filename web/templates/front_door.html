@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import review_banner, doc_block %}
+{% from "_macros.html" import review_banner %}
 {% from "_front_door.html" import fd_styles, fd_search %}
 
 {% block title %}Find data · anthive{% endblock %}
@@ -9,51 +9,42 @@
 <div class="fd-wrap" id="front-door">
   {{ review_banner('front-door') }}
   <section class="fd-hero" aria-label="Search the catalogue">
-    <h1>Search datasets, genes, gene sets{% if library_available(request) %}, papers{% endif %} and more</h1>
+    <h1 class="fd-logo" id="fd-logo">{% if topbar_logo %}<img src="{{ topbar_logo }}" alt="anthive" width="45" height="48">{% else %}anthive{% endif %}</h1>
     {{ fd_search('', autofocus=True) }}
-    <p class="fd-try" id="fd-examples">Try {% for example in examples %}<a href="{{ example.href }}">{{ example.text }}</a>{% if not loop.last %} or {% endif %}{% endfor %}</p>
-
-    {# Live numbers for this visitor (GET /api/stats, cached per access level for 5 minutes). #}
-    <div class="fd-stats" id="fd-stats" role="list" aria-label="What this site holds">
-      {% for tile in tiles %}
-      {% set _n = format_count(tile.n) if tile.short else '{:,}'.format(tile.n) %}
-      {% if tile.href %}<a class="fd-tile" role="listitem" id="fd-tile-{{ tile.id }}" href="{{ tile.href }}" title="{{ tile.tip }}">{% else %}<span class="fd-tile" role="listitem" id="fd-tile-{{ tile.id }}" title="{{ tile.tip }}" tabindex="0">{% endif %}
-        {%- if tile.n2 is defined -%}
-        <span class="fd-n">{{ '{:,}'.format(tile.n) }}<span class="fd-sep">/</span>{{ '{:,}'.format(tile.n2 or 0) }}</span><span class="fd-l">{{ tile.label }} / {{ tile.label2 }}</span>
-        {%- else -%}
-        <span class="fd-n">{{ _n }}</span><span class="fd-l">{{ tile.label }}{% if tile.id == 'cells' %} <span class="fd-i" aria-hidden="true">&#9432;</span>{% endif %}</span>
-        {%- endif -%}
-      {% if tile.href %}</a>{% else %}</span>{% endif %}
-      {% endfor %}
-    </div>
-
-    <nav class="fd-browse" aria-label="Browse">
-      <a href="/diseases" id="fd-browse-disease" class="{{ view_class('browse-disease') }}" title="{{ view_tip('browse-disease', 'Datasets grouped by the disease of their donors') }}">Browse by disease<span class="n">{{ n_diseases }}</span></a>
-      <a href="/cell-types" id="fd-browse-celltype" class="{{ view_class('browse-celltype') }}" title="{{ view_tip('browse-celltype', 'Datasets grouped by the cell types they hold') }}">Browse by cell type<span class="n">{{ n_celltypes }}</span></a>
-      <a href="/collections" id="fd-browse-dataset" title="Every collection (one per study) with its datasets">Browse by dataset<span class="n">{{ summary.n_collections }} collections</span></a>
+    <nav class="fd-browse" id="fd-browse" aria-label="Browse">Browse by
+      <a href="/diseases" id="fd-browse-disease" class="{{ view_class('browse-disease') }}" title="{{ view_tip('browse-disease', 'Datasets grouped by the disease of their donors') }}">disease</a><span class="fd-dot" aria-hidden="true">·</span><a href="/cell-types" id="fd-browse-celltype" class="{{ view_class('browse-celltype') }}" title="{{ view_tip('browse-celltype', 'Datasets grouped by the cell types they hold') }}">cell type</a><span class="fd-dot" aria-hidden="true">·</span><a href="/collections" id="fd-browse-dataset" title="Every collection (one per study) with its datasets">dataset</a>
     </nav>
+    {# Hidden on load; shown after examples_delay_ms without activity (script below). #}
+    <p class="fd-try" id="fd-examples" data-delay-ms="{{ examples_delay_ms }}" hidden>Try {% for example in examples %}<a href="{{ example.href }}">{{ example.text }}</a>{% if not loop.last %} or {% endif %}{% endfor %}</p>
   </section>
 
   {% if error %}<p class="fd-error" id="fd-error">{{ error }}</p>{% endif %}
-
-  {% if recent %}
-  <section class="fd-recent" id="fd-recent" aria-label="Recently updated datasets">
-    <h2 class="fd-recent-head">Recently updated</h2>
-    <ul>
-      {% for row in recent %}<li><a href="{{ row.href }}">{{ row.title|no_dash }}</a> <span class="muted">{{ row.collection|no_dash }}</span><span class="fd-date">{{ row.updated }}</span></li>{% endfor %}
-    </ul>
-  </section>
-  {% endif %}
-
-  <section class="fd-what" id="fd-what-here" aria-label="What is here">
-    <div>{{ summary.n_datasets }} datasets in {{ summary.n_collections }} collections. <button type="button" class="doc-toggle fd-what-toggle" data-help-for="fd-what" aria-controls="fd-what" aria-expanded="false" title="What is here: show or hide">What is here</button></div>
-    {% call doc_block('What is here', id='fd-what') %}
-      <p>This site holds {{ summary.n_datasets }} datasets in {{ summary.n_collections }} collections (one collection per study){% if summary.n_cells_primary %}, with {{ format_count(summary.n_cells_primary) }} cells or nuclei (samples, for bulk data) in the {{ summary.n_primary }} datasets that are primary data; reanalyses reuse cells another dataset already serves and are not counted twice{% endif %}.
-      {{ summary.n_human }} of the {{ summary.n_datasets }} datasets are human and {{ summary.n_microglia }} include microglia. {% set _rest = summary.n_datasets - summary.n_single_nucleus - summary.n_single_cell %}{{ summary.n_single_nucleus }} profile single nuclei and {{ summary.n_single_cell }} single cells{% if _rest > 0 %}; the other {{ _rest }} are bulk RNA-seq, spatial, proteomics or do not record it{% endif %}.
-      You can look at the cells of a dataset (maps and cell annotations), at the expression of any gene or gene set across datasets, and at differential expression as the authors published it{% if ui.facets %}, plus donor-level comparisons such as disease against control where a dataset has enough donors{% endif %}.
-      A cell count is not a sample size: donors are the independent replicates, so judge a comparison by its number of donors, not cells.
-      Only the datasets you are allowed to see are counted. To start, type a gene or a disease in the box, or browse by disease or cell type.</p>
-    {% endcall %}
-  </section>
 </div>
+<script>
+/* Example questions: shown after a minute with no activity (keys, typing, pointer, scroll, touch, focus in the
+   search box). Any activity restarts the wait; once shown they stay. No fade with prefers-reduced-motion. */
+(function () {
+  var box = document.getElementById('fd-examples');
+  if (!box) return;
+  var delay = parseInt(box.getAttribute('data-delay-ms'), 10) || 60000;
+  var timer = null, shown = false;
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var events = ['keydown', 'input', 'pointermove', 'pointerdown', 'scroll', 'wheel', 'touchstart'];
+  function show() {
+    shown = true;
+    events.forEach(function (name) { window.removeEventListener(name, restart, true); });
+    if (!reduce) box.classList.add('fd-fade');
+    box.hidden = false;
+  }
+  function restart() {
+    if (shown) return;
+    clearTimeout(timer);
+    timer = setTimeout(show, delay);
+  }
+  events.forEach(function (name) { window.addEventListener(name, restart, {capture: true, passive: true}); });
+  var input = document.querySelector('#front-door .fd-search input[type=search]');
+  if (input) input.addEventListener('focus', restart);
+  restart();
+})();
+</script>
 {% endblock %}
