@@ -1,4 +1,4 @@
-{% from "_effect_bar.html" import effect_bar_assets %}{% from "_macros.html" import plot_icons_js %}<!DOCTYPE html>
+{% from "_effect_bar.html" import effect_bar_assets %}{% from "_front_door.html" import fd_search %}{% from "_macros.html" import plot_icons_js %}<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -81,6 +81,37 @@
         #topbar nav[aria-label="Main"] { order: 1; }
         #topbar .topbar-spacer { order: 2; }
         #topbar .topbar-util { order: 4; }
+        /* Search button (2026-10-27, round 6): every page but the front door. It opens a small search box next
+           to it (a popover on desktop, a sheet under the bar on phones) that goes to the same /search results. */
+        #topbar .topbar-search { order: 3; position: relative; display: flex; align-items: center; }
+        #topbar .ts-icon {
+            display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 26px; padding: 0;
+            border: 1px solid rgba(255,255,255,.28); border-radius: 6px; background: transparent; color: var(--bar-link); cursor: pointer;
+        }
+        #topbar .ts-icon:hover, #topbar .ts-icon[aria-expanded="true"] { border-color: rgba(255,255,255,.6); color: var(--bar-link-hover); }
+        #topbar .ts-icon:focus-visible { outline: 2px solid var(--accent-cream); outline-offset: 2px; }
+        #topbar .ts-icon svg { width: 15px; height: 15px; display: block; }
+        #topbar .ts-pop {
+            position: absolute; top: calc(100% + 9px); right: 0; z-index: 500; width: 380px; max-width: calc(100vw - 24px);
+            padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+            box-shadow: 0 10px 28px rgba(15, 23, 42, .18); color: var(--text);
+        }
+        #topbar .ts-pop[hidden] { display: none; }
+        #topbar .ts-pop::before {
+            content: ''; position: absolute; top: -6px; right: 10px; width: 10px; height: 10px; background: var(--bg);
+            border-left: 1px solid var(--border); border-top: 1px solid var(--border); transform: rotate(45deg);
+        }
+        #topbar .ts-pop .fd-search { display: flex; gap: 6px; }
+        #topbar .ts-pop .fd-search input[type=search] {
+            flex: 1; min-width: 0; font: inherit; font-size: 14px; line-height: 1.4; padding: 7px 11px; color: var(--text);
+            background: var(--bg); border: 1px solid var(--border); border-radius: 8px; outline: none;
+        }
+        #topbar .ts-pop .fd-search input[type=search]:focus { border-color: var(--link); box-shadow: 0 0 0 3px rgba(51, 92, 103, .14); }
+        #topbar .ts-pop .fd-search button {
+            flex: none; font: inherit; font-size: 13px; padding: 0 12px; border-radius: 8px; cursor: pointer;
+            border: 1px solid var(--link); background: var(--link); color: #fff;
+        }
+        #topbar .ts-pop .ts-hint { margin: 6px 2px 0; font-size: 11.5px; color: var(--text-muted); line-height: 1.4; }
         #topbar nav { display: flex; align-items: center; gap: 16px; }
         /* Desktop: the menu wrapper is layout-transparent, so the nav links,
            spacer and utility cluster sit directly in the topbar flex row. */
@@ -104,6 +135,16 @@
             #topbar { position: relative; z-index: 400; padding: 5px 14px; min-height: 44px; gap: 10px; }
             #topbar .brand img { height: 22px; }
             #topbar .nav-toggle { display: inline-flex; margin-left: auto; order: 2; }
+            #topbar .topbar-search { order: 1; margin-left: auto; }
+            #topbar .topbar-search ~ .nav-toggle { margin-left: 0; }
+            #topbar .ts-icon { width: 40px; height: 34px; }
+            #topbar .ts-icon svg { width: 17px; height: 17px; }
+            #topbar .ts-pop {
+                position: fixed; top: 44px; left: 0; right: 0; width: auto; max-width: none; border-radius: 0;
+                border-width: 0 0 1px; padding: 10px 14px 12px; box-shadow: 0 10px 20px rgba(15, 23, 42, .18);
+            }
+            #topbar .ts-pop::before { display: none; }
+            #topbar .ts-pop .fd-search input[type=search] { font-size: 16px; padding: 8px 12px; }
             #topbar .topbar-menu {
                 display: none; position: absolute; top: 100%; left: 0; right: 0;
                 flex-direction: column; padding: 4px 14px 12px;
@@ -773,6 +814,19 @@
             <svg class="icon-open" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
             <svg class="icon-close" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         </button>
+        {% if not front_door %}
+        {# Search everything (the front page's search, GET /search) from any page but the front door: the button
+           opens a small search box next to it. Outside the phone menu panel; CSS order puts it before Help. #}
+        <div class="topbar-search" id="topbar-search">
+            <button type="button" class="ts-icon" id="topbar-search-btn" aria-label="Search anthive" aria-haspopup="dialog" aria-expanded="false" aria-controls="topbar-search-pop" title="Search datasets, genes, gene sets, papers and help (press /)">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12.6 12.6L17 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            </button>
+            <div class="ts-pop" id="topbar-search-pop" role="dialog" aria-label="Search anthive" hidden>
+                {{ fd_search('', placeholder='A gene, disease, cell type, region or author') }}
+                <p class="ts-hint">Datasets, collections, genes, gene sets, papers (also their full text){% if ui.facets %}, facets{% endif %} and help.</p>
+            </div>
+        </div>
+        {% endif %}
         <div class="topbar-menu" id="topbar-menu">
         <nav aria-label="Main">
             {% macro navlink(key, href, label, tip, link_id='') -%}
@@ -849,6 +903,47 @@
                 link.style.display = '';
             })
             .catch(function () {});
+    })();
+    (function () {
+        // Search button: opens the search box next to it, focused. Escape, a click outside or the button again
+        // closes it and puts the focus back on the button. "/" opens it when the focus is not in a text field
+        // (the collection list keeps "/" for its own box). Opening closes the phone menu panel.
+        var bar = document.getElementById('topbar');
+        var btn = document.getElementById('topbar-search-btn');
+        var pop = document.getElementById('topbar-search-pop');
+        if (!bar || !btn || !pop) return;
+        var input = pop.querySelector('input[type=search]');
+        function isOpen() { return !pop.hidden; }
+        function setOpen(on, refocus) {
+            pop.hidden = !on;
+            btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+            if (on) {
+                bar.classList.remove('menu-open');
+                var menuBtn = document.getElementById('nav-toggle');
+                if (menuBtn) { menuBtn.setAttribute('aria-expanded', 'false'); menuBtn.setAttribute('aria-label', 'Open menu'); }
+                if (input) { input.focus(); input.select(); }
+            } else if (refocus) {
+                btn.focus();
+            }
+        }
+        btn.addEventListener('click', function (e) { e.stopPropagation(); setOpen(!isOpen(), true); });
+        document.addEventListener('click', function (e) {
+            if (isOpen() && !pop.contains(e.target) && e.target !== btn) setOpen(false, false);
+        });
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && isOpen()) { e.preventDefault(); setOpen(false, true); return; }
+            if (e.key !== '/' || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || isOpen()) return;
+            if (document.getElementById('cat-q')) return;
+            var active = document.activeElement;
+            var tag = (active && active.tagName) || '';
+            if (/INPUT|TEXTAREA|SELECT/.test(tag) || (active && active.isContentEditable)) return;
+            e.preventDefault();
+            setOpen(true);
+        });
+        var form = pop.querySelector('form');
+        if (form && input) form.addEventListener('submit', function (e) { if (!input.value.trim()) { e.preventDefault(); input.focus(); } });
+        var toggle = document.getElementById('nav-toggle');
+        if (toggle) toggle.addEventListener('click', function () { if (isOpen()) setOpen(false, false); });
     })();
     (function () {
         // Narrow-screen menu button: opens the panel with the nav links, Help,

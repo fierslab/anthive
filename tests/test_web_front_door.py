@@ -21,6 +21,8 @@ import catalog_search  # noqa: E402
 from tests.test_web_browser import _fake_api_get, browser  # noqa: E402
 
 CALLS = []
+PAPERS = []       # library record hits the fake /search returns (set by a test)
+FULLTEXT = []     # full-text hits the fake /search returns (set by a test)
 
 
 def _fake_with_search(api_url, path, **kwargs):
@@ -34,9 +36,11 @@ def _fake_with_search(api_url, path, **kwargs):
                       'withdrawn': n == 0} for n in range(7)]
         facets = [{'column': 'ant_sex', 'tag': 'sex', 'label': 'Sex', 'summary': 'Biological sex of the donor',
                    'definition': '', 'n_datasets': 2}]
+        kinds = [k for k in parse_qs(urlparse(path).query).get('kind', [''])[0].split(',') if k]
         return catalog_search.search(query, databases, gene_index=index, genesets=[], labels={},
                                      artefacts=artefacts, facets=facets, help_hidden=[],
-                                     limit=int(parse_qs(urlparse(path).query).get('limit', ['50'])[0]))
+                                     papers=lambda words: list(PAPERS), paper_fulltext=lambda groups: list(FULLTEXT),
+                                     limit=int(parse_qs(urlparse(path).query).get('limit', ['50'])[0]), kinds=kinds)
     return _fake_api_get(api_url, path, **kwargs)
 
 
@@ -50,6 +54,8 @@ def client(monkeypatch):
     monkeypatch.setattr(browser, '_caveats_mode_cfg', ['all'])
     monkeypatch.setattr(browser, '_facets_visible_cfg', [[]])
     CALLS.clear()
+    PAPERS.clear()
+    FULLTEXT.clear()
     monkeypatch.setattr(browser, '_home_collection_cfg', [''])
     browser._HOME_COLLECTION_WARNED.clear()
     app = FastAPI()
@@ -167,7 +173,7 @@ def test_old_landing_links_go_to_the_collection_list(client):
     assert client.get('/datasets', follow_redirects=False).headers['location'] == '/collections'
 
 
-def test_nav_home_is_the_front_door_and_the_bar_has_no_search_field(client):
+def test_nav_home_is_the_front_door_and_the_search_button_is_on_every_other_page(client):
     page = client.get('/help').text
     nav = page.split('<nav aria-label="Main">')[1].split('</nav>')[0]
     home = nav.split('id="nav-home"')[1].split('</a>')[0]
@@ -176,15 +182,38 @@ def test_nav_home_is_the_front_door_and_the_bar_has_no_search_field(client):
     # the logo goes to "/" (the site's landing); About moved into the user menu
     assert '<a href="/" class="brand" id="topbar-brand"' in page
     assert 'href="/about" id="about-menu-link"' in page
-    for path in ('/', '/home', '/collections', '/browse/GroupA/ds1', '/genes', '/diseases', '/search?q=microglia'):
+    # round 6: a search button opens a small search box; not on the front door, which is the search page
+    for path in ('/', '/home'):
         html = client.get(path).text
-        for gone in ('id="topbar-search"', 'id="topbar-search-toggle"', 'id="topbar-search-input"', 'search-open'):
-            assert gone not in html, (path, gone)
+        assert 'id="topbar-search"' not in html and 'id="topbar-search-btn"' not in html, path
+    for path in ('/collections', '/browse/GroupA/ds1', '/genes', '/diseases', '/search?q=microglia', '/help'):
+        html = client.get(path).text
+        box = html.split('<div class="topbar-search" id="topbar-search">')[1].split('</div>\n        </div>')[0]
+        assert 'id="topbar-search-btn" aria-label="Search anthive" aria-haspopup="dialog" aria-expanded="false"' \
+            ' aria-controls="topbar-search-pop"' in box, path
+        assert '<div class="ts-pop" id="topbar-search-pop" role="dialog" aria-label="Search anthive" hidden>' in box
+        # the same form as the front page: GET /search with q
+        assert '<form class="fd-search" action="/search" method="get" role="search">' in box
+        assert 'name="q"' in box, path
+        # outside the phone menu panel, so it stays visible on phones
+        assert html.index('id="topbar-search"') < html.index('id="topbar-menu"')
+    # the old always-visible field and its phone toggle stay gone
+    for gone in ('id="topbar-search-toggle"', 'id="topbar-search-input"', 'search-open'):
+        assert gone not in client.get('/collections').text, gone
+
+
+def test_search_button_script_closes_and_returns_focus():
+    base = (Path(__file__).resolve().parent.parent / 'web' / 'templates' / 'base.html').read_text()
+    script = base.split("var pop = document.getElementById('topbar-search-pop');")[1].split('})();')[0]
+    assert "e.key === 'Escape' && isOpen()" in script and 'btn.focus()' in script
+    assert '!pop.contains(e.target)' in script                  # a click outside closes it
+    assert "e.key !== '/'" in script and "getElementById('cat-q')" in script and 'INPUT|TEXTAREA|SELECT' in script
+    assert 'input.focus()' in script
 
 
 def test_search_results_page_keeps_its_own_box_with_the_query(client):
     html = client.get('/search', params={'q': 'microglia'}).text
-    box = html.split('class="fd-search"')[1].split('</form>')[0]
+    box = html.split('id="search-results"')[1].split('class="fd-search"')[1].split('</form>')[0]
     assert 'name="q"' in box and 'value="microglia"' in box
     assert '<form class="fd-search" action="/search"' in html
 
@@ -200,6 +229,38 @@ def test_search_groups_top_few_and_show_all(client):
     one = client.get('/search', params={'q': 'microglia', 'kind': 'artefacts'}).text
     assert one.split('id="search-artefacts"')[1].split('</section>')[0].count('<li>') == 7
     assert 'id="search-datasets"' not in one and '<title>Artefacts · Search · anthive</title>' in one
+
+
+def test_show_all_asks_the_api_for_that_kind_only(client):
+    client.get('/search', params={'q': 'microglia', 'kind': 'artefacts'})
+    call = next(call for call in CALLS if call.startswith('/search?'))
+    assert parse_qs(urlparse(call).query)['kind'] == ['artefacts']
+    CALLS.clear()
+    client.get('/search', params={'q': 'microglia'})
+    assert 'kind' not in parse_qs(urlparse(next(c for c in CALLS if c.startswith('/search?'))).query)
+
+
+def test_search_shows_paper_passages_and_where_the_words_were_found(client, monkeypatch):
+    monkeypatch.setattr(browser, '_library_available', lambda request: True)
+    PAPERS.append({'citekey': 'smith2024', 'title': 'Microglia in plaques', 'authors': ['Smith, Anna'],
+                   'citation': 'Smith 2024', 'journal': 'Nature'})
+    FULLTEXT.extend([
+        {'citekey': 'smith2024', 'summary': {}, 'score': 3.0, 'n_passages': 5,
+         'passages': [{'page_start': 4, 'page_end': 5, 'section': 'results',
+                       'snippet': 'reactive <mark>microglia</mark> &lt;b&gt;near&lt;/b&gt; plaques'}]},
+        {'citekey': 'lee2020', 'summary': {'citekey': 'lee2020', 'title': 'Glia atlas', 'citation': 'Lee 2020'},
+         'score': 1.0, 'n_passages': 1,
+         'passages': [{'page_start': 2, 'page_end': 2, 'section': 'figure_legend',
+                       'snippet': '<script>alert(1)</script><mark>microglia</mark> cluster'}]}])
+    html = client.get('/search', params={'q': 'microglia'}).text
+    papers = html.split('id="search-papers"')[1].split('</section>')[0]
+    assert papers.index('smith2024') < papers.index('lee2020')
+    assert 'found in title, full text' in papers and 'found in full text' in papers
+    assert '<ul class="fd-passages"><li><span class="snip">reactive <mark>microglia</mark> &lt;b&gt;near&lt;/b&gt; plaques</span>' \
+        ' <span class="where">results, pp. 4-5</span>' in papers
+    assert 'figure legend, p. 2' in papers
+    assert '<script>alert(1)</script>' not in papers and '&lt;script&gt;' in papers   # only <mark> survives
+    assert '4 more matching passages in this paper' in papers
 
 
 def test_search_finds_help_and_facets_and_respects_ui_facets(client, monkeypatch):

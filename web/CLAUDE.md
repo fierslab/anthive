@@ -1144,3 +1144,21 @@ pages resolve).
   the front door); the nav `home` (`#nav-home`) always goes to `/home`, so search stays one click away on a site
   that lands on a collection. `/about`, formerly the brand's target, is `#about-menu-link` ("About anthive") in
   the user menu. On phones the menu button takes `margin-left: auto`.
+
+## Search button, paper passages (2026-10-27, round 6)
+
+- Mark: "add the search icon on any page but the home page, that pops up a modal search box next to the icon".
+  `base.html` has `#topbar-search` (outside `#topbar-menu`, CSS order 3 on desktop, before the menu button on
+  phones) with the button `#topbar-search-btn` (`aria-haspopup="dialog"`, `aria-expanded`, `aria-controls`) and
+  the popover `#topbar-search-pop` (`role="dialog"`, `hidden`), which holds `fd_search` from `_front_door.html`
+  (the front page's own form: GET /search, `q`). Desktop: a 380px popover under the button with an arrow;
+  phones (<= 640px): a fixed sheet under the bar. Script: button toggles, opening focuses and selects the field
+  and closes the phone menu; Escape and a second click return focus to the button; an outside click closes;
+  "/" opens it unless focus is in a field or the page has `#cat-q` (the collection list keeps "/"); an empty
+  submit is refused. Left out on the front door: `_render_front_door` passes `front_door: True` (also "/" when it
+  renders the front door). Tests: `tests/test_web_front_door.py`.
+- `/search` papers: `_search_rows` adds `note` ("found in title, full text", `_PAPER_MATCHED_WORDS`), up to 3
+  `passages` (`_snippet_markup` escapes everything except the API's `<mark>` highlights, `_section_word`,
+  `_page_range`) and `more_passages` ("N more matching passages in this paper"). There is no web literature
+  search page, so there is no "show all passages" link. Styles `.fd-passages` in `fd_styles`.
+- "show all N" (`?kind=`) now sends `kind=` to `GET /api/search`, so the API computes one group only.

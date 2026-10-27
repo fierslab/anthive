@@ -2667,6 +2667,7 @@ def _render_front_door(request: Request, error: Optional[str] = None) -> HTMLRes
                      for example in FRONT_DOOR_EXAMPLES],
         "examples_delay_ms": FRONT_DOOR_EXAMPLES_DELAY_MS,
         "error": error,
+        "front_door": True,      # base.html leaves out the top-bar search button here
     })
 
 
@@ -2732,6 +2733,29 @@ _ARTEFACT_KIND_WORDS = {'de_table': 'DE table', 'figure': 'figure', 'table': 'ta
                         'report': 'report', 'model': 'model', 'other': 'file'}
 
 
+_PAPER_MATCHED_WORDS = {'citekey': 'citekey', 'title': 'title', 'authors': 'authors', 'journal': 'journal',
+                        'doi': 'DOI', 'keywords': 'keywords', 'summary': 'summary', 'fulltext': 'full text'}
+_SECTION_WORDS = {'figure_legend': 'figure legend'}
+
+
+def _snippet_markup(snippet: Any) -> Markup:
+    """A passage snippet from the API as safe HTML: every part escaped, only the <mark> highlights kept."""
+    parts = re.split(r'(</?mark>)', str(snippet or ''))
+    return Markup(''.join(part if part in ('<mark>', '</mark>') else html_lib.escape(html_lib.unescape(part))
+                          for part in parts))
+
+
+def _section_word(section: Any) -> str:
+    text = str(section or '').strip()
+    return _SECTION_WORDS.get(text, text.replace('_', ' '))
+
+
+def _page_range(start: Any, end: Any) -> str:
+    if not start:
+        return ''
+    return f"p. {start}" if not end or end == start else f"pp. {start}-{end}"
+
+
 def _search_rows(kind: str, result: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Result rows of one group in one shape: title, href, meta (short strings), note, mark."""
     rows: List[Dict[str, Any]] = []
@@ -2768,9 +2792,16 @@ def _search_rows(kind: str, result: Dict[str, Any]) -> List[Dict[str, Any]]:
             n = row.get('n_datasets') or 0
             meta = [row.get('citation') or row.get('first_author') or '', row.get('journal') or '',
                     f"{n} linked dataset{'' if n == 1 else 's'}" if n else '']
+            matched = [_PAPER_MATCHED_WORDS.get(m, m) for m in row.get('matched_in') or []]
+            passages = [{'snippet': _snippet_markup(p.get('snippet')), 'section': _section_word(p.get('section')),
+                         'pages': _page_range(p.get('page_start'), p.get('page_end'))}
+                        for p in (row.get('passages') or [])[:3]]
+            n_passages = int(row.get('n_passages') or 0)
             rows.append({'title': row.get('title') or row.get('citekey'),
                          'href': '/papers/' + url_quote(str(row.get('citekey') or ''), safe=''),
-                         'meta': [m for m in meta if m], 'note': '', 'mark': ''})
+                         'meta': [m for m in meta if m], 'note': ('found in ' + ', '.join(matched)) if matched else '',
+                         'mark': '', 'passages': passages,
+                         'more_passages': n_passages - len(passages) if n_passages > len(passages) else 0})
         elif kind == 'artefacts':
             belongs = row.get('db_id') or row.get('group_id') or ''
             meta = [_ARTEFACT_KIND_WORDS.get(row.get('kind') or '', row.get('kind') or ''),
@@ -2809,8 +2840,8 @@ async def search_view(request: Request, q: str = '', kind: str = ''):
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     try:
-        result = _api_get(_api_url(request), '/search?' + urlencode({'q': query, 'limit': 500 if only else 50}),
-                          timeout=30)
+        params = {'q': query, 'limit': 500 if only else 50, **({'kind': only} if only else {})}
+        result = _api_get(_api_url(request), '/search?' + urlencode(params), timeout=30)
     except requests.HTTPError as exc:
         status = getattr(getattr(exc, 'response', None), 'status_code', None)
         error = ('This server does not offer search yet (it needs API 2.48). Use the collection list '
