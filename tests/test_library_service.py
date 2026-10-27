@@ -285,6 +285,38 @@ def test_fulltext_needs_every_word_in_one_passage_and_groups_per_paper(service, 
     assert all(len(hit['passages']) <= 1 for hit in service.fulltext([('microglia',)], per_paper=1))
 
 
+def test_snippet_shows_the_words_together_and_reference_lists_rank_low():
+    import library_index as li
+    from library_service import _densest_window
+    text = 'microglia ' + 'filler words here ' * 60 + 'lipid droplets accumulate in aged microglia here.'
+    start = _densest_window(text, [('lipid',), ('microglia',)])
+    assert text[start:start + 60].startswith('lipid droplets')
+    snippet = highlight_snippet(text, 'lipid microglia', focus=start)
+    assert '<mark>lipid</mark> droplets' in snippet and snippet.startswith('...')
+    references = ('12. Chen, D. et al. CTLA-4 blockade. Nat Med 19, 784-790 (2013). 13. Lee, X. et al. '
+                  'Microglia mediated. Immunity 56, 2086-2104 (2023). 14. Wu, Y. et al. Glia. Cell 7, 1-9 (2020).')
+    assert li.looks_like_citations(references)
+    assert not li.looks_like_citations('Microglia near plaques took up lipid droplets (Fig. 2a) in aged mice, '
+                                       'as reported before (Lee et al. 2020), and lost homeostatic genes.')
+
+
+def test_fulltext_leaves_out_overlapping_passages(service):
+    class Index:
+        rows = [{'citekey': 'src2024', 'page_start': 6, 'page_end': 7, 'section': 'results',
+                 'text': 'Aging affects microglia, characterized by lipid droplets, also after plaques appear.'},
+                {'citekey': 'src2024', 'page_start': 7, 'page_end': 8, 'section': 'results',
+                 'text': 'Aging affects microglia, characterized by lipid droplets, also after plaques appear. More.'},
+                {'citekey': 'src2024', 'page_start': 9, 'page_end': 9, 'section': 'discussion',
+                 'text': 'In discussion, microglia with lipid droplets are new.'}]
+
+        def match_all(self, word_groups, k=50, citekeys=None):
+            return {'results': [(0, 3.0), (1, 2.9), (2, 1.0)], 'per_citekey': {'src2024': 3}}
+    service.index = Index()
+    hits = service.fulltext([('microglia',), ('lipid',)])
+    assert [p['page_start'] for p in hits[0]['passages']] == [6, 9] and hits[0]['n_passages'] == 3
+    assert '_texts' not in hits[0]
+
+
 def test_fulltext_without_index_is_empty(service):
     assert service.fulltext([('microglia',)]) == []
 

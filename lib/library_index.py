@@ -740,6 +740,19 @@ def read_index_metadata(path: Path) -> Dict[str, Any]:
 
 # ── query side ───────────────────────────────────────────────────────────────
 
+# Passages that read like a reference list (PDF parsing sometimes files the references under the discussion)
+# rank far below prose in match_all: their score is multiplied by this weight.
+CITATION_LIKE_WEIGHT = 0.1
+_CITATION_RE = re.compile(r"\(\s*(?:19|20)\d\d[a-z]?\s*\)|\b\d{1,4}\s*[,:]\s*\d{1,6}\s*[-\u2013]\s*\d{1,6}\b")
+
+
+def looks_like_citations(text: str) -> bool:
+    """True for a passage that is mostly references: at least four reference marks (a year alone in
+    brackets, a volume and page range such as "19, 784-790"), and at least four per 150 words."""
+    marks = len(_CITATION_RE.findall(text))
+    return marks >= 4 and marks * 150 >= 4 * max(len(text.split()), 1)
+
+
 class LibraryIndex:
     """In-memory search over library_chunks.parquet.
 
@@ -867,17 +880,25 @@ class LibraryIndex:
                 alt_score = np.zeros(n_rows, np.float32)
                 for cols in token_columns:
                     token_hit = np.zeros(n_rows, bool)
+                    token_score = np.zeros(n_rows, np.float32)
                     for col in cols:
                         column = self._bm25.getcol(col)
                         token_hit[column.indices] = True
-                        alt_score[column.indices] += column.data * self._idf[col]
+                        # the best of the terms a token stands for, so "microglia" is not counted again
+                        # for microglial, microglia-mediated, ...
+                        token_score[column.indices] = np.maximum(token_score[column.indices],
+                                                                 column.data * self._idf[col])
                     alt_hit &= token_hit
+                    alt_score += token_score
                 word_hit |= alt_hit
                 word_score = np.maximum(word_score, np.where(alt_hit, alt_score, 0))
             keep &= word_hit
             if not keep.any():
                 return {'results': [], 'per_citekey': {}}
             scores += word_score
+        if not hasattr(self, '_citation_like'):
+            self._citation_like = np.array([looks_like_citations(row.get('text') or '') for row in self.rows])
+        scores = np.where(self._citation_like, scores * CITATION_LIKE_WEIGHT, scores)
         hits = np.flatnonzero(keep)
         order = hits[np.argsort(-scores[hits], kind='stable')][:k]
         codes, counts = np.unique(self._citekey_of_row[hits], return_counts=True)

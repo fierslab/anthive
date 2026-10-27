@@ -62,6 +62,8 @@ Minor, additive. Nothing is removed or renamed; `API_VERSION` is bumped at relea
   and topic lists, summary) and a full-text search of the literature index: the best 50 passages that hold every
   search word (keyword index only, no query model; reference lists left out; a word matches through any of its
   alternatives, and a word of four or more letters also matches longer words it starts), grouped per paper.
+  Passages that read like a reference list (PDF parsing sometimes files references under the discussion) rank
+  far lower; overlapping neighbour passages are shown once; the snippet is centred where the words sit together.
   Every paper row gains `matched_in` (list from `citekey`, `title`, `authors`, `journal`, `doi`, `keywords`,
   `summary`, `fulltext`; topic lists count as `keywords`), `passages` (up to 3 `{page_start, page_end, section,
   snippet}`, the snippet HTML-escaped with the words in `<mark>`; empty without a full-text hit) and `n_passages`

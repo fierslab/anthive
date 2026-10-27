@@ -136,13 +136,14 @@ def geneset_references(geneset_dir: Optional[Path]) -> List[Tuple[str, str, str]
     return out
 
 
-def highlight_snippet(text: str, query: str, width: int = 320) -> str:
-    """A window of ``text`` around the first query term, terms in <mark>."""
+def highlight_snippet(text: str, query: str, width: int = 320, focus: Optional[int] = None) -> str:
+    """A window of ``text`` around the first query term (or around character ``focus``), terms in <mark>."""
     from library_index import _STOPWORDS  # noqa: PLC0415
     terms = [t for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]+", query)
              if len(t) > 2 and t.lower() not in _STOPWORDS]
     lowered = text.lower()
-    first = min((lowered.find(t.lower()) for t in terms if lowered.find(t.lower()) >= 0), default=0)
+    first = focus if focus is not None else \
+        min((lowered.find(t.lower()) for t in terms if lowered.find(t.lower()) >= 0), default=0)
     start = max(0, first - width // 3)
     snippet = text[start:start + width].strip()
     if start > 0:
@@ -153,6 +154,29 @@ def highlight_snippet(text: str, query: str, width: int = 320) -> str:
     for term in sorted(set(terms), key=len, reverse=True):
         snippet = re.sub(rf"(?i)\b({re.escape(term)})", r"<mark>\1</mark>", snippet)
     return snippet
+
+
+def _densest_window(text: str, word_groups: Sequence[Sequence[str]], width: int = 320) -> int:
+    """Character offset where a window of ``width`` holds the most different search words (one entry per word,
+    each a list of alternatives), so a snippet shows the words together rather than only the first one."""
+    lowered = text.lower()
+    hits: List[Tuple[int, int]] = []
+    for index, alternatives in enumerate(word_groups):
+        for alternative in alternatives:
+            needle = str(alternative).lower()
+            if len(needle) < 2:
+                continue
+            for match in re.finditer(re.escape(needle), lowered):
+                hits.append((match.start(), index))
+    if not hits:
+        return 0
+    hits = sorted(hits)[:400]
+    best_start, best_count = hits[0][0], 0
+    for position, _ in hits:
+        count = len({index for start, index in hits if position <= start < position + width * 2 // 3})
+        if count > best_count:
+            best_start, best_count = position, count
+    return best_start
 
 
 @dataclass
@@ -712,11 +736,20 @@ class LibraryService:
                 continue
             entry = papers.setdefault(citekey, {'citekey': citekey, 'paper': paper, 'score': score,
                                                 'n_passages': found['per_citekey'].get(citekey, 1),
-                                                'passages': []})
+                                                'passages': [], '_texts': []})
             if len(entry['passages']) < per_paper:
+                text = row.get('text') or ''
+                focus = _densest_window(text, word_groups)
+                # neighbouring chunks overlap: leave out a passage whose matching words were already shown
+                core = text[focus:focus + 40]
+                if core and any(core in seen for seen in entry['_texts']):
+                    continue
+                entry['_texts'].append(text)
                 entry['passages'].append({'page_start': row.get('page_start'), 'page_end': row.get('page_end'),
                                           'section': row.get('section'),
-                                          'snippet': highlight_snippet(row.get('text') or '', highlight)})
+                                          'snippet': highlight_snippet(text, highlight, focus=focus)})
+        for entry in papers.values():
+            entry.pop('_texts', None)
         return list(papers.values())
 
     def page_text(self, paper: Paper, page: int) -> Optional[str]:
