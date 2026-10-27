@@ -455,6 +455,7 @@ class LibraryService:
             'organisms': _as_list(f.get('anthive_organisms')),
             'methods': _as_list(f.get('anthive_methods')),
             'cohorts': _as_list(f.get('anthive_cohorts')),
+            'keywords': _as_list(f.get('keywords')),
             'summary': f.get('anthive_summary'),
             'has_pdf': self.pdf_path(paper) is not None,
             'n_datasets': len({link.db_id for link in links}),
@@ -689,6 +690,34 @@ class LibraryService:
             if len(results) >= k:
                 break
         return {'query': query, 'mode': raw['mode'], 'results': results, 'warnings': raw['warnings']}
+
+    def fulltext(self, word_groups: Sequence[Sequence[str]], *, k: int = 50,
+                 per_paper: int = 3) -> List[Dict[str, Any]]:
+        """Papers whose full text holds every search word in one passage (keyword index only, no query
+        model). ``word_groups``: one list of alternatives per word (``LibraryIndex.match_all``). The best
+        ``k`` passages of the whole library are grouped per paper; each paper gets up to ``per_paper`` of
+        them as ``{page_start, page_end, section, snippet}`` plus ``n_passages`` (all matching passages of
+        the paper, not only the best k) and ``score`` (its best passage). Best paper first. Only papers
+        with a library record are returned; an index that is not loaded gives an empty list."""
+        if self.index is None or not word_groups or not hasattr(self.index, 'match_all'):
+            return []
+        found = self.index.match_all(word_groups, k=k, citekeys=self.state.papers.keys())
+        highlight = ' '.join(alt for group in word_groups for alt in group)
+        papers: Dict[str, Dict[str, Any]] = {}
+        for row_index, score in found['results']:
+            row = self.index.rows[row_index]
+            citekey = row.get('citekey')
+            paper = self.state.papers.get(citekey)
+            if paper is None:
+                continue
+            entry = papers.setdefault(citekey, {'citekey': citekey, 'paper': paper, 'score': score,
+                                                'n_passages': found['per_citekey'].get(citekey, 1),
+                                                'passages': []})
+            if len(entry['passages']) < per_paper:
+                entry['passages'].append({'page_start': row.get('page_start'), 'page_end': row.get('page_end'),
+                                          'section': row.get('section'),
+                                          'snippet': highlight_snippet(row.get('text') or '', highlight)})
+        return list(papers.values())
 
     def page_text(self, paper: Paper, page: int) -> Optional[str]:
         if self.index is None:

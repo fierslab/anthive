@@ -22,13 +22,20 @@ Matching rules (plain, documented on the help page):
   some dataset of the catalogue must match that field ("microglia" finds
   datasets recorded as microglia, not a neuron dataset whose description
   mentions microglia).
-* Every other word must occur in a dataset's text (title, collection, paper
-  title, description, organism, tissue, cell type, disease, condition,
-  technology and the labels of its standard cell annotation columns). A word
+* Every other word must occur in a dataset's text (title, collection,
+  authors of the dataset and its collection, description, organism, tissue,
+  cell type, disease, condition, technology and the labels of its standard
+  cell annotation columns). A word
   matches inside a longer word ("microglia" finds "microglial cell"); a
   trailing plural s is optional; a few abbreviations are expanded (AD, PD,
   MS, ALS, FTD, APOE4). Words of one or two letters must match a whole word.
 * With gene words only, datasets whose text mentions the gene are listed.
+* Papers are found by their library record (citekey, title, all authors,
+  journal, DOI, keywords and topic lists, summary: every word somewhere in
+  the record) or by their full text (one passage holding every word, any
+  alternative of a word counting; reference lists are not searched). Both
+  are merged into one row per paper with ``matched_in`` and up to three
+  ``passages``.
 """
 from __future__ import annotations
 
@@ -242,8 +249,8 @@ def dataset_fields(db: Mapping[str, Any], labels: Optional[Mapping[str, str]] = 
         'title': ' '.join([str(db.get('title') or ''), str(db.get('basename') or ''), str(db.get('id') or ''),
                            str(db.get('file_id') or '')]),
         'collection': ' '.join([str(collection.get('title') or ''), str(collection.get('group') or ''),
-                                str(db.get('group_id') or ''), str(collection.get('summary') or ''),
-                                ' '.join(as_list(collection.get('authors')))]),
+                                str(db.get('group_id') or ''), str(collection.get('summary') or '')]),
+        'authors': ' '.join(author_names(db) + author_names(collection)),
         'disease': ' '.join(disease_values(db) + [disease_label(v) for v in disease_values(db)]
                             + as_list(db.get('condition'))),
         'cell type': ' '.join(celltype_values(db) + [celltype_label(v) for v in celltype_values(db)]),
@@ -255,6 +262,16 @@ def dataset_fields(db: Mapping[str, Any], labels: Optional[Mapping[str, str]] = 
         'description': ' '.join([str(db.get('description') or ''), str(db.get('markdown') or '')[:1500]]),
     }
     return {key: fold(value) for key, value in fields.items()}
+
+
+def author_names(record: Mapping[str, Any]) -> List[str]:
+    """Author names of a dataset or collection record: ``authors`` (list), ``first_author`` and
+    ``last_author``, as recorded (full names when the store has them), duplicates removed."""
+    names: List[str] = []
+    for name in as_list(record.get('authors')) + as_list(record.get('first_author')) + as_list(record.get('last_author')):
+        if name not in names:
+            names.append(name)
+    return names
 
 
 # ── search ────────────────────────────────────────────────────────────────────
@@ -322,7 +339,7 @@ def search_datasets(databases: Sequence[Mapping[str, Any]], words: Sequence[str]
     """
     if not words:
         return [], 0
-    core = ('title', 'disease', 'cell type', 'tissue', 'organism', 'cell annotations', 'collection')
+    core = ('title', 'disease', 'cell type', 'tissue', 'organism', 'cell annotations', 'collection', 'authors')
     all_fields = [(db, dataset_fields(db, labels)) for db in databases]
     scopes: Dict[str, Tuple[str, ...]] = {}
     for word in words:
@@ -436,7 +453,7 @@ def search_collections(databases: Sequence[Mapping[str, Any]], words: Sequence[s
         meta = entry['meta']
         title = str((meta.get('title') or '').strip() or meta.get('group') or group_id)
         text = fold(' '.join([title, str(meta.get('group') or ''), group_id, str(meta.get('summary') or ''),
-                              str(meta.get('description') or '')[:2000], ' '.join(as_list(meta.get('authors'))),
+                              str(meta.get('description') or '')[:2000], ' '.join(author_names(meta)),
                               str(meta.get('year') or ''), str(meta.get('doi') or ''), str(meta.get('pmid') or ''),
                               str(meta.get('accession') or '')]))
         n_matching = len(matched_db_ids.intersection(entry['db_ids']))
@@ -524,6 +541,63 @@ def help_entries(hidden: Sequence[str] = ()) -> List[Dict[str, str]]:
     return entries
 
 
+PAPER_MATCH_FIELDS: Tuple[str, ...] = ('citekey', 'title', 'authors', 'journal', 'doi', 'keywords', 'summary',
+                                        'fulltext')
+
+
+def paper_matched_fields(row: Mapping[str, Any], words: Sequence[str]) -> List[str]:
+    """Which record fields of a library paper summary hold one of ``words`` (the words given to the
+    library's own substring search, :func:`paper_query`). The curated topic lists (cell types, tissues,
+    diseases, organisms, methods, cohorts) count as keywords."""
+    texts = {
+        'citekey': row.get('citekey'),
+        'title': row.get('title'),
+        'authors': ' '.join(as_list(row.get('authors'))),
+        'journal': row.get('journal'),
+        'doi': row.get('doi'),
+        'keywords': ' '.join(as_list(row.get('keywords')) + [item for key in ('celltypes', 'tissues', 'diseases',
+                                                                            'organisms', 'methods', 'cohorts')
+                                                             for item in as_list(row.get(key))]),
+        'summary': row.get('summary'),
+    }
+    folded = {name: fold(value) for name, value in texts.items()}
+    return [name for name, text in folded.items() if text and any(fold(word) in text for word in words)]
+
+
+def merge_papers(metadata_rows: Sequence[Mapping[str, Any]], fulltext_rows: Sequence[Mapping[str, Any]],
+                 metadata_words: Sequence[str]) -> List[Dict[str, Any]]:
+    """One row per paper from the record search and the full-text search.
+
+    ``fulltext_rows`` are ``{citekey, summary, score, n_passages, passages}``. Every row gets ``matched_in``
+    (from :data:`PAPER_MATCH_FIELDS`), ``passages`` (up to 3, empty without a full-text hit) and
+    ``n_passages``. Order: papers found in the record and the full text first (best passage first), then
+    record-only papers (in the library's order: newest first), then full-text-only papers by best passage
+    score and number of matching passages.
+    """
+    fulltext = {str(row['citekey']): row for row in fulltext_rows}
+    both, record_only = [], []
+    seen: Set[str] = set()
+    for row in metadata_rows:
+        citekey = str(row.get('citekey'))
+        seen.add(citekey)
+        hit = fulltext.get(citekey)
+        out = dict(row)
+        out['matched_in'] = paper_matched_fields(row, metadata_words) + (['fulltext'] if hit else [])
+        out['passages'] = list(hit['passages']) if hit else []
+        out['n_passages'] = int(hit['n_passages']) if hit else 0
+        (both if hit else record_only).append((-(hit['score'] if hit else 0.0), out))
+    both.sort(key=lambda item: item[0])
+    text_only = []
+    for citekey, hit in fulltext.items():
+        if citekey in seen:
+            continue
+        out = dict(hit['summary'])
+        out.update(matched_in=['fulltext'], passages=list(hit['passages']), n_passages=int(hit['n_passages']))
+        text_only.append(((-float(hit['score']), -int(hit['n_passages']), citekey), out))
+    text_only.sort(key=lambda item: item[0])
+    return [row for _, row in both] + [row for _, row in record_only] + [row for _, row in text_only]
+
+
 def search_help(entries: Sequence[Mapping[str, str]], words: Sequence[str],
                 limit: int = 50) -> Tuple[List[Dict[str, Any]], int]:
     """Help topics and glossary terms whose title, aliases, summary or text hold every word; title hits first,
@@ -540,17 +614,24 @@ def search_help(entries: Sequence[Mapping[str, str]], words: Sequence[str],
     return [row for _, row in hits[:limit]], len(hits)
 
 
+# The groups of the unified search, in the order the web results page shows them.
+SEARCH_KINDS: Tuple[str, ...] = ('genes', 'datasets', 'collections', 'genesets', 'papers', 'artefacts', 'facets',
+                                 'help')
+
+
 def search(query: str, databases: Sequence[Mapping[str, Any]], *,
            gene_index: Optional[GeneIndex] = None,
            genesets: Optional[Sequence[Mapping[str, Any]]] = None,
            genesets_with_gene: Optional[Callable[[str], Sequence[Mapping[str, Any]]]] = None,
            papers: Optional[Callable[[str], Sequence[Mapping[str, Any]]]] = None,
+           paper_fulltext: Optional[Callable[[List[Tuple[str, ...]]], Sequence[Mapping[str, Any]]]] = None,
            analysis_collections: Optional[Sequence[Mapping[str, Any]]] = None,
            artefacts: Optional[Sequence[Mapping[str, Any]]] = None,
            facets: Optional[Sequence[Mapping[str, Any]]] = None,
            help_hidden: Optional[Sequence[str]] = None,
            labels: Optional[Mapping[str, str]] = None,
-           limit: int = 50) -> Dict[str, Any]:
+           limit: int = 50,
+           kinds: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """Unified keyword search, grouped by kind.
 
     Args:
@@ -559,7 +640,11 @@ def search(query: str, databases: Sequence[Mapping[str, Any]], *,
         gene_index: gene names of the catalogue; None skips the gene group.
         genesets: gene set summaries; None skips the gene set group.
         genesets_with_gene: gene sets that contain a gene (for a query of gene words only).
-        papers: callable taking the joined words and returning paper summaries; None skips papers.
+        papers: callable taking the joined words and returning paper summaries (the record search); None
+            skips papers.
+        paper_fulltext: callable taking one tuple of alternatives per word and returning the papers whose full
+            text holds every word (``{citekey, summary, score, n_passages, passages}``); merged with the record
+            hits by :func:`merge_papers`. None: record search only.
         analysis_collections: visible analysis collections (no datasets) to search besides the collections
             of the visible datasets.
         artefacts: artefacts the caller may see (``ArtefactService.searchable``); None skips the group.
@@ -567,19 +652,27 @@ def search(query: str, databases: Sequence[Mapping[str, Any]], *,
         help_hidden: parts switched off on the site, for the help group; None skips the help group.
         labels: ``{tag: label}`` of the ant_* annotation columns.
         limit: most rows per group (totals are reported separately).
+        kinds: the groups to compute (names of :data:`SEARCH_KINDS`); None or empty computes every group. A
+            group left out is None with a zero count, and ``kinds`` in the result lists the groups searched.
 
     Returns:
-        ``{query, words, gene_words, datasets, n_datasets, datasets_basis, collections, n_collections, genes,
-        suggestions, genesets, n_genesets, papers, n_papers, artefacts, n_artefacts, facets, n_facets, help,
-        n_help}``. A group that was skipped is None; an empty match is an empty list.
+        ``{query, words, gene_words, kinds, datasets, n_datasets, datasets_basis, collections, n_collections,
+        genes, suggestions, genesets, n_genesets, papers, n_papers, artefacts, n_artefacts, facets, n_facets,
+        help, n_help}``. A group that was skipped (not on the site, or not asked for) is None; an empty match
+        is an empty list.
     """
+    wanted = set(kinds or ()) or set(SEARCH_KINDS)
+    unknown = wanted - set(SEARCH_KINDS)
+    if unknown:
+        raise ValueError(f"unknown search kind(s): {', '.join(sorted(unknown))}")
     words = query_words(query)
     labels = labels if labels is not None else vocabulary_labels()
     visible_ids = {str(db.get('id')) for db in databases}
     gene_words: List[str] = []
     genes: Optional[List[Dict[str, Any]]] = None
     suggestions: List[str] = []
-    if gene_index is not None:
+    if gene_index is not None and ('genes' in wanted or 'datasets' in wanted or 'collections' in wanted
+                                   or 'genesets' in wanted):
         genes = []
         for word in words:
             name = gene_index.canonical(word) if _gene_like(word) else None
@@ -590,7 +683,9 @@ def search(query: str, databases: Sequence[Mapping[str, Any]], *,
             suggestions = gene_index.prefixed(words[0])
     other_words = [word for word in words if word not in gene_words]
 
-    if other_words:
+    if not wanted & {'datasets', 'collections'}:
+        all_rows, n_datasets, basis = [], 0, 'none'
+    elif other_words:
         all_rows, n_datasets = search_datasets(databases, other_words, labels, limit=10_000)
         basis = 'words'
     elif gene_words:
@@ -606,12 +701,15 @@ def search(query: str, databases: Sequence[Mapping[str, Any]], *,
         all_rows, n_datasets, basis = [], 0, 'none'
     dataset_rows = all_rows[:limit]
     text_words = other_words or gene_words
-    collection_rows, n_collections = search_collections(
-        databases, text_words, {row['db_id'] for row in all_rows}, analysis_collections, limit)
+    collection_rows: Optional[List[Dict[str, Any]]] = None
+    n_collections = 0
+    if 'collections' in wanted:
+        collection_rows, n_collections = search_collections(
+            databases, text_words, {row['db_id'] for row in all_rows}, analysis_collections, limit)
 
     geneset_rows: Optional[List[Dict[str, Any]]] = None
     n_genesets = 0
-    if genesets is not None:
+    if genesets is not None and 'genesets' in wanted:
         if other_words:
             geneset_rows, n_genesets = search_genesets(genesets, other_words, limit=limit)
         elif gene_words and genesets_with_gene is not None:
@@ -625,17 +723,27 @@ def search(query: str, databases: Sequence[Mapping[str, Any]], *,
             geneset_rows = []
 
     paper_rows: Optional[List[Dict[str, Any]]] = None
-    if papers is not None:
-        paper_rows = list(papers(paper_query(words))) if words else []
-    artefact_rows, n_artefacts = (search_artefacts(artefacts, words, limit) if artefacts is not None
-                                  else (None, 0))
-    facet_rows, n_facets = search_facets(facets, words, limit) if facets is not None else (None, 0)
-    help_rows, n_help = (search_help(help_entries(help_hidden), words, limit) if help_hidden is not None
-                         else (None, 0))
+    if papers is not None and 'papers' in wanted:
+        metadata_words = paper_query(words)
+        record_rows = list(papers(metadata_words)) if words else []
+        text_rows = list(paper_fulltext([word_alternatives(word) for word in words])) \
+            if (paper_fulltext is not None and words) else []
+        paper_rows = merge_papers(record_rows, text_rows, metadata_words.split())
+    artefact_rows, n_artefacts = (search_artefacts(artefacts, words, limit)
+                                  if artefacts is not None and 'artefacts' in wanted else (None, 0))
+    facet_rows, n_facets = (search_facets(facets, words, limit)
+                            if facets is not None and 'facets' in wanted else (None, 0))
+    help_rows, n_help = (search_help(help_entries(help_hidden), words, limit)
+                         if help_hidden is not None and 'help' in wanted else (None, 0))
+    if 'datasets' not in wanted:
+        dataset_rows, n_datasets = None, 0
+    if 'genes' not in wanted:
+        genes, suggestions = None, []
     return {
         'query': query,
         'words': words,
         'gene_words': gene_words,
+        'kinds': [kind for kind in SEARCH_KINDS if kind in wanted],
         'datasets': dataset_rows,
         'n_datasets': n_datasets,
         'datasets_basis': basis,

@@ -1625,6 +1625,10 @@ class DatabaseRegistry:
             # the admin dataset editor's Basics tab). Not the markdown body,
             # which is exposed separately as `markdown` below.
             'description': file_metadata.get('description'),
+            # Authors recorded on the dataset itself (rare; most datasets carry them on the collection)
+            'authors': file_metadata.get('authors'),
+            'first_author': file_metadata.get('first_author'),
+            'last_author': file_metadata.get('last_author'),
             'n_cells': n_cells,
             'n_genes': n_genes,
 
@@ -1725,6 +1729,8 @@ class DatabaseRegistry:
                 'title': collection_metadata.get('title'),
                 'experiment': collection_metadata.get('experiment'),
                 'authors': collection_metadata.get('authors'),
+                'first_author': collection_metadata.get('first_author'),
+                'last_author': collection_metadata.get('last_author'),
                 'year': collection_metadata.get('year'),
                 'date': collection_metadata.get('date'),
                 'doi': collection_metadata.get('doi'),
@@ -4167,6 +4173,8 @@ def get_group_info(request: Request, group_id: str):
         'group_id': group_id,
         'experiment': collection_meta.get('experiment'),
         'authors': collection_meta.get('authors'),
+        'first_author': collection_meta.get('first_author'),
+        'last_author': collection_meta.get('last_author'),
         'year': collection_meta.get('year'),
         'date': collection_meta.get('date'),
         'doi': collection_meta.get('doi'),
@@ -17993,40 +18001,68 @@ def _catalog_gene_index() -> Any:
         return _CATALOG_GENE_INDEX['index']
 
 
+_SEARCH_FULLTEXT_PASSAGES = 50     # passages of the whole library the full-text paper search ranks per query
+
+
 @app.get("/search", tags=["databases"])
 def search_catalog(request: Request,
                    q: str = Query(..., min_length=1, max_length=300, description="Words as a person types them, e.g. 'TREM2 microglia Alzheimer'"),
-                   limit: int = Query(50, ge=1, le=500, description="Most rows per group")):
+                   limit: int = Query(50, ge=1, le=500, description="Most rows per group"),
+                   kind: Optional[str] = Query(None, description="Comma-separated groups to search: datasets, collections, genes, genesets, papers, artefacts, facets, help (default all)")):
     """Keyword search over the catalogue, grouped by kind (API 2.48, additive).
 
     Returns the datasets the caller may see whose text (title, collection,
-    description, organism, tissue, cell type, disease, condition, technology,
-    labels of the standard cell annotation columns) holds every word (a
-    word that names a recorded disease, cell type, organism or tissue must
-    match that field), the
-    genes named in the query (exact gene names of the precomputed gene index,
-    case ignored; with ``n_datasets`` counted over visible datasets only), the
-    gene sets whose name or description holds the words (or that contain the
-    gene, for a query of gene names only) and the library papers that hold
-    the words. Also searched (API 2.48): collections (their own text, or
-    holding a matching dataset), artefacts (id, title, description, kind,
-    scope; only those ``GET /artefacts`` lists for the caller), facets
-    (name, label, summary, definition; only when ``ui.facets`` is on, and
-    outside ``facets_visible`` for admins only) and the help topics and
-    glossary terms (without the parts switched off). Filler words ("expression", "in", "which", "datasets", ...)
-    are dropped; AD, PD, MS, ALS, FTD and APOE4 are expanded. Rules:
+    authors of the dataset and its collection, description, organism,
+    tissue, cell type, disease, condition, technology, labels of the
+    standard cell annotation columns) holds every word (a word that names a
+    recorded disease, cell type, organism or tissue must match that field;
+    ``matched_in`` names the fields, ``authors`` among them), the genes
+    named in the query (exact gene names of the precomputed gene index,
+    case ignored; with ``n_datasets`` counted over visible datasets only),
+    the gene sets whose name or description holds the words (or that
+    contain the gene, for a query of gene names only), collections (their
+    own text including author names, or holding a matching dataset),
+    artefacts (id, title, description, kind, scope; only those
+    ``GET /artefacts`` lists for the caller), facets (name, label, summary,
+    definition; only when ``ui.facets`` is on, and outside
+    ``facets_visible`` for admins only) and the help topics and glossary
+    terms (without the parts switched off).
+
+    Papers: the union of (i) the library records holding every word
+    (citekey, title, all authors, journal, DOI, keywords and topic lists,
+    summary) and (ii) the full text: the best 50 passages of the literature
+    index (keyword index, no query model needed) that hold every word, one
+    row per paper. Each paper row adds ``matched_in`` (from citekey, title,
+    authors, journal, doi, keywords, summary, fulltext), ``passages`` (up
+    to 3 ``{page_start, page_end, section, snippet}``, snippet is HTML with
+    the words in ``<mark>``; empty without a full-text hit) and
+    ``n_passages`` (all matching passages of that paper). Order: record and
+    full text, then record only, then full text only. ``n_papers`` counts
+    the union.
+
+    Filler words ("expression", "in", "which", "datasets", ...) are dropped;
+    AD, PD, MS, ALS, FTD and APOE4 are expanded. Rules:
     ``lib/catalog_search.py``.
 
-    A group the site does not have is ``null``: ``genes`` without a gene
-    index, ``genesets`` without a gene set store, ``papers`` without a
-    library. Access rules are those of ``GET /databases``.
+    ``kind`` limits the work to the listed groups; the others are ``null``
+    with a zero count, and ``kinds`` lists the groups searched (an unknown
+    name is a 422). A group the site does not have is ``null`` as well:
+    ``genes`` without a gene index, ``genesets`` without a gene set store,
+    ``papers`` without a library. Access rules are those of
+    ``GET /databases``; papers have no per-paper access rules.
     """
     import catalog_search  # noqa: PLC0415
+    kinds = [part.strip() for part in (kind or '').split(',') if part.strip()]
+    unknown = sorted(set(kinds) - set(catalog_search.SEARCH_KINDS))
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"unknown kind {', '.join(unknown)}; choose from "
+                                                    f"{', '.join(catalog_search.SEARCH_KINDS)}")
+    wanted = set(kinds) or set(catalog_search.SEARCH_KINDS)
     databases = registry.list_databases()
     genesets = None
     genesets_with_gene = None
     store = globals().get('geneset_registry')
-    if store is not None:
+    if store is not None and 'genesets' in wanted:
         try:
             genesets = [g.to_summary() for g in store.list_genesets()]
         except Exception as exc:  # a broken store must not break the dataset search
@@ -18035,31 +18071,44 @@ def search_catalog(request: Request,
         genesets_with_gene = lambda gene: [m for m in by_gene.get(gene.upper(), [])  # noqa: E731
                                            if m.get('kind') == 'geneset']
     papers = None
+    paper_fulltext = None
     library = globals().get('_library_service')
-    if library is not None:
+    if library is not None and 'papers' in wanted:
         papers = lambda words: library.list(q=words)  # noqa: E731
-    try:
-        gene_index = _catalog_gene_index()
-    except Exception as exc:
-        log.warning("search: gene index unavailable: %s", exc)
-        gene_index = None
+
+        def paper_fulltext(word_groups):
+            try:
+                hits = library.fulltext(word_groups, k=_SEARCH_FULLTEXT_PASSAGES)
+            except Exception as exc:  # noqa: BLE001 - the record search still answers
+                log.warning("search: full-text paper search failed: %s", exc)
+                return []
+            return [{'citekey': hit['citekey'], 'summary': library.summary(hit['paper']), 'score': hit['score'],
+                     'n_passages': hit['n_passages'], 'passages': hit['passages']} for hit in hits]
+    gene_index = None
+    if wanted & {'genes', 'datasets', 'collections', 'genesets'}:
+        try:
+            gene_index = _catalog_gene_index()
+        except Exception as exc:
+            log.warning("search: gene index unavailable: %s", exc)
     # Artefacts and analysis collections: the access rules of GET /artefacts and GET /groups/{id}
     # (the artefact policy over the full maps, applied to this caller). Fails closed: no group.
     artefacts = None
     analysis_collections: List[Dict[str, Any]] = []
-    try:
-        policy = _artefact_policy()
-        viewer = _artefact_viewer(request)
-        for group_id, collection in (registry.collection_registry() or {}).items():
-            if collection.kind == 'analysis' and policy.collection_visible(group_id, viewer):
-                analysis_collections.append({**(collection.meta or {}), 'group_id': group_id,
-                                             'title': collection.title, 'description': collection.description})
-        artefacts = _artefact_service().searchable(registry.artefact_index(), policy, viewer)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("search: artefacts unavailable: %s", exc)
+    if wanted & {'artefacts', 'collections'}:
+        try:
+            policy = _artefact_policy()
+            viewer = _artefact_viewer(request)
+            for group_id, collection in (registry.collection_registry() or {}).items():
+                if collection.kind == 'analysis' and policy.collection_visible(group_id, viewer):
+                    analysis_collections.append({**(collection.meta or {}), 'group_id': group_id,
+                                                 'title': collection.title, 'description': collection.description})
+            if 'artefacts' in wanted:
+                artefacts = _artefact_service().searchable(registry.artefact_index(), policy, viewer)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("search: artefacts unavailable: %s", exc)
     ui = _ui_settings()
     facets = None
-    if ui.get('facets', True):
+    if ui.get('facets', True) and 'facets' in wanted:
         try:
             facets = _search_facets(request, databases)
         except Exception as exc:  # noqa: BLE001
@@ -18067,8 +18116,9 @@ def search_catalog(request: Request,
     help_hidden = [part for part in help_content.UI_PARTS if not ui.get(part, True)]
     return catalog_search.search(q, databases, gene_index=gene_index, genesets=genesets,
                                  genesets_with_gene=genesets_with_gene, papers=papers,
+                                 paper_fulltext=paper_fulltext,
                                  analysis_collections=analysis_collections, artefacts=artefacts, facets=facets,
-                                 help_hidden=help_hidden, limit=limit)
+                                 help_hidden=help_hidden, limit=limit, kinds=wanted)
 
 
 def _search_facets(request: Request, databases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

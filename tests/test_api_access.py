@@ -67,7 +67,7 @@ _SERVE_WANTED = {
     # GET /search (API 2.48): the catalogue search lists only what /databases lists
     'search_catalog', '_catalog_gene_index', '_CATALOG_GENE_INDEX', '_CATALOG_GENE_INDEX_LOCK',
     '_search_facets', '_ui_settings', '_UI_SETTINGS',
-    'catalog_stats', '_CATALOG_STATS_CACHE', '_CATALOG_STATS_TTL',
+    'catalog_stats', '_CATALOG_STATS_CACHE', '_CATALOG_STATS_TTL', '_SEARCH_FULLTEXT_PASSAGES',
 }
 
 
@@ -238,6 +238,51 @@ def test_search_finds_only_datasets_the_caller_may_see(tmp_path):
     signed_in = client.get('/search', params={'q': 'G1'}, headers=USER).json()
     assert sorted(row['db_id'] for row in signed_in['datasets']) == sorted([PUBLIC_ID, INTERNAL_ID])
     assert client.get('/search', params={'q': 'internal'}).json()['n_datasets'] == 0
+
+
+class _FakeLibrary:
+    """The two searches GET /search uses: the record search (list) and the full text (fulltext)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def list(self, q=None):
+        self.calls.append(('list', q))
+        return [{'citekey': 'rec2024', 'title': 'Microglia record', 'authors': ['Smith, Anna']}]
+
+    def fulltext(self, word_groups, k=50):
+        self.calls.append(('fulltext', k))
+        return [{'citekey': 'txt2020', 'paper': 'txt2020', 'score': 2.0, 'n_passages': 4,
+                 'passages': [{'page_start': 2, 'page_end': 2, 'section': 'results', 'snippet': 'x'}]},
+                {'citekey': 'rec2024', 'paper': 'rec2024', 'score': 1.0, 'n_passages': 1, 'passages': []}]
+
+    def summary(self, paper):
+        return {'citekey': paper, 'title': f'Title {paper}'}
+
+
+def test_search_papers_union_of_record_and_full_text(tmp_path):
+    client = _serve(tmp_path)
+    library = _FakeLibrary()
+    client.namespace['_library_service'] = library
+    result = client.get('/search', params={'q': 'microglia'}).json()
+    assert [row['citekey'] for row in result['papers']] == ['rec2024', 'txt2020'] and result['n_papers'] == 2
+    assert result['papers'][0]['matched_in'] == ['title', 'fulltext']
+    assert result['papers'][1]['matched_in'] == ['fulltext'] and result['papers'][1]['n_passages'] == 4
+    assert ('fulltext', 50) in library.calls
+
+
+def test_search_kind_limits_the_groups_and_refuses_unknown_names(tmp_path):
+    client = _serve(tmp_path)
+    library = _FakeLibrary()
+    client.namespace['_library_service'] = library
+    genes_only = client.get('/search', params={'q': 'G1', 'kind': 'datasets'}).json()
+    assert genes_only['kinds'] == ['datasets'] and genes_only['papers'] is None and genes_only['help'] is None
+    assert genes_only['collections'] is None and [row['db_id'] for row in genes_only['datasets']] == [PUBLIC_ID]
+    assert library.calls == []                       # no paper search, no full text, when papers is not asked
+    both = client.get('/search', params={'q': 'microglia', 'kind': 'papers, help'}).json()
+    assert both['kinds'] == ['papers', 'help'] and both['n_papers'] == 2 and both['datasets'] is None
+    bad = client.get('/search', params={'q': 'G1', 'kind': 'genes,planets'})
+    assert bad.status_code == 422 and 'planets' in bad.json()['detail']
 
 
 def test_search_follows_the_ui_switches(tmp_path):
@@ -500,3 +545,22 @@ def test_stats_count_only_what_the_caller_may_see(tmp_path):
     signed_in = client.get('/stats', headers=USER).json()
     assert signed_in['n_datasets'] == 3 and signed_in['n_collections'] == 2
     assert client.get('/stats').json()['n_datasets'] == 1          # the cache keeps access levels apart
+
+
+def test_stats_cache_answers_repeat_calls_without_recounting(tmp_path, monkeypatch):
+    """GET /stats was 40 ms per call on the dev API although cached: the cache key read the config through
+    get_auth_settings (a YAML parse per call, fixed in lib/config.py). The cache itself must also hold."""
+    import catalog_search
+    client = _serve(tmp_path)
+    counted = []
+    real = catalog_search.catalogue_stats
+    monkeypatch.setattr(catalog_search, 'catalogue_stats', lambda *a, **k: counted.append(1) or real(*a, **k))
+    first = client.get('/stats').json()
+    for _ in range(3):
+        assert client.get('/stats').json() == first
+    assert len(counted) == 1
+    client.get('/stats', headers=USER)
+    assert len(counted) == 2                        # another access level, its own entry
+    client.namespace['_CATALOG_STATS_CACHE'].clear()
+    client.get('/stats')
+    assert len(counted) == 3

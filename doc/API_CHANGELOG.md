@@ -53,6 +53,28 @@ Minor, additive. Nothing is removed or renamed; `API_VERSION` is bumped at relea
   (registered facets on name, label, summary and definition; `null` when `ui.facets` is off; facets outside
   `facets_visible` for admins only) and `help` / `n_help` (help topics and glossary terms, without the parts the
   site's `ui` switches off; `anchor` is the id on the help page). `limit` now also caps the gene sets group.
+- `GET /search` takes `kind` (comma list from `datasets`, `collections`, `genes`, `genesets`, `papers`,
+  `artefacts`, `facets`, `help`; an unknown name is a 422). Only the listed groups are computed; the others are
+  `null` with a zero count, and the new response field `kinds` lists the groups searched (all of them without
+  `kind`). Without `papers` in `kind` no paper search (and no full-text search) runs. Clients such as pyvark,
+  vark and ant-mcp already sent `kind`; before this it was ignored.
+- `GET /search` papers are the union of the record search (citekey, title, all authors, journal, DOI, keywords
+  and topic lists, summary) and a full-text search of the literature index: the best 50 passages that hold every
+  search word (keyword index only, no query model; reference lists left out; a word matches through any of its
+  alternatives, and a word of four or more letters also matches longer words it starts), grouped per paper.
+  Every paper row gains `matched_in` (list from `citekey`, `title`, `authors`, `journal`, `doi`, `keywords`,
+  `summary`, `fulltext`; topic lists count as `keywords`), `passages` (up to 3 `{page_start, page_end, section,
+  snippet}`, the snippet HTML-escaped with the words in `<mark>`; empty without a full-text hit) and `n_passages`
+  (all matching passages of the paper). Order: record and full text, record only, full text only (best passage
+  score, then passage count). `n_papers` counts the union; because only the best 50 passages are grouped, a broad
+  query lists fewer full-text-only papers than exist. The paper summaries (also `GET /papers`) gain `keywords`.
+- Dataset and collection text of `GET /search` includes author names: the collection's `authors`,
+  `first_author` and `last_author` (index.md) and the same fields on a dataset `.md` when present; a dataset hit
+  there has `authors` in `matched_in`. `GET /databases` records (and `/databases/{id}/info`) gain `authors`,
+  `first_author`, `last_author` (dataset level, usually null) and `collection.first_author` /
+  `collection.last_author`; `GET /groups/{id}` gains `first_author` and `last_author`.
+- Faster: `lib/config.py` reuses the parsed config while the files are unchanged. Every admin check read and
+  parsed both YAML files (about 30 ms); the cached `GET /stats` therefore still took about 40 ms per call.
 - New `GET /stats` (tag `databases`): the front page numbers for the caller, under the access rules of
   `GET /databases` and `GET /artefacts`: datasets, collections, cells (all, and of primary datasets only),
   human, mouse, microglia, single-nucleus and single-cell datasets, organisms, genes with precomputed

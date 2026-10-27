@@ -117,6 +117,86 @@ def test_genesets_and_papers_groups():
     assert [row['name'] for row in by_gene['genesets']] == ['has_TREM2']
 
 
+def test_author_names_find_datasets_and_collections():
+    named = {'id': 'S9/V6', 'group_id': 'S9', 'file_id': 'V6', 'title': 'Village grafts',
+             'collection': {'title': 'Xenograft study', 'group': 'Xeno2026',
+                            'authors': ['Daan Moechars'], 'first_author': 'Annerieke Sierksma',
+                            'last_author': 'Bart De Strooper'}, 'organism': ['human'], 'n_cells': 10}
+    own = {'id': 'S9/QC', 'group_id': 'S9', 'file_id': 'QC', 'title': 'Grafts QC', 'first_author': 'Ann Other',
+           'collection': {'title': 'Xenograft study', 'group': 'Xeno2026'}}
+    result = cs.search('Annerieke', DATABASES + [named, own], labels={})
+    assert [row['db_id'] for row in result['datasets']] == ['S9/V6']
+    assert result['datasets'][0]['matched_in'] == ['authors']
+    assert [row['group_id'] for row in result['collections']] == ['S9']
+    assert result['collections'][0]['matched_in'] == ['collection']
+    both = cs.search('sierksma strooper', DATABASES + [named, own], labels={})
+    assert both['n_datasets'] == 1
+    assert [row['db_id'] for row in cs.search('Other', [own], labels={})['datasets']] == ['S9/QC']
+    assert cs.author_names({'authors': ['A B', 'C D'], 'first_author': 'A B', 'last_author': 'E F'}) == \
+        ['A B', 'C D', 'E F']
+
+
+PAPERS = [
+    {'citekey': 'smith2024', 'title': 'Microglia in Alzheimer disease', 'authors': ['Smith, Anna'],
+     'journal': 'Nature', 'doi': '10.1/abc', 'keywords': ['lipid'], 'summary': 'A study.', 'year': 2024},
+    {'citekey': 'jones2020', 'title': 'Astrocytes', 'authors': ['Jones, Bob'], 'journal': 'Cell',
+     'doi': '10.1/def', 'celltypes': ['microglial cell'], 'summary': None, 'year': 2020},
+]
+
+
+def _fulltext_hit(citekey, score, n=1):
+    return {'citekey': citekey, 'summary': {'citekey': citekey, 'title': f'Paper {citekey}'}, 'score': score,
+            'n_passages': n, 'passages': [{'page_start': 3, 'page_end': 3, 'section': 'results',
+                                           'snippet': '<mark>microglia</mark> here'}]}
+
+
+def test_papers_merge_record_and_full_text_hits():
+    seen = []
+    result = cs.search('microglia', DATABASES, labels={},
+                       papers=lambda words: PAPERS,
+                       paper_fulltext=lambda groups: seen.append(groups) or [
+                           _fulltext_hit('weak2019', 1.0, 5), _fulltext_hit('jones2020', 2.0),
+                           _fulltext_hit('strong2018', 3.0, 1)])
+    assert seen == [[('microglia',)]]
+    keys = [row['citekey'] for row in result['papers']]
+    # record and full text, then record only, then full text only by best passage score
+    assert keys == ['jones2020', 'smith2024', 'strong2018', 'weak2019']
+    assert result['n_papers'] == 4
+    rows = {row['citekey']: row for row in result['papers']}
+    assert rows['jones2020']['matched_in'] == ['keywords', 'fulltext']
+    assert rows['smith2024']['matched_in'] == ['title'] and rows['smith2024']['passages'] == []
+    assert rows['strong2018']['matched_in'] == ['fulltext'] and rows['strong2018']['passages'][0]['page_start'] == 3
+    assert rows['weak2019']['n_passages'] == 5 and rows['smith2024']['n_passages'] == 0
+
+
+def test_paper_matched_fields_cover_the_record():
+    row = {'citekey': 'sierksma2020novel', 'title': 'Novel risk genes', 'authors': ['Sierksma, Annerieke'],
+           'journal': 'EMBO Molecular Medicine', 'doi': '10.15252/emmm.201910606', 'keywords': ['amyloid'],
+           'summary': 'Risk genes and amyloid.'}
+    assert cs.paper_matched_fields(row, ['annerieke']) == ['authors']
+    assert cs.paper_matched_fields(row, ['sierksma']) == ['citekey', 'authors']
+    assert cs.paper_matched_fields(row, ['embo']) == ['journal']
+    assert cs.paper_matched_fields(row, ['10.15252']) == ['doi']
+    assert cs.paper_matched_fields(row, ['amyloid']) == ['keywords', 'summary']
+
+
+def test_kinds_limit_the_work():
+    calls = []
+    result = cs.search('microglia', DATABASES, labels={}, gene_index=_gene_index(),
+                       papers=lambda words: calls.append('papers') or [],
+                       paper_fulltext=lambda groups: calls.append('fulltext') or [],
+                       genesets=[], help_hidden=[], kinds=['datasets'])
+    assert calls == [] and result['kinds'] == ['datasets']
+    assert result['n_datasets'] > 0
+    for group in ('papers', 'genesets', 'help', 'genes', 'collections', 'artefacts', 'facets'):
+        assert result[group] is None, group
+    only_papers = cs.search('microglia', DATABASES, labels={}, papers=lambda words: PAPERS, kinds=['papers'])
+    assert only_papers['datasets'] is None and only_papers['n_papers'] == 2
+    assert cs.search('microglia', DATABASES, labels={}, kinds=[])['kinds'] == list(cs.SEARCH_KINDS)
+    with pytest.raises(ValueError):
+        cs.search('microglia', DATABASES, kinds=['planets'])
+
+
 def test_paper_query_expands_abbreviations():
     assert cs.paper_query(['ad', 'carriers', 'trem2']) == 'alzheimer carrier trem2'
 

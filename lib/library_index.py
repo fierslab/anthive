@@ -813,6 +813,78 @@ class LibraryIndex:
                 scores[column.indices] += column.data * self._idf[col]
         return scores
 
+    def _term_columns(self, alternative: str) -> List[List[int]]:
+        """BM25 columns per token of one alternative ("multiple sclerosis" -> two tokens). A token of four
+        or more characters (three in a multi-word alternative such as "lewy bod") also matches the index
+        terms it starts ("microglia" finds "microglial"); a shorter one matches only itself."""
+        import bisect  # noqa: PLC0415
+        if not hasattr(self, '_sorted_vocab'):
+            self._sorted_vocab = sorted(self._vocab)
+        columns: List[List[int]] = []
+        tokens = self._tokens(alternative)
+        for token in tokens:
+            if len(token) >= (3 if len(tokens) > 1 else 4):
+                start = bisect.bisect_left(self._sorted_vocab, token)
+                end = bisect.bisect_left(self._sorted_vocab, token + '￿')
+                cols = [self._vocab[term] for term in self._sorted_vocab[start:end]]
+            else:
+                cols = [self._vocab[token]] if token in self._vocab else []
+            columns.append(cols)
+        return columns
+
+    def match_all(self, word_groups: Sequence[Sequence[str]], k: int = 50, *,
+                  citekeys: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+        """Passages that hold every search word: ``word_groups`` has one entry per word, each a list of
+        alternatives (the word, its synonyms, its singular); a passage matches a word when it holds one
+        alternative (all tokens of a multi-word alternative). Reference lists are never searched.
+
+        Returns ``{"results": [(row, score), ...] best first (at most k), "per_citekey": {citekey:
+        number of matching passages}}``. The score is the BM25 weight of the matched terms."""
+        n_rows = len(self.rows)
+        if not n_rows or not word_groups:
+            return {'results': [], 'per_citekey': {}}
+        if not hasattr(self, '_searchable'):
+            self._searchable = np.array([row.get('section') not in NON_SEARCHABLE_SECTIONS for row in self.rows])
+            self._citekey_codes: Dict[str, int] = {}
+            self._citekey_of_row = np.array([self._citekey_codes.setdefault(row.get('citekey') or '',
+                                                                             len(self._citekey_codes))
+                                             for row in self.rows], dtype=np.int64)
+            self._citekey_names = np.array(list(self._citekey_codes), dtype=object)
+        keep = self._searchable.copy()
+        if citekeys is not None:
+            allowed = np.zeros(len(self._citekey_codes), bool)
+            allowed[[self._citekey_codes[key] for key in citekeys if key in self._citekey_codes]] = True
+            keep &= allowed[self._citekey_of_row]
+        scores = np.zeros(n_rows, np.float32)
+        for alternatives in word_groups:
+            word_hit = np.zeros(n_rows, bool)
+            word_score = np.zeros(n_rows, np.float32)
+            for alternative in alternatives:
+                token_columns = self._term_columns(alternative)
+                if not token_columns:
+                    continue
+                alt_hit = np.ones(n_rows, bool)
+                alt_score = np.zeros(n_rows, np.float32)
+                for cols in token_columns:
+                    token_hit = np.zeros(n_rows, bool)
+                    for col in cols:
+                        column = self._bm25.getcol(col)
+                        token_hit[column.indices] = True
+                        alt_score[column.indices] += column.data * self._idf[col]
+                    alt_hit &= token_hit
+                word_hit |= alt_hit
+                word_score = np.maximum(word_score, np.where(alt_hit, alt_score, 0))
+            keep &= word_hit
+            if not keep.any():
+                return {'results': [], 'per_citekey': {}}
+            scores += word_score
+        hits = np.flatnonzero(keep)
+        order = hits[np.argsort(-scores[hits], kind='stable')][:k]
+        codes, counts = np.unique(self._citekey_of_row[hits], return_counts=True)
+        return {'results': [(int(i), float(scores[i])) for i in order],
+                'per_citekey': {str(self._citekey_names[code]): int(n) for code, n in zip(codes, counts)
+                                if self._citekey_names[code]}}
+
     def _semantic_scores(self, query: str) -> np.ndarray:
         vector = self.embedder.embed_query(query)
         return self.vectors @ vector

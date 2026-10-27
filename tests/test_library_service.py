@@ -264,6 +264,31 @@ def test_search_modes(service, tmp_path, library):
     assert '<mark>' in methods['results'][0]['snippet']
 
 
+def test_fulltext_needs_every_word_in_one_passage_and_groups_per_paper(service, tmp_path, library):
+    """GET /search papers (API 2.48): the keyword index, no query model, all words in one passage."""
+    build_toy_index(tmp_path, library)
+    service.embedder_factory = None
+    service.load_index()
+    hits = service.fulltext([('microglia',), ('amyloid',)], k=50)
+    keys = [hit['citekey'] for hit in hits]
+    assert set(keys) == {'src2024', 'nollm2021', 'summ2020', 'secret2025'}
+    src = next(hit for hit in hits if hit['citekey'] == 'src2024')
+    assert src['n_passages'] == 1 and src['passages'][0]['page_start'] == 1
+    assert set(src['passages'][0]) == {'page_start', 'page_end', 'section', 'snippet'}
+    assert '<mark>Microglia</mark>' in src['passages'][0]['snippet']
+    # "plaque" and "nuclei" never share a passage: no hit
+    assert service.fulltext([('plaque',), ('nuclei',)]) == []
+    # an alternative of a word counts (synonym / singular); prefix match of longer tokens
+    assert [hit['citekey'] for hit in service.fulltext([('trem2',), ('xyz', 'plaque')])] == ['src2024']
+    assert {hit['citekey'] for hit in service.fulltext([('microgli',)])} >= {'src2024'}
+    # at most per_paper passages; papers without a record are never returned
+    assert all(len(hit['passages']) <= 1 for hit in service.fulltext([('microglia',)], per_paper=1))
+
+
+def test_fulltext_without_index_is_empty(service):
+    assert service.fulltext([('microglia',)]) == []
+
+
 def test_model_mismatch_falls_back_to_keyword(service, tmp_path, library):
     build_toy_index(tmp_path, library, model='other/model')
     service.embedder_factory = lambda model: FakeEmbedder('fake/model-1')
