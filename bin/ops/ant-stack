@@ -175,7 +175,7 @@ def load_site(path: Path) -> dict:
 #: what is served); unknown keys elsewhere are warnings.
 STRICT_SECTIONS = ('auth', 'tls', 'ports', 's3', 'services', 'datasets', 'data', 'ui')
 #: Valid keys that site.example.yaml only shows in a comment.
-EXTRA_SITE_KEYS = {'site': {'docs_base_url'}}
+EXTRA_SITE_KEYS = {'site': {'docs_base_url', 'home_collection'}}
 #: Mappings whose own keys are free-form (copied through or described elsewhere).
 FREE_FORM = {('anthive',), ('auth', 'smtp'), ('auth', 'users')}
 
@@ -237,6 +237,10 @@ def _extra_mounts(value: Any) -> list[Path]:
     return mounts
 
 
+#: site.home_collection: a collection folder name or group_id (lib/config.get_web_home_collection).
+HOME_COLLECTION_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.+-]{0,199}')
+
+
 def validate_site(site: dict, path: Path) -> dict:
     name = str(site['site'].get('name') or '')
     if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,40}', name):
@@ -270,6 +274,11 @@ def validate_site(site: dict, path: Path) -> dict:
             not isinstance(facets_visible, list)
             or not all(isinstance(f, str) and re.fullmatch(r'ant_[A-Za-z0-9_]+', f) for f in facets_visible)):
         raise SiteError("site.facets_visible must be a list of ant_* facet names (or [] for all)")
+    home = site['site'].get('home_collection')
+    if home is not None and (not isinstance(home, str)
+                             or (home.strip() and not HOME_COLLECTION_RE.fullmatch(home.strip()))):
+        raise SiteError(f"site.home_collection must be a collection folder name such as Sierksma2025 "
+                        f"(or empty for the front door), not {home!r}")
     ui = site.get('ui')
     if ui is None:
         ui = site['ui'] = {}
@@ -728,6 +737,8 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
     if site['site'].get('docs_base_url'):
         cfg['docs_base_url'] = str(site['site']['docs_base_url'])
     cfg['facets_visible'] = [str(f) for f in (site['site'].get('facets_visible') or [])]
+    if str(site['site'].get('home_collection') or '').strip():
+        cfg['web_home_collection'] = str(site['site']['home_collection']).strip()
     # parts of the web UI (web, api and mcp read it; harmless for the other roles)
     cfg['ui'] = ui_settings(site)
     if caveats_mode(site) == 'serious':
@@ -1421,6 +1432,7 @@ def _validate_rendered_config(path: Path) -> None:
             "    cfg = config.load_config(); config.get_auth_settings(cfg)\n"
             "    config.get_coordinate_mode(cfg); config.get_catalog_scan_mode(cfg)\n"
             "    config.get_facets_visible(cfg); config.get_log_stderr_level(cfg); config.get_ui_settings(cfg)\n"
+            "    config.get_web_home_collection(cfg)\n"
             "except Exception as error:\n"
             "    print(error if isinstance(error, config.ConfigError) else f'{type(error).__name__}: {error}',"
             " file=sys.stderr); sys.exit(3)\n")
@@ -2117,6 +2129,7 @@ def check(site: dict, running: bool = False) -> list[str]:
               "served (unless auth.internal_requires_auth is false).")
     _check_internal_access(site)
     _check_ui(site)
+    _check_home_collection(site)
     if site['auth']['mode'] == 'trusted-proxy' and site['ports']['bind'] not in ('127.0.0.1', '::1'):
         problems.append("auth.mode trusted-proxy trusts identity headers: ports.bind must be 127.0.0.1")
     return problems
@@ -2146,6 +2159,42 @@ def _check_ui(site: dict) -> None:
     if not ui['jupyter']:
         _say("ui.jupyter is false: no JupyterLite on this site; Caddy answers /jupyter/ with 404 and the web "
              "UI shows no notebook links or buttons.")
+
+
+def home_collection_folder(store: Path, wanted: str) -> Path | None:
+    """The collection folder of the store that site.home_collection names (folder name or group_id), or None."""
+    folder = store / wanted
+    if folder.is_dir() and (folder / 'index.md').is_file():
+        return folder
+    folded = wanted.casefold()
+    for index in sorted(store.glob('*/index.md')):
+        if index.parent.name.startswith(('_', '.')):
+            continue
+        if index.parent.name.casefold() == folded:
+            return index.parent
+        try:
+            text = index.read_text(encoding='utf-8', errors='replace')
+            front = yaml.safe_load(text.split('---', 2)[1]) if text.startswith('---') else {}
+        except (yaml.YAMLError, IndexError):
+            continue
+        if isinstance(front, dict) and str(front.get('group_id') or '').casefold() == folded:
+            return index.parent
+    return None
+
+
+def _check_home_collection(site: dict) -> None:
+    """site.home_collection: say what "/" opens, warn when the store has no such collection."""
+    wanted = str(site['site'].get('home_collection') or '').strip()
+    store = site['_h5adstore']
+    if not wanted or not store or not store.is_dir():
+        return
+    folder = home_collection_folder(store, wanted)
+    if folder is None:
+        _warn(f"site.home_collection: {wanted} is not a collection of {store} (no {wanted}/index.md and no "
+              f"index.md with group_id: {wanted}); \"/\" shows the front door instead")
+        return
+    _say(f"site.home_collection: \"/\" opens the collection {folder.name}; the front door is at /home. "
+         f"Visitors who may not see that collection get the front door")
 
 
 def _catalog_dataset_mds(store: Path):

@@ -29,6 +29,11 @@ site:
   # Optional: folder the in-app help links to for detailed docs (client
   # setup, MCP links, library). Leave out to use the anthive4 GitLab docs.
   # docs_base_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/blob/main/doc
+  # Optional: open one collection's page (its index.md) at "/" instead of the
+  # front door. A collection folder name of the h5adstore or its group_id.
+  # Visitors who may not see it get the front door, which stays at /home.
+  # `ant-stack check` warns when the store has no such collection.
+  # home_collection: Sierksma2025
   # Facets shown on the /facets pages and in the dataset facet card. While
   # the facet audit decisions are pending, only the six that the donor-level
   # facet tests analyse are shown; the other ant_* columns stay in the data

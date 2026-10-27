@@ -255,3 +255,42 @@ def test_ui_caveats_serious_is_rendered_and_checked(tmp_path, ant_stack, capsys)
     assert 'ui.caveats is serious' in capsys.readouterr().out
     with pytest.raises(ant_stack.SiteError, match='true or false or serious'):
         _site(ant_stack, tmp_path, ui={'caveats': 'some'})
+
+
+# ── site.home_collection (2.48.0): what "/" opens ─────────────────────────────
+
+def _collection(store, folder, group_id):
+    (store / folder).mkdir(parents=True, exist_ok=True)
+    (store / folder / 'index.md').write_text(f'---\ngroup: {folder}\ngroup_id: {group_id}\n---\n\nA study.\n')
+
+
+def test_home_collection_renders_web_home_collection_only_when_set(tmp_path, ant_stack):
+    site = _site(ant_stack, tmp_path)
+    ant_stack.ensure_secrets(site)
+    assert 'web_home_collection' not in _rendered(ant_stack.render(site, quiet=True))
+    site = _site(ant_stack, tmp_path, site={'home_collection': 'Sierksma2025'})
+    assert site['_key_problems'] == [] and site['_key_warnings'] == []       # a known key, not a typo
+    rendered = _rendered(ant_stack.render(site, quiet=True))
+    assert rendered['web_home_collection'] == 'Sierksma2025'
+
+
+@pytest.mark.parametrize('bad', ['../x', 'a/b', '_staging', ['S25']])
+def test_home_collection_must_be_a_folder_name(tmp_path, ant_stack, bad):
+    with pytest.raises(ant_stack.SiteError, match='home_collection'):
+        _site(ant_stack, tmp_path, site={'home_collection': bad})
+
+
+def test_check_warns_when_the_home_collection_is_not_in_the_store(tmp_path, ant_stack, capsys):
+    site = _site(ant_stack, tmp_path, site={'home_collection': 'Sierksma2025'})
+    ant_stack._check_home_collection(site)
+    err = capsys.readouterr().err
+    assert 'site.home_collection: Sierksma2025 is not a collection' in err and 'front door' in err
+    _collection(site['_h5adstore'], 'Sierksma2025', 'S25')
+    ant_stack._check_home_collection(site)
+    out = capsys.readouterr()
+    assert out.err == '' and 'opens the collection Sierksma2025' in out.out and '/home' in out.out
+    by_id = _site(ant_stack, tmp_path, site={'home_collection': 's25'})        # group_id, case ignored
+    ant_stack._check_home_collection(by_id)
+    assert 'opens the collection Sierksma2025' in capsys.readouterr().out
+    ant_stack._check_home_collection(_site(ant_stack, tmp_path))              # unset: silent
+    assert capsys.readouterr() == ('', '')

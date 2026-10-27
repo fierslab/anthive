@@ -1047,6 +1047,29 @@ def get_docs_base_url(cfg: Optional[Dict[str, Any]] = None) -> str:
     return (value or DEFAULT_DOCS_BASE_URL).rstrip('/')
 
 
+_HOME_COLLECTION_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.+-]{0,199}')
+
+
+def get_web_home_collection(cfg: Optional[Dict[str, Any]] = None) -> str:
+    """The collection the web UI's ``/`` opens instead of the front door; '' means the front door.
+
+    Precedence: ``ANTHIVE_WEB_HOME_COLLECTION`` > ``web_home_collection`` in
+    anthive.yaml > '' (default). The value is a collection folder name (as in
+    the h5adstore, e.g. ``Sierksma2025``) or its ``group_id``. Whether the
+    collection exists and whether a visitor may see it is decided per request
+    by the web UI, which falls back to the front door.
+
+    Raises:
+        ConfigError: for a value that cannot be a collection folder name (a
+            path, a leading ``_`` or dot, spaces).
+    """
+    value = str(_setting(cfg, 'web_home_collection', 'ANTHIVE_WEB_HOME_COLLECTION', '') or '').strip()
+    if value and not _HOME_COLLECTION_RE.fullmatch(value):
+        raise ConfigError(f"web_home_collection must be a collection folder name such as Sierksma2025, "
+                          f"not {value!r}")
+    return value
+
+
 DEFAULT_FACETS_VISIBLE = ('ant_sex', 'ant_disease', 'ant_apoe4_carrier', 'ant_braak', 'ant_age', 'ant_app_nlgf')
 
 

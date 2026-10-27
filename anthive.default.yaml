@@ -712,6 +712,14 @@ grist:
 # (opens in a new tab). An empty string hides the entry.
 issue_tracker_url: https://gitlab.kuleuven.be/bdslab/anthive/anthive4/-/issues
 
+# What the web UI shows at "/". Empty: the front door (search box), or the
+# only collection when a visitor can see exactly one. A collection folder name
+# (e.g. Sierksma2025) or its group_id: "/" opens that collection's page (its
+# index.md). A visitor who may not see that collection, or a name that is not
+# in the catalogue, gets the front door (the web log warns once). The front
+# door itself stays at /home. Env: ANTHIVE_WEB_HOME_COLLECTION.
+web_home_collection: ''
+
 # Facets shown on the /facets pages and in the dataset page's facet card.
 # Temporary: while the facet audit decisions are pending, only the facets the
 # replicate-level facet tests analyse are shown. Other ant_* columns stay in the

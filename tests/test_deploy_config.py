@@ -378,3 +378,15 @@ def test_caddy_and_authelia_images_are_pinned_by_digest_everywhere():
         assert re.fullmatch(r'[a-z0-9./-]+:[0-9][0-9A-Za-z.-]*@sha256:[0-9a-f]{64}', ref), ref
         assert ref in compose
     assert f"ARG CADDY_IMAGE={images['caddy']}" in (REPO / 'docker' / 'Dockerfile').read_text()
+
+
+def test_web_home_collection_env_beats_config_beats_default(clean_env):
+    assert config.get_web_home_collection(config.load_default_config()) == ''      # default: the front door
+    assert config.get_web_home_collection({'web_home_collection': ''}) == ''
+    assert config.get_web_home_collection({'web_home_collection': ' Sierksma2025 '}) == 'Sierksma2025'
+    clean_env.setenv('ANTHIVE_WEB_HOME_COLLECTION', 'S25')
+    assert config.get_web_home_collection({'web_home_collection': 'Sierksma2025'}) == 'S25'
+    clean_env.delenv('ANTHIVE_WEB_HOME_COLLECTION')
+    for bad in ('../etc', 'a/b', '_staging', 'two words'):
+        with pytest.raises(config.ConfigError, match='web_home_collection'):
+            config.get_web_home_collection({'web_home_collection': bad})
