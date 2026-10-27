@@ -32,6 +32,15 @@ Sister docs:
 
 ---
 
+## Upgrading a host install to 2.48
+
+Nothing is required: pull the code and restart api, web and mcp together (the web pages call the new
+`GET /search` of the api). One new optional `anthive.yaml` key, `web_home_collection` (env
+`ANTHIVE_WEB_HOME_COLLECTION`): a collection folder name or `group_id` whose page opens at `/` instead of the
+front page. The front page is always at `/home`. The new logo and favicons are served by the web app; a
+host-served Authelia reads its login logo from `config/authelia/assets/logo.png` in the checkout, so it shows the new one
+once the code is pulled.
+
 ## Upgrading a host install to 2.47
 
 The API refuses state-changing browser requests from another site (403 `cross_site`). It compares the

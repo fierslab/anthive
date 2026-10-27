@@ -140,7 +140,7 @@ images:
   # The release you run: the same number as the git tag you checked out
   # (`git describe --tags`). Change it at every upgrade. Never `latest`, it
   # changes under you.
-  tag: 2.47.2
+  tag: 2.48.0
   # Leave the defaults unless you mirror these images. Pinned by digest (tag@sha256): a bare tag such as
   # caddy:2.11-alpine moves, and `ant-stack pull` then reports the image as "updated" without a release.
   # To move on: `docker buildx imagetools inspect caddy:<new version>-alpine`, put its Digest after the

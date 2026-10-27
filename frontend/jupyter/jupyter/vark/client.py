@@ -4,8 +4,9 @@ Targets the anthive REST API contract. See
 `https://codeberg.org/mfiers/pyvark` for sources and
 `https://codeberg.org/mfiers/vark` for the Go CLI that ships the same surface.
 
-API surface verified against **REST API 2.47.0** (read-only artefact
-store: listing, versions, provenance and verified downloads; read-only
+API surface verified against **REST API 2.48.0** (catalogue search
+and front-page numbers, read-only artefact store: listing, versions,
+provenance and verified downloads; read-only
 dataset deposit status for depositors and admins, facet tests with
 facet scopes, replication with an effect gate and forest rows, module
 replication, per-donor values and plots, donor variability, gene set
@@ -348,7 +349,7 @@ class AnthiveClient:
     """
 
     #: Anthive REST API version this client release was last verified against.
-    API_TARGET = "2.47.0"
+    API_TARGET = "2.48.0"
 
     #: Server-side plot geoms the client knows about. Validation prevents a
     #: round-trip on typos. Update with every new server geom.
@@ -807,6 +808,153 @@ class AnthiveClient:
         hidden from you.
         """
         return _self._get(f'/groups/{group_id}')
+
+    # ── Catalogue search and front-page numbers (REST API 2.48.0+) ──────
+
+    #: Result groups of :meth:`search`, the values ``kind=`` accepts.
+    SEARCH_KINDS = ('datasets', 'collections', 'genes', 'genesets',
+                    'papers', 'artefacts', 'facets', 'help')
+
+    def _get_or_too_old(self, path: str, params: Optional[Dict[str, Any]],
+                        required_version: str, what: str) -> Any:
+        """GET a route added in ``required_version``; FastAPI's generic
+        404 or 405 (the route does not exist) raises
+        :class:`ServerTooOldError` naming the server's version, every
+        other non-2xx raises ``requests.HTTPError`` as :meth:`_get`."""
+        response = self._request('GET', path, params=params)
+        if response.status_code in (404, 405):
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            if (not isinstance(body, dict)
+                    or body.get('detail') in ('Not Found',
+                                              'Method Not Allowed')):
+                server_version = None
+                try:
+                    server_version = self.get_version().get('version')
+                except Exception:  # noqa: BLE001 - the message still helps
+                    pass
+                response.close()
+                raise ServerTooOldError(
+                    f"this anthive server (REST API "
+                    f"{server_version or 'version unknown'}) has no "
+                    f"{what}; it needs anthive REST API "
+                    f"{required_version}+ (url: {response.url})",
+                    status_code=response.status_code,
+                    body=body if isinstance(body, dict) else {},
+                    response=response, required_version=required_version,
+                    server_version=server_version)
+        response.raise_for_status()
+        return response.json()
+
+    def search(self, q: str, limit: Optional[int] = None,
+               kind: Union[str, Sequence[str], None] = None,
+               format: str = 'json') -> Union[Dict, Any]:
+        """``GET /search``. Keyword search over the whole catalogue,
+        grouped by kind (REST API 2.48.0+). The same search as the
+        front page of the web UI.
+
+        Every word must match (a word that names a recorded disease,
+        cell type, organism or tissue must match that field); filler
+        words such as "expression" or "datasets" are dropped and AD, PD,
+        MS, ALS, FTD and APOE4 are expanded. Only what you may see is
+        searched, with the access rules of each group's own route.
+
+        Returns a dict with ``query``, ``words``, ``gene_words``,
+        ``suggestions`` and, per group, a list and its count:
+        ``datasets`` / ``n_datasets`` (each row with ``matched_in``,
+        plus ``datasets_basis``), ``collections`` / ``n_collections``,
+        ``genes`` (``{gene, n_datasets}``, exact gene names named in the
+        query), ``genesets`` / ``n_genesets``, ``papers`` /
+        ``n_papers`` (citekey, title, authors, year, doi, ...,
+        ``matched_in`` and ``passages`` of ``{page_start, page_end,
+        section, snippet}``), ``artefacts`` / ``n_artefacts``,
+        ``facets`` / ``n_facets`` and ``help`` / ``n_help``. A group the
+        site does not have is ``None`` (``genes`` without a gene index,
+        ``genesets`` without a gene set store, ``papers`` without a
+        library, ``facets`` when facets are switched off).
+
+        Args:
+            q: The words as a person types them, e.g.
+                ``'TREM2 microglia Alzheimer'`` (1 to 300 characters).
+            limit: Most rows per group (server default 50, at most
+                500). Sent only when given; the ``n_*`` counts are not
+                capped.
+            kind: Only these groups, one name or a list from
+                :attr:`SEARCH_KINDS`; sent as a comma list. A server
+                that does not know ``kind`` ignores it and answers
+                every group.
+            format: ``'json'`` (the dict) or ``'dataframe'``: the rows
+                of the one group named in ``kind`` as a DataFrame
+                (needs pandas; empty when the group is ``None``).
+
+        Raises:
+            ValueError: An unknown ``kind``, an empty ``q``, or
+                ``format='dataframe'`` without exactly one ``kind``.
+            ServerTooOldError: The server has no ``/search`` (it needs
+                anthive REST API 2.48.0+).
+            requests.HTTPError: 422 for a ``q`` or ``limit`` out of
+                range.
+        """
+        if not q or not str(q).strip():
+            raise ValueError("q must hold at least one word")
+        kinds: List[str] = []
+        if kind is not None:
+            kinds = ([kind] if isinstance(kind, str)
+                     else [str(item) for item in kind])
+            kinds = [part.strip() for item in kinds
+                     for part in item.split(',') if part.strip()]
+            unknown = [item for item in kinds if item not in self.SEARCH_KINDS]
+            if unknown:
+                raise ValueError(
+                    f"unknown search kind(s) {unknown}; use "
+                    f"{', '.join(self.SEARCH_KINDS)}")
+        if format not in ('json', 'dataframe'):
+            raise ValueError(
+                f"format must be 'json' or 'dataframe', got {format!r}")
+        if format == 'dataframe' and len(kinds) != 1:
+            raise ValueError(
+                "format='dataframe' needs exactly one kind, e.g. "
+                "kind='datasets'")
+        params: Dict[str, Any] = {'q': q}
+        if limit is not None:
+            params['limit'] = int(limit)
+        if kinds:
+            params['kind'] = _csv_param(kinds)
+        result = self._get_or_too_old('/search', params, '2.48.0',
+                                      'catalogue search (/search)')
+        if format == 'dataframe':
+            try:
+                import pandas as pd
+            except ImportError as exc:  # pragma: no cover
+                raise ImportError(
+                    "pandas is required for format='dataframe'. "
+                    "Install with: pip install pandas") from exc
+            return pd.DataFrame(result.get(kinds[0]) or [])
+        return result
+
+    def stats(self) -> Dict:
+        """``GET /stats``. The front-page numbers for you (REST API
+        2.48.0+): only datasets, papers and artefacts you may see are
+        counted.
+
+        The dict is passed through as the server sends it. A 2.48
+        server answers ``n_datasets``, ``n_collections``, ``n_cells``,
+        ``n_cells_primary`` (primary datasets only; reanalyses reuse
+        cells), ``n_primary``, ``n_human``, ``n_mouse``,
+        ``n_microglia``, ``n_single_nucleus``, ``n_single_cell``,
+        ``organisms``, ``n_genes`` (``None`` without a gene index),
+        ``n_genesets``, ``n_papers`` (``None`` without a library),
+        ``n_artefacts`` and ``recently_updated`` (5 datasets). Donors
+        are not counted. The server caches the answer for 5 minutes.
+
+        Raises:
+            ServerTooOldError: The server has no ``/stats`` (it needs
+                anthive REST API 2.48.0+).
+        """
+        return self._get_or_too_old('/stats', None, '2.48.0',
+                                    'front-page numbers (/stats)')
 
     # ── Gene operations ─────────────────────────────────────────────────
 

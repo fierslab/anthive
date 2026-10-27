@@ -168,11 +168,15 @@ class ArtefactError(AnthiveAPIError):
 
 class ServerTooOldError(ArtefactError):
     """The server does not have this route: the artefact store and the
-    collection listing need anthive REST API 2.47.0 or newer.
+    collection listing need anthive REST API 2.47.0 or newer, the
+    catalogue search (``search``) and the front-page numbers
+    (``stats``) 2.48.0 or newer.
 
     Raised instead of a bare 404 when a route answers FastAPI's generic
     ``{"detail": "Not Found"}`` (a 2.47 server always sends a status
-    word on these routes).
+    word on the artefact routes). It subclasses :class:`ArtefactError`
+    for historical reasons; ``required_version`` names what the call
+    needs.
 
     Attributes:
         required_version: The REST API version the call needs.

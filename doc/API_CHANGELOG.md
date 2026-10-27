@@ -29,9 +29,9 @@ the spec drifting away from the running code.
 
 ---
 
-## 2.48.0 (unreleased)
+## 2.48.0 (2026-10-27)
 
-Minor, additive. Nothing is removed or renamed; `API_VERSION` is bumped at release.
+Minor, additive. Nothing is removed or renamed.
 
 - New `GET /search?q=&limit=` (tag `databases`): keyword search over the catalogue for the web UI's front page,
   grouped by kind. Returns `{query, words, gene_words, datasets, n_datasets, datasets_basis, genes, suggestions,
