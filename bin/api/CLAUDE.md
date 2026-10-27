@@ -244,6 +244,14 @@ and `lib/config.py` (anthive.yaml loader).
   "obs_columns"` goes through `_deposit_call(..., kinds=('dataset',))` (dataset uploaders) to
   `ArtefactDepositService.create_obs_columns`; `_artefact_context` passes `dataset_obs=_dataset_obs_names`, the obs
   names of the cached metadata, so the clash check never opens a duckdb in this process.
+- **Unified search** (2.48): `GET /search` (`search_catalog`) builds its inputs and hands them to
+  `lib/catalog_search.search`; `kind` limits the groups computed (422 on an unknown name, `kinds` in the answer).
+  Papers are `merge_papers` of the record search (`LibraryService.list(q=)`) and the full text
+  (`LibraryService.fulltext` -> `LibraryIndex.match_all`: every word in one passage, best
+  `_SEARCH_FULLTEXT_PASSAGES` = 50 passages grouped per paper, keyword index only). Dataset and collection text
+  includes `authors` / `first_author` / `last_author`. MCP `search` wraps it (compact text grouped by kind, passages
+  as plain text) and `catalog_stats` wraps `GET /stats`. Tests: `tests/test_catalog_search.py`,
+  `tests/test_api_access.py`, `tests/test_library_service.py`, `tests/test_mcp_search.py`.
 - **Collections and artefacts over MCP** (2.47): `list_collections` (`GET /collections`), `list_artefacts`, `get_artefact`,
   open to every caller (the API decides visibility; no role gate). Depositor text is labelled as such, download links are
   `public_api_url` + the API download route, never a signed URL. `_deposit_groups` adds `artefacts_upload_groups` and

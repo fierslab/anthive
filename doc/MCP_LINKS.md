@@ -56,7 +56,10 @@ URL. Use `https://anthive.example.org/mcp` as the URL and send
 
 ## What you can do with it
 
-Data tools: `search_datasets`, `get_dataset_info`, `search_genes`, `plot`,
+Search (2.48): `search` (one call over datasets, collections, genes, gene
+sets, papers with full-text passages, artefacts, facets and help, as the
+front page; `kind` limits the groups) and `catalog_stats` (what the site
+holds for the caller). Data tools: `search_datasets`, `get_dataset_info`, `search_genes`, `plot`,
 `analytics_schema`, `analytics_query`, `module_score`, `list_module_scores`,
 `list_genesets`, `get_geneset`.
 

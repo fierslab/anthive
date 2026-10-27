@@ -46,6 +46,7 @@ import sys
 import time
 import uuid
 from datetime import datetime, timedelta
+from html import unescape as html_unescape
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlencode
@@ -388,7 +389,9 @@ papers have citekeys like `lee2026plasticity`.
 
 ## Order of work
 
-1. Find data: `search_datasets` (organism, tissue, cell type, disease, text).
+1. Find data: `search` (words, one call over datasets, collections, genes,
+   gene sets, papers with full-text passages, artefacts, facets and help),
+   then `search_datasets` to filter by organism, tissue, cell type, disease.
 2. Before analysing a dataset: `get_dataset_context(db_id)`. It gives the
    caveats, the exact obs column names (standardised `ant_*` facets such as
    `ant_disease`, `ant_braak`, `ant_donor`, `ant_sex`), the precomputed module
@@ -768,6 +771,9 @@ def main() -> None:
             '  get_dataset_context  background pack for one dataset (load before analysing it)\n'
             '\n'
             'DISCOVERING DATA\n'
+            '  search           start here for "find anything about X": datasets, collections, genes, gene sets,\n'
+            '                     papers (record and full text, with passages), artefacts, facets and help in one call\n'
+            '  catalog_stats    how much the site holds for you: datasets, collections, cells, genes, papers\n'
             '  search_datasets  find datasets by organism, cell type, tissue, disease, or free text;\n'
             '                     returns db_id values used in every other tool\n'
             '  get_dataset_info  full metadata for one dataset: all categorical and numerical\n'
@@ -1036,6 +1042,148 @@ def main() -> None:
         ]
 
     # ── tools ──────────────────────────────────────────────────────────────────
+
+    _SEARCH_KINDS = ('datasets', 'collections', 'genes', 'genesets', 'papers', 'artefacts', 'facets', 'help')
+
+    def _search_text(data: Dict[str, Any], limit: int) -> str:
+        """Compact text of a GET /search answer, grouped by kind."""
+        def plain(snippet: Any) -> str:
+            text = re.sub(r'</?mark>', '', str(snippet or ''))
+            return ' '.join(html_unescape(text).split())
+        lines = [f"Search {data.get('query')!r}: words {', '.join(data.get('words') or []) or '(none)'}"]
+        if data.get('suggestions'):
+            lines.append(f"No gene of that name; genes starting so: {', '.join(data['suggestions'])}")
+        total = 0
+        genes = data.get('genes')
+        if genes:
+            total += len(genes)
+            lines += ['', f'GENES ({len(genes)})']
+            lines += [f"  {g['gene']}: measured in {g.get('n_datasets')} dataset(s)" for g in genes[:limit]]
+        datasets = data.get('datasets')
+        if datasets:
+            total += data.get('n_datasets') or len(datasets)
+            basis = ' (datasets whose text mentions the gene)' if data.get('datasets_basis') == 'mentions' else ''
+            lines += ['', f"DATASETS ({data.get('n_datasets')}){basis}"]
+            for row in datasets[:limit]:
+                facts = '; '.join(part for part in (
+                    row.get('collection'), ', '.join(row.get('organism') or []), ', '.join(row.get('cell_types') or []),
+                    ', '.join(row.get('diseases') or []),
+                    f"{_count_text(row.get('n_cells'))} cells" if row.get('n_cells') else '',
+                    'reanalysis' if row.get('designation') == 'reanalysis' else '') if part)
+                lines.append(f"  {row.get('db_id')}  {row.get('title')}  [{facts}]"
+                             f"  found in: {', '.join(row.get('matched_in') or [])}")
+        collections = data.get('collections')
+        if collections:
+            total += data.get('n_collections') or len(collections)
+            lines += ['', f"COLLECTIONS ({data.get('n_collections')})"]
+            for row in collections[:limit]:
+                lines.append(f"  {row.get('group_id')}  {row.get('title')}  ({row.get('n_datasets')} datasets, "
+                             f"{row.get('n_matching')} matching)")
+        genesets = data.get('genesets')
+        if genesets:
+            total += data.get('n_genesets') or len(genesets)
+            lines += ['', f"GENE SETS ({data.get('n_genesets')})"]
+            for row in genesets[:limit]:
+                lines.append(f"  {row.get('study')}/{row.get('experiment')}/{row.get('name')}  "
+                             f"({row.get('n_genes')} genes)")
+        papers = data.get('papers')
+        if papers:
+            total += data.get('n_papers') or len(papers)
+            lines += ['', f"PAPERS ({data.get('n_papers')}; record and full-text matches first)"]
+            for row in papers[:limit]:
+                lines.append(f"  {row.get('citekey')}  {row.get('citation') or ''}  {row.get('title') or ''}"
+                             f"  found in: {', '.join(row.get('matched_in') or [])}")
+                for passage in row.get('passages') or []:
+                    pages = passage.get('page_start')
+                    if passage.get('page_end') and passage.get('page_end') != pages:
+                        pages = f"{pages}-{passage.get('page_end')}"
+                    lines.append(f"      {passage.get('section')}, p.{pages}: {plain(passage.get('snippet'))}")
+                if (row.get('n_passages') or 0) > len(row.get('passages') or []):
+                    lines.append(f"      ({row['n_passages']} matching passages; search_literature with "
+                                 f"citekeys=['{row.get('citekey')}'] reads more)")
+        artefacts = data.get('artefacts')
+        if artefacts:
+            total += data.get('n_artefacts') or len(artefacts)
+            lines += ['', f"ARTEFACTS ({data.get('n_artefacts')}; titles and descriptions are the depositor's)"]
+            for row in artefacts[:limit]:
+                lines.append(f"  {row.get('ref')}  {row.get('kind')}  {row.get('title')}"
+                             + ('  (withdrawn)' if row.get('withdrawn') else ''))
+        facets = data.get('facets')
+        if facets:
+            total += data.get('n_facets') or len(facets)
+            lines += ['', f"FACETS ({data.get('n_facets')})"]
+            lines += [f"  {row.get('column')}  {row.get('label')}: {row.get('summary') or ''}" for row in facets[:limit]]
+        help_rows = data.get('help')
+        if help_rows:
+            total += data.get('n_help') or len(help_rows)
+            lines += ['', f"HELP ({data.get('n_help')}; explain(<id>) gives the text)"]
+            lines += [f"  {row.get('anchor')}  {row.get('title')}" for row in help_rows[:limit]]
+        if not total and not data.get('suggestions'):
+            lines.append('Nothing found. Use fewer or other words; filler words are dropped.')
+        return '\n'.join(lines)
+
+    @mcp.tool()
+    async def search(query: str, kind: Optional[str] = None, limit: int = 10) -> str:
+        """Search everything this Anthive site holds in one call: the first tool for "find anything about X".
+
+        Searches datasets (title, collection, author names, description, organism, tissue, cell type,
+        disease, method, cell annotation columns), collections, genes (exact gene names in the query),
+        gene sets, papers (the library record: citekey, title, authors, journal, DOI, keywords, summary;
+        AND the full text, with up to three matching passages per paper, section and page), artefacts,
+        facets and the help topics. Only what you may see is searched. Every word must match (filler words
+        such as "expression", "in", "datasets" are dropped; AD, PD, MS, ALS, FTD, APOE4 are expanded). A gene
+        name lists the gene but does not narrow the datasets. Keyword matching, not a ranking model: a
+        passage that names a gene is not necessarily about it.
+
+        Use the ids it returns in the other tools: db_id in get_dataset_info / plot / analytics_query,
+        citekey in get_paper or search_literature(citekeys=[...]) to read around a passage. For semantic
+        literature questions (paraphrases) use search_literature; to filter datasets by field use
+        search_datasets.
+
+        Args:
+            query: words as a person types them, e.g. 'TREM2 microglia Alzheimer' or 'Sierksma'.
+            kind:  only these groups, comma-separated: datasets, collections, genes, genesets, papers,
+                   artefacts, facets, help (default all).
+            limit: most rows shown per group (default 10, max 50); the counts are always totals.
+        """
+        kinds = [part.strip() for part in (kind or '').split(',') if part.strip()]
+        unknown = [part for part in kinds if part not in _SEARCH_KINDS]
+        if unknown:
+            return f"Unknown kind {', '.join(unknown)}; choose from {', '.join(_SEARCH_KINDS)}."
+        limit = min(max(int(limit), 1), 50)
+        try:
+            data = await _get('/search', q=query, limit=limit, kind=','.join(kinds) if kinds else None)
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+        return _search_text(data, limit)
+
+    @mcp.tool()
+    async def catalog_stats() -> str:
+        """How much this Anthive site holds for you: datasets (primary, human, mouse, microglia,
+        single-nucleus, single-cell), collections, cells (all, and of primary datasets only, because
+        reanalyses reuse cells), genes with expression statistics, gene sets, papers, artefacts and the
+        five most recently updated datasets. Counts follow your access. There is no donor count: donors
+        cannot be counted reliably across datasets."""
+        try:
+            data = await _get('/stats')
+        except httpx.HTTPStatusError as exc:
+            return f"Error {exc.response.status_code}: {exc.response.text}"
+        def value(key: str) -> str:
+            return 'not on this site' if data.get(key) is None else _count_text(data.get(key))
+        organisms = ', '.join(f"{name} {n}" for name, n in (data.get('organisms') or {}).items())
+        lines = [f"Datasets: {value('n_datasets')} ({value('n_primary')} primary; {value('n_human')} human, "
+                 f"{value('n_mouse')} mouse; {value('n_microglia')} microglia; {value('n_single_nucleus')} "
+                 f"single-nucleus, {value('n_single_cell')} single-cell)",
+                 f"Organisms: {organisms or 'none'}",
+                 f"Collections: {value('n_collections')}",
+                 f"Cells: {value('n_cells')} (primary datasets only: {value('n_cells_primary')})",
+                 f"Genes with expression statistics: {value('n_genes')}",
+                 f"Gene sets: {value('n_genesets')}   Papers: {value('n_papers')}   Artefacts: {value('n_artefacts')}"]
+        recent = data.get('recently_updated') or []
+        if recent:
+            lines.append('Recently updated:')
+            lines += [f"  {row.get('updated')}  {row.get('db_id')}  {row.get('title')}" for row in recent]
+        return '\n'.join(lines)
 
     @mcp.tool()
     async def search_datasets(
