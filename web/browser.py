@@ -106,7 +106,7 @@ VIEW_REGISTRY: Dict[str, str] = {
     'older-views': 'The Older views menu of the gene, gene set and facet pages (earlier designs)',
     'dataset-facet-gs': 'Dataset page, Facet GS tab (gene set scores by annotation column, per cell)',
     'artefacts': 'Artefacts: the Artefacts tab of a dataset, the artefact list of a collection, the artefact page',
-    'front-door': 'Front page: the ant head, one search box, a browse line, example questions after a minute idle',
+    'front-door': 'Front page: the logo, one search box, a browse line, example questions after a minute idle',
     'search': 'Search results: datasets, genes, gene sets and papers for the words typed',
     'browse-disease': 'Browse by disease: dataset counts per disease and the dataset list of one disease',
     'browse-celltype': 'Browse by cell type: dataset counts per cell type and the dataset list of one cell type',
@@ -415,17 +415,18 @@ def _obs_col_info(name: str) -> dict:
 
 templates.env.globals['obs_col_info'] = _obs_col_info
 
-# The (white) anthive logo, base64-inlined once at import so the About page
-# stays self-contained — no static/ dir or asset route (see web/CLAUDE.md).
-# It's a grayscale+alpha PNG (white line-art), meant for a dark backdrop.
+# The large anthive logo (ant in a teal ring with hexagonal cells, 512 px RGBA),
+# base64-inlined once at import so the About page and the front door stay
+# self-contained, no static/ dir or asset route (see web/CLAUDE.md).
 try:
     _LOGO_DATA_URI = 'data:image/png;base64,' + base64.b64encode(
         (Path(__file__).parent / 'anthive_logo.png').read_bytes()
     ).decode('ascii')
 except Exception:  # asset missing — page still renders, just without the mark
     _LOGO_DATA_URI = ''
+templates.env.globals['brand_logo'] = _LOGO_DATA_URI
 
-# Tiny dark ant-head mark for the topbar (every page). Registered as a Jinja
+# Small round icon for the topbar (every page), 56 px for a 28 px slot. Registered as a Jinja
 # global so base.html can use it without each route threading it through.
 try:
     templates.env.globals['topbar_logo'] = 'data:image/png;base64,' + base64.b64encode(
@@ -2592,7 +2593,7 @@ async def index(request: Request):
 
 # ── Front door: search box, browse by disease / cell type (2026-10-26; front door approved 2026-10-27) ──
 #
-# "/" (or /home) is the front page for biologists: the ant head, one search box (GET /api/search), one line of
+# "/" (or /home) is the front page for biologists: the logo, one search box (GET /api/search), one line of
 # browse links and two example questions that appear after a minute without activity. The collection list
 # it replaced lives at /collections ("Browse by dataset"). The browse pages are computed from GET /databases
 # on behalf of the visitor (_api_get forwards the identity), so counts and lists hold exactly the datasets that
@@ -2673,7 +2674,7 @@ def _render_front_door(request: Request, error: Optional[str] = None) -> HTMLRes
 
 @router.get("/", response_class=HTMLResponse)
 async def front_door(request: Request):
-    """The landing page: the configured home collection, else the front door (ant head, search box, one
+    """The landing page: the configured home collection, else the front door (logo, search box, one
     browse line, example questions that appear after a minute without activity).
 
     A query string of the old landing page (``?q=``, ``?disease=``, ``?view=table``, ...) redirects to

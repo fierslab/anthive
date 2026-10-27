@@ -71,11 +71,10 @@
         }
         #topbar .brand { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; color: #FFF3B0; font-size: 14px; text-decoration: none; letter-spacing: .3px; }
         #topbar .brand:hover { text-decoration: none; color: #ffffff; }
-        /* Force the topbar logo to render as (near-)white on the dark-teal bar.
-           The source PNG is a dark-recoloured crop that reads as low-contrast on
-           the dark background - invert + brightness pushes it to white/cream so
-           it clears WCAG AA contrast against #335C67. */
-        #topbar .brand img { height: 22px; width: auto; display: block; filter: brightness(0) invert(1); }
+        /* Topbar logo: the round icon (teal ring, white disc), drawn at 28 px from a
+           56 px PNG so it stays sharp on 2x screens. The white disc reads as a badge
+           on the teal bar, so no filter. */
+        #topbar .brand img { width: 28px; height: 28px; display: block; }
         /* Order of the bar: logo, nav, spacer, help and account. No search field in the bar since 2026-10-27:
            the front page (/home, the nav "home" link) is the search page. */
         #topbar nav[aria-label="Main"] { order: 1; }
@@ -133,7 +132,6 @@
            else lives in a panel that drops down under the bar. */
         @media (max-width: 640px) {
             #topbar { position: relative; z-index: 400; padding: 5px 14px; min-height: 44px; gap: 10px; }
-            #topbar .brand img { height: 22px; }
             #topbar .nav-toggle { display: inline-flex; margin-left: auto; order: 2; }
             #topbar .topbar-search { order: 1; margin-left: auto; }
             #topbar .topbar-search ~ .nav-toggle { margin-left: 0; }
@@ -809,7 +807,7 @@
 </head>
 <body>
     <div id="topbar">
-        <a href="/" class="brand" id="topbar-brand" title="anthive: start page">{% if topbar_logo %}<img src="{{ topbar_logo }}" alt="">{% endif %}anthive</a>
+        <a href="/" class="brand" id="topbar-brand" title="anthive: start page">{% if topbar_logo %}<img src="{{ topbar_logo }}" alt="" width="28" height="28">{% endif %}anthive</a>
         <button type="button" class="nav-toggle" id="nav-toggle" aria-controls="topbar-menu" aria-expanded="false" aria-label="Open menu">
             <svg class="icon-open" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
             <svg class="icon-close" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>

@@ -74,7 +74,7 @@ def test_front_door_is_minimal_logo_search_browse_line_and_hidden_examples(clien
     # approved (2026-10-27): no review banner, no preview marks on the page itself
     assert 'class="review-banner"' not in html and 'data-view="front-door"' not in html
     assert 'exp-badge' not in page and 'Preview.' not in page
-    # the small ant head above the box, no tagline
+    # the logo above the box, no tagline
     logo = page.split('id="fd-logo"')[1].split('</h1>')[0]
     assert '<img src="data:image/png;base64,' in logo and 'alt="anthive"' in logo
     assert 'Search datasets, genes' not in page and '<h1>Search' not in html

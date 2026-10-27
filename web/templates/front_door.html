@@ -9,7 +9,7 @@
 <div class="fd-wrap" id="front-door">
   {{ review_banner('front-door') }}
   <section class="fd-hero" aria-label="Search the catalogue">
-    <h1 class="fd-logo" id="fd-logo">{% if topbar_logo %}<img src="{{ topbar_logo }}" alt="anthive" width="45" height="48">{% else %}anthive{% endif %}</h1>
+    <h1 class="fd-logo" id="fd-logo">{% if brand_logo %}<img src="{{ brand_logo }}" alt="anthive" width="120" height="120">{% else %}anthive{% endif %}</h1>
     {{ fd_search('', autofocus=True) }}
     <nav class="fd-browse" id="fd-browse" aria-label="Browse">Browse by
       <a href="/diseases" id="fd-browse-disease" class="{{ view_class('browse-disease') }}" title="{{ view_tip('browse-disease', 'Datasets grouped by the disease of their donors') }}">disease</a><span class="fd-dot" aria-hidden="true">·</span><a href="/cell-types" id="fd-browse-celltype" class="{{ view_class('browse-celltype') }}" title="{{ view_tip('browse-celltype', 'Datasets grouped by the cell types they hold') }}">cell type</a><span class="fd-dot" aria-hidden="true">·</span><a href="/collections" id="fd-browse-dataset" title="Every collection (one per study) with its datasets">dataset</a>

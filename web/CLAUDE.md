@@ -33,8 +33,9 @@ web/
     edit_dataset.html      # /admin/edit/{group}/{file} — .md + .mus editor
     admin_feedback.html    # /admin/feedback — chat feedback triage (no menu entry)
     account_mcp.html       # /account/mcp — the user's MCP links (+ all users' links for admins)
-  anthive_logo.png  # the (white) brand logo — grayscale+alpha, for dark bg
-  topbar_logo.png   # dark-recoloured topbar mark (base64-inlined Jinja global)
+  anthive_logo.png  # large logo (ant in a teal ring, hex cells), 512 px RGBA; about + front door
+  topbar_logo.png   # small round icon, 56 px RGBA, drawn at 28 px in the top bar (Jinja global)
+  favicons/         # favicon.ico/svg/png, apple-touch, manifest icons + site.webmanifest
   __init__.py       # so the directory imports cleanly if ever needed
   README.md         # user-facing overview
 ```
@@ -44,9 +45,16 @@ inline in the matching `*.html` (the JS budget is small enough that
 splitting into separate files would only add HTTP requests).  Sitewide
 styles live in `templates/base.html`'s `<style>` block.  The one bundled
 binary asset, `anthive_logo.png`, is **base64-inlined into a data URI once at
-import** (`browser._LOGO_DATA_URI`, passed to `about.html`) — so even the logo
-stays self-contained, with no static dir or asset route.  It's a white
-line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
+import** (`browser._LOGO_DATA_URI`, passed to `about.html` and exposed as the
+Jinja global `brand_logo` for the front door), so even the logo stays
+self-contained, with no static dir or asset route.  The logo (2026-10-27) is a
+round badge: teal ring, white disc, ant with an amber head; transparent outside
+the ring.  Two 1024 px masters: the simple ICON (top bar, favicons) and the
+LARGE one with hexagonal cells (anything shown at about 96 px or more: front
+door, about page, Authelia login).  The repo-root `anthive_logo.png` is the
+LARGE master; every served size is derived from the masters with Pillow
+(LANCZOS, palette PNG).  An SVG redraw is planned; `favicons/favicon.svg` is
+for now an SVG wrapping a 256 px PNG.
 
 ## How it boots
 
@@ -65,7 +73,7 @@ line-art logo (grayscale+alpha PNG), so it's shown on a dark hero panel.
 | Path | Renders | Template |
 | --- | --- | --- |
 | `/` | the site's landing: `web_home_collection` (anthive.yaml, env `ANTHIVE_WEB_HOME_COLLECTION`, site.yaml `site.home_collection`) 302s to that collection when the visitor sees it, else the front door; old landing query strings (`?q=`, `?disease=`, `?view=`...) 302 to `/collections`; one visible collection still jumps into it (`?all=1` opts out of both) | `front_door.html` |
-| `/home` | the front door, always (approved `front-door`): ant head, search box, one browse line, two examples shown after 60 s idle | `front_door.html` |
+| `/home` | the front door, always (approved `front-door`): logo, search box, one browse line, two examples shown after 60 s idle | `front_door.html` |
 | `/collections` | dataset catalog (grouped by collection), "Browse by dataset"; `/datasets` redirects here | `index.html` |
 | `/search?q=` | search results grouped by kind (preview `search`), from `GET /api/search` (API 2.48) | `search.html` |
 | `/diseases`, `/diseases/{key}` · `/cell-types`, `/cell-types/{key}` | dataset counts per disease / cell type and the dataset list of one (previews `browse-disease`, `browse-celltype`), from `/databases` via `lib/catalog_search.py` | `browse.html` |
@@ -536,8 +544,8 @@ and `index.md` files, so no body is trusted. Plot thumbnails survive as `<img sr
   fonts, which `syncURL` does NOT write to the URL), so colormap etc. don't
   reset on switch. Base it on `location.search`, not `buildUrl()`, so
   auto-prefilled defaults (a smart `y`) don't leak in and misroute the mode.
-- **Topbar brand logo** is `web/topbar_logo.png` (a dark-recoloured crop of the
-  Authelia login mark), base64-inlined once and exposed as the Jinja **global**
+- **Topbar brand logo** is `web/topbar_logo.png` (the round ICON at 56 px,
+  shown at 28x28 with no CSS filter), base64-inlined once and exposed as the Jinja **global**
   `topbar_logo` (`templates.env.globals`), so `base.html` shows it on every page
   without per-route context.
 - **Topbar on narrow screens (<= 640px)** is one row: logo plus a menu button
@@ -1121,7 +1129,7 @@ pages resolve).
 
 - The number tiles, the recently updated list and "What is here" are gone (Mark: more minimal). `GET /api/stats`
   stays in the API (2.48); the web no longer calls it, and `_front_door_context`, `_front_door_tiles` and the
-  per-access-level cache were removed. `front_door.html`: `#fd-logo` (the `topbar_logo` ant head, 45x48, as the
+  per-access-level cache were removed. `front_door.html`: `#fd-logo` (the LARGE logo via `brand_logo`, 120x120, 96 on phones, as the
   h1 with alt "anthive"), `fd_search`, `#fd-browse` (one muted line: Browse by disease, cell type, dataset), then
   `#fd-examples`, `hidden` on load with `data-delay-ms` (`FRONT_DOOR_EXAMPLES_DELAY_MS`, 60000). Inline script:
   keydown, input, pointermove, pointerdown, scroll, wheel, touchstart (window, capture) and focus on the search box

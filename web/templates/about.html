@@ -5,12 +5,14 @@
 {% block content %}
 <style>
   .about-wrap { max-width: 760px; margin: 0 auto; }
-  /* Dark hero so the white line-art logo reads cleanly. */
+  /* Dark hero; the round logo (white disc in a teal ring) sits on it as a badge, the name under it. */
   .about-hero {
     background: #0f172a; border-radius: 10px; padding: 28px 24px;
     display: flex; flex-direction: column; align-items: center; text-align: center;
   }
-  .about-hero img { width: 300px; max-width: 78%; height: auto; }
+  .about-hero img { width: 220px; max-width: 70%; height: auto; }
+  .about-hero .wordmark { color: #FFF3B0; font-size: 34px; font-weight: 500; letter-spacing: .5px; margin-top: 14px; line-height: 1.1; }
+  .about-hero .wordmark-sub { color: #cbd5e1; font-size: 11px; letter-spacing: 2.5px; text-transform: uppercase; margin-top: 4px; }
   .about-hero .tagline {
     color: #cbd5e1; font-size: 13px; margin-top: 10px; letter-spacing: .3px;
   }
@@ -42,7 +44,7 @@
   .about-links a.primary { background: var(--link); color: #fff; border-color: var(--link); }
   .about-links a.primary:hover { filter: brightness(1.08); }
   .about-foot { font-size: 11px; color: var(--text-muted); border-top: 1px solid var(--border-light); padding-top: 10px; }
-  @media (max-width: 760px) { .about-hero img { width: 220px; } }
+  @media (max-width: 760px) { .about-hero img { width: 160px; } }
 </style>
 
 {% from "_macros.html" import breadcrumb %}
@@ -52,7 +54,9 @@
 
   <div class="about-hero">
     {% if logo_data_uri %}
-    <img src="{{ logo_data_uri }}" alt="anthive, single cell · omics" width="380" height="361">
+    <img src="{{ logo_data_uri }}" alt="" width="512" height="512">
+    <div class="wordmark">anthive</div>
+    <div class="wordmark-sub">single cell · omics</div>
     {% else %}
     <div style="color:#fff;font-size:28px;font-weight:700">anthive</div>
     {% endif %}
