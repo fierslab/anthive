@@ -4,13 +4,14 @@ Configuration management for anthive
 Loads configuration from anthive.yaml or uses defaults from anthive.default.yaml
 """
 
+import copy
 import logging
 import os
 import re
 import secrets
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -253,9 +254,26 @@ def validate_config(config: Dict[str, Any], defaults: Dict[str, Any], strict: Op
             )
 
 
+# The last merged config with the content of the files it came from. Parsing the two YAML files costs
+# about 30 ms, and request handlers call load_config() through helpers such as get_auth_settings() on
+# every request (an admin check, the GET /stats cache key). Reading the bytes to compare is cheap, and
+# unlike a modification time it notices an edit within the file system's timestamp granularity. The
+# lenient flag is part of the key.
+_LOADED_CONFIG: Dict[str, Any] = {}
+
+
+def _file_signature(path: Path) -> Tuple[str, Optional[bytes]]:
+    try:
+        return (str(path), path.read_bytes())
+    except OSError:
+        return (str(path), None)
+
+
 def load_config() -> Dict[str, Any]:
     """
     Load configuration (user config merged with defaults)
+
+    The merged result is reused while neither file's content changes; every call gets its own copy.
 
     Returns:
         Dictionary with merged configuration values
@@ -263,6 +281,17 @@ def load_config() -> Dict[str, Any]:
     Raises:
         ConfigError: If configuration cannot be loaded or is invalid
     """
+    key = (_file_signature(get_anthive_root() / "anthive.default.yaml"), _file_signature(get_user_config_path()),
+           bool(_UNKNOWN_KEYS_LENIENT['on']))
+    cached = _LOADED_CONFIG.get('entry')
+    if cached is not None and cached[0] == key:
+        return copy.deepcopy(cached[1])
+    config = _load_config_uncached()
+    _LOADED_CONFIG['entry'] = (key, copy.deepcopy(config))
+    return config
+
+
+def _load_config_uncached() -> Dict[str, Any]:
     # Load defaults
     defaults = load_default_config()
 

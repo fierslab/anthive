@@ -182,3 +182,37 @@ class TestCriticalSubKeys:
         monkeypatch.setattr(config, '_WARNED_UNKNOWN', set())
         validate_config(bad, defaults)
         assert words in capsys.readouterr().err
+
+
+class TestLoadConfigReuse:
+    """load_config() parses the YAML files once while they are unchanged (it sat on every request through
+    get_auth_settings, about 30 ms each, which made the cached GET /stats cost 40 ms per call)."""
+
+    def _site(self, tmp_path, monkeypatch, text):
+        import config as config_module
+        (tmp_path / "anthive.default.yaml").write_text("rest_api_port: 8080\nauth:\n  mode: null\n  admins: []\n")
+        (tmp_path / "anthive.yaml").write_text(text)
+        monkeypatch.setattr(config_module, "get_anthive_root", lambda: tmp_path)
+        monkeypatch.delenv("ANTHIVE_CONFIG", raising=False)
+        return config_module
+
+    def test_unchanged_files_are_parsed_once(self, tmp_path, monkeypatch):
+        config_module = self._site(tmp_path, monkeypatch, "rest_api_port: 9000\n")
+        calls = []
+        real = config_module.yaml.safe_load
+        monkeypatch.setattr(config_module.yaml, "safe_load", lambda stream: calls.append(1) or real(stream))
+        config_module.load_config()
+        n_parses = len(calls)
+        for _ in range(5):
+            assert config_module.load_config()["rest_api_port"] == 9000
+        assert len(calls) == n_parses
+
+    def test_a_changed_file_is_read_again_and_copies_are_independent(self, tmp_path, monkeypatch):
+        config_module = self._site(tmp_path, monkeypatch, "rest_api_port: 9000\n")
+        first = config_module.load_config()
+        first["rest_api_port"] = 1
+        first["auth"]["admins"].append("mallory")
+        again = config_module.load_config()
+        assert again["rest_api_port"] == 9000 and again["auth"]["admins"] == []
+        (tmp_path / "anthive.yaml").write_text("rest_api_port: 9100\n")
+        assert config_module.load_config()["rest_api_port"] == 9100
