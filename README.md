@@ -1,18 +1,61 @@
+<p align="center"><img src="anthive_logo.png" alt="anthive logo: an ant in a teal ring of hexagonal cells" width="180"></p>
+
 # anthive
 
-anthive is a browser and API for curated single-cell RNA-seq datasets. It
-takes `.h5ad` files, turns them into fast DuckDB databases, and serves them
-to people (a web site), to code (a REST API with Python and Go clients), to
-notebooks (JupyterLite in the browser) and to AI assistants (MCP).
+anthive gives an AI assistant curated single-cell RNA-seq data to work
+with. Connect Claude, Codex, Gemini CLI, Cursor, VS Code or another MCP
+client to an anthive site and ask your question in plain language. Which
+microglia datasets show TREM2 changing in Alzheimer's disease? How does a
+lysosomal gene set behave across donors? What do the papers behind this
+dataset say about its cell types? The assistant finds the datasets, runs
+the queries on the server, draws the plots and quotes the papers. Every
+number it reports can be checked in the web browser or reproduced from
+Python, because all of them come from the same API.
 
-The main deployment holds 186 datasets in 63 collections, about 17 million
-cells, mostly human microglia in health and Alzheimer's disease (October
-2026, release 2.44.0).
+The main deployment holds about 190 datasets in 63 collections, about 17
+million cells, mostly human microglia in health and Alzheimer's disease.
 
-This repository is the home of the whole project: the server, the web UI,
-the ingest and annotation tools, the deployment tooling and the
+---
+
+## What an assistant can do with anthive
+
+The MCP server offers about 45 tools. Grouped by what they are for:
+
+- **Find data.** Search the catalogue by gene, tissue, disease, author or
+  free text; read a dataset's design, cell counts and curation caveats.
+- **Look at expression.** Genes and gene sets per cluster, condition or
+  donor, detection rates, and plots as PNG, SVG or PDF that are clean
+  enough for a figure.
+- **Compare conditions.** Donor-level comparisons (facets), donor
+  variability, module scores (scanpy and UCell) and differential
+  expression studies.
+- **Ask anything else.** Read-only, sandboxed SQL over the cell metadata
+  for questions no tool covers.
+- **Read the literature.** Full-text search over the site's paper library,
+  linked to the datasets that came from each paper.
+- **Contribute.** Upload papers, datasets and analysis results, which
+  curators review before they appear.
+
+**Connect in two minutes.** Sign in to an anthive site, open your account
+menu, choose **Connect an MCP client** and paste your personal link into
+your AI app. [doc/MCP_CLIENTS.md](doc/MCP_CLIENTS.md) has the steps for
+about 20 clients. Treat the link like a password; it carries your access.
+
+**Agent skills** teach the assistant anthive's workflows (setup, dataset
+analysis, literature, deposits, reproducible reports). They are public at
+[github.com/badslab/labskills](https://github.com/badslab/labskills), and
+the install guide there covers Claude, Codex, Cursor and others.
+
+Anything anthive returns to your AI client, including text from papers and
+datasets, is sent to that client's AI provider. Pick a provider you trust
+with that material.
+
+The same data also reaches people through a web browser, code through a
+REST API with Python and Go clients, and notebooks through JupyterLite in
+the browser. This repository holds all of it: the server, the web UI, the
+MCP server, the ingest and annotation tools, the deployment tooling and the
 documentation. The other repositories below hold the data catalogue, the
-gene sets and the client libraries.
+gene sets, the clients and the skills.
 
 ---
 
@@ -36,12 +79,7 @@ Everything is started through one command dispatcher, `bin/ant`
 
 ## How the data flows
 
-```
- .h5ad ──ant convert──▶ .duckdb + parquet ──ant-serve──▶ REST API ──▶ web UI / MCP / notebooks / vark / pyvark
-   ▲                         │
-   └──ant merge-h5ad─────────┘  annotations (module scores, curated columns) are written
-                                 to the .duckdb first and merged back into the .h5ad later
-```
+<p align="center"><img src="doc/img/data_flow.svg" alt="Data flow: .h5ad files are converted to DuckDB, served by ant-serve as a REST API, and reach the web UI, MCP clients, notebooks, pyvark and vark; annotations are written to the DuckDB first and merged back into the .h5ad" width="820"></p>
 
 The `.h5ad` is the long-term source of truth. The `.duckdb` and its parquet
 sidecars are what the server reads. Data files live on S3 and are synced
@@ -60,7 +98,7 @@ In short, on a Linux server with Docker and uv:
 
 ```sh
 git clone https://gitlab.kuleuven.be/bdslab/anthive/anthive4.git && cd anthive4
-git checkout v2.44.0
+git checkout v2.48.0
 bin/ops/ant-stack init        # writes site.yaml; edit it, then run init again
 bin/ops/ant-stack check
 bin/ops/ant-stack pull
@@ -82,11 +120,9 @@ Images (public, linux/amd64):
 ## Use it
 
 - **In the browser:** open the site and log in.
-- **From an AI client:** in the web UI, open your account menu, choose
-  "Connect an MCP client", and paste your personal link into Claude Code,
-  claude.ai, Codex, Gemini CLI, Cursor, VS Code or one of the ~20 other
-  clients in [doc/MCP_CLIENTS.md](doc/MCP_CLIENTS.md)
-  (links: [doc/MCP_LINKS.md](doc/MCP_LINKS.md)).
+- **From an AI client:** see the top of this page; per-client steps in
+  [doc/MCP_CLIENTS.md](doc/MCP_CLIENTS.md), links in
+  [doc/MCP_LINKS.md](doc/MCP_LINKS.md).
 - **From Python:** [`pyvark`](https://codeberg.org/mfiers/pyvark)
   (`pip install pyvark`, then `from vark import AnthiveClient`).
 - **From the shell:** [`vark`](https://codeberg.org/mfiers/vark), a single
@@ -100,11 +136,12 @@ Images (public, linux/amd64):
 
 | Repository | Holds |
 | --- | --- |
-| **anthive4** (this one): [GitHub](https://github.com/badslab/anthive4), mirror on [KU Leuven GitLab](https://gitlab.kuleuven.be/bdslab/anthive/anthive4) | all code, deployment tooling, documentation, the container images |
+| **anthive4** (this one): [GitHub](https://github.com/badslab/anthive4), mirrors on [KU Leuven GitLab](https://gitlab.kuleuven.be/bdslab/anthive/anthive4) and [Codeberg](https://codeberg.org/mfiers/anthive) | all code, deployment tooling, documentation; the container images are on the GitLab registry only |
 | **h5adstore**: GitHub `badslab/h5adstore`, mirror `gitlab.kuleuven.be/bdslab/anthive/h5adstore` (private) | the dataset catalogue: one `.md` + `.h5ad.mus` per dataset, one `index.md` per collection. No data files. |
 | **anthive-genesetdb**: `gitlab.kuleuven.be/bdslab/genesetdbs/anthive-genesetdb` (private) | the gene sets and modules used for scoring |
 | **pyvark**: [codeberg.org/mfiers/pyvark](https://codeberg.org/mfiers/pyvark) | the Python client |
 | **vark**: [codeberg.org/mfiers/vark](https://codeberg.org/mfiers/vark) | the Go command-line client |
+| **labskills**: [github.com/badslab/labskills](https://github.com/badslab/labskills), mirror `gitlab.kuleuven.be/bdslab/anthive/skills` | agent skills for AI apps, also the Claude Team plugin |
 | **mus**: [codeberg.org/mfiers/mus](https://codeberg.org/mfiers/mus) | the controlled vocabulary for dataset annotation (`.h5ad.mus`) |
 
 The data files themselves (`.h5ad`, `.duckdb`, parquet) are in an S3 bucket,
@@ -150,7 +187,7 @@ change there affects all of them.
 
 ## Status
 
-Release **2.44.0** (October 2026). The release number is the REST API
+Release **2.48.0** (October 2026). The release number is the REST API
 version; a running site reports it at `/api/health`.
 
 Maintained by the BADS lab, KU Leuven (Mark Fiers). License: not yet

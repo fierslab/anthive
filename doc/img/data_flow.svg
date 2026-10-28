@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>anthive data flow</title>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#335C67"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#9E2A2B"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="960" height="400" rx="14" fill="#ffffff"/>
+
+  <!-- S3 storage band -->
+  <rect x="15" y="105" width="440" height="180" rx="12" fill="#FFF3B0" fill-opacity="0.35" stroke="#E09F3E" stroke-dasharray="6 5"/>
+  <text x="30" y="126" font-size="12" fill="#540B0E">S3 bucket, synced with ant sync</text>
+
+  <!-- h5ad -->
+  <rect x="30" y="145" width="150" height="76" rx="10" fill="#ffffff" stroke="#335C67" stroke-width="2"/>
+  <text x="105" y="176" font-size="17" font-weight="700" text-anchor="middle" fill="#335C67">.h5ad</text>
+  <text x="105" y="196" font-size="11.5" text-anchor="middle" fill="#333">source of truth</text>
+  <text x="105" y="211" font-size="11.5" text-anchor="middle" fill="#333">raw + log-normalised</text>
+
+  <!-- convert arrow -->
+  <line x1="180" y1="171" x2="262" y2="171" stroke="#335C67" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="221" y="162" font-size="12" text-anchor="middle" fill="#335C67" font-family="ui-monospace, Menlo, Consolas, monospace">ant convert</text>
+
+  <!-- duckdb -->
+  <rect x="264" y="145" width="176" height="76" rx="10" fill="#ffffff" stroke="#335C67" stroke-width="2"/>
+  <text x="352" y="176" font-size="15" font-weight="700" text-anchor="middle" fill="#335C67">.duckdb + parquet</text>
+  <text x="352" y="196" font-size="11.5" text-anchor="middle" fill="#333">what the server reads</text>
+  <text x="352" y="211" font-size="11.5" text-anchor="middle" fill="#333">live annotation target</text>
+
+  <!-- merge back -->
+  <path d="M300,221 C300,268 105,268 105,223" fill="none" stroke="#9E2A2B" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrow-red)"/>
+  <text x="202" y="272" font-size="12" text-anchor="middle" fill="#9E2A2B" font-family="ui-monospace, Menlo, Consolas, monospace">ant merge-h5ad</text>
+
+  <!-- annotation -->
+  <rect x="285" y="310" width="220" height="66" rx="10" fill="#ffffff" stroke="#9E2A2B" stroke-width="2"/>
+  <text x="395" y="336" font-size="14" font-weight="700" text-anchor="middle" fill="#9E2A2B">annotation</text>
+  <text x="395" y="356" font-size="11.5" text-anchor="middle" fill="#333">module scores, curated columns</text>
+  <line x1="395" y1="310" x2="395" y2="224" stroke="#9E2A2B" stroke-width="2" marker-end="url(#arrow-red)"/>
+  <text x="402" y="300" font-size="11" fill="#9E2A2B">written here first</text>
+
+  <!-- serve arrow -->
+  <line x1="440" y1="183" x2="528" y2="183" stroke="#335C67" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- catalogue -->
+  <rect x="500" y="22" width="210" height="64" rx="10" fill="#ffffff" stroke="#335C67" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="605" y="46" font-size="13" font-weight="700" text-anchor="middle" fill="#335C67">catalogue (git)</text>
+  <text x="605" y="66" font-size="11.5" text-anchor="middle" fill="#333">.md + .h5ad.mus per dataset</text>
+  <line x1="605" y1="86" x2="605" y2="143" stroke="#335C67" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- api -->
+  <rect x="530" y="145" width="150" height="76" rx="10" fill="#335C67"/>
+  <text x="605" y="177" font-size="17" font-weight="700" text-anchor="middle" fill="#ffffff">ant-serve</text>
+  <text x="605" y="198" font-size="12" text-anchor="middle" fill="#FFF3B0">REST API</text>
+
+  <!-- consumers -->
+  <g font-size="13">
+    <line x1="680" y1="183" x2="766" y2="58" stroke="#335C67" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="680" y1="183" x2="766" y2="126" stroke="#335C67" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="680" y1="183" x2="766" y2="194" stroke="#335C67" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="680" y1="183" x2="766" y2="262" stroke="#335C67" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="680" y1="183" x2="766" y2="330" stroke="#335C67" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <rect x="768" y="30" width="176" height="56" rx="10" fill="#E09F3E"/>
+    <text x="856" y="54" font-weight="700" text-anchor="middle" fill="#540B0E">MCP server</text>
+    <text x="856" y="73" font-size="11.5" text-anchor="middle" fill="#540B0E">AI assistants</text>
+
+    <rect x="768" y="100" width="176" height="52" rx="10" fill="#ffffff" stroke="#335C67" stroke-width="2"/>
+    <text x="856" y="122" font-weight="700" text-anchor="middle" fill="#335C67">web UI</text>
+    <text x="856" y="140" font-size="11.5" text-anchor="middle" fill="#333">people in a browser</text>
+
+    <rect x="768" y="168" width="176" height="52" rx="10" fill="#ffffff" stroke="#335C67" stroke-width="2"/>
+    <text x="856" y="190" font-weight="700" text-anchor="middle" fill="#335C67">notebooks</text>
+    <text x="856" y="208" font-size="11.5" text-anchor="middle" fill="#333">JupyterLite in the browser</text>
+
+    <rect x="768" y="236" width="176" height="52" rx="10" fill="#ffffff" stroke="#335C67" stroke-width="2"/>
+    <text x="856" y="258" font-weight="700" text-anchor="middle" fill="#335C67">pyvark</text>
+    <text x="856" y="276" font-size="11.5" text-anchor="middle" fill="#333">Python client</text>
+
+    <rect x="768" y="304" width="176" height="52" rx="10" fill="#ffffff" stroke="#335C67" stroke-width="2"/>
+    <text x="856" y="326" font-weight="700" text-anchor="middle" fill="#335C67">vark</text>
+    <text x="856" y="344" font-size="11.5" text-anchor="middle" fill="#333">command line (Go)</text>
+  </g>
+</svg>
