@@ -126,9 +126,10 @@ updated and the guide has been followed on a scratch site (fresh
 
 `anthive4` and `data/h5adstore` push to GitHub `badslab/*` and
 `gitlab.kuleuven.be:bdslab/anthive/*`. `anthive4` also pushes to
-Codeberg `mfiers/anthive` (remote `codeberg`), which holds a copy of the
+Codeberg `mfiers/anthive` (remote `codeberg`) and GitHub `fierslab/anthive`
+(remote `fierslab`), extra mirrors for visibility that hold a copy of the
 code only: branches and tags, never container images. In this checkout
-`origin` has all three push URLs, so a plain `git push` updates every
+`origin` has all four push URLs, so a plain `git push` updates every
 mirror; fetch comes from GitHub. `push.followTags` is on so annotated release tags
 travel along. Commits that reach GitHub some other way (another clone, a PR
 merged on github.com) are only mirrored at the next push from here; catch up

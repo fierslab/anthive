@@ -136,7 +136,7 @@ Images (public, linux/amd64):
 
 | Repository | Holds |
 | --- | --- |
-| **anthive4** (this one): [GitHub](https://github.com/badslab/anthive4), mirrors on [KU Leuven GitLab](https://gitlab.kuleuven.be/bdslab/anthive/anthive4) and [Codeberg](https://codeberg.org/mfiers/anthive) | all code, deployment tooling, documentation; the container images are on the GitLab registry only |
+| **anthive4** (this one): [GitHub](https://github.com/badslab/anthive4), mirrors on [KU Leuven GitLab](https://gitlab.kuleuven.be/bdslab/anthive/anthive4), [Codeberg](https://codeberg.org/mfiers/anthive) and [GitHub fierslab](https://github.com/fierslab/anthive) | all code, deployment tooling, documentation; the container images are on the GitLab registry only |
 | **h5adstore**: GitHub `badslab/h5adstore`, mirror `gitlab.kuleuven.be/bdslab/anthive/h5adstore` (private) | the dataset catalogue: one `.md` + `.h5ad.mus` per dataset, one `index.md` per collection. No data files. |
 | **anthive-genesetdb**: `gitlab.kuleuven.be/bdslab/genesetdbs/anthive-genesetdb` (private) | the gene sets and modules used for scoring |
 | **pyvark**: [codeberg.org/mfiers/pyvark](https://codeberg.org/mfiers/pyvark) | the Python client |
