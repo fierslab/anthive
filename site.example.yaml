@@ -263,7 +263,8 @@ journal:
   enabled: true
   download_retention_days: 730   # who downloaded what is deleted after this (0 keeps it)
   triage_groups: [admins, curators]   # may set a report's status (the dataset's depositor may too)
-  # also: max_body_chars (10000), writes_per_minute (30)
+  max_body_chars: 10000         # longest note in characters (at least 100)
+  writes_per_minute: 30         # notes and replies one user may write per minute
 
 mcp:
   token_ttl_days: 90 # lifetime of a per-user MCP link (0 = never expires)

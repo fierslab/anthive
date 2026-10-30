@@ -1108,7 +1108,8 @@ journal:
   triage_groups: [admins, curators]   # may set a report's status; the dataset's depositor may too
 ```
 
-`max_body_chars` (10000) and `writes_per_minute` (30) are the other keys.
+`max_body_chars` (10000, the longest note in characters, at least 100) and
+`writes_per_minute` (30) are the other keys.
 `ant-stack check` and the plan print one journal line. The block reaches
 `anthive.yaml` as `journal:` (environment variables `ANTHIVE_JOURNAL_ENABLED`,
 `ANTHIVE_JOURNAL_DB`, `ANTHIVE_JOURNAL_DOWNLOAD_RETENTION_DAYS`). The journal is
@@ -1487,7 +1488,7 @@ resolve inside the containers.
 | `services.dataset_deposit` | since 2.46.0: let `datasets.upload_groups` deposit datasets through presigned S3 uploads (needs `s3.enabled`; see "Let depositors add datasets") |
 | `datasets.*` | since 2.46.0: who may deposit (`upload_groups`, default admins and curators), `max_gb`, `url_ttl_hours`, `max_open_days` (an open deposit not completed within this many days expires, default 7), `max_open_per_user`, `max_pending_gb_per_user`, `update_policy`, `site_id` (default `site.name`) |
 | `ports.tools` | since 2.46.1: the `127.0.0.1` port of Caddy's listener for the host-side deposit watcher (default 8079; published only with `services.dataset_deposit` or `artefacts.enabled`; requires the internal secret) |
-| `journal.*` | since 2.49.0: the dataset journal (`enabled`, default true), `download_retention_days` (730, 0 keeps download records), `triage_groups` (admins, curators), `max_body_chars` (10000), `writes_per_minute` (30) (see "The dataset journal") |
+| `journal.*` | since 2.49.0: the dataset journal (`enabled`, default true), `download_retention_days` (730, 0 keeps download records), `triage_groups` (admins, curators), `max_body_chars` (10000, at least 100), `writes_per_minute` (30) (see "The dataset journal") |
 | `artefacts.*` | since 2.47.0: artefact and collection deposits (`enabled`, needs `s3.enabled`), `upload_groups` and `collections_create_groups` (default admins and analysts), `max_file_gb`, `max_deposit_gb`, `max_files`, `max_versions`, `max_stored_gb_per_user`, `inline_max_mb`, `hold_public`, `serve_local` (`fallback` or `prefer`), `url_ttl_seconds` (see "Let analysts deposit artefacts") |
 | `library.*` | upload groups, PDF size limit, git committer and push, S3 autopush, index publisher, `index_pull` (false: this site never downloads the shared literature index) |
 | `library.deploy_key` | SSH key `ant-stack publish-library` pushes the library with (host path) |
