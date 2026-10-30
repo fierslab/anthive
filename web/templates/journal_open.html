@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{#- Open reports across the site (REST 2.49 GET /journal/open; preview view `journal-open`). Every entry is user
+    text: rendered by _journal.html's entry macro (safe_markdown bodies, autoescaped fields). -#}
+
+{% block title %}Open reports · anthive{% endblock %}
+
+{% block content %}
+{% from "_macros.html" import breadcrumb, review_banner, doc_toggle, doc_block %}
+{% from "_journal.html" import journal_styles, journal_entry %}
+{{ journal_styles() }}
+<style>
+  .jo-page { max-width: 960px; }
+  .jo-filters { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin: 6px 0 10px; font-size: 12px; }
+  .jo-filters a.jr-chip { text-decoration: none; }
+</style>
+<div class="jo-page">
+  {{ breadcrumb([("open reports", None)]) }}
+  <h1 class="page-title" style="margin-top:4px">Open reports {{ doc_toggle('jo-help', 'About open reports') }}</h1>
+  {{ review_banner('journal-open') }}
+  <p class="muted" style="font-size:12.5px;margin:2px 0 8px">Data errors, annotation concerns and data requests that are still open or acknowledged, newest first.</p>
+  {% call doc_block('About open reports', id='jo-help') %}
+    <p>Anyone who signs in can report a problem in the journal of a dataset, collection, gene set, facet or artefact.
+    This page lists the reports across the site that are not closed yet, so curators can work through them and
+    users can see what is already known before relying on a dataset.</p>
+    <p>A <em>data error</em> is a mistake in the data or its metadata, an <em>annotation concern</em> a doubtful cell
+    type label, a <em>data request</em> something people would like added. Admins, curators and a dataset's owner
+    acknowledge, fix or decline them on the dataset's Journal tab; a fixed data error or annotation concern names the
+    changelog line and the new dataset version. You only see reports on things you can see. More in the
+    <a href="/help#journal">help</a>.</p>
+  {% endcall %}
+  <div class="jo-filters" role="group" aria-label="Filter the reports">
+    {% set _qs_type = ('&target_type=' ~ target_type) if target_type else '' %}
+    <a class="jr-chip{% if not category %} jr-on{% endif %}" href="/journal/open{{ ('?target_type=' ~ target_type) if target_type else '' }}">all{% if counts %} <span>{{ counts.values()|sum }}</span>{% endif %}</a>
+    {% for key, label in categories %}<a class="jr-chip jr-report{% if category == key %} jr-on{% endif %}" href="/journal/open?category={{ key }}{{ _qs_type }}">{{ label }}{% if counts.get(key) %} <span>{{ counts.get(key) }}</span>{% endif %}</a>{% endfor %}
+  </div>
+  {% if error == 401 %}
+  <p class="muted">Sign in to see the open reports.</p>
+  {% elif error is not none %}
+  <p class="plot-error">The reports could not be loaded. Try again in a moment.</p>
+  {% elif not issues %}
+  <p class="muted" id="jo-empty">No open reports{% if category %} of this kind{% endif %}.</p>
+  {% else %}
+  <ol class="jr-list" id="jo-list">
+    {% for e in issues %}{{ journal_entry(e, show_target=True) }}{% endfor %}
+  </ol>
+  {% endif %}
+</div>
+{% endblock %}

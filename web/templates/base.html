@@ -870,6 +870,8 @@
                        deployment without MCP links shows no affordance. The
                        label becomes "MCP links" once the user has any. #}
                     {% if ui.mcp %}<a href="/account/mcp" id="mcp-menu-link" style="display:none">Connect an MCP client</a>{% endif %}
+                    {# Hidden until GET /api/journal/status reports the journal on with notes (preview view journal-open). #}
+                    <a href="/journal/open" id="journal-open-menu-link" class="{{ view_class('journal-open') }}" title="{{ view_tip('journal-open', 'Data errors, annotation concerns and data requests that are still open, across the site') }}" style="display:none">Open reports{% if not view_approved('journal-open') %}<small class="exp-badge">preview</small>{% endif %}</a>
                     {% set _issue_url = issue_tracker_url() %}
                     {% if _issue_url %}
                     <a href="{{ _issue_url }}" id="issue-tracker-link" target="_blank" rel="noopener">Report an issue</a>
@@ -889,6 +891,14 @@
     <script>
     // Sign out via Authelia's logout endpoint (clears the SSO session), then
     // land back on the catalogue (which will bounce to the login portal).
+    (function () {
+        var link = document.getElementById('journal-open-menu-link');
+        if (!link || !window.fetch) return;
+        fetch('/api/journal/status', { credentials: 'same-origin' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) { if (d && d.enabled && d.notes && d.signed_in) link.style.display = ''; })
+            .catch(function () {});
+    })();
     (function () {
         var link = document.getElementById('mcp-menu-link');
         if (!link || !window.fetch) return;

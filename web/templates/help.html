@@ -143,6 +143,7 @@
       {% endif %}
       <li><a href="#papers">The paper library</a></li>
       <li><a href="#artefacts">Artefacts</a></li>
+      <li><a href="#journal">Dataset journal</a></li>
       {% if ui.mcp or ui.api %}
       <li><a href="#ai">Working with AI assistants</a>
         <ul>
@@ -219,6 +220,8 @@
     {{ help_topic_html('artefacts') }}
   </details>
 
+  <details class="help-section" id="journal"><summary><h2 class="section-head">Dataset journal</h2></summary>{{ help_topic_html('journal') }}</details>
+
   {% if ui.mcp or ui.api %}
   <details class="help-section" id="ai"><summary><h2 class="section-head">Working with AI assistants</h2></summary>
     {% if ui.mcp %}
@@ -278,6 +281,7 @@
       <tr><td><code>get_dataset_info</code></td><td>Details of one dataset: layers, embeddings, annotation columns.</td></tr>
       <tr><td><code>get_dataset_context</code></td><td>Background before analysing a dataset: metadata, caveats, exact column names, module scores and the source paper's methods.</td></tr>
       <tr><td><code>list_collections</code>, <code>list_artefacts</code>, <code>get_artefact</code></td><td>The collections you can see, and the artefacts (versioned analysis files) of a dataset or collection: what each was made from, its versions and download links for your browser (see <a href="#artefacts">artefacts</a>). Read-only.</td></tr>
+      <tr><td><code>journal_list</code>, <code>journal_add</code>, <code>journal_open_issues</code></td><td>The journal of a dataset (or collection, gene set, facet, artefact): notes, ELN and other links, declared use, artefacts made from it, new versions, and open reports of data errors, annotation concerns and data requests with their status; journal_add writes a note under your name when you ask (see <a href="#journal">dataset journal</a>).</td></tr>
       <tr><td><code>get_collection</code></td><td>One collection: its datasets, citation, the papers linked to it and the number of artefacts.</td></tr>
 {% if ui.facets %}<tr><td><code>list_facets</code>, <code>get_facet</code></td><td>The harmonised annotation columns (facets) of this server, and one facet's definition, controlled values, scopes and values.</td></tr>{% endif %}
 {% if ui.facets %}<tr><td><code>gene_detection</code></td><td>How well a gene is detected per scope and cell type group, with the <a href="#facet-low-detection">low-detection</a> flag.</td></tr>{% endif %}

@@ -98,6 +98,8 @@ for now an SVG wrapping a 256 px PNG.
 | `/api-guide` | how to use the REST API: login (basic auth on /api, netrc, env vars), curl first steps, pyvark, vark, admin-only endpoints and limits, API version; links on to `/api/docs`. Target of the user-menu entry `API` (`#api-menu-link`); the top bar has no API link (removed 2026-10-22, the dropdown renders in every auth mode, so the page stays reachable on auth.mode none too). Examples use `mcp.public_base_url` or the request host, always https; text adapts to `auth.mode` | `api_guide.html` |
 | `/papers/{citekey}` | one library paper: record, summary/topics (draft markers), linked datasets grouped by role with the reason, related papers grouped by kind with evidence, PDF + BibTeX | `paper.html` |
 | `/library` | all library papers, client-side search + role/year/cohort/cell-type filters | `library.html` |
+| `/journal/open` `?category=&target_type=` | open and acknowledged reports across the site (preview `journal-open`), from `GET /api/journal/open`; 404 when the journal is off or has no notes | `journal_open.html` |
+| `/journal/list?db_id=&v=&category=&kind=&status=&before_id=` | HTML fragment of one dataset's journal for the Journal tab | `_journal.html` |
 | `/donor-groups` | every donor group (`GET /donor-groups`) with its datasets marked primary data / reanalysis / unresolved, `#dg-<slug>` anchors; linked from the dataset lineage row, `/facets` and the help page | `donor_groups.html` |
 
 **Paper library UI (API 2.39+).** `dataset_view` fetches `/databases/{id}/papers`
@@ -1170,3 +1172,25 @@ pages resolve).
   `_page_range`) and `more_passages` ("N more matching passages in this paper"). There is no web literature
   search page, so there is no "show all passages" link. Styles `.fd-passages` in `fd_styles`.
 - "show all N" (`?kind=`) now sends `kind=` to `GET /api/search`, so the API computes one group only.
+
+## Dataset journal (2026-10-30, REST 2.49, preview)
+
+- Registry keys `journal` (dataset page Journal tab, between Artefacts and Downloads) and `journal-open` (the
+  `/journal/open` page, linked from the user menu as `#journal-open-menu-link`, hidden until
+  `GET /api/journal/status` says enabled, notes and signed_in). `dataset_view` passes `journal` =
+  `_journal_status(request)` (None when the journal is off, has no notes, or the API has no such route); no tab then.
+- The tab holds the help box `jr-help`, the write form `#jr-new` (category, markdown body, typed links, optional refs:
+  column with a datalist of the obs columns, value, gene or genes, cell type, evidence), `#jr-use` ("I used this
+  dataset", POST `/journal/use` with `tool: anthive web`), category chips `#jr-filters` and kind and status selects.
+  Entries load lazily on `anthive:tab-activated` from `/journal/list` (server-rendered with `_journal.html`:
+  `journal_styles`, `journal_entry`; bodies through `safe_markdown.render`, links through `safe_href` and http(s)
+  only, everything else autoescaped). Raw fields for the edit form travel as a `script.jr-data` JSON block; the page
+  script only sets `.value` / `textContent`. Writes go straight to `/api` (POST note, replies, status, hide; PATCH
+  edit) and reload the fragment. "older entries" pages with `before_id`.
+- Rights only decide which buttons show; the API decides. Status controls for `may_triage`, `is_admin` or
+  `names_visible` from the downloads route (true only for admins and the dataset's owner); hide/show for admins;
+  edit when the entry says `may_edit`. Fixing a data error or annotation concern needs the changelog line and a new
+  version (checked in the form and by the API). An entry written about an older dataset version than the page's
+  shows `jr-ver-old` (`_journal_version_older`).
+- Tests: `tests/test_web_journal.py`. Local write checks against a scratch API need the rerouted request to drop
+  `Origin` and `Sec-Fetch-*` (the API's cross-site guard refuses a POST whose Origin is the :8081 page).

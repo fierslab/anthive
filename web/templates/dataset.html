@@ -556,6 +556,7 @@
   {% endif %}
   {% if papers %}<button type="button" class="tab-btn" data-tab="papers" role="tab" id="tab-btn-papers">Papers<span class="tab-count">{{ papers|length }}</span></button>{% endif %}
   <button type="button" class="tab-btn {{ view_class('artefacts') }}{% if not artefacts %} tab-empty{% endif %}" data-tab="artefacts" role="tab" id="tab-btn-artefacts" title="{{ view_tip('artefacts', 'Analysis files deposited with this dataset: DE tables, figures, tables, notebooks, reports, models.') }}">Artefacts{% if artefacts %}<span class="tab-count">{{ artefacts|length }}</span>{% endif %}</button>
+  {% if journal %}<button type="button" class="tab-btn {{ view_class('journal') }}" data-tab="journal" role="tab" id="tab-btn-journal" title="{{ view_tip('journal', 'Notes, reports of data errors, links and events about this dataset, and its download counts.') }}">Journal</button>{% endif %}
   {# Downloads is always shown. The JS (loadFiles) adds .tab-empty when /files lists nothing and there are
      no paper PDFs: greyed, still clickable, the panel says there is nothing to download. #}
   <button type="button" class="tab-btn"        data-tab="downloads" role="tab" id="tab-btn-downloads">Downloads</button>
@@ -1268,6 +1269,379 @@
   <p class="muted">No artefacts for this dataset.</p>
   {% endif %}
 </section>
+
+{# ── Journal tab (REST 2.49; preview view `journal`). Shown only when GET /journal/status says the journal is on
+   and takes notes (a site with a login). The entries come from /journal/list (browser.journal_list_fragment,
+   _journal.html) when the tab opens; writes go from this script straight to /api. Note text is user data:
+   the fragment renders it safely, and this script only ever sets textContent or form values. ─────────── #}
+{% if journal %}
+{% from "_journal.html" import journal_styles %}
+{% from "_macros.html" import review_banner as _jr_banner, doc_toggle as _jr_toggle, doc_block as _jr_block %}
+<section class="tab-panel" id="tab-journal" role="tabpanel">
+  {{ _jr_banner('journal') }}
+  {{ journal_styles() }}
+  <style>
+    .jr-toolbar { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 6px 0 4px; }
+    .jr-btn, .jr-form button { font-family: var(--font); font-size: 12.5px; padding: 4px 11px; border-radius: 5px;
+                               border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; }
+    .jr-btn:hover, .jr-form button:hover { background: var(--hover); }
+    .jr-btn.primary, .jr-form button[type=submit] { background: var(--link); border-color: var(--link); color: #fff; }
+    .jr-form select, .jr-form input[type=text], .jr-form input[type=url], .jr-form textarea, .jr-filters select {
+      font-family: var(--font); font-size: 12.5px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px;
+      background: var(--bg); color: var(--text); }
+    .jr-form button.jr-add-link, .jr-form button.jr-del-link { border: none; background: none; padding: 0 2px;
+                                                               color: var(--link); font-size: 12px; }
+    .jr-filters { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin: 4px 0 8px; font-size: 12px; }
+    .jr-filters select { font-size: 12px; }
+    .jr-filters .jr-sep { color: var(--text-muted); margin: 0 4px; }
+    .jr-form { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin: 8px 0; font-size: 12.5px;
+               max-width: 760px; }
+    .jr-form label { display: block; margin: 6px 0 2px; color: var(--text-muted); }
+    .jr-form textarea { width: 100%; box-sizing: border-box; min-height: 90px; font: inherit; font-size: 13px; }
+    .jr-form input[type=text], .jr-form input[type=url] { width: 100%; box-sizing: border-box; }
+    .jr-form .jr-row { display: grid; grid-template-columns: 9em 1fr 1fr auto; gap: 4px; margin: 3px 0; }
+    .jr-form .jr-refgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+    .jr-form .jr-formbtns { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .jr-form .msg { color: var(--text-muted); }
+    .jr-form .msg.err { color: var(--effect-up-ink, #92400e); }
+    .jr-dl-toggle { background: none; border: none; padding: 0; font: inherit; color: var(--link, #2f6f6b); cursor: pointer; }
+    @media (max-width: 600px) { .jr-form .jr-row { grid-template-columns: 1fr; } .jr-form .jr-refgrid { grid-template-columns: 1fr; } }
+  </style>
+  <h2 class="section-head">Journal {{ _jr_toggle('jr-help', 'About the journal') }}</h2>
+  <p class="muted" style="margin:0 0 6px;font-size:12.5px">Notes and reports from the people who use this dataset, and what the site recorded about it.</p>
+  {% call _jr_block('About the journal', id='jr-help') %}
+    <p>The journal collects what people learn about this dataset: comments, questions, findings, links to an ELN
+    experiment, a protocol or a manuscript, and reports of problems. The site adds events of its own (a new
+    version, an artefact made from the dataset, someone declaring that they used it) and counts the downloads.</p>
+    <p><strong>Reporting a problem.</strong> Choose <em>data error</em> for a mistake in the data or its metadata (for
+    example a mislabelled sex or a wrong mapping), <em>annotation concern</em> for a cell type label you doubt, and
+    <em>data request</em> for something you would like added. A report starts as open; admins, curators and the
+    dataset's owner move it to acknowledged, fixed or declined. A data error or annotation concern only counts as fixed
+    with the changelog line and the new dataset version that holds the fix.</p>
+    <p><strong>Versions.</strong> Every note records the dataset version it was written about. A note about an older
+    version is flagged: check whether it still applies to the data you see now.</p>
+    <p><strong>Who sees what.</strong> Everyone who can sign in to this site reads every note, also through an AI
+    assistant connected to this site (which sends the text to its provider). Only the author edits a note and the
+    earlier text is kept; admins can hide a note, nothing is deleted. Download counts are shown to everyone; only
+    admins and the dataset's owner see who downloaded. Text is shown as you wrote it, with simple markdown
+    (bold, lists, links) and no HTML. More in the <a href="/help#journal">help</a>.</p>
+  {% endcall %}
+  {% if journal.signed_in %}
+  <div class="jr-toolbar">
+    <button type="button" class="jr-btn primary" id="jr-new-open" aria-expanded="false" aria-controls="jr-new">Write a note</button>
+    <button type="button" class="jr-btn" id="jr-use-open" aria-expanded="false" aria-controls="jr-use" title="Record that you used this dataset in an analysis, with an optional ELN link">I used this dataset</button>
+  </div>
+  <form class="jr-form" id="jr-new" hidden>
+    <label for="jr-new-category">Kind of note</label>
+    <select id="jr-new-category" name="category">
+      {% for cat in journal.note_categories or [] %}<option value="{{ cat }}">{{ journal_category_labels.get(cat, cat) }}</option>{% endfor %}
+    </select>
+    <label for="jr-new-body">Text <span class="muted-2">(simple markdown, up to {{ '{:,}'.format(journal.max_body_chars or 10000) }} characters)</span></label>
+    <textarea id="jr-new-body" name="body" maxlength="{{ journal.max_body_chars or 10000 }}"></textarea>
+    <label>Links <span class="muted-2">(http or https)</span></label>
+    <div class="jr-links-edit"></div>
+    <button type="button" class="jr-add-link">add a link</button>
+    <details style="margin-top:6px"><summary class="muted" style="cursor:pointer">Point at the data (optional)</summary>
+      <div class="jr-refgrid">
+        <div><label for="jr-new-column">Column</label><input type="text" id="jr-new-column" name="ref_column" list="jr-columns" maxlength="200"></div>
+        <div><label for="jr-new-value">Value</label><input type="text" id="jr-new-value" name="ref_value" maxlength="200"></div>
+        <div><label for="jr-new-gene">Gene or genes (comma separated)</label><input type="text" id="jr-new-gene" name="ref_gene" maxlength="2000"></div>
+        <div><label for="jr-new-celltype">Cell type</label><input type="text" id="jr-new-celltype" name="ref_cell_type" maxlength="200"></div>
+      </div>
+      <label for="jr-new-evidence">Evidence <span class="muted-2">(a plot link, a figure in a paper, a check you ran)</span></label>
+      <input type="text" id="jr-new-evidence" name="ref_evidence" maxlength="2000">
+    </details>
+    <div class="jr-formbtns"><button type="submit">Save note</button><button type="button" class="jr-cancel">cancel</button><span class="msg" role="status"></span></div>
+  </form>
+  <datalist id="jr-columns">{% for col in obs_columns %}<option value="{{ col.name }}">{% endfor %}</datalist>
+  <form class="jr-form" id="jr-use" hidden>
+    <p style="margin:0 0 4px">Record that you used this dataset (version {{ dataset_version or 'unknown' }}) in an analysis. This adds an event under your name.</p>
+    <label for="jr-use-note">What for <span class="muted-2">(optional)</span></label>
+    <textarea id="jr-use-note" name="note" maxlength="{{ journal.max_body_chars or 10000 }}" style="min-height:50px"></textarea>
+    <label for="jr-use-eln">ELN entry or other link <span class="muted-2">(optional)</span></label>
+    <input type="url" id="jr-use-eln" name="eln" placeholder="https://" maxlength="2000">
+    <div class="jr-formbtns"><button type="submit">Record use</button><button type="button" class="jr-cancel">cancel</button><span class="msg" role="status"></span></div>
+  </form>
+  {% endif %}
+  <div class="jr-filters" id="jr-filters" role="group" aria-label="Filter the journal by category">
+    <button type="button" class="jr-chip jr-on" data-cat="">all</button>
+    {% for cat in (journal.note_categories or []) + ['used-in-analysis', 'artefact-made', 'deposited', 'version-published'] %}<button type="button" class="jr-chip{% if cat in (journal.actionable_categories or []) %} jr-report{% endif %}" data-cat="{{ cat }}">{{ journal_category_labels.get(cat, cat) }}</button>{% endfor %}
+  </div>
+  <div class="jr-filters">
+    <label for="jr-f-kind" class="muted">show</label>
+    <select id="jr-f-kind"><option value="">notes and events</option><option value="note">notes only</option><option value="event">events only</option></select>
+    <label for="jr-f-status" class="muted">status</label>
+    <select id="jr-f-status"><option value="">any</option>{% for st in journal.statuses or [] %}<option value="{{ st }}">{{ st }}</option>{% endfor %}</select>
+  </div>
+  <div id="jr-list" aria-live="polite"><p class="muted">loading the journal…</p></div>
+
+  <template id="jr-link-row"><div class="jr-row">
+    <select name="link_type">{% for lt in journal.link_types or [] %}<option value="{{ lt }}">{{ journal_link_type_labels.get(lt, lt) }}</option>{% endfor %}</select>
+    <input type="url" name="link_url" placeholder="https://" maxlength="2000" aria-label="Link address">
+    <input type="text" name="link_label" placeholder="label (optional)" maxlength="200" aria-label="Link label">
+    <button type="button" class="jr-del-link" title="Remove this link">remove</button>
+  </div></template>
+  <template id="jr-reply-form"><form class="jr-form">
+    <label>Reply as</label>
+    <select name="category">{% for cat in journal_reply_categories %}<option value="{{ cat }}">{{ journal_category_labels.get(cat, cat) }}</option>{% endfor %}</select>
+    <label>Text</label><textarea name="body" maxlength="{{ journal.max_body_chars or 10000 }}"></textarea>
+    <label>Links</label><div class="jr-links-edit"></div><button type="button" class="jr-add-link">add a link</button>
+    <div class="jr-formbtns"><button type="submit">Save reply</button><button type="button" class="jr-cancel">cancel</button><span class="msg" role="status"></span></div>
+  </form></template>
+  <template id="jr-edit-form"><form class="jr-form">
+    <label>Text</label><textarea name="body" maxlength="{{ journal.max_body_chars or 10000 }}"></textarea>
+    <label>Links</label><div class="jr-links-edit"></div><button type="button" class="jr-add-link">add a link</button>
+    <p class="muted-2" style="margin:6px 0 0">The earlier text is kept in the history.</p>
+    <div class="jr-formbtns"><button type="submit">Save changes</button><button type="button" class="jr-cancel">cancel</button><span class="msg" role="status"></span></div>
+  </form></template>
+  <template id="jr-status-form"><form class="jr-form">
+    <label>New status</label>
+    <select name="status">{% for st in journal.statuses or [] %}<option value="{{ st }}">{{ st }}</option>{% endfor %}</select>
+    <label>Note <span class="muted-2">(optional, shown with the status)</span></label><input type="text" name="note" maxlength="2000">
+    <div class="jr-fix" hidden>
+      <label>Changelog line of the fix <span class="muted-2">(required)</span></label><input type="text" name="changelog_ref" maxlength="2000">
+      <label>Dataset version that holds the fix <span class="muted-2">(required, a newer version than the one reported on)</span></label><input type="text" name="fixed_in_version" maxlength="100" value="{{ dataset_version or '' }}">
+    </div>
+    <div class="jr-formbtns"><button type="submit">Set status</button><button type="button" class="jr-cancel">cancel</button><span class="msg" role="status"></span></div>
+  </form></template>
+  <template id="jr-hide-form"><form class="jr-form">
+    <label>Why hide this entry <span class="muted-2">(admins see the reason)</span></label><input type="text" name="reason" maxlength="2000">
+    <div class="jr-formbtns"><button type="submit">Hide</button><button type="button" class="jr-cancel">cancel</button><span class="msg" role="status"></span></div>
+  </form></template>
+  <script>
+  (function () {
+    var DB_ID = {{ db_id|tojson }}, VERSION = {{ (dataset_version or '')|tojson }};
+    var NEEDS_CHANGELOG = {{ journal_needs_changelog|list|tojson }};
+    var dbPath = DB_ID.split('/').map(encodeURIComponent).join('/');
+    var panel = document.getElementById('tab-journal'), list = document.getElementById('jr-list');
+    var state = {category: '', kind: '', status: ''}, loaded = false, raw = {};
+
+    function readRaw(root) {
+      root.querySelectorAll('script.jr-data').forEach(function (node) {
+        try { var data = JSON.parse(node.textContent || '{}'); Object.keys(data).forEach(function (k) { raw[k] = data[k]; }); }
+        catch (_) {}
+      });
+    }
+    function query(beforeId) {
+      var params = new URLSearchParams({db_id: DB_ID, v: VERSION});
+      if (state.category) params.set('category', state.category);
+      if (state.kind) params.set('kind', state.kind);
+      if (state.status) params.set('status', state.status);
+      if (beforeId) params.set('before_id', beforeId);
+      return '/journal/list?' + params.toString();
+    }
+    function load() {
+      loaded = true;
+      list.setAttribute('aria-busy', 'true');
+      fetch(query(), {credentials: 'same-origin'}).then(function (r) { return r.text(); }).then(function (html) {
+        raw = {};
+        list.innerHTML = html;          // server-rendered, user text escaped there (_journal.html)
+        readRaw(list);
+      }).catch(function () {
+        list.innerHTML = '<p class="plot-error">The journal could not be loaded. Try again in a moment.</p>';
+      }).then(function () { list.removeAttribute('aria-busy'); });
+    }
+    function loadOlder(button) {
+      button.disabled = true;
+      fetch(query(button.getAttribute('data-before')), {credentials: 'same-origin'}).then(function (r) { return r.text(); }).then(function (html) {
+        var holder = document.createElement('div');
+        holder.innerHTML = html;
+        readRaw(holder);
+        var target = list.querySelector('ol.jr-list'), more = holder.querySelector('ol.jr-list');
+        if (target && more) while (more.firstChild) target.appendChild(more.firstChild);
+        var p = button.closest('.jr-more'), next = holder.querySelector('.jr-more');
+        if (next) p.replaceWith(next); else p.remove();
+      }).catch(function () { button.disabled = false; });
+    }
+
+    // ── writing ──
+    function say(msg, text, isError) { msg.textContent = text; msg.classList.toggle('err', !!isError); }
+    function send(method, url, payload, msg, done) {
+      say(msg, 'saving');
+      fetch(url, {method: method, credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify(payload)}).then(function (response) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          if (response.ok) { say(msg, 'saved'); done(body); return; }
+          var text = body.message || (typeof body.detail === 'string' ? body.detail : '') || ('refused (' + response.status + ')');
+          if (response.status === 401) text = 'Sign in to write in the journal.';
+          if (response.status === 429) text = 'Too many entries in a minute. Wait a moment and try again.';
+          say(msg, text, true);
+        });
+      }).catch(function () { say(msg, 'The request failed. Try again.', true); });
+    }
+    function addLinkRow(form, link) {
+      var tpl = document.getElementById('jr-link-row');
+      var row = tpl.content.firstElementChild.cloneNode(true);
+      if (link) {
+        row.querySelector('[name=link_type]').value = link.type || 'other';
+        row.querySelector('[name=link_url]').value = link.url || '';
+        row.querySelector('[name=link_label]').value = link.label || '';
+      }
+      form.querySelector('.jr-links-edit').appendChild(row);
+    }
+    function readLinks(form) {
+      var out = [];
+      form.querySelectorAll('.jr-links-edit .jr-row').forEach(function (row) {
+        var url = row.querySelector('[name=link_url]').value.trim();
+        if (!url) return;
+        var link = {url: url, type: row.querySelector('[name=link_type]').value};
+        var label = row.querySelector('[name=link_label]').value.trim();
+        if (label) link.label = label;
+        out.push(link);
+      });
+      return out;
+    }
+    function readRefs(form) {
+      var refs = {};
+      [['ref_column', 'column'], ['ref_value', 'value'], ['ref_cell_type', 'cell_type'], ['ref_evidence', 'evidence']].forEach(function (pair) {
+        var field = form.querySelector('[name=' + pair[0] + ']');
+        if (field && field.value.trim()) refs[pair[1]] = field.value.trim();
+      });
+      var geneField = form.querySelector('[name=ref_gene]');
+      if (geneField && geneField.value.trim()) {
+        var genes = geneField.value.split(/[\s,;]+/).filter(Boolean);
+        if (genes.length === 1) refs.gene = genes[0]; else refs.genes = genes;
+      }
+      return refs;
+    }
+    function wireLinkButtons(form) {
+      form.addEventListener('click', function (event) {
+        if (event.target.closest('.jr-add-link')) { addLinkRow(form); }
+        var del = event.target.closest('.jr-del-link');
+        if (del) del.closest('.jr-row').remove();
+      });
+    }
+    function toggleForm(openBtn, form, on) {
+      form.hidden = !on;
+      openBtn.setAttribute('aria-expanded', on ? 'true' : 'false');
+      if (on) { var first = form.querySelector('textarea, select, input'); if (first) first.focus(); }
+    }
+
+    var newForm = document.getElementById('jr-new'), newOpen = document.getElementById('jr-new-open');
+    if (newForm && newOpen) {
+      wireLinkButtons(newForm);
+      newOpen.addEventListener('click', function () { toggleForm(newOpen, newForm, newForm.hidden); });
+      newForm.querySelector('.jr-cancel').addEventListener('click', function () { toggleForm(newOpen, newForm, false); });
+      newForm.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var payload = {category: newForm.category.value, body: newForm.body.value, links: readLinks(newForm), refs: readRefs(newForm)};
+        send('POST', '/api/databases/' + dbPath + '/journal', payload, newForm.querySelector('.msg'), function () {
+          newForm.reset();
+          newForm.querySelector('.jr-links-edit').innerHTML = '';
+          toggleForm(newOpen, newForm, false);
+          load();
+        });
+      });
+    }
+    var useForm = document.getElementById('jr-use'), useOpen = document.getElementById('jr-use-open');
+    if (useForm && useOpen) {
+      useOpen.addEventListener('click', function () { toggleForm(useOpen, useForm, useForm.hidden); });
+      useForm.querySelector('.jr-cancel').addEventListener('click', function () { toggleForm(useOpen, useForm, false); });
+      useForm.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var payload = {note: useForm.note.value, tool: 'anthive web'};
+        var eln = useForm.eln.value.trim();
+        if (eln) payload.links = [{url: eln, type: 'eln', label: 'ELN entry'}];
+        send('POST', '/api/databases/' + dbPath + '/journal/use', payload, useForm.querySelector('.msg'), function () {
+          useForm.reset();
+          toggleForm(useOpen, useForm, false);
+          load();
+        });
+      });
+    }
+
+    // per-entry actions: one form at a time in the entry's slot
+    function openEntryForm(entry, kind) {
+      var slot = entry.querySelector(':scope > .jr-slot');
+      if (!slot) return;
+      if (slot.firstChild && slot.firstChild.dataset.kind === kind) { slot.innerHTML = ''; return; }
+      if (kind === 'unhide') {
+        var msg = document.createElement('span'); msg.className = 'msg'; slot.innerHTML = ''; slot.appendChild(msg);
+        send('POST', '/api/journal/entries/' + entry.dataset.id + '/hide', {hidden: false}, msg, load);
+        return;
+      }
+      var tpl = document.getElementById('jr-' + kind + '-form');
+      var form = tpl.content.firstElementChild.cloneNode(true);
+      form.dataset.kind = kind;
+      slot.innerHTML = '';
+      slot.appendChild(form);
+      wireLinkButtons(form);
+      var id = entry.dataset.id, data = raw[id] || {};
+      if (kind === 'edit') {
+        form.body.value = data.body || '';
+        (data.links || []).forEach(function (link) { addLinkRow(form, link); });
+      }
+      if (kind === 'status') {
+        var fix = form.querySelector('.jr-fix'), needs = NEEDS_CHANGELOG.indexOf(entry.dataset.category) >= 0;
+        var next = {open: 'acknowledged', acknowledged: 'fixed'}[entry.dataset.status || 'open'];
+        if (next) form.status.value = next;
+        var sync = function () { fix.hidden = !(needs && form.status.value === 'fixed'); };
+        form.status.addEventListener('change', sync); sync();
+      }
+      form.querySelector('.jr-cancel').addEventListener('click', function () { slot.innerHTML = ''; });
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var msg = form.querySelector('.msg'), base = '/api/journal/entries/' + id;
+        if (kind === 'reply') {
+          send('POST', base + '/replies', {category: form.category.value, body: form.body.value, links: readLinks(form)}, msg, load);
+        } else if (kind === 'edit') {
+          send('PATCH', base, {body: form.body.value, links: readLinks(form), refs: data.refs || {}}, msg, load);
+        } else if (kind === 'status') {
+          var payload = {status: form.status.value, note: form.note.value};
+          if (!form.querySelector('.jr-fix').hidden) {
+            payload.changelog_ref = form.changelog_ref.value.trim();
+            payload.fixed_in_version = form.fixed_in_version.value.trim();
+            if (!payload.changelog_ref || !payload.fixed_in_version) {
+              say(msg, 'A fix needs the changelog line and the new dataset version.', true); return;
+            }
+            if (entry.dataset.version && payload.fixed_in_version === entry.dataset.version) {
+              say(msg, 'This was reported on version ' + entry.dataset.version + '; a fix is a newer version.', true); return;
+            }
+          }
+          send('POST', base + '/status', payload, msg, load);
+        } else if (kind === 'hide') {
+          send('POST', base + '/hide', {hidden: true, reason: form.reason.value}, msg, load);
+        }
+      });
+      var first = form.querySelector('textarea, select, input'); if (first) first.focus();
+    }
+    list.addEventListener('click', function (event) {
+      var act = event.target.closest('.jr-act');
+      if (act) { openEntryForm(act.closest('.jr-entry'), act.dataset.act); return; }
+      var chip = event.target.closest('[data-filter-category]');
+      if (chip) { setCategory(chip.getAttribute('data-filter-category')); return; }
+      var older = event.target.closest('.jr-older');
+      if (older) { loadOlder(older); return; }
+      var dl = event.target.closest('.jr-dl-toggle');
+      if (dl) {
+        var box = document.getElementById('jr-dl-names');
+        if (box) { box.hidden = !box.hidden; dl.setAttribute('aria-expanded', box.hidden ? 'false' : 'true'); }
+      }
+    });
+
+    // ── filters ──
+    var filters = document.getElementById('jr-filters');
+    function setCategory(cat) {
+      state.category = state.category === cat ? '' : cat;
+      filters.querySelectorAll('.jr-chip').forEach(function (b) { b.classList.toggle('jr-on', b.dataset.cat === state.category); });
+      load();
+    }
+    filters.addEventListener('click', function (event) {
+      var chip = event.target.closest('.jr-chip');
+      if (chip) setCategory(chip.dataset.cat);
+    });
+    document.getElementById('jr-f-kind').addEventListener('change', function (e) { state.kind = e.target.value; load(); });
+    document.getElementById('jr-f-status').addEventListener('change', function (e) { state.status = e.target.value; load(); });
+
+    // lazy: fetch when the tab opens (or at once when the page opened on #journal)
+    document.addEventListener('anthive:tab-activated', function (e) {
+      if (e.detail && e.detail.name === 'journal' && !loaded) load();
+    });
+    if (panel.classList.contains('active')) load();
+  })();
+  </script>
+</section>
+{% endif %}
 
 {# ── Downloads tab ────────────────────────────────────────────────────── #}
 <section class="tab-panel" id="tab-downloads" role="tabpanel">

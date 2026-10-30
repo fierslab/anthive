@@ -23,5 +23,6 @@ body_html: |
     <li><strong>Versions.</strong> A note on a dataset records the dataset version it was written against. When a newer version exists, check whether an open report still applies.</li>
     <li><strong>Events.</strong> The site adds an event when a new dataset version is published, when an artefact is made from the dataset, and when someone declares from vark, pyvark or a notebook that they used the dataset in an analysis. Use is never inferred from browsing or queries.</li>
     <li><strong>Downloads.</strong> Every download of the h5ad, a static file or an artefact is counted. Ordinary users see how many downloads and how many people; admins and the dataset's depositor see who downloaded what and when. Download records are deleted after two years (the site's setting <code>journal.download_retention_days</code>).</li>
+    <li><strong>Where to find it.</strong> On the web, the Journal tab of a dataset page lists its entries newest first, with replies under each note, filters by kind of note and status, the download counts, and buttons to write a note or record that you used the dataset. Open reports across the site are under <em>Open reports</em> in the account menu.</li>
     <li><strong>Moderation.</strong> Nothing is deleted. An admin can hide a note, which then shows only to admins with the reason.</li>
   </ul>

@@ -110,6 +110,8 @@ VIEW_REGISTRY: Dict[str, str] = {
     'search': 'Search results: datasets, genes, gene sets and papers for the words typed',
     'browse-disease': 'Browse by disease: dataset counts per disease and the dataset list of one disease',
     'browse-celltype': 'Browse by cell type: dataset counts per cell type and the dataset list of one cell type',
+    'journal': 'Dataset page, Journal tab: notes, reports, events and download counts of the dataset',
+    'journal-open': 'Open reports: data errors, annotation concerns and data requests across the site',
 }
 APPROVED_VIEWS = frozenset({
     'datasets', 'genes', 'genesets', 'gene-expression', 'geneset-expression',
@@ -3169,6 +3171,247 @@ async def artefact_page(request: Request, group_id: str, scope: str, artefact_id
     })
 
 
+# ── Dataset journal (REST 2.49.0, doc/DESIGN_dataset_journal.md) ───────────────
+#
+# Notes, reports and events per dataset, plus download counts. The API decides everything (who reads, who writes,
+# who sets a status, who sees download names); every fetch goes out as the visitor. Note text, links and refs are
+# user data: bodies through safe_markdown.render, everything else autoescaped, links through safe_markdown.safe_href.
+# Writes are made by the page's script straight to /api (the proxy adds the identity there too).
+
+JOURNAL_CATEGORY_LABELS = {
+    'comment': 'comment', 'question': 'question', 'finding': 'finding', 'link': 'link', 'used-in': 'used in',
+    'data-error': 'data error', 'annotation-concern': 'annotation concern', 'data-request': 'data request',
+    'downloaded': 'downloaded', 'used-in-analysis': 'used in an analysis', 'artefact-made': 'artefact made',
+    'deposited': 'deposited', 'version-published': 'new version',
+}
+JOURNAL_LINK_TYPE_LABELS = {'eln': 'ELN', 'doi': 'DOI', 'artefact': 'artefact', 'protocol': 'protocol',
+                            'manuscript': 'manuscript', 'other': 'link'}
+JOURNAL_STATUS_LABELS = {'open': 'open', 'acknowledged': 'acknowledged', 'fixed': 'fixed', 'declined': 'declined'}
+JOURNAL_REF_LABELS = (('column', 'column'), ('value', 'value'), ('gene', 'gene'), ('genes', 'genes'),
+                      ('cell_type', 'cell type'), ('evidence', 'evidence'))
+#: categories a reply may have, and the reports that need a changelog line to be fixed (lib/journal.py)
+JOURNAL_REPLY_CATEGORIES = ('comment', 'question', 'finding', 'link')
+JOURNAL_NEEDS_CHANGELOG = ('data-error', 'annotation-concern')
+JOURNAL_ACTIONABLE = ('data-error', 'annotation-concern', 'data-request')
+JOURNAL_PAGE_SIZE = 50
+templates.env.globals['journal_category_labels'] = JOURNAL_CATEGORY_LABELS
+templates.env.globals['journal_link_type_labels'] = JOURNAL_LINK_TYPE_LABELS
+templates.env.globals['journal_reply_categories'] = JOURNAL_REPLY_CATEGORIES
+templates.env.globals['journal_needs_changelog'] = JOURNAL_NEEDS_CHANGELOG
+
+
+def _journal_api(request: Request, path: str) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
+    """GET a journal route as the visitor: (payload, None) or (None, HTTP status; 0 when the API is unreachable)."""
+    try:
+        return _api_get_as_user(request, _api_url(request), path) or {}, None
+    except requests.HTTPError as exc:
+        response = getattr(exc, 'response', None)
+        return None, (response.status_code if response is not None else 404)
+    except Exception:
+        return None, 0
+
+
+def _journal_status(request: Request) -> Optional[Dict[str, Any]]:
+    """``GET /journal/status`` when the journal is on and takes notes (a site with a login), else None."""
+    status, _error = _journal_api(request, '/journal/status')
+    if not status or not status.get('enabled') or not status.get('notes'):
+        return None
+    return status
+
+
+def _version_key(value: Any) -> Optional[Tuple[int, ...]]:
+    """(1, 2, 0) for '1.2.0' or 'v1.2'; None for a version that is not dotted numbers."""
+    match = re.fullmatch(r'v?(\d+(?:\.\d+)*)', str(value or '').strip())
+    return tuple(int(part) for part in match.group(1).split('.')) if match else None
+
+
+def _journal_version_older(entry_version: Any, current_version: Any) -> bool:
+    """True when an entry was written about a dataset version older than the current one."""
+    if not entry_version or not current_version or str(entry_version) == str(current_version):
+        return False
+    entry_key, current_key = _version_key(entry_version), _version_key(current_version)
+    if entry_key is None or current_key is None:
+        return True    # different, not comparable: flag it so the reader checks
+    width = max(len(entry_key), len(current_key))
+    return entry_key + (0,) * (width - len(entry_key)) < current_key + (0,) * (width - len(current_key))
+
+
+def _journal_when(stamp: Any) -> str:
+    """'2026-10-30 14:05' from an ISO time (UTC as stored)."""
+    text = str(stamp or '')
+    return text[:16].replace('T', ' ') if len(text) >= 16 else text
+
+
+def _journal_target_url(target_type: str, target_id: str) -> Optional[str]:
+    """The web page of a journal target, None when it has none."""
+    target_id = str(target_id or '')
+    if target_type == 'dataset' and '/' in target_id:
+        group, file_id = target_id.split('/', 1)
+        return f"/browse/{url_quote(group, safe='')}/{url_quote(file_id, safe='')}#journal"
+    if target_type == 'collection' and target_id:
+        return f"/browse/{url_quote(target_id, safe='')}"
+    if target_type == 'artefact' and target_id.count('/') == 2:
+        return '/artefacts/' + '/'.join(url_quote(part, safe='') for part in target_id.split('@')[0].split('/'))
+    if target_type == 'geneset' and target_id.count('/') == 2:
+        return '/genesets/' + '/'.join(url_quote(part, safe='') for part in target_id.split('/'))
+    if target_type == 'facet' and target_id and _ui()['facets']:
+        return f"/facets/{url_quote(target_id, safe='')}"
+    return None
+
+
+def _journal_entry_view(entry: Dict[str, Any], current_version: Optional[str]) -> Dict[str, Any]:
+    """One journal entry made safe and ready for _journal.html (replies nested, same shape)."""
+    links = []
+    for link in entry.get('links') or []:
+        if not isinstance(link, dict):
+            continue
+        href = safe_markdown.safe_href(str(link.get('url') or ''))
+        if not href or not href.lower().startswith(('http://', 'https://')):
+            continue
+        link_type = str(link.get('type') or 'other')
+        links.append({'href': href, 'label': safe_markdown.plain(link.get('label'), 200) or href,
+                      'type': link_type, 'type_label': JOURNAL_LINK_TYPE_LABELS.get(link_type, link_type)})
+    refs_raw = entry.get('refs') if isinstance(entry.get('refs'), dict) else {}
+    refs = []
+    for key, label in JOURNAL_REF_LABELS:
+        value = refs_raw.get(key)
+        if value in (None, '', []):
+            continue
+        if key == 'genes' and isinstance(value, list):
+            refs.append({'key': key, 'label': label, 'genes': [str(gene)[:60] for gene in value[:100]]})
+        elif key == 'gene':
+            refs.append({'key': key, 'label': label, 'genes': [str(value)[:60]]})
+        else:
+            refs.append({'key': key, 'label': label, 'value': str(value)[:2000]})
+    category = str(entry.get('category') or '')
+    about = entry.get('about') if isinstance(entry.get('about'), dict) else None
+    version = entry.get('dataset_version')
+    status = entry.get('status')
+    return {
+        'id': entry.get('id'), 'kind': entry.get('kind'), 'is_event': entry.get('kind') == 'event',
+        'category': category, 'category_label': JOURNAL_CATEGORY_LABELS.get(category, category.replace('-', ' ')),
+        'author': str(entry.get('author') or ''), 'when': _journal_when(entry.get('created')),
+        'created': entry.get('created'), 'edited': _journal_when(entry.get('edited')) if entry.get('edited') else None,
+        'body_html': safe_markdown.render(entry.get('body')), 'links': links, 'refs': refs,
+        'version': version, 'version_older': _journal_version_older(version, current_version),
+        'actionable': category in JOURNAL_ACTIONABLE and not entry.get('parent_id'),
+        'needs_changelog': category in JOURNAL_NEEDS_CHANGELOG,
+        'status': status, 'status_label': JOURNAL_STATUS_LABELS.get(status or '', status),
+        'status_by': entry.get('status_by'), 'status_when': _journal_when(entry.get('status_at')),
+        'status_note': entry.get('status_note'), 'fixed_in_version': entry.get('fixed_in_version'),
+        'changelog_ref': entry.get('changelog_ref'),
+        'about_url': _journal_target_url(about.get('type'), about.get('id')) if about else None,
+        'about_id': about.get('id') if about else None,
+        'hidden': bool(entry.get('hidden')), 'hidden_by': entry.get('hidden_by'),
+        'hidden_when': _journal_when(entry.get('hidden_at')), 'hidden_reason': entry.get('hidden_reason'),
+        'may_edit': bool(entry.get('may_edit')),
+        'target_type': entry.get('target_type'), 'target_id': entry.get('target_id'),
+        'target_url': _journal_target_url(str(entry.get('target_type') or ''), str(entry.get('target_id') or '')),
+        # what the edit form starts from (the page script reads it as JSON, never as HTML)
+        'raw': {'body': entry.get('body') or '', 'links': [link for link in entry.get('links') or []
+                                                           if isinstance(link, dict) and str(link.get('url') or '')
+                                                           .lower().startswith(('http://', 'https://'))],
+                'refs': refs_raw},
+        'replies': [_journal_entry_view(reply, current_version) for reply in entry.get('replies') or []
+                    if isinstance(reply, dict)],
+    }
+
+
+def _journal_csv_param(value: Optional[str], allowed: Any) -> str:
+    """A comma list of allowed words only (the filters are passed on to the API)."""
+    words = [word.strip().lower() for word in str(value or '').split(',') if word.strip()]
+    return ','.join(word for word in words if word in allowed)
+
+
+@router.get("/journal/list", response_class=HTMLResponse)
+async def journal_list_fragment(request: Request, db_id: str, category: Optional[str] = None,
+                                kind: Optional[str] = None, status: Optional[str] = None,
+                                before_id: Optional[int] = None, v: Optional[str] = None):
+    """The entries of one dataset's journal as an HTML fragment for the Journal tab (preview view ``journal``)."""
+    params: Dict[str, Any] = {'limit': JOURNAL_PAGE_SIZE}
+    category = _journal_csv_param(category, JOURNAL_CATEGORY_LABELS)
+    status = _journal_csv_param(status, JOURNAL_STATUS_LABELS)
+    if category:
+        params['category'] = category
+    if status:
+        params['status'] = status
+    if kind in ('note', 'event'):
+        params['kind'] = kind
+    if before_id:
+        params['before_id'] = int(before_id)
+    if db_id.count('/') != 1 or not all(db_id.split('/')):
+        return HTMLResponse('<p class="muted">No journal for this dataset.</p>', status_code=404)
+    db_path = '/'.join(url_quote(part, safe='') for part in db_id.split('/'))
+    payload, error = _journal_api(request, f"/databases/{db_path}/journal?{urlencode(params)}")
+    journal_status = _journal_status(request) or {}
+    downloads = None
+    if payload is not None and not before_id:
+        downloads, _dl_error = _journal_api(request, f"/databases/{db_path}/journal/downloads?limit=200")
+    names_visible = bool((downloads or {}).get('names_visible'))
+    entries = [_journal_entry_view(entry, v) for entry in (payload or {}).get('entries') or []
+               if isinstance(entry, dict)]
+    return templates.TemplateResponse(request, "_journal.html", {
+        "error": error, "entries": entries, "append": bool(before_id),
+        # raw note fields by entry id, for the edit form (read by the page script as JSON)
+        "raw_map": {str(item['id']): item['raw'] for entry in entries for item in [entry] + entry['replies']},
+        "next_before_id": (payload or {}).get('next_before_id'),
+        "downloads": (payload or {}).get('downloads') if not before_id else None,
+        "download_rows": (downloads or {}).get('rows') or [] if names_visible else [],
+        "names_visible": names_visible,
+        "retention_days": (downloads or {}).get('retention_days') or journal_status.get('download_retention_days'),
+        # set a status: admins, triage groups (journal/status) and the dataset's owner (who also sees names)
+        "may_status": bool(journal_status.get('may_triage') or journal_status.get('is_admin') or names_visible),
+        "is_admin": bool(journal_status.get('is_admin')),
+        "signed_in": bool(journal_status.get('signed_in')),
+        "statuses": journal_status.get('statuses') or list(JOURNAL_STATUS_LABELS),
+        "filtered": bool(category or status or kind in ('note', 'event')),
+        "current_version": v,
+    }, status_code=200 if error is None else (error or 502))
+
+
+@router.get("/journal/open", response_class=HTMLResponse)
+async def journal_open_view(request: Request, category: Optional[str] = None, target_type: Optional[str] = None):
+    """Open and acknowledged reports across the site (preview view ``journal-open``)."""
+    journal_status = _journal_status(request)
+    if journal_status is None:
+        return _error_page(request, "The journal is not available on this site", 404,
+                           hint="It needs a site where you sign in.")
+    category = _journal_csv_param(category, JOURNAL_ACTIONABLE)
+    params: Dict[str, Any] = {'limit': 500}
+    if category:
+        params['category'] = category
+    if target_type in ('dataset', 'collection', 'geneset', 'facet', 'artefact'):
+        params['target_type'] = target_type
+    payload, error = _journal_api(request, f"/journal/open?{urlencode(params)}")
+    # dataset titles and current versions (autoescaped in the template), for the datasets the visitor sees
+    titles: Dict[str, str] = {}
+    versions: Dict[str, str] = {}
+    try:
+        for db in _all_databases(_api_url(request)):
+            key = db.get('id') or db.get('db_id')
+            if key:
+                titles[key] = str(db.get('title') or key)[:300]
+                versions[key] = str(db.get('version') or '')
+    except Exception:
+        pass
+    issues = []
+    for item in (payload or {}).get('issues') or []:
+        if not isinstance(item, dict):
+            continue
+        current = versions.get(str(item.get('target_id'))) if item.get('target_type') == 'dataset' else None
+        view = _journal_entry_view(item, current or None)
+        target_id = str(item.get('target_id') or '')
+        view['target_label'] = titles.get(target_id, target_id) if item.get('target_type') == 'dataset' else target_id
+        issues.append(view)
+    counts = (payload or {}).get('counts') or {}
+    return templates.TemplateResponse(request, "journal_open.html", {
+        "error": error, "issues": issues, "counts": counts, "category": category,
+        "target_type": params.get('target_type'),
+        "categories": [(key, JOURNAL_CATEGORY_LABELS[key]) for key in JOURNAL_ACTIONABLE],
+        "signed_in": bool(journal_status.get('signed_in')),
+    }, status_code=200 if error is None else error or 502)
+
+
 @router.get("/browse/{browse_id}", response_class=HTMLResponse)
 async def folder_view(request: Request, browse_id: str):
     group_id = unquote(browse_id)
@@ -3925,6 +4168,8 @@ async def dataset_view(request: Request, folder_browse_id: str, dataset_browse_i
         "de_total_contrasts": de_total_contrasts,
         "papers": _dataset_papers(api_url, db_id),
         "artefacts": _artefact_rows(request, db_id=db_id),
+        # the Journal tab: GET /journal/status when the journal is on and takes notes (a site with a login)
+        "journal": _journal_status(request),
         "facet_tests": facet_tests,
         "replicate": _replicate_view(info, (facet_tests or {}).get('replicate_source')) if facets_on else None,
         "caveats": caveats,

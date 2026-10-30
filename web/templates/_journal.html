@@ -1,0 +1,134 @@
+{#- The entries of one dataset's journal, an HTML fragment for the Journal tab (browser.journal_list_fragment,
+    REST 2.49). Also the shared entry macro and styles, used by journal_open.html.
+
+    Everything an entry holds is user data: body_html comes from safe_markdown.render (raw HTML off, allowlist),
+    links from safe_markdown.safe_href (http and https only), every other field is autoescaped here. The edit
+    form reads the raw values from the JSON block at the end (tojson in a script of type application/json),
+    never from HTML. -#}
+
+{% macro journal_styles() -%}
+<style>
+  .jr-list, .jr-replies { list-style: none; margin: 0; padding: 0; }
+  .jr-entry { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin: 8px 0;
+              background: var(--surface, transparent); }
+  .jr-entry.jr-event { border: none; border-left: 2px solid var(--border); border-radius: 0; padding: 2px 10px;
+                       margin: 4px 0; font-size: 12px; color: var(--text-muted); background: transparent; }
+  .jr-entry.jr-event .jr-body { font-size: 12px; }
+  .jr-entry.jr-hidden { opacity: .6; border-style: dashed; }
+  .jr-replies { margin: 6px 0 0 14px; border-left: 2px solid var(--border); padding-left: 10px; }
+  .jr-replies .jr-entry { border: none; padding: 4px 0; margin: 4px 0; }
+  .jr-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 12px; }
+  .jr-author { font-weight: 600; color: var(--text); }
+  .jr-event .jr-author { font-weight: 500; color: var(--text-muted); }
+  .jr-when, .jr-edited { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .jr-chip { display: inline-block; font-size: 11px; line-height: 1.5; padding: 0 7px; border-radius: 10px;
+             border: 1px solid var(--border); color: var(--text-muted); background: transparent; cursor: pointer;
+             font-family: inherit; }
+  button.jr-chip:hover { border-color: #4f9a96; color: var(--text); }
+  .jr-chip.jr-report { border-color: var(--effect-up, #b45309); color: var(--effect-up-ink, #92400e); }
+  .jr-chip.jr-on { background: #4f9a96; border-color: #4f9a96; color: #fff; }
+  .jr-status { font-size: 11px; padding: 0 6px; border-radius: 3px; border: 1px solid var(--border); }
+  .jr-st-open { border-color: var(--effect-up, #b45309); color: var(--effect-up-ink, #92400e); }
+  .jr-st-acknowledged { border-color: #c2a05a; color: var(--text); }
+  .jr-st-fixed { border-color: #4f9a96; color: #2f6f6b; }
+  .jr-st-declined { color: var(--text-muted); }
+  .jr-ver { font-size: 11px; color: var(--text-muted); }
+  .jr-ver-old { color: var(--effect-up-ink, #92400e); }
+  .jr-body { font-size: 13px; margin: 4px 0 0; overflow-wrap: anywhere; }
+  .jr-body p { margin: 4px 0; }
+  .jr-links { list-style: none; margin: 4px 0 0; padding: 0; font-size: 12.5px; }
+  .jr-links li { margin: 2px 0; overflow-wrap: anywhere; }
+  .jr-ltype { display: inline-block; min-width: 3em; font-size: 10px; text-transform: uppercase; letter-spacing: .03em;
+              padding: 0 5px; margin-right: 4px; border-radius: 3px; border: 1px solid var(--border);
+              color: var(--text-muted); text-align: center; }
+  .jr-refs { font-size: 12px; color: var(--text-muted); margin-top: 4px; overflow-wrap: anywhere; }
+  .jr-refs span + span::before { content: " · "; }
+  .jr-statusline { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+  .jr-hidden-note { font-size: 12px; color: var(--effect-up-ink, #92400e); margin-top: 2px; }
+  .jr-actions { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .jr-actions button { background: none; border: none; padding: 0; font: inherit; font-size: 12px;
+                       color: var(--link, #2f6f6b); cursor: pointer; }
+  .jr-actions button:hover { text-decoration: underline; }
+  .jr-dl { font-size: 12.5px; margin: 4px 0 10px; }
+  .jr-target { font-size: 12px; margin-bottom: 2px; overflow-wrap: anywhere; }
+  .jr-more { margin: 8px 0; }
+</style>
+{%- endmacro %}
+
+{% macro journal_entry(e, may_status=False, is_admin=False, signed_in=False, show_target=False, reply=False) -%}
+<li class="jr-entry jr-{{ 'event' if e.is_event else 'note' }}{% if e.hidden %} jr-hidden{% endif %}" id="journal-{{ e.id }}"
+    data-id="{{ e.id }}" data-category="{{ e.category }}"{% if e.needs_changelog %} data-needs-changelog="1"{% endif %}{% if e.version %} data-version="{{ e.version }}"{% endif %}{% if e.status %} data-status="{{ e.status }}"{% endif %}>
+  {% if show_target %}<div class="jr-target">{% if e.target_url %}<a href="{{ e.target_url }}">{{ e.target_label or e.target_id }}</a>{% else %}{{ e.target_label or e.target_id }}{% endif %} <span class="muted">{{ e.target_type }}</span></div>{% endif %}
+  <div class="jr-head">
+    {% if show_target %}<span class="jr-chip{% if e.actionable %} jr-report{% endif %}">{{ e.category_label }}</span>
+    {% else %}<button type="button" class="jr-chip{% if e.actionable %} jr-report{% endif %}" data-filter-category="{{ e.category }}" title="Show only entries of this category">{{ e.category_label }}</button>{% endif %}
+    {% if e.actionable and e.status %}<span class="jr-status jr-st-{{ e.status }}">{{ e.status_label }}</span>{% endif %}
+    <span class="jr-author">{{ e.author }}</span>
+    <span class="jr-when">{{ e.when }}</span>
+    {% if e.edited %}<span class="jr-edited">edited {{ e.edited }}</span>{% endif %}
+    {% if e.version %}<span class="jr-ver{% if e.version_older %} jr-ver-old{% endif %}" title="{% if e.version_older %}Written about an older version of the dataset than the one shown now; check whether it still applies.{% else %}The dataset version this entry was written about.{% endif %}">version {{ e.version }}{% if e.version_older %}, older than the current version{% endif %}</span>{% endif %}
+  </div>
+  {% if e.hidden %}<div class="jr-hidden-note">Hidden by {{ e.hidden_by }} on {{ e.hidden_when }}{% if e.hidden_reason %} because {{ e.hidden_reason }}{% endif %}. Only admins see it.</div>{% endif %}
+  {% if e.body_html %}<div class="jr-body md-body">{{ e.body_html|safe }}</div>{% endif %}
+  {% if e.links %}<ul class="jr-links">
+    {% for link in e.links %}<li><span class="jr-ltype">{{ link.type_label }}</span><a href="{{ link.href }}" target="_blank" rel="nofollow noopener noreferrer">{{ link.label }}</a></li>{% endfor %}
+  </ul>{% endif %}
+  {% if e.about_url %}<div class="jr-refs"><a href="{{ e.about_url }}">open the artefact</a></div>{% endif %}
+  {% if e.refs %}<div class="jr-refs">{% for ref in e.refs %}<span>{{ ref.label }}
+    {% if ref.genes %}{% for gene in ref.genes %}<a href="/genes/{{ gene|urlencode }}">{{ gene }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% else %}<span class="mono">{{ ref.value }}</span>{% endif %}</span>{% endfor %}</div>{% endif %}
+  {% if e.actionable and e.status_by %}<div class="jr-statusline">Set to {{ e.status_label }} by {{ e.status_by }} on {{ e.status_when }}.{% if e.status_note %} {{ e.status_note }}{% endif %}
+    {% if e.fixed_in_version %} Fixed in version {{ e.fixed_in_version }}.{% endif %}{% if e.changelog_ref %} Changelog: <span class="mono">{{ e.changelog_ref }}</span>{% endif %}</div>{% endif %}
+  {% if signed_in and not show_target %}
+  <div class="jr-actions">
+    {% if not reply and not e.hidden %}<button type="button" class="jr-act" data-act="reply">reply</button>{% endif %}
+    {% if e.may_edit and not e.hidden %}<button type="button" class="jr-act" data-act="edit">edit</button>{% endif %}
+    {% if e.actionable and may_status and not e.hidden %}<button type="button" class="jr-act" data-act="status">change status</button>{% endif %}
+    {% if is_admin %}{% if e.hidden %}<button type="button" class="jr-act" data-act="unhide">show again</button>{% else %}<button type="button" class="jr-act" data-act="hide">hide</button>{% endif %}{% endif %}
+  </div>
+  <div class="jr-slot"></div>
+  {% endif %}
+  {% if e.replies %}<ol class="jr-replies">
+    {% for r in e.replies %}{{ journal_entry(r, may_status, is_admin, signed_in, show_target, True) }}{% endfor %}
+  </ol>{% endif %}
+</li>
+{%- endmacro %}
+
+{#- the fragment itself (only when rendered by journal_list_fragment, which passes `entries`) -#}
+{% if entries is defined %}
+{% if error == 401 %}
+<p class="muted">Sign in to read and write the journal.</p>
+{% elif error == 404 %}
+<p class="muted">No journal for this dataset.</p>
+{% elif error is not none %}
+<p class="plot-error">The journal could not be loaded. Try again in a moment.</p>
+{% else %}
+{% if not append %}
+{% if downloads %}
+<p class="jr-dl" id="jr-downloads">{% set _n = downloads.n_downloads or 0 %}{{ '{:,}'.format(_n) }} download{{ '' if _n == 1 else 's' }}{% if _n %} by {{ downloads.n_people or 0 }} signed-in {{ 'person' if (downloads.n_people or 0) == 1 else 'people' }}{% if downloads.n_anonymous %} and {{ downloads.n_anonymous }} anonymous{% endif %}{% if downloads.last_download %}, the last on {{ downloads.last_download[:10] }}{% endif %}{% endif %}.
+  <span class="info" title="Downloads of the h5ad and the static files of this dataset{% if retention_days %} over the last {{ (retention_days|int) // 365 if (retention_days|int) >= 365 else retention_days|int }} {{ 'years' if (retention_days|int) >= 730 else ('year' if (retention_days|int) >= 365 else 'days') }}{% endif %}. Only admins and the dataset's owner see who downloaded.">ⓘ</span>
+  {% if names_visible and download_rows %}<button type="button" class="jr-dl-toggle" aria-expanded="false" aria-controls="jr-dl-names">who downloaded</button>{% endif %}
+</p>
+{% if names_visible and download_rows %}
+<div id="jr-dl-names" hidden>
+  <div class="table-wrap">
+  <table class="jr-dl-table">
+    <thead><tr><th>Who</th><th>When</th><th>What</th><th>File</th><th>Version</th></tr></thead>
+    <tbody>
+    {% for row in download_rows %}<tr><td>{{ row.user or 'anonymous' }}</td><td class="mono">{{ (row.ts or '')[:16]|replace('T', ' ') }}</td><td>{{ row.what }}</td><td style="overflow-wrap:anywhere">{{ row.name or '' }}</td><td>{{ row.dataset_version or '' }}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+{% if not entries %}
+<p class="muted" id="jr-empty">{% if filtered %}No entries match these filters.{% else %}No notes yet. Write the first one, or declare that you used this dataset.{% endif %}</p>
+{% endif %}
+{% endif %}
+<ol class="jr-list"{% if append %} data-append="1"{% endif %}>
+  {% for e in entries %}{{ journal_entry(e, may_status, is_admin, signed_in) }}{% endfor %}
+</ol>
+{% if next_before_id %}<p class="jr-more"><button type="button" class="jr-older" data-before="{{ next_before_id }}">older entries</button></p>{% endif %}
+<script type="application/json" class="jr-data">{{ raw_map|tojson }}</script>
+{% endif %}
+{% endif %}
