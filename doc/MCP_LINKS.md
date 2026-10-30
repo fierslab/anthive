@@ -106,6 +106,8 @@ only appear for members of the `admins` group.
   `public_base_url`, `rate_limit_per_minute`, `verify_cache_seconds`,
   `token_secret`. Container sites set `mcp.token_ttl_days` and
   `mcp.max_links_per_user` in `site.yaml`.
+- ant-mcp caches a token's verification for `verify_cache_seconds`
+  (default 30 s), so a revoked link keeps working for up to that long.
 - Tokens are derived from a server secret (HMAC). The link table in
   `<state_dir>/mcp_tokens.db` never holds a working token. The secret is
   `mcp.token_secret`, env `ANTHIVE_MCP_TOKEN_SECRET`, or an auto-created

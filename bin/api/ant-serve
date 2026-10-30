@@ -17557,9 +17557,11 @@ def edit_journal_entry(request: Request, entry_id: int, payload: JournalEdit):
 @app.post("/journal/entries/{entry_id}/replies", tags=["journal"], status_code=201)
 def reply_journal_entry(request: Request, entry_id: int, payload: JournalNote):
     """Reply to an entry (category comment, question, finding or link; replies have no status)."""
+    db_id = _journal_entry_db(entry_id)
+    version = _journal_dataset_version(db_id) if db_id else None
     return _journal_call(request, True, lambda service, actor, visible: service.add_note(
         actor, visible, 'dataset', 'reply', payload.category, payload.body, payload.links, payload.refs,
-        parent_id=entry_id))
+        dataset_version=version, parent_id=entry_id), db_id=db_id)
 
 
 @app.post("/journal/entries/{entry_id}/status", tags=["journal"])

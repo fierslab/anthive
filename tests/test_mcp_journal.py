@@ -112,3 +112,67 @@ def test_journal_open_issues():
     text = _run(namespace['journal_open_issues']())
     assert '1 open report(s) (annotation-concern 1)' in text and '[dataset S26/SLM]' in text
     assert set(calls[0][2]) <= _route_params('/journal/open')
+
+
+def test_journal_add_takes_a_refs_object_and_genes():
+    namespace, calls = _load({})
+    _run(namespace['journal_add']('annotation-concern', 'odd cluster', db_id='S26/SLM',
+                                  refs={'column': 'cell_type', 'value': '7', 'genes': ['P2RY12', 'TMEM119']},
+                                  evidence='both absent'))
+    assert calls[0][2]['refs'] == {'column': 'cell_type', 'value': '7', 'genes': ['P2RY12', 'TMEM119'],
+                                   'evidence': 'both absent'}
+    _run(namespace['journal_add']('finding', 'up', db_id='S26/SLM', genes=['TREM2', 'APOE'], refs={'gene': 'X'}))
+    assert calls[1][2]['refs'] == {'gene': 'X', 'genes': ['TREM2', 'APOE']}
+    text = _run(namespace['journal_add']('comment', 'x', db_id='S26/SLM', refs={'colum': 'typo'}))
+    assert text.startswith('Unknown refs key(s): colum') and len(calls) == 2
+
+
+def _mcp_module():
+    import importlib.machinery
+    import importlib.util
+    import sys
+    pytest = __import__('pytest')
+    pytest.importorskip('mcp')
+    loader = importlib.machinery.SourceFileLoader('ant_mcp_journal_under_test', str(MCP_PATH))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = module
+    loader.exec_module(module)
+    return module
+
+
+def test_error_text_becomes_a_failed_tool_call():
+    module = _mcp_module()
+    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.types import TextContent
+    error = [TextContent(type='text', text='Error 400: {"status": "bad_links"}')]
+    for result in (error, (error, {'result': error[0].text})):
+        try:
+            module._raise_on_error_text(result)
+        except ToolError as exc:
+            assert 'bad_links' in str(exc)
+        else:
+            raise AssertionError('no ToolError')
+    module._raise_on_error_text([TextContent(type='text', text='Written: #9')])
+    module._raise_on_error_text('ran search_literature')
+
+
+def test_journal_tools_refuse_unknown_arguments():
+    module = _mcp_module()
+    from mcp.server.fastmcp.exceptions import ToolError
+    server = module.AnthiveMCP('t')
+    server.require_identity = False
+
+    @server.tool()
+    async def journal_add(category: str, body: str) -> str:
+        return 'Written'
+
+    async def call(arguments):
+        return await server.call_tool('journal_add', arguments)
+
+    try:
+        asyncio.run(call({'category': 'comment', 'body': 'x', 'refz': {}}))
+    except ToolError as exc:
+        assert 'refz' in str(exc) and 'Nothing was done' in str(exc)
+    else:
+        raise AssertionError('unknown argument accepted')

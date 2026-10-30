@@ -1187,8 +1187,9 @@ pages resolve).
   only, everything else autoescaped). Raw fields for the edit form travel as a `script.jr-data` JSON block; the page
   script only sets `.value` / `textContent`. Writes go straight to `/api` (POST note, replies, status, hide; PATCH
   edit) and reload the fragment. "older entries" pages with `before_id`.
-- Rights only decide which buttons show; the API decides. Status controls for `may_triage`, `is_admin` or
-  `names_visible` from the downloads route (true only for admins and the dataset's owner); hide/show for admins;
+- Rights only decide which buttons show; the API decides. Status controls when the list answer says
+  `may_set_status` (admins, triage groups, the dataset's owner; an older API without the field falls back to
+  `may_triage`, `is_admin` or the downloads route's `names_visible`); hide/show for admins;
   edit when the entry says `may_edit`. Fixing a data error or annotation concern needs the changelog line and a new
   version (checked in the form and by the API). An entry written about an older dataset version than the page's
   shows `jr-ver-old` (`_journal_version_older`).

@@ -34,8 +34,10 @@ the spec drifting away from the running code.
 Minor, additive. Nothing is removed or renamed. The dataset journal (`doc/DESIGN_dataset_journal.md`):
 notes, reports and usage events per dataset, collection, gene set, facet and artefact, plus download
 counts. New tag `journal`. Errors are `{status, message}` with 400 (bad input), 401 `sign_in_required`,
-403 `forbidden`, 404 `not_found` / `journal_off` / `journal_notes_off` (no login on this site), 409,
-429 `too_many_writes`.
+403 `forbidden`, 404 `not_found` / `journal_off` / `journal_notes_off` (no login on this site), 409
+`hidden` (the author edits a hidden note), 429 `too_many_writes`. Status changes refuse with
+`changelog_required` (a fixed data-error or annotation-concern without `changelog_ref` and
+`fixed_in_version`) and `same_version` (`fixed_in_version` is the version the problem was reported on).
 
 An entry is `{id, target_type, target_id, dataset_version, author, created, kind (note|event), category,
 body, links: [{url, label, type}], refs: {column, value, gene, genes, cell_type, evidence}, parent_id,
@@ -47,7 +49,8 @@ hidden_by, hidden_at, hidden_reason}`.
   types, `max_body_chars`, `download_retention_days`, and the caller's `signed_in`, `is_admin`,
   `may_triage`.
 - `GET /databases/{db_id}/journal?category=&status=&kind=&before_id=&limit=` (signed in): `{target_type,
-  target_id, entries, downloads: {n_downloads, n_people, n_anonymous, last_download}, next_before_id}`.
+  target_id, entries, downloads: {n_downloads, n_people, n_anonymous, last_download}, next_before_id,
+  may_set_status}`; `may_set_status` says whether the caller may change the status of this target's reports.
 - `POST /databases/{db_id}/journal` (signed in) body `{category, body, links, refs}`: 201 with the entry,
   pinned to the dataset's current version; reports start `open`.
 - `POST /databases/{db_id}/journal/use` (signed in) body `{note, links, tool}`: a `used-in-analysis` event.
@@ -59,14 +62,18 @@ hidden_by, hidden_at, hidden_reason}`.
   `{issues, counts}`.
 - `GET /journal/downloads?target_type=&target_id=`: counts of a dataset or an artefact.
 - `GET /journal/entries/{id}`; `PATCH /journal/entries/{id}` body `{body, links, refs}` (author only);
-  `POST /journal/entries/{id}/replies` body `{category, body, links, refs}`;
+  `POST /journal/entries/{id}/replies` body `{category, body, links, refs}` (a reply on a dataset is pinned
+  to the dataset's current version);
   `POST /journal/entries/{id}/status` body `{status, note, changelog_ref, fixed_in_version}` (admins,
   `journal.triage_groups`, the dataset's owner; fixing a data-error or annotation-concern needs both
   `changelog_ref` and a new `fixed_in_version`); `POST /journal/entries/{id}/hide` body `{hidden, reason}`
-  (admins); `GET /journal/entries/{id}/history` (author, admins).
+  (admins); `GET /journal/entries/{id}/history` (author, also of a hidden note, and admins).
 - `GET /databases/{db_id}/download/{kind}`, `GET /databases/{db_id}/download-static/{filename}` and the
   artefact file download now record the download in the journal. Their answers are unchanged.
-- Help topic `journal`. MCP tools `journal_list`, `journal_add`, `journal_open_issues`.
+- Help topic `journal`. MCP tools `journal_list`, `journal_add` (pointers as flat arguments, `genes`, or a
+  `refs` object), `journal_open_issues`; they refuse undeclared arguments.
+- MCP (all tools): a tool answer of the form `Error <HTTP status>: ...` is now returned as a failed call
+  (`isError: true`) with the same text, instead of a successful call.
 
 ## 2.48.0 (2026-10-27)
 

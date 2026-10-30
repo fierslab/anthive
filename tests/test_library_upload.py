@@ -533,8 +533,10 @@ def _anthive_mcp_class(cfg):
     import contextvars
     from types import SimpleNamespace
     tree = ast.parse(MCP_PATH.read_text())
-    names = {'_is_admin', '_upload_groups', '_may_upload', '_deposit_groups', '_may_deposit', 'AnthiveMCP'}
-    assigns = {'UPLOAD_TOOLS', 'UPLOADS_DISABLED_MESSAGE', 'ADMIN_ONLY_TOOLS', 'DEPOSIT_TOOLS'}
+    names = {'_is_admin', '_upload_groups', '_may_upload', '_deposit_groups', '_may_deposit', 'AnthiveMCP',
+             '_raise_on_error_text'}
+    assigns = {'UPLOAD_TOOLS', 'UPLOADS_DISABLED_MESSAGE', 'ADMIN_ONLY_TOOLS', 'DEPOSIT_TOOLS',
+               'STRICT_ARGUMENT_TOOLS', '_ERROR_TEXT'}
     body = [n for n in tree.body if getattr(n, 'name', None) in names
             or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id in assigns for t in n.targets))]
 
@@ -553,6 +555,7 @@ def _anthive_mcp_class(cfg):
     namespace: Dict[str, Any] = {
         'Optional': Optional, '_get_anthive_config': lambda: cfg, 'FastMCP': StubFastMCP,
         '_current_identity': contextvars.ContextVar('identity', default=None), 'frozenset': frozenset,
+        're': __import__('re'), 'Any': Any, 'TextContent': type('TextContent', (), {}), 'ToolError': RuntimeError,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(MCP_PATH), 'exec', dont_inherit=True), namespace)
     return namespace['AnthiveMCP'], namespace

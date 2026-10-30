@@ -55,6 +55,7 @@ import httpx
 import uvicorn
 import yaml
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ImageContent, TextContent
 
@@ -278,6 +279,11 @@ class _McpLinkAuthMiddleware:
         await self._app(scope, receive, send)
 
 
+# Tools that refuse arguments they do not declare (FastMCP drops them silently otherwise): a note written
+# without the pointers the caller meant to give is worse than a refusal.
+STRICT_ARGUMENT_TOOLS = frozenset({'journal_list', 'journal_add', 'journal_open_issues'})
+
+
 class AnthiveMCP(FastMCP):
     """FastMCP that runs each tool call as the verified link owner and hides
     admin-only tools from everyone else."""
@@ -324,11 +330,32 @@ class AnthiveMCP(FastMCP):
             raise PermissionError(UPLOADS_DISABLED_MESSAGE)
         if name in DEPOSIT_TOOLS and not _may_deposit(identity):
             raise PermissionError(f"The '{name}' tool is for users who may deposit datasets.")
+        if name in STRICT_ARGUMENT_TOOLS:
+            tool = self._tool_manager.get_tool(name)
+            known = set(((tool.parameters or {}).get('properties') or {}) if tool else ())
+            unknown = sorted(set(arguments or {}) - known) if tool else []
+            if unknown:
+                raise ToolError(f"Unknown argument(s) for {name}: {', '.join(unknown)}. "
+                                f"Known: {', '.join(sorted(known))}. Nothing was done.")
         ctx_token = _current_identity.set(identity)
         try:
-            return await super().call_tool(name, arguments)
+            result = await super().call_tool(name, arguments)
         finally:
             _current_identity.reset(ctx_token)
+        _raise_on_error_text(result)
+        return result
+
+
+# Tools report an API refusal as the text "Error <HTTP status>: <body>". Raised here, the MCP layer answers
+# with isError true (and the same text), so clients see a failed call instead of a successful one.
+_ERROR_TEXT = re.compile(r'^Error [1-5][0-9][0-9]: ')
+
+
+def _raise_on_error_text(result: Any) -> None:
+    content = result[0] if isinstance(result, tuple) and result else result
+    if isinstance(content, (list, tuple)) and len(content) == 1 and isinstance(content[0], TextContent) \
+            and _ERROR_TEXT.match(content[0].text or ''):
+        raise ToolError(content[0].text)
 
 
 # ── plain-language help (served by ant-serve, /api/help) ────────────────────────
@@ -3752,6 +3779,7 @@ def main() -> None:
                           target_type: Optional[str] = None, target_id: Optional[str] = None,
                           column: Optional[str] = None, value: Optional[str] = None, gene: Optional[str] = None,
                           cell_type: Optional[str] = None, evidence: Optional[str] = None,
+                          genes: Optional[List[str]] = None, refs: Optional[Dict[str, Any]] = None,
                           links: Optional[List[Dict[str, str]]] = None, reply_to: Optional[int] = None) -> str:
         """Write a note in the journal of a dataset (or collection, gene set, facet, artefact) under the
         user's own name; everyone who can sign in to this site reads it. Only write what the user asked you
@@ -3768,11 +3796,23 @@ def main() -> None:
             target_type: dataset, collection, geneset, facet or artefact.
             target_id:   group id, gene set id, facet name or artefact ref.
             column, value, gene, cell_type, evidence: what the note is about in the data.
+            genes:       several genes, e.g. ["TREM2", "APOE"].
+            refs:        the same pointers as one object, as the REST API takes them: {"column": ...,
+                         "value": ..., "gene": ..., "genes": [...], "cell_type": ..., "evidence": ...}.
+                         Flat arguments win over keys in refs; an unknown key is refused.
             links:       [{"url": "https://...", "label": "...", "type": "eln|doi|artefact|protocol|manuscript|other"}].
             reply_to:    the id (#N) of the entry this replies to (then no target is needed).
         """
-        refs = {key: val for key, val in (('column', column), ('value', value), ('gene', gene),
-                                          ('cell_type', cell_type), ('evidence', evidence)) if val}
+        ref_keys = ('column', 'value', 'gene', 'genes', 'cell_type', 'evidence')
+        if refs is not None and not isinstance(refs, dict):
+            return 'refs must be an object with the keys ' + ', '.join(ref_keys) + '.'
+        unknown = sorted(set(refs or {}) - set(ref_keys))
+        if unknown:
+            return (f"Unknown refs key(s): {', '.join(unknown)}. Known: {', '.join(ref_keys)}. Nothing was written.")
+        flat = {'column': column, 'value': value, 'gene': gene, 'genes': genes, 'cell_type': cell_type,
+                'evidence': evidence}
+        refs = {**{key: val for key, val in (refs or {}).items() if val not in (None, '', [])},
+                **{key: val for key, val in flat.items() if val not in (None, '', [])}}
         payload: Dict[str, Any] = {'category': category, 'body': body, 'links': links or None, 'refs': refs or None}
         if reply_to is not None:
             path = f'/journal/entries/{int(reply_to)}/replies'

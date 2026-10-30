@@ -146,8 +146,9 @@ def test_status_rules(service):
     with pytest.raises(JournalError) as err:
         service.set_status(CURATOR, everything, issue['id'], 'fixed')
     assert err.value.body['status'] == 'changelog_required'
-    with pytest.raises(JournalError):
+    with pytest.raises(JournalError) as err:
         service.set_status(CURATOR, everything, issue['id'], 'fixed', changelog_ref='x', fixed_in_version='1.2.0')
+    assert err.value.body['status'] == 'same_version'
     fixed = service.set_status(Actor('dora', owns=True), everything, issue['id'], 'fixed',
                                changelog_ref='1.2.1: sex labels corrected', fixed_in_version='1.2.1')
     assert fixed['status'] == 'fixed' and fixed['fixed_in_version'] == '1.2.1'
@@ -273,3 +274,53 @@ def test_config_settings(tmp_path, monkeypatch):
         config.get_journal_settings({**cfg, 'journal': {'download_retention_days': -1}})
     with pytest.raises(config.ConfigError):
         config.get_journal_settings({**cfg, 'journal': 'yes'})
+
+
+def test_may_set_status_in_the_list(service):
+    service.add_note(ALICE, everything, 'dataset', 'S26/SLM', 'comment', 'hello')
+    assert service.list(ALICE, everything, 'dataset', 'S26/SLM')['may_set_status'] is False
+    assert service.list(CURATOR, everything, 'dataset', 'S26/SLM')['may_set_status'] is True
+    assert service.list(ADMIN, everything, 'dataset', 'S26/SLM')['may_set_status'] is True
+    assert service.list(Actor('dora', owns=True), everything, 'dataset', 'S26/SLM')['may_set_status'] is True
+
+
+def test_open_issues_never_drop_visible_reports_behind_invisible_ones(service):
+    visible_issue = service.add_note(ALICE, everything, 'dataset', 'S26/SLM', 'data-error', 'visible one')
+    for number in range(1200):
+        service.store.insert(target_type='dataset', target_id='S99/SEC', author='alice', kind='note',
+                             category='data-error', body=f'hidden {number}', links=[], refs={},
+                             dataset_version=None, parent_id=None, status='open')
+    issues = service.open_issues(BOB, no_internal, limit=10)['issues']
+    assert [item['id'] for item in issues] == [visible_issue['id']]
+
+
+def test_the_author_reads_the_history_of_a_hidden_note_and_gets_409_on_edit(service):
+    entry = service.add_note(ALICE, everything, 'dataset', 'S26/SLM', 'comment', 'first')
+    service.edit(ALICE, everything, entry['id'], body='second')
+    service.hide(ADMIN, everything, entry['id'], reason='off topic')
+    history = service.history(ALICE, everything, entry['id'])['history']
+    assert [item['action'] for item in history] == ['edit', 'hide']
+    with pytest.raises(JournalError) as err:
+        service.history(BOB, everything, entry['id'])
+    assert err.value.status == 404
+    with pytest.raises(JournalError) as err:
+        service.edit(ALICE, everything, entry['id'], body='third')
+    assert err.value.status == 409 and err.value.body['status'] == 'hidden'
+    with pytest.raises(JournalError) as err:
+        service.edit(BOB, everything, entry['id'], body='third')
+    assert err.value.status == 404
+
+
+def test_reply_gets_the_given_dataset_version(service):
+    root = service.add_note(ALICE, everything, 'dataset', 'S26/SLM', 'question', 'why?', dataset_version='1.2.0')
+    reply = service.add_note(BOB, everything, 'dataset', 'reply', 'comment', 'because', dataset_version='1.3.0',
+                             parent_id=root['id'])
+    assert reply['dataset_version'] == '1.3.0'
+
+
+@pytest.mark.parametrize('value', [1.5, '2.5', True])
+def test_config_rejects_non_integer_numbers(tmp_path, value):
+    import config
+    cfg = {'state_dir': str(tmp_path), 'auth': {'mode': 'authelia'}, 'journal': {'download_retention_days': value}}
+    with pytest.raises(config.ConfigError):
+        config.get_journal_settings(cfg)

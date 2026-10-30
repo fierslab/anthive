@@ -143,6 +143,10 @@ def test_note_lifecycle_over_http(client):
     reply = _post(client, f"/journal/entries/{entry['id']}/replies", {'category': 'comment', 'body': 'seen it too'},
                   BOB)
     assert reply.status_code == 201 and reply.json()['parent_id'] == entry['id']
+    assert reply.json()['dataset_version'] == '1.2.0'      # replies are pinned to the dataset version too
+    assert listed['may_set_status'] is False
+    assert client.get('/databases/S26/SLM/journal', headers=OWNER).json()['may_set_status'] is True
+    assert client.get('/databases/S26/SLM/journal', headers=CURATOR).json()['may_set_status'] is True
     assert client.patch(f"/journal/entries/{entry['id']}", json={'body': 'x'}, headers=BOB).status_code == 403
     assert client.patch(f"/journal/entries/{entry['id']}", json={'body': 'donor 3 and 4'},
                         headers=USER).json()['body'] == 'donor 3 and 4'
@@ -159,6 +163,9 @@ def test_note_lifecycle_over_http(client):
     assert _post(client, f"/journal/entries/{entry['id']}/hide", {'reason': 'x'}, USER).status_code == 403
     assert _post(client, f"/journal/entries/{entry['id']}/hide", {'reason': 'dup'}, ADMIN).json()['hidden']
     assert client.get(f"/journal/entries/{entry['id']}", headers=USER).status_code == 404
+    assert client.get(f"/journal/entries/{entry['id']}/history", headers=USER).status_code == 200
+    hidden_edit = client.patch(f"/journal/entries/{entry['id']}", json={'body': 'again'}, headers=USER)
+    assert hidden_edit.status_code == 409 and hidden_edit.json()['status'] == 'hidden'
 
 
 def test_sign_in_needed_and_internal_datasets_hidden(client):

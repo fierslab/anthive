@@ -3359,8 +3359,10 @@ async def journal_list_fragment(request: Request, db_id: str, category: Optional
         "download_rows": (downloads or {}).get('rows') or [] if names_visible else [],
         "names_visible": names_visible,
         "retention_days": (downloads or {}).get('retention_days') or journal_status.get('download_retention_days'),
-        # set a status: admins, triage groups (journal/status) and the dataset's owner (who also sees names)
-        "may_status": bool(journal_status.get('may_triage') or journal_status.get('is_admin') or names_visible),
+        # set a status: the list's may_set_status (admins, triage groups, the dataset's owner); APIs before it
+        # existed: journal/status rights or names_visible (true only for admins and the owner)
+        "may_status": bool((payload or {})['may_set_status']) if 'may_set_status' in (payload or {}) else
+        bool(journal_status.get('may_triage') or journal_status.get('is_admin') or names_visible),
         "is_admin": bool(journal_status.get('is_admin')),
         "signed_in": bool(journal_status.get('signed_in')),
         "statuses": journal_status.get('statuses') or list(JOURNAL_STATUS_LABELS),

@@ -1051,6 +1051,8 @@ def get_journal_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]
                 raise ConfigError(f'ERROR: [Config] journal.{key} must be a number, got {raw!r}')
             if value < 0 or value != value:
                 raise ConfigError(f'ERROR: [Config] journal.{key} must not be negative, got {raw!r}')
+            if isinstance(raw, bool) or value != int(value):
+                raise ConfigError(f'ERROR: [Config] journal.{key} must be a whole number, got {raw!r}')
             settings[key] = int(value)
         else:
             settings[key] = str(raw).strip()

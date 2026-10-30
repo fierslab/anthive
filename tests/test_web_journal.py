@@ -48,7 +48,7 @@ EVENT = {'id': 5, 'target_type': 'dataset', 'target_id': 'GroupA/ds1', 'dataset_
          'edited': None, 'may_edit': False, 'about': {'type': 'artefact', 'id': 'GA1/ds1/volcano'}, 'replies': []}
 
 
-def _fake(path, journal=True, status=None, names=False, list_error=None):
+def _fake(path, journal=True, status=None, names=False, list_error=None, may_set_status=None):
     status = {**STATUS_ON, **(status or {})}
     if path == '/journal/status':
         if not journal:
@@ -73,7 +73,8 @@ def _fake(path, journal=True, status=None, names=False, list_error=None):
         return {'target_type': 'dataset', 'target_id': 'GroupA/ds1', 'entries': entries,
                 'downloads': {'n_downloads': 12, 'n_people': 4, 'n_anonymous': 0,
                               'last_download': '2026-10-28T08:00:00Z'},
-                'next_before_id': 5 if 'before_id' not in path else None}
+                'next_before_id': 5 if 'before_id' not in path else None,
+                **({'may_set_status': may_set_status} if may_set_status is not None else {})}
     if path.startswith('/journal/open'):
         return {'issues': [{**REPORT, 'replies': None}], 'counts': {'data-error': 1}}
     if path.startswith('/artefacts?'):
@@ -185,6 +186,14 @@ def test_action_buttons_follow_the_rights(make_client):
     admin = make_client(status={'is_admin': True, 'may_triage': True}).get(
         '/journal/list?db_id=GroupA/ds1&v=1.1.0', headers={'Remote-User': 'root', 'Remote-Groups': 'admins'}).text
     assert 'data-act="status"' in admin and 'data-act="hide"' in admin
+
+
+def test_status_controls_follow_may_set_status_when_the_api_gives_it(make_client):
+    owner = make_client(may_set_status=True).get('/journal/list?db_id=GroupA/ds1&v=1.1.0', headers=SIGNED_IN).text
+    assert 'data-act="status"' in owner                                            # owner without names_visible
+    refused = make_client(names=True, may_set_status=False).get('/journal/list?db_id=GroupA/ds1&v=1.1.0',
+                                                                headers=SIGNED_IN).text
+    assert 'data-act="status"' not in refused                                      # the field wins over the guess
 
 
 def test_the_fragment_carries_raw_fields_as_json_only(make_client):

@@ -456,9 +456,14 @@ class JournalService:
             return False
         return True
 
-    def _require_entry(self, entry_id: int, actor: Actor, visible: Visible) -> Dict[str, Any]:
+    def _require_entry(self, entry_id: int, actor: Actor, visible: Visible,
+                       author_sees_hidden: bool = False) -> Dict[str, Any]:
         row = self.store.get(entry_id)
-        if row is None or not self._shown(row, actor, visible):
+        if row is not None and author_sees_hidden and row['hidden'] and actor.user and row['author'] == actor.user:
+            row_for_check = {**row, 'hidden': 0}
+        else:
+            row_for_check = row
+        if row is None or not self._shown(row_for_check, actor, visible):
             raise JournalError(404, 'not_found', f'no journal entry {entry_id}')
         return row
 
@@ -493,8 +498,14 @@ class JournalService:
             entries.append(item)
         out = {'target_type': target_type, 'target_id': target_id, 'entries': entries,
                'downloads': self.store.download_summary(target_type, target_id),
-               'next_before_id': int(rows[-1]['id']) if more and rows else None}
+               'next_before_id': int(rows[-1]['id']) if more and rows else None,
+               'may_set_status': self.may_set_status(actor)}
         return out
+
+    @staticmethod
+    def may_set_status(actor: Actor) -> bool:
+        """Admins, triage groups and the target dataset's owner set report statuses."""
+        return bool(actor.signed_in and (actor.is_admin or actor.may_triage or actor.owns))
 
     def get(self, actor: Actor, visible: Visible, entry_id: int) -> Dict[str, Any]:
         row = self._require_entry(entry_id, actor, visible)
@@ -505,7 +516,7 @@ class JournalService:
         return item
 
     def history(self, actor: Actor, visible: Visible, entry_id: int) -> Dict[str, Any]:
-        row = self._require_entry(entry_id, actor, visible)
+        row = self._require_entry(entry_id, actor, visible, author_sees_hidden=True)
         if not (actor.is_admin or row['author'] == actor.user):
             raise JournalError(403, 'forbidden', 'only the author and admins read the edit history')
         return {'id': int(entry_id), 'history': [
@@ -518,10 +529,19 @@ class JournalService:
         wanted = [check_category(value, ACTIONABLE) for value in (category or ACTIONABLE)]
         if target_type is not None and target_type not in TARGET_TYPES:
             raise JournalError(400, 'bad_target', f"target_type is one of {', '.join(TARGET_TYPES)}")
-        rows = self.store.entries(category=wanted, status=list(OPEN_STATUSES), parent_id=None,
-                                  target_type=target_type, include_hidden=False, limit=1000)
-        issues = [self._public(row, actor) for row in rows if self._shown(row, actor, visible)]
-        issues = issues[:max(1, min(int(limit), 1000))]
+        limit = max(1, min(int(limit), 1000))
+        issues: List[Dict[str, Any]] = []
+        before_id: Optional[int] = None
+        while len(issues) < limit:
+            # page through the store so reports the caller may not see never push visible ones out
+            rows = self.store.entries(category=wanted, status=list(OPEN_STATUSES), parent_id=None,
+                                      target_type=target_type, include_hidden=False, before_id=before_id,
+                                      limit=1000)
+            issues.extend(self._public(row, actor) for row in rows if self._shown(row, actor, visible))
+            if len(rows) < 1000:
+                break
+            before_id = int(rows[-1]['id'])
+        issues = issues[:limit]
         counts: Dict[str, int] = {}
         for item in issues:
             counts[item['category']] = counts.get(item['category'], 0) + 1
@@ -583,7 +603,7 @@ class JournalService:
              refs: Any = None) -> Dict[str, Any]:
         """The author changes the text, links or refs of their own note; the old values go to the history."""
         self._require_signed_in(actor)
-        row = self._require_entry(entry_id, actor, visible)
+        row = self._require_entry(entry_id, actor, visible, author_sees_hidden=True)
         if row['author'] != actor.user or row['kind'] != 'note':
             raise JournalError(403, 'forbidden', 'only the author edits a note (admins hide notes instead)')
         if row['hidden']:
@@ -612,7 +632,7 @@ class JournalService:
         row = self._require_entry(entry_id, actor, visible)
         if row['category'] not in ACTIONABLE or row['parent_id'] is not None:
             raise JournalError(400, 'no_status', f"only {', '.join(ACTIONABLE)} notes have a status")
-        if not (actor.is_admin or actor.may_triage or actor.owns):
+        if not self.may_set_status(actor):
             raise JournalError(403, 'forbidden', "status changes are for admins, curators and the dataset's owner")
         status = str(status or '').strip().lower()
         if status not in STATUSES:
@@ -627,7 +647,7 @@ class JournalService:
                                    'closing a data error or annotation concern as fixed needs changelog_ref (the '
                                    'changelog line) and fixed_in_version (the dataset version with the fix)')
             if row['dataset_version'] and version == row['dataset_version']:
-                raise JournalError(400, 'changelog_required',
+                raise JournalError(400, 'same_version',
                                    f'the problem was reported on version {version}; a fix is a new version')
             fields.update(changelog_ref=reference, fixed_in_version=version)
         elif status != 'fixed':
