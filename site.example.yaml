@@ -254,6 +254,17 @@ artefacts:
   # also: max_files (50), max_versions (100), inline_max_mb (2), serve_local (fallback | prefer),
   # url_ttl_seconds (300)
 
+# Dataset journal (doc/DESIGN_dataset_journal.md): notes, reports (data errors,
+# annotation concerns, data requests) and usage events per dataset, in
+# <state_dir>/journal.sqlite. Notes need a login; with auth.mode none only
+# anonymous download counts are kept. Download records name the user: say so in
+# the site's privacy notice. Everything below is optional (defaults shown).
+journal:
+  enabled: true
+  download_retention_days: 730   # who downloaded what is deleted after this (0 keeps it)
+  triage_groups: [admins, curators]   # may set a report's status (the dataset's depositor may too)
+  # also: max_body_chars (10000), writes_per_minute (30)
+
 mcp:
   token_ttl_days: 90 # lifetime of a per-user MCP link (0 = never expires)
   max_links_per_user: 5 # each user can have this many named links

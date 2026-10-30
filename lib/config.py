@@ -1000,6 +1000,72 @@ def may_create_collections(groups: Any, is_admin: bool, cfg: Optional[Dict[str, 
     return bool(member & set(get_artefact_settings(cfg)['collections_create_groups']))
 
 
+JOURNAL_DEFAULTS: Dict[str, Any] = {
+    'enabled': True,
+    'db_path': '',
+    'download_retention_days': 730,
+    'max_body_chars': 10000,
+    'triage_groups': ['admins', 'curators'],
+    'writes_per_minute': 30,
+}
+
+
+def get_journal_settings(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Settings of the dataset journal (doc/DESIGN_dataset_journal.md), from the ``journal`` block.
+
+    ``db_path`` is resolved: env ``ANTHIVE_JOURNAL_DB`` > ``journal.db_path`` > ``<state_dir>/journal.sqlite``.
+    ``enabled`` (env ``ANTHIVE_JOURNAL_ENABLED``) switches everything off, download counts included;
+    ``notes`` is True when notes can be written, which needs a login (auth.mode other than none).
+
+    Raises:
+        ConfigError: a block that is not a mapping, a negative or non-numeric number, a group list that
+            is not a list of names.
+    """
+    cfg = cfg if cfg is not None else get_config()
+    block = cfg.get('journal')
+    if block is None:
+        block = {}
+    if not isinstance(block, dict):
+        raise ConfigError('ERROR: [Config] journal must be a mapping (enabled, db_path, download_retention_days, ...)')
+    settings: Dict[str, Any] = {}
+    env = {'enabled': 'ANTHIVE_JOURNAL_ENABLED', 'db_path': 'ANTHIVE_JOURNAL_DB',
+           'download_retention_days': 'ANTHIVE_JOURNAL_DOWNLOAD_RETENTION_DAYS'}
+    for key, default in JOURNAL_DEFAULTS.items():
+        raw = os.environ.get(env[key], '').strip() if key in env else ''
+        if not raw:
+            raw = block.get(key)
+        if raw is None or raw == '':
+            raw = default
+        if isinstance(default, bool):
+            settings[key] = _flag(raw, default)
+        elif isinstance(default, list):
+            if isinstance(raw, str):
+                raw = raw.split(',')
+            if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+                raise ConfigError(f'ERROR: [Config] journal.{key} must be a list of group names, got {raw!r}')
+            settings[key] = [item.strip().lower() for item in raw if item.strip()]
+        elif isinstance(default, int):
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                raise ConfigError(f'ERROR: [Config] journal.{key} must be a number, got {raw!r}')
+            if value < 0 or value != value:
+                raise ConfigError(f'ERROR: [Config] journal.{key} must not be negative, got {raw!r}')
+            settings[key] = int(value)
+        else:
+            settings[key] = str(raw).strip()
+    if settings['max_body_chars'] < 100:
+        raise ConfigError('ERROR: [Config] journal.max_body_chars must be at least 100')
+    settings['db_path'] = (resolve_path(settings['db_path']) if settings['db_path']
+                           else get_state_dir(cfg, create=False) / 'journal.sqlite')
+    try:
+        auth_mode = get_auth_settings(cfg)['mode']
+    except ConfigError:
+        auth_mode = 'none'
+    settings['notes'] = settings['enabled'] and auth_mode != 'none'
+    return settings
+
+
 def get_model_cache_dir(cfg: Optional[Dict[str, Any]] = None) -> Path:
     """Cache for the query-embedding model: model_cache / ANTHIVE_MODEL_CACHE,
     else FASTEMBED_CACHE_PATH (baked into the image), else <state_dir>/models."""

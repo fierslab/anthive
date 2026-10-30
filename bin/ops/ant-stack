@@ -115,6 +115,9 @@ ARTEFACT_SITE_KEYS = {'upload_groups': 'artefacts_upload_groups',
                       'inline_max_mb': 'artefacts_inline_max_mb', 'hold_public': 'artefacts_hold_public',
                       'serve_local': 'artefacts_serve_local', 'url_ttl_seconds': 'artefacts_url_ttl_seconds'}
 
+# site.yaml journal: keys (doc/DESIGN_dataset_journal.md); rendered into anthive.yaml's journal: block.
+JOURNAL_SITE_KEYS = ('enabled', 'download_retention_days', 'triage_groups', 'max_body_chars', 'writes_per_minute')
+
 # Container-side fixed locations (see docker/Dockerfile + compose.yaml).
 C_STATE = '/var/lib/anthive'
 C_SCRATCH = '/scratch'
@@ -369,6 +372,22 @@ def validate_site(site: dict, path: Path) -> dict:
         raise SiteError("artefacts.hold_public must be true or false")
     if artefact_block.get('serve_local') is not None and artefact_block['serve_local'] not in ('fallback', 'prefer'):
         raise SiteError("artefacts.serve_local must be fallback or prefer")
+    journal_block = site.get('journal')
+    if journal_block is not None and not isinstance(journal_block, dict):
+        raise SiteError("journal must be a mapping (enabled, download_retention_days, triage_groups, ...)")
+    journal_block = journal_block or {}
+    unknown = sorted(set(journal_block) - set(JOURNAL_SITE_KEYS))
+    if unknown:
+        raise SiteError(f"journal: unknown key(s) {', '.join(unknown)} (known: {', '.join(JOURNAL_SITE_KEYS)})")
+    if not isinstance(journal_block.get('enabled', True), bool):
+        raise SiteError("journal.enabled must be true or false")
+    for key in ('download_retention_days', 'max_body_chars', 'writes_per_minute'):
+        value = journal_block.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise SiteError(f"journal.{key} must be a whole number, 0 or more")
+    groups = journal_block.get('triage_groups')
+    if groups is not None and (not isinstance(groups, list) or not all(isinstance(g, str) and g for g in groups)):
+        raise SiteError("journal.triage_groups must be a list of group names, e.g. [admins, curators]")
     site['_trusted_proxies'] = _trusted_proxies(site)
     library = site.get('library') or {}
     site['_deploy_key'] = _abs(library.get('deploy_key'), 'library.deploy_key', False)
@@ -796,6 +815,9 @@ def render_anthive_yaml(site: dict, role: str = 'api') -> dict:
         read_block = _artefacts_read_block(site)
         if read_block is not None:
             cfg['artefacts_s3'] = read_block
+    # Dataset journal (journal: block): its SQLite file lives in the api's state_dir (the default path).
+    journal_block = site.get('journal') or {}
+    cfg['journal'] = {key: journal_block[key] for key in JOURNAL_SITE_KEYS if journal_block.get(key) is not None}
     if site['_starcatstore']:
         cfg['starcat_store'] = str(site['_starcatstore'])
     chat_key = _read_secret(state / 'secrets' / 'chat_api_key')
@@ -1715,6 +1737,23 @@ def _check_central(site: dict, central: dict, groups: str) -> list[str]:
     return problems
 
 
+def _journal_summary(site: dict) -> str:
+    block = site.get('journal') or {}
+    if block.get('enabled') is False:
+        return 'off'
+    retention = block.get('download_retention_days', 730)
+    kept = f"download records kept {retention} days" if retention else 'download records kept forever'
+    if site['auth']['mode'] == 'none':
+        return f"anonymous download counts only (auth.mode none), {kept}"
+    return f"notes and reports on, {kept}"
+
+
+def _check_journal(site: dict) -> list[str]:
+    """The dataset journal (doc/DESIGN_dataset_journal.md): one summary line; no problems it can cause."""
+    _say(f"journal: {_journal_summary(site)} (<state_dir>/journal.sqlite; name it in the site's privacy notice)")
+    return []
+
+
 def _check_artefacts(site: dict) -> list[str]:
     """The artefact store (doc/DESIGN_artefacts.md): deposits, the read key pair, the redirect log filter and
     the h5adstore's .gitignore. One summary line; problems only for what cannot work."""
@@ -2065,6 +2104,7 @@ def check(site: dict, running: bool = False) -> list[str]:
     problems += _check_s3(site)
     problems += _check_datasets(site)
     problems += _check_artefacts(site)
+    problems += _check_journal(site)
     _check_secret_permissions(site)
     _check_proxy_trust(site)
     store = site['_h5adstore']
@@ -2300,6 +2340,7 @@ def print_plan(site: dict) -> None:
   s3             {('on, api access: ' + site['s3']['api_access']) if site['s3'].get('enabled') else 'off'}
   deposits       {('on for ' + ', '.join((site.get('datasets') or {}).get('upload_groups') or ['admins', 'curators'])) if _deposit_enabled(site) else 'off'}
   artefacts      {('deposits on for ' + ', '.join((site.get('artefacts') or {}).get('upload_groups') or ['admins', 'analysts'])) if _artefacts_enabled(site) else 'deposits off'}
+  journal        {_journal_summary(site)}
   published      {published_summary(site)}
   h5adstore      {site['_h5adstore']}{' (read-only)' if site['data'].get('readonly') else ''}
   genesetstore   {site['_genesetstore'] or '-'}

@@ -180,6 +180,7 @@ def _serve(store: Path, auth_mode: str = 'authelia', requires_auth: bool = True,
         'help_content': help_content, 'get_ui_settings': lambda cfg_arg=None: {},
         'facet_hidden_by_config': lambda facet, visible: bool(visible) and facet not in visible,
         '_facets_visible': lambda: [],
+        '_journal_record_download': lambda *args, **kwargs: None,   # the journal has its own tests
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(SERVE_PATH), 'exec', dont_inherit=True), namespace)
     namespace['registry'] = _registry(namespace, store)

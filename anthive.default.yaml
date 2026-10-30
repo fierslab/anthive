@@ -177,6 +177,28 @@ datasets_deposit_watcher_public_keys: []
 # the catalog prefix). Empty: the s3 block's bucket.
 datasets_deposit_catalog_bucket: ''
 
+# Dataset journal (doc/DESIGN_dataset_journal.md): notes, reports (data errors,
+# annotation concerns, data requests) and usage events per dataset, collection,
+# gene set, facet and artefact, in one SQLite file per site. Notes need a login:
+# on a site with auth.mode none only anonymous download counts are kept.
+# Env overrides: ANTHIVE_JOURNAL_ENABLED, ANTHIVE_JOURNAL_DB,
+# ANTHIVE_JOURNAL_DOWNLOAD_RETENTION_DAYS.
+journal:
+  enabled: true
+  # SQLite file; empty means <state_dir>/journal.sqlite. Never inside the repo.
+  db_path: ''
+  # Download rows (who downloaded what) are deleted after this many days (0 keeps them).
+  download_retention_days: 730
+  # Longest note, in characters.
+  max_body_chars: 10000
+  # Who may set the status of a data error, annotation concern or data request
+  # (admins always; the dataset's depositor or assigned owner too).
+  triage_groups:
+    - admins
+    - curators
+  # Notes and replies one user may write per minute.
+  writes_per_minute: 30
+
 # Artefact store (doc/DESIGN_artefacts.md): versioned, immutable analysis files
 # (DE tables, figures, tables, notebooks, reports, models) of a dataset or a
 # collection, under <Group>/static/artefacts/. S3 holds the files; the API

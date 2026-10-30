@@ -29,6 +29,45 @@ the spec drifting away from the running code.
 
 ---
 
+## 2.49.0 (unreleased)
+
+Minor, additive. Nothing is removed or renamed. The dataset journal (`doc/DESIGN_dataset_journal.md`):
+notes, reports and usage events per dataset, collection, gene set, facet and artefact, plus download
+counts. New tag `journal`. Errors are `{status, message}` with 400 (bad input), 401 `sign_in_required`,
+403 `forbidden`, 404 `not_found` / `journal_off` / `journal_notes_off` (no login on this site), 409,
+429 `too_many_writes`.
+
+An entry is `{id, target_type, target_id, dataset_version, author, created, kind (note|event), category,
+body, links: [{url, label, type}], refs: {column, value, gene, genes, cell_type, evidence}, parent_id,
+edited, may_edit, replies?}`; reports add `{status, status_by, status_at, status_note, fixed_in_version,
+changelog_ref}`, artefact events add `about: {type, id}`, hidden entries (admins only) add `{hidden,
+hidden_by, hidden_at, hidden_reason}`.
+
+- `GET /journal/status`: switched on, notes possible, categories, statuses, link types, ref keys, target
+  types, `max_body_chars`, `download_retention_days`, and the caller's `signed_in`, `is_admin`,
+  `may_triage`.
+- `GET /databases/{db_id}/journal?category=&status=&kind=&before_id=&limit=` (signed in): `{target_type,
+  target_id, entries, downloads: {n_downloads, n_people, n_anonymous, last_download}, next_before_id}`.
+- `POST /databases/{db_id}/journal` (signed in) body `{category, body, links, refs}`: 201 with the entry,
+  pinned to the dataset's current version; reports start `open`.
+- `POST /databases/{db_id}/journal/use` (signed in) body `{note, links, tool}`: a `used-in-analysis` event.
+- `GET /databases/{db_id}/journal/downloads?limit=`: the counts plus `retention_days`, `names_visible`;
+  admins and the dataset's owner also get `rows: [{user, ts, what, name, dataset_version}]`.
+- `GET /journal?target_type=&target_id=&...` and `POST /journal` body `{target_type, target_id, category,
+  body, links, refs}`: the same for any target.
+- `GET /journal/open?category=&target_type=&limit=`: open and acknowledged reports the caller may see,
+  `{issues, counts}`.
+- `GET /journal/downloads?target_type=&target_id=`: counts of a dataset or an artefact.
+- `GET /journal/entries/{id}`; `PATCH /journal/entries/{id}` body `{body, links, refs}` (author only);
+  `POST /journal/entries/{id}/replies` body `{category, body, links, refs}`;
+  `POST /journal/entries/{id}/status` body `{status, note, changelog_ref, fixed_in_version}` (admins,
+  `journal.triage_groups`, the dataset's owner; fixing a data-error or annotation-concern needs both
+  `changelog_ref` and a new `fixed_in_version`); `POST /journal/entries/{id}/hide` body `{hidden, reason}`
+  (admins); `GET /journal/entries/{id}/history` (author, admins).
+- `GET /databases/{db_id}/download/{kind}`, `GET /databases/{db_id}/download-static/{filename}` and the
+  artefact file download now record the download in the journal. Their answers are unchanged.
+- Help topic `journal`. MCP tools `journal_list`, `journal_add`, `journal_open_issues`.
+
 ## 2.48.0 (2026-10-27)
 
 Minor, additive. Nothing is removed or renamed.

@@ -10,6 +10,7 @@ children:
 - facets-columns
 - dataset-versions
 - dataset-caveats
+- journal
 - differential-expression
 aliases:
 - dataset page

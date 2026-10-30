@@ -1,0 +1,27 @@
+id: journal
+title: Dataset journal
+summary: The journal of a dataset holds notes people write (comments, questions, findings, links such as an ELN entry, reports of data errors) and events the site records (new versions, artefacts made from it, declared use), plus how often it was downloaded.
+related:
+- dataset-versions
+- dataset-caveats
+- artefacts
+aliases:
+- journal
+- notes
+- comments
+- data error
+- report a problem
+- annotation concern
+- data request
+- downloads
+- eln
+body_html: |
+  <p>The journal is new and shown as a preview while it is reviewed. It exists on sites where you sign in; a site without a login keeps only anonymous download counts.</p>
+  <ul>
+    <li><strong>Notes.</strong> Anyone who can sign in writes a note on a dataset, a collection, a gene set, a facet or an artefact. A note is a comment, a question, a finding, a link (for example to an ELN experiment, a protocol, a DOI or a manuscript), a used-in note (a paper or grant that used the data), or a report. Everyone who can sign in to this site reads every note, and notes read through an AI assistant are sent to that assistant's provider. Only the author edits a note; the earlier text is kept.</li>
+    <li><strong>Reports.</strong> A data error (a mistake in the data or its metadata, such as a mislabelled sex or a wrong mapping), an annotation concern (a cell type label you doubt) or a data request (a dataset you would like added) starts as open. Admins, curators and the dataset's depositor move it to acknowledged, fixed or declined. A data error or annotation concern is only fixed with the changelog line and the new dataset version that holds the fix, so every fix also appears as a caveat or changelog entry on the dataset page.</li>
+    <li><strong>Versions.</strong> A note on a dataset records the dataset version it was written against. When a newer version exists, check whether an open report still applies.</li>
+    <li><strong>Events.</strong> The site adds an event when a new dataset version is published, when an artefact is made from the dataset, and when someone declares from vark, pyvark or a notebook that they used the dataset in an analysis. Use is never inferred from browsing or queries.</li>
+    <li><strong>Downloads.</strong> Every download of the h5ad, a static file or an artefact is counted. Ordinary users see how many downloads and how many people; admins and the dataset's depositor see who downloaded what and when. Download records are deleted after two years (the site's setting <code>journal.download_retention_days</code>).</li>
+    <li><strong>Moderation.</strong> Nothing is deleted. An admin can hide a note, which then shows only to admins with the reason.</li>
+  </ul>

@@ -2009,6 +2009,8 @@ async def lifespan(app: FastAPI):
     # A site with a central deposit watcher (design section 24) expires its own deposits and reads the
     # watcher's signed results back in a daemon thread.
     _start_deposit_site_sync()
+    # Dataset journal: new dataset and artefact versions become events, old download rows are purged.
+    asyncio.create_task(asyncio.to_thread(_journal_startup_sync))
     # Slave-mode banner — make the deployment role obvious in the logs
     # so it's the first thing visible when debugging "why won't this
     # write?". Banner ONLY fires when role=slave is opt-in; primaries
@@ -2049,11 +2051,11 @@ async def lifespan(app: FastAPI):
 #   * major (x.0.0): removes / renames endpoints, changes response shape.
 #
 # Detail: doc/API_CHANGELOG.md (served at /api/changelog).
-API_VERSION = "2.48.0"
+API_VERSION = "2.49.0"
 # Release date (YYYY-MM-DD) of API_VERSION; None while it is unreleased. Set it
 # in the release commit together with the changelog heading
 # (tests/test_version_sync.py keeps the two in step).
-API_VERSION_RELEASED: Optional[str] = "2026-10-27"
+API_VERSION_RELEASED: Optional[str] = None
 # Oldest pyvark (codeberg.org/mfiers/pyvark, `from vark import AnthiveClient`)
 # that works with this API.
 API_COMPATIBLE_PYVARK = ">=0.11.0"
@@ -16924,7 +16926,7 @@ def list_database_files(db_id: str):
 
 
 @app.get("/databases/{db_id:path}/download/{kind}", tags=["databases"])
-def download_database_file(db_id: str, kind: str):
+def download_database_file(request: Request, db_id: str, kind: str):
     """Download one stored artifact.
 
     Only ``kind='h5ad'`` is served — the ``.duckdb``, ``.scores.parquet``, and
@@ -16944,6 +16946,7 @@ def download_database_file(db_id: str, kind: str):
                             detail=f"No '{kind}' file available for {db_id}")
     from fastapi.responses import FileResponse, RedirectResponse  # noqa: PLC0415
     source, target, filename = resolved
+    _journal_record_download(request, 'dataset', db_id, 'h5ad', filename, _journal_dataset_version(db_id))
     if source == 's3':
         return RedirectResponse(url=target, status_code=307)
     return FileResponse(str(target), filename=filename,
@@ -16951,7 +16954,7 @@ def download_database_file(db_id: str, kind: str):
 
 
 @app.get("/databases/{db_id:path}/download-static/{filename}", tags=["databases"])
-def download_database_static_file(db_id: str, filename: str):
+def download_database_static_file(request: Request, db_id: str, filename: str):
     """Download one file from the collection's ``static/`` folder.
 
     Paper PDFs and supplementary tables shipped with the collection. Path-
@@ -16965,6 +16968,7 @@ def download_database_static_file(db_id: str, filename: str):
         raise HTTPException(status_code=404,
                             detail=f"No static file '{filename}' for {db_id}")
     from fastapi.responses import FileResponse  # noqa: PLC0415
+    _journal_record_download(request, 'dataset', db_id, 'static', target.name, _journal_dataset_version(db_id))
     return FileResponse(str(target), filename=target.name,
                         media_type='application/octet-stream')
 
@@ -17143,6 +17147,7 @@ def download_artefact_file(request: Request, group_id: str, scope: str, artefact
         return _artefact_error(exc)
     log.info("artefact download %s@v%s/%s by %s via %s", entry.ref, version_entry.number, name,
              viewer.user or 'anonymous', 's3' if delivery.how == 'redirect' else 'local')
+    _journal_record_download(request, 'artefact', entry.ref, 'artefact', f'v{version_entry.number}/{name}')
     if delivery.how == 'redirect':
         return RedirectResponse(url=delivery.url, status_code=307,
                                 headers={'Cache-Control': 'no-store, private', 'Referrer-Policy': 'no-referrer'})
@@ -17165,6 +17170,419 @@ def get_artefact_preview(request: Request, group_id: str, scope: str, artefact_i
     return FileResponse(str(path), media_type=content_type,
                         headers={'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': 'sandbox',
                                  'Content-Disposition': 'inline', 'Cache-Control': 'private, max-age=300'})
+
+
+# ── Dataset journal (REST 2.49.0, doc/DESIGN_dataset_journal.md) ───────────────
+#
+# Notes (comment, question, finding, link, used-in, data-error, annotation-concern, data-request) and
+# events (downloads, declared use, artefact-made, deposited, version-published) per dataset, collection,
+# gene set, facet and artefact, in one SQLite file per site (lib/journal.py). Notes need a login: with
+# auth.mode none only anonymous download counts are kept and the note routes answer 404. The access rules
+# of the targets apply: a dataset or artefact the caller cannot see has no journal for them, and an event
+# about an invisible artefact is left out. Download names are for admins and the dataset's owner only.
+
+_journal_service_instance = None
+_journal_service_lock = Lock()
+_journal_sync_state: Dict[str, Any] = {'metadata': None, 'artefacts': None, 'checked': 0.0}
+_journal_sync_lock = Lock()
+_journal_owner_store = None
+_JOURNAL_OFF = {'status': 'journal_off', 'message': 'the journal is switched off on this site (journal.enabled)'}
+_JOURNAL_NOTES_OFF = {'status': 'journal_notes_off',
+                      'message': 'journal notes need a login; this site has none (auth.mode none)'}
+
+
+def _journal_settings() -> Dict[str, Any]:
+    from config import get_journal_settings  # noqa: PLC0415
+    return get_journal_settings(get_config())
+
+
+def _journal_service():
+    """The JournalService of this process, or None when the journal is off (a config change needs a restart)."""
+    global _journal_service_instance
+    if _journal_service_instance is None:
+        with _journal_service_lock:
+            if _journal_service_instance is None:
+                settings = _journal_settings()
+                if not settings['enabled']:
+                    return None
+                import journal as journal_lib  # noqa: PLC0415
+                store = journal_lib.JournalStore(settings['db_path'], max_body_chars=settings['max_body_chars'])
+                _journal_service_instance = journal_lib.JournalService(
+                    store, retention_days=settings['download_retention_days'],
+                    writes_per_minute=settings['writes_per_minute'])
+    return _journal_service_instance
+
+
+def _journal_owner(db_id: str) -> Optional[str]:
+    """The depositor or assigned owner of a dataset (deposits.sqlite), None when unknown."""
+    global _journal_owner_store
+    try:
+        if _journal_owner_store is None:
+            import dataset_deposit as dd  # noqa: PLC0415
+            from config import get_ingest_state_dir  # noqa: PLC0415
+            _journal_owner_store = dd.DepositStore.open_if_exists(get_ingest_state_dir(get_config(), create=False))
+        if _journal_owner_store is None:
+            return None
+        return _journal_owner_store.owner_of_dataset(db_id)
+    except Exception as exc:  # noqa: BLE001 - an unreadable deposit store only loses the owner's rights
+        log.warning("journal: owner lookup for %s failed: %s", db_id, exc)
+        return None
+
+
+def _journal_depositor(db_id: str, version: str) -> Optional[str]:
+    """Who deposited this version of a dataset (the newest live deposit with that db_id and version)."""
+    owner_store = None
+    try:
+        _journal_owner(db_id)
+        owner_store = _journal_owner_store
+        if owner_store is None:
+            return None
+        rows = owner_store._rows("SELECT user FROM deposits WHERE UPPER(db_id) = UPPER(?) AND version = ? "
+                                 "AND watch_state = 'live' ORDER BY rowid DESC LIMIT 1", (db_id, version))
+        return rows[0]['user'] if rows else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _journal_actor(request: Request, db_id: Optional[str] = None):
+    """Who asks: the login name (none on a site without a login), admin, triager, owner of ``db_id``."""
+    import journal as journal_lib  # noqa: PLC0415
+    user = (request.headers.get('Remote-User') or '').strip() if _access_settings()['auth_mode'] != 'none' else ''
+    is_admin = bool(user) and _caller_is_admin(request)
+    groups = {g.strip().lower() for g in (request.headers.get('Remote-Groups') or '').split(',') if g.strip()}
+    may_triage = is_admin or bool(user and groups & set(_journal_settings()['triage_groups']))
+    owns = bool(user and db_id and _journal_owner(db_id) == user)
+    return journal_lib.Actor(user=user, is_admin=is_admin, may_triage=may_triage, owns=owns)
+
+
+def _journal_visible(request: Request):
+    """visible(target_type, target_id) for this caller: the dataset access rules, the artefact policy for
+    collections and artefacts; gene sets and facets are visible to everyone who reaches the journal."""
+    cache: Dict[Tuple[str, str], bool] = {}
+    state: Dict[str, Any] = {}
+
+    def policy_and_viewer():
+        if 'policy' not in state:
+            state['policy'], state['viewer'] = _artefact_policy(), _artefact_viewer(request)
+        return state['policy'], state['viewer']
+
+    def visible(target_type: str, target_id: str) -> bool:
+        key = (target_type, target_id)
+        if key in cache:
+            return cache[key]
+        answer = False
+        try:
+            if target_type == 'dataset':
+                answer = registry is not None and target_id in registry.databases
+            elif target_type == 'collection':
+                policy, viewer = policy_and_viewer()
+                answer = (target_id in registry.collection_registry()
+                          and policy.collection_visible(target_id, viewer))
+            elif target_type == 'artefact':
+                parts = target_id.split('@', 1)[0].split('/')
+                if len(parts) == 3:
+                    entry = registry.artefact_index().get(*parts)
+                    policy, viewer = policy_and_viewer()
+                    answer = entry is not None and policy.artefact_visible(entry, viewer)
+            elif target_type in ('geneset', 'facet'):
+                answer = True
+        except Exception as exc:  # noqa: BLE001 - when in doubt, not visible
+            log.warning("journal: visibility of %s %s failed: %s", target_type, target_id, exc)
+            answer = False
+        cache[key] = answer
+        return answer
+
+    return visible
+
+
+def _journal_sync(force: bool = False) -> None:
+    """Turn new dataset versions and artefact versions into events, at most once per catalog scan (the
+    registry swaps its maps on a rescan), and delete download rows past their retention once a day."""
+    service = _journal_service()
+    if service is None or registry is None:
+        return
+    metadata = registry._metadata_all
+    index = registry._artefact_index
+    with _journal_sync_lock:
+        state = _journal_sync_state
+        if not force and state['metadata'] is metadata and state['artefacts'] is index \
+                and time.time() - state['checked'] < 3600:
+            return
+        try:
+            if metadata and (force or state['metadata'] is not metadata):
+                versions = {db_id: (meta or {}).get('version') for db_id, meta in metadata.items()}
+                written = service.sync_dataset_versions(versions, depositor=_journal_depositor)
+                if written:
+                    log.info("journal: %d dataset version event(s)", written)
+            if index is not None and (force or state['artefacts'] is not index):
+                items = []
+                for entry in index.entries.values():
+                    for number, version in entry.versions.items():
+                        if not version.servable:
+                            continue
+                        manifest = version.manifest or {}
+                        items.append({'ref': entry.ref, 'version': number, 'published': version.published,
+                                      'owner': entry.owner, 'title': manifest.get('title') or entry.head.get('title'),
+                                      'made_from': manifest.get('made_from') or []})
+                written = service.sync_artefact_versions(items)
+                if written:
+                    log.info("journal: %d artefact-made event(s)", written)
+            if service.purge_due():
+                removed = service.purge_old_downloads()
+                if removed:
+                    log.info("journal: deleted %d download row(s) past retention", removed)
+        except Exception as exc:  # noqa: BLE001 - the journal never breaks a request
+            log.warning("journal: catalog sync failed: %s", exc)
+        state.update(metadata=metadata, artefacts=index, checked=time.time())
+
+
+def _journal_startup_sync() -> None:
+    """After the catalog has loaded: one forced sync (a failure is logged, never raised)."""
+    try:
+        _journal_sync(force=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("journal: startup sync failed: %s", exc)
+
+
+def _journal_record_download(request: Request, target_type: str, target_id: str, what: str,
+                             name: Optional[str] = None, dataset_version: Optional[str] = None) -> None:
+    """Fire and forget: a failure is logged and the download goes ahead."""
+    try:
+        service = _journal_service()
+        if service is None:
+            return
+        user = (request.headers.get('Remote-User') or '').strip() if _access_settings()['auth_mode'] != 'none' else ''
+        service.record_download(target_type, target_id, what, user, dataset_version, name)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("journal: download of %s %s not recorded: %s", target_type, target_id, exc)
+
+
+def _journal_call(request: Request, notes: bool, action, db_id: Optional[str] = None):
+    """Run ``action(service, actor, visible)``; map the journal's refusals to JSON answers."""
+    import journal as journal_lib  # noqa: PLC0415
+    service = _journal_service()
+    if service is None:
+        return JSONResponse(_JOURNAL_OFF, status_code=404)
+    if notes and not _journal_settings()['notes']:
+        return JSONResponse(_JOURNAL_NOTES_OFF, status_code=404)
+    _journal_sync()
+    actor = _journal_actor(request, db_id)
+    if notes and not actor.signed_in:
+        return JSONResponse({'status': 'sign_in_required', 'message': 'sign in to read and write the journal'},
+                            status_code=401)
+    try:
+        return action(service, actor, _journal_visible(request))
+    except journal_lib.JournalError as exc:
+        return JSONResponse(exc.body, status_code=exc.status)
+
+
+def _journal_dataset_version(db_id: str) -> Optional[str]:
+    try:
+        version = (registry._metadata_all.get(db_id) or {}).get('version')
+        return str(version) if version not in (None, '') else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _journal_csv(value: Optional[str]) -> Optional[List[str]]:
+    return [part.strip().lower() for part in value.split(',') if part.strip()] if value else None
+
+
+def _journal_owner_db(target_type: str, target_id: str) -> Optional[str]:
+    return target_id if target_type == 'dataset' else None
+
+
+def _journal_entry_db(entry_id: int) -> Optional[str]:
+    """The dataset an entry belongs to (for the owner's rights), None for other targets."""
+    service = _journal_service()
+    row = service.store.get(entry_id) if service is not None else None
+    return row['target_id'] if row and row['target_type'] == 'dataset' else None
+
+
+class JournalNote(BaseModel):
+    category: str = Field(..., description="comment, question, finding, link, used-in, data-error, "
+                                           "annotation-concern or data-request (replies: comment, question, "
+                                           "finding or link)")
+    body: Optional[str] = Field(None, description="markdown text (max journal.max_body_chars characters)")
+    links: Optional[List[Any]] = Field(None, description="[{url, label, type}]: http(s) only; type eln, doi, "
+                                                         "artefact, protocol, manuscript or other")
+    refs: Optional[Dict[str, Any]] = Field(None, description="pointers into the data: column, value, gene, "
+                                                             "genes (list), cell_type, evidence")
+
+
+class JournalTargetNote(JournalNote):
+    target_type: str = Field(..., description="dataset, collection, geneset, facet or artefact")
+    target_id: str = Field(..., description="db_id, group id, gene set id, facet name or artefact ref")
+
+
+class JournalEdit(BaseModel):
+    body: Optional[str] = None
+    links: Optional[List[Any]] = None
+    refs: Optional[Dict[str, Any]] = None
+
+
+class JournalStatus(BaseModel):
+    status: str = Field(..., description="open, acknowledged, fixed or declined")
+    note: Optional[str] = None
+    changelog_ref: Optional[str] = Field(None, description="the changelog line of the fix (required to close a "
+                                                           "data-error or annotation-concern as fixed)")
+    fixed_in_version: Optional[str] = Field(None, description="the dataset version that holds the fix (required "
+                                                              "with changelog_ref)")
+
+
+class JournalHide(BaseModel):
+    hidden: bool = True
+    reason: Optional[str] = None
+
+
+class JournalUse(BaseModel):
+    note: Optional[str] = Field(None, description="what the dataset was used for")
+    links: Optional[List[Any]] = Field(None, description="[{url, label, type}], e.g. the ELN experiment")
+    tool: Optional[str] = Field(None, description="the client that declares it, e.g. 'vark 0.0.30'")
+
+
+@app.get("/journal/status", tags=["journal"])
+def journal_status(request: Request):
+    """What this site's journal does: switched on, notes possible (needs a login), categories, statuses, link
+    types, download retention, and the caller's rights (signed in, may set statuses)."""
+    import journal as journal_lib  # noqa: PLC0415
+    settings = _journal_settings()
+    actor = _journal_actor(request)
+    return {'enabled': settings['enabled'], 'notes': settings['notes'],
+            'note_categories': list(journal_lib.NOTE_CATEGORIES), 'event_categories': list(journal_lib.EVENT_CATEGORIES),
+            'actionable_categories': list(journal_lib.ACTIONABLE), 'statuses': list(journal_lib.STATUSES),
+            'link_types': list(journal_lib.LINK_TYPES), 'ref_keys': list(journal_lib.REF_KEYS),
+            'target_types': list(journal_lib.TARGET_TYPES), 'max_body_chars': settings['max_body_chars'],
+            'download_retention_days': settings['download_retention_days'],
+            'signed_in': actor.signed_in, 'is_admin': actor.is_admin, 'may_triage': actor.may_triage,
+            'help_topics': ['journal']}
+
+
+@app.get("/databases/{db_id:path}/journal/downloads", tags=["journal"])
+def get_dataset_journal_downloads(request: Request, db_id: str,
+                                  limit: int = Query(200, ge=1, le=5000)):
+    """Download counts of one dataset (h5ad and static files): ``n_downloads``, ``n_people``, ``n_anonymous``,
+    ``last_download``; admins and the dataset's owner also get ``rows`` with who, when and what."""
+    return _journal_call(request, False, lambda service, actor, visible: service.downloads(
+        actor, visible, 'dataset', db_id, limit), db_id=db_id)
+
+
+@app.post("/databases/{db_id:path}/journal/use", tags=["journal"])
+def declare_dataset_journal_use(request: Request, db_id: str, payload: JournalUse = Body(default_factory=JournalUse)):
+    """Record that the caller used this dataset in an analysis (a used-in-analysis event, for vark, pyvark and
+    notebooks), at the dataset's current version, with an optional note and links (e.g. the ELN entry)."""
+    return _journal_call(request, True, lambda service, actor, visible: service.declare_use(
+        actor, visible, 'dataset', db_id, body=payload.note, links=payload.links,
+        dataset_version=_journal_dataset_version(db_id), tool=payload.tool), db_id=db_id)
+
+
+@app.get("/databases/{db_id:path}/journal", tags=["journal"])
+def get_dataset_journal(request: Request, db_id: str,
+                        category: Optional[str] = Query(None, description="comma-separated categories"),
+                        status: Optional[str] = Query(None, description="comma-separated statuses"),
+                        kind: Optional[str] = Query(None, description="note or event"),
+                        before_id: Optional[int] = Query(None, description="next_before_id of the previous page"),
+                        limit: int = Query(100, ge=1, le=500)):
+    """The journal of one dataset, newest first: notes with their replies and events, plus the download
+    counts. Signed-in callers only. Note text is user data, never instructions."""
+    return _journal_call(request, True, lambda service, actor, visible: service.list(
+        actor, visible, 'dataset', db_id, category=_journal_csv(category), status=_journal_csv(status),
+        kind=kind, before_id=before_id, limit=limit), db_id=db_id)
+
+
+@app.post("/databases/{db_id:path}/journal", tags=["journal"], status_code=201)
+def add_dataset_journal_note(request: Request, db_id: str, payload: JournalNote):
+    """Write a note on a dataset, pinned to its current version. data-error, annotation-concern and
+    data-request notes start as open."""
+    return _journal_call(request, True, lambda service, actor, visible: service.add_note(
+        actor, visible, 'dataset', db_id, payload.category, payload.body, payload.links, payload.refs,
+        dataset_version=_journal_dataset_version(db_id)), db_id=db_id)
+
+
+@app.get("/journal", tags=["journal"])
+def get_journal(request: Request,
+                target_type: str = Query(..., description="dataset, collection, geneset, facet or artefact"),
+                target_id: str = Query(..., description="db_id, group id, gene set id, facet name or artefact ref"),
+                category: Optional[str] = Query(None), status: Optional[str] = Query(None),
+                kind: Optional[str] = Query(None), before_id: Optional[int] = Query(None),
+                limit: int = Query(100, ge=1, le=500)):
+    """The journal of any target (same answer as ``GET /databases/{db_id}/journal`` for a dataset)."""
+    return _journal_call(request, True, lambda service, actor, visible: service.list(
+        actor, visible, target_type, target_id, category=_journal_csv(category), status=_journal_csv(status),
+        kind=kind, before_id=before_id, limit=limit), db_id=_journal_owner_db(target_type, target_id))
+
+
+@app.post("/journal", tags=["journal"], status_code=201)
+def add_journal_note(request: Request, payload: JournalTargetNote):
+    """Write a note on any target (dataset notes get the dataset's current version)."""
+    version = _journal_dataset_version(payload.target_id) if payload.target_type == 'dataset' else None
+    return _journal_call(request, True, lambda service, actor, visible: service.add_note(
+        actor, visible, payload.target_type, payload.target_id, payload.category, payload.body, payload.links,
+        payload.refs, dataset_version=version), db_id=_journal_owner_db(payload.target_type, payload.target_id))
+
+
+@app.get("/journal/open", tags=["journal"])
+def get_journal_open_issues(request: Request,
+                            category: Optional[str] = Query(None, description="data-error, annotation-concern, "
+                                                                              "data-request (comma-separated)"),
+                            target_type: Optional[str] = Query(None),
+                            limit: int = Query(200, ge=1, le=1000)):
+    """Open and acknowledged data errors, annotation concerns and data requests across the site that the
+    caller may see, newest first, with counts per category."""
+    return _journal_call(request, True, lambda service, actor, visible: service.open_issues(
+        actor, visible, category=_journal_csv(category), target_type=target_type, limit=limit))
+
+
+@app.get("/journal/downloads", tags=["journal"])
+def get_journal_downloads(request: Request, target_type: str = Query(...), target_id: str = Query(...),
+                          limit: int = Query(200, ge=1, le=5000)):
+    """Download counts of a dataset or an artefact (names for admins and the dataset's owner)."""
+    return _journal_call(request, False, lambda service, actor, visible: service.downloads(
+        actor, visible, target_type, target_id, limit), db_id=_journal_owner_db(target_type, target_id))
+
+
+@app.get("/journal/entries/{entry_id}", tags=["journal"])
+def get_journal_entry(request: Request, entry_id: int):
+    """One entry with its replies."""
+    return _journal_call(request, True, lambda service, actor, visible: service.get(actor, visible, entry_id))
+
+
+@app.patch("/journal/entries/{entry_id}", tags=["journal"])
+def edit_journal_entry(request: Request, entry_id: int, payload: JournalEdit):
+    """The author changes the text, links or refs of their own note; the old values are kept."""
+    return _journal_call(request, True, lambda service, actor, visible: service.edit(
+        actor, visible, entry_id, body=payload.body, links=payload.links, refs=payload.refs))
+
+
+@app.post("/journal/entries/{entry_id}/replies", tags=["journal"], status_code=201)
+def reply_journal_entry(request: Request, entry_id: int, payload: JournalNote):
+    """Reply to an entry (category comment, question, finding or link; replies have no status)."""
+    return _journal_call(request, True, lambda service, actor, visible: service.add_note(
+        actor, visible, 'dataset', 'reply', payload.category, payload.body, payload.links, payload.refs,
+        parent_id=entry_id))
+
+
+@app.post("/journal/entries/{entry_id}/status", tags=["journal"])
+def set_journal_entry_status(request: Request, entry_id: int, payload: JournalStatus):
+    """Admins, triage groups (curators) and the dataset's owner set the status of a data error, annotation
+    concern or data request. Fixed data errors and annotation concerns need changelog_ref and
+    fixed_in_version."""
+    return _journal_call(request, True, lambda service, actor, visible: service.set_status(
+        actor, visible, entry_id, payload.status, note=payload.note, changelog_ref=payload.changelog_ref,
+        fixed_in_version=payload.fixed_in_version), db_id=_journal_entry_db(entry_id))
+
+
+@app.post("/journal/entries/{entry_id}/hide", tags=["journal"])
+def hide_journal_entry(request: Request, entry_id: int, payload: JournalHide = Body(default_factory=JournalHide)):
+    """Admins hide an entry (``hidden: false`` shows it again). Entries are never deleted."""
+    return _journal_call(request, True, lambda service, actor, visible: service.hide(
+        actor, visible, entry_id, hidden=payload.hidden, reason=payload.reason))
+
+
+@app.get("/journal/entries/{entry_id}/history", tags=["journal"])
+def get_journal_entry_history(request: Request, entry_id: int):
+    """Edits, status changes and hides of one entry (the author and admins)."""
+    return _journal_call(request, True, lambda service, actor, visible: service.history(actor, visible, entry_id))
 
 
 # ── Paper library + literature search (REST 2.39) ─────────────────────────────

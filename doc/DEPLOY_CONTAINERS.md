@@ -1086,6 +1086,34 @@ has no collection of that name. The setting reaches `anthive.yaml` as
 Without it nothing changes: a visitor who can see exactly one collection is
 still taken straight into it.
 
+### The dataset journal (since 2.49.0)
+
+Every site keeps a journal per dataset, collection, gene set, facet and
+artefact (`doc/DESIGN_dataset_journal.md`): notes people write, reports of
+data errors, annotation concerns and data requests with a status, events
+(new dataset versions, artefacts made from a dataset, use declared by vark or
+pyvark) and a record of every download of an h5ad, static file or artefact.
+It is on by default and needs nothing new: one SQLite file,
+`<state_dir>/journal.sqlite`, written by the api. Notes need a login; with
+`auth.mode: none` only anonymous download counts are kept.
+
+Download records name the user who downloaded. Ordinary users only see
+counts; admins and the dataset's depositor see the names. Say this in the
+site's privacy notice, and set how long the records are kept:
+
+```yaml
+journal:
+  enabled: true                  # false switches the journal off, download counts included
+  download_retention_days: 730   # older download records are deleted once a day (0 keeps them)
+  triage_groups: [admins, curators]   # may set a report's status; the dataset's depositor may too
+```
+
+`max_body_chars` (10000) and `writes_per_minute` (30) are the other keys.
+`ant-stack check` and the plan print one journal line. The block reaches
+`anthive.yaml` as `journal:` (environment variables `ANTHIVE_JOURNAL_ENABLED`,
+`ANTHIVE_JOURNAL_DB`, `ANTHIVE_JOURNAL_DOWNLOAD_RETENTION_DAYS`). The journal is
+per site: two sites serving the same dataset have separate journals.
+
 ### Run syncs from cron or a systemd timer
 
 `ant-stack` and `ant-sync` start with `#!/usr/bin/env -S uv run ...`, so
@@ -1222,7 +1250,8 @@ The site needs the S3 settings and keys (step 4) for step 3.
 ### Back up
 
 Back up `state_dir` (`/srv/anthive/state`). It holds everything that is not
-in the images or the data: secrets, the user database, MCP links, caches. It
+in the images or the data: secrets, the user database, MCP links, the dataset
+journal (`journal.sqlite`), caches. It
 is small. Copy it while the stack is stopped (`ant-stack down`), or copy the
 SQLite files inside it with `sqlite3 <file> ".backup <copy>"`.
 
@@ -1458,6 +1487,7 @@ resolve inside the containers.
 | `services.dataset_deposit` | since 2.46.0: let `datasets.upload_groups` deposit datasets through presigned S3 uploads (needs `s3.enabled`; see "Let depositors add datasets") |
 | `datasets.*` | since 2.46.0: who may deposit (`upload_groups`, default admins and curators), `max_gb`, `url_ttl_hours`, `max_open_days` (an open deposit not completed within this many days expires, default 7), `max_open_per_user`, `max_pending_gb_per_user`, `update_policy`, `site_id` (default `site.name`) |
 | `ports.tools` | since 2.46.1: the `127.0.0.1` port of Caddy's listener for the host-side deposit watcher (default 8079; published only with `services.dataset_deposit` or `artefacts.enabled`; requires the internal secret) |
+| `journal.*` | since 2.49.0: the dataset journal (`enabled`, default true), `download_retention_days` (730, 0 keeps download records), `triage_groups` (admins, curators), `max_body_chars` (10000), `writes_per_minute` (30) (see "The dataset journal") |
 | `artefacts.*` | since 2.47.0: artefact and collection deposits (`enabled`, needs `s3.enabled`), `upload_groups` and `collections_create_groups` (default admins and analysts), `max_file_gb`, `max_deposit_gb`, `max_files`, `max_versions`, `max_stored_gb_per_user`, `inline_max_mb`, `hold_public`, `serve_local` (`fallback` or `prefer`), `url_ttl_seconds` (see "Let analysts deposit artefacts") |
 | `library.*` | upload groups, PDF size limit, git committer and push, S3 autopush, index publisher, `index_pull` (false: this site never downloads the shared literature index) |
 | `library.deploy_key` | SSH key `ant-stack publish-library` pushes the library with (host path) |
