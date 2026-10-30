@@ -385,6 +385,8 @@ def validate_site(site: dict, path: Path) -> dict:
         value = journal_block.get(key)
         if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
             raise SiteError(f"journal.{key} must be a whole number, 0 or more")
+    if journal_block.get('max_body_chars') is not None and journal_block['max_body_chars'] < 100:
+        raise SiteError("journal.max_body_chars must be at least 100")
     groups = journal_block.get('triage_groups')
     if groups is not None and (not isinstance(groups, list) or not all(isinstance(g, str) and g for g in groups)):
         raise SiteError("journal.triage_groups must be a list of group names, e.g. [admins, curators]")

@@ -28,7 +28,7 @@ def test_no_login_site_keeps_counts_only(tmp_path, ant_stack):  # noqa: F811
 
 
 @pytest.mark.parametrize('block', [{'enabled': 'yes'}, {'download_retention_days': -1}, {'colour': 'red'},
-                                   {'triage_groups': 'curators'}, 'on'])
+                                   {'triage_groups': 'curators'}, {'max_body_chars': 50}, 'on'])
 def test_journal_block_is_validated(tmp_path, ant_stack, block):  # noqa: F811
     with pytest.raises(ant_stack.SiteError):
         _site(ant_stack, tmp_path, journal=block)
