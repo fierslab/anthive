@@ -626,7 +626,7 @@ def result_from_row(row: Mapping[str, Any], report: Optional[Mapping[str, Any]],
             'held_reasons': [str(item) for item in loads(row.get('held_reasons'), [])],
             'error': refused or row.get('error'),
             'warnings': [str(item) for item in loads(row.get('warnings'), [])],
-            'report': json.loads(canonical(report).decode()) if isinstance(report, Mapping) else None}
+            'report': json.loads(canonical(ensure_no_floats(report)).decode()) if isinstance(report, Mapping) else None}
 
 
 def ensure_no_floats(document: Any) -> Any:

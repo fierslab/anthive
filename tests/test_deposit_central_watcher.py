@@ -461,3 +461,11 @@ def test_record_paths_outside_the_layout_are_ignored(tmp_path):
     env.s3.put('__deposits/intern/dep_x/record.json', b'{}')
     counts = env.watcher.remote.import_records(dd.DepositStore(env.state / dd.DB_FILE), {})
     assert counts['imported'] == 0 and counts['ignored'] == 2
+
+
+def test_result_from_row_turns_report_floats_into_strings():
+    """A check report carries floats (limit_gb, shares); the signed result must not (dep_aa1eac2056, 2026-11-11)."""
+    report = {'result': 'fail', 'checks': [{'id': 'files.size', 'details': {'limit_gb': 100.0, 'size_gb': 3.16}}]}
+    result = dr.result_from_row({'watch_state': 'failed'}, report)
+    assert result['report']['checks'][0]['details'] == {'limit_gb': '100.0', 'size_gb': '3.16'}
+    dr.canonical(result)
