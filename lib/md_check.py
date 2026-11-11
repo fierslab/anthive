@@ -221,7 +221,8 @@ def check_md_folder(
             continue
         if md_path.name == 'index.md':
             index_files.append(md_path)
-        elif md_path.with_suffix('.h5ad').exists():
+        elif md_path.with_suffix('.h5ad').exists() or md_path.with_suffix('.duckdb').exists():
+            # a dataset whose .h5ad lives only on S3 (trimmed from disk) still has its .duckdb
             data_files.append(md_path)
         # other .md files are silently skipped
 
@@ -484,7 +485,8 @@ def collect_db_ids(store_root: Path) -> Set[str]:
         parts = md_path.relative_to(store_root).parts
         if any(part.startswith('_') for part in parts[:-1]) or len(parts) < 2:
             continue
-        if md_path.name == 'index.md' or not md_path.with_suffix('.h5ad').exists():
+        if md_path.name == 'index.md' or not (md_path.with_suffix('.h5ad').exists()
+                                              or md_path.with_suffix('.duckdb').exists()):
             continue
         top = parts[0]
         if top not in group_of:

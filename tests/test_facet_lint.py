@@ -347,3 +347,11 @@ def test_facet_mapping_describes_computed_facets():
     assert entries['ant_braak_group']['live'] is True
     assert entries['ant_apoe4_carrier']['source_columns'] == ['ant_apoe']
     assert '5 to 6 high' in entries['ant_braak_group']['computed_rule']
+
+
+def test_collect_db_ids_counts_a_dataset_whose_h5ad_is_only_on_s3(store):
+    """A dataset trimmed from disk (S3 holds the .h5ad) keeps its .duckdb and stays a reanalysis target."""
+    h5ad = store / 'Study2024' / 'primary.h5ad'
+    h5ad.with_suffix('.duckdb').write_bytes(b'')
+    h5ad.unlink()
+    assert collect_db_ids(store) == {'S24/PRI', 'S24/REA'}
