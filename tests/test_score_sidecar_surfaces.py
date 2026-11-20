@@ -122,7 +122,8 @@ def test_sandbox_without_sidecar_has_no_view_and_still_works(tmp_path, monkeypat
     db_path = _make_dataset(tmp_path)
     (tmp_path / 'ds.scores.parquet').unlink()
     assert analytics.run_query(str(db_path), 'SELECT COUNT(*) AS n FROM obsnum')['preview'][0]['n'] == 4
-    with pytest.raises(RuntimeError, match='score_sidecar'):
+    # Refused before execution: the view is not one this dataset publishes.
+    with pytest.raises(ValueError, match="Unknown table 'score_sidecar'"):
         analytics.run_query(str(db_path), 'SELECT * FROM score_sidecar')
 
 

@@ -47,6 +47,13 @@ from .exceptions import (
     DepositNotOwnerError,
     DepositQuotaError,
     DepositStoppedError,
+    JournalError,
+    JournalForbiddenError,
+    JournalNotFoundError,
+    JournalNotesOffError,
+    JournalOffError,
+    JournalRateLimitedError,
+    JournalSignInRequiredError,
     PaperDuplicateError,
     PaperInvalidError,
     PaperNotPDFError,
@@ -54,6 +61,7 @@ from .exceptions import (
     PaperUploadDisabledError,
     PaperUploadError,
     PaperUploadForbiddenError,
+    QueryTruncatedWarning,
     ServerTooOldError,
     ServerWarmingUpWarning,
 )
@@ -61,10 +69,11 @@ from .exceptions import (
 # Backward-compatibility alias (matches antclient 1.x).
 AntClient = AnthiveClient
 
-__version__ = "0.12.2"
+__version__ = "0.13.0"
 __all__ = [
     "AnthiveClient", "AntClient", "VarkConfigError", "__version__",
     "AnthiveAPIError", "AnthiveWarmingUpError", "ServerWarmingUpWarning",
+    "QueryTruncatedWarning",
     "DatasetDepositError", "DepositNotOwnerError", "DepositQuotaError",
     "DepositHeldError", "DepositStoppedError",
     "ArtefactError", "ArtefactNotFoundError", "ArtefactFileNotFoundError", "ArtefactNotOnThisSiteError",
@@ -72,6 +81,9 @@ __all__ = [
     "ArtefactPurgedError", "ArtefactPurgingError", "ArtefactIntegrityError",
     "ArtefactStorageUnavailableError", "ArtefactRateLimitedError",
     "ArtefactDownloadError", "ServerTooOldError",
+    "JournalError", "JournalOffError", "JournalNotesOffError",
+    "JournalSignInRequiredError", "JournalForbiddenError",
+    "JournalNotFoundError", "JournalRateLimitedError",
     "PaperUploadError", "PaperUploadForbiddenError",
     "PaperUploadDisabledError", "PaperDuplicateError", "PaperInvalidError",
     "PaperTooLargeError", "PaperNotPDFError",

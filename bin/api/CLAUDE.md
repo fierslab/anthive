@@ -56,8 +56,14 @@ and `lib/config.py` (anthive.yaml loader).
   scores-sidecar mtime)`; captures the X-Plot-Caption + bytes. `?cache=miss`
   skips the lookup, re-renders and refreshes the entry (`X-Plot-Cache:
   BYPASS`); it is not part of the key.
-- `analytics_query` runs sandboxed SELECT-only SQL via `lib/analytics.py` —
-  see `tests/test_analytics_security.py` before touching the sandbox.
+- **User SQL has one path**: `/query/sql` and `/analytics/query` (MCP
+  `analytics_query`) both call `analytics.execute_query` (private locked-down
+  DuckDB instance, allowlist over the parse tree, published relations only,
+  row cap around the query, timeout). Never run caller SQL on a pooled
+  connection. `/query/sql` streams `analytics.query_json_answer` (never
+  read the whole answer into memory); `_sql_caller` keys anonymous callers
+  by the last `X-Forwarded-For` hop. Read `tests/test_analytics_security.py` and
+  `tests/test_sql_single_path.py` before touching it.
 - **Module scores live in two places**: legacy obsnum columns of the duckdb,
   and (most datasets) the `<stem>.scores.parquet` sidecar, which `obsnum`
   does not contain. Anything that lists or reads scores must cover both:

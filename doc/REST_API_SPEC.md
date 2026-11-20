@@ -456,7 +456,24 @@ List available layers.
 ### 8. SQL Queries
 
 #### `POST /databases/{db_id}/query/sql`
-Execute raw SQL query (requires authentication if token set).
+Run one read-only SELECT on one dataset and get the rows back. Same executor
+as `/analytics/query` (2.49.0):
+
+- Tables: what the dataset publishes (`obscat`, `obsnum`, `cells`, `genes`,
+  `varcat`, `layer__<layer>`, `obsm__*`, `score_sidecar`, `__cells`,
+  `__genes`) and the query's own CTEs. `GET /databases/{db_id}/analytics/schema`
+  lists them with their columns, and so does the view `schema_columns`
+  (`table_name, column_name, data_type, column_index`) inside a query;
+  `DESCRIBE`, `SHOW`, `SUMMARIZE` and `information_schema` are not available.
+- Table functions: `range`, `generate_series`, `unnest`, `json_each`, `json_tree`.
+  No file paths, URLs, `read_*`, system catalogs or engine settings.
+- One statement, at most 50,000 characters, at most `limit` rows (default and
+  cap 100,000; applied around the query), 120 s time limit (408).
+- 400 `Query refused: ...` names what was refused; 400 `Query error: ...` is
+  an error while running; 429 (`Retry-After: 5`) when the caller already has 2
+  queries running or every query slot is taken.
+- The answer is streamed with `Content-Length`; `truncated` is true when more
+  rows existed than `limit` (or than 2,000,000 cells).
 
 **Request Body:**
 ```json
@@ -474,7 +491,8 @@ Execute raw SQL query (requires authentication if token set).
   "n_columns": 2,
   "columns": ["cell_name", "n_genes"],
   "dtypes": {"cell_name": "object", "n_genes": "int64"},
-  "data": [...]
+  "data": [...],
+  "truncated": false
 }
 ```
 

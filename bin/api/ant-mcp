@@ -868,7 +868,9 @@ def main() -> None:
             'SQL ANALYTICS  (for custom questions the plot tool cannot answer)\n'
             '  analytics_schema  inspect DuckDB tables, column names/types, and 3-row samples;\n'
             '                     ALWAYS call this first; column names differ per dataset\n'
-            '  analytics_query   run any SELECT / WITH … SELECT query (writes are blocked);\n'
+            '  analytics_query   run one SELECT / WITH … SELECT query on the dataset\'s own\n'
+            '                     tables (no files, system catalogs, information_schema or\n'
+            '                     DESCRIBE; columns are in the view schema_columns);\n'
             '                     do ALL aggregation, filtering, pivoting, and joins HERE;\n'
             '                     returns a markdown table when ≤ 500 rows, otherwise a 10-row\n'
             '                     preview plus a session_id for analytics_viz\n'
@@ -904,8 +906,8 @@ def main() -> None:
             '    violin / kde / ecdf   sample=20000   distribution shape well preserved\n'
             '    bar / heatmap means   sample=10000   sufficient for common cell types\n'
             '  SQL analytics: use DuckDB\'s own USING SAMPLE clause in analytics_query, e.g.:\n'
-            '    SELECT celltype, AVG(TREM2) FROM __cells USING SAMPLE 10000 ROWS (reservoir)\n'
-            '    GROUP BY celltype\n'
+            '    SELECT ant_cell_type, COUNT(*) FROM obscat USING SAMPLE 10000 ROWS (reservoir)\n'
+            '    GROUP BY ant_cell_type\n'
             '\n'
             'IMAGE EMBEDDING (Open WebUI, compatible clients)\n'
             '  Add the custom HTTP header  X-Image-Output: inline  in your MCP client settings.\n'
@@ -1519,6 +1521,9 @@ def main() -> None:
 
         Call this first when planning a custom analysis to understand what tables
         and fields are available.  Then write a SQL query with analytics_query.
+        Inside analytics_query the same list is the view `schema_columns`
+        (table_name, column_name, data_type, column_index);
+        information_schema, DESCRIBE and SHOW are not available there.
 
         Args:
             db_id: Dataset identifier (e.g. 'S25/SGM').
@@ -1570,9 +1575,21 @@ def main() -> None:
         analytics_viz step should contain only plotting code that operates on the
         already-aggregated result.
 
-        Only SELECT / WITH … SELECT queries are permitted.  Results are stored as
+        Only one SELECT / WITH … SELECT statement is permitted.  Results are stored as
         a Parquet file on the server — no bulk data travels over MCP.  Use the
         returned session_id in analytics_viz to visualise the result.
+
+        WHAT A QUERY MAY READ: the dataset's published tables and views (obscat,
+        obsnum, cells, genes, layer__<layer>, score_sidecar, module_variability,
+        attached sessions) and the table functions range, generate_series,
+        unnest, json_each and json_tree. Files, URLs, system catalogs
+        (information_schema, duckdb_*), DESCRIBE / SHOW and the internal `__`
+        tables are refused. To look up columns in SQL use the view
+        `schema_columns`:
+            SELECT column_name, data_type FROM schema_columns WHERE table_name = 'obscat'
+        or call analytics_schema. A refusal names what was refused; fix the
+        query rather than retrying it. "All query slots are in use" means the
+        server is busy: wait a few seconds and try again.
 
         Returns column names, dtypes, total row count, and a 10-row preview.
 
@@ -1596,8 +1613,8 @@ def main() -> None:
         Args:
             db_id:   Dataset identifier (e.g. 'S25/SGM').
             sql:     SELECT query.
-            timeout: Query timeout in seconds (default 120). Increase for complex
-                     multi-CTE queries on large datasets, e.g. timeout=300.
+            timeout: Query timeout in seconds; the server's limit (default 120)
+                     is also the maximum, so only a shorter value has an effect.
             attach_sessions: List of session IDs from prior module_score or
                      analytics_query calls. The first is available as table
                      `scores`, additional ones as `session_1`, `session_2`, etc.
@@ -1615,6 +1632,8 @@ def main() -> None:
                 return f"Dataset '{db_id}' not found."
             if code in (400, 408):
                 return f"Query error: {error.response.text}"
+            if code == 429:
+                return f"Server busy, try again in a few seconds: {error.response.text}"
             raise
 
         session_id_val = data['session_id']

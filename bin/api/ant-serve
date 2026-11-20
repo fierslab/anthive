@@ -1988,6 +1988,9 @@ async def lifespan(app: FastAPI):
         sys.exit(1)
     asyncio.create_task(_daily_metadata_refresh())
     asyncio.create_task(_pseudobulk_cleanup_loop())
+    # Start the spare user-SQL worker now, so the first query does not wait for
+    # its imports (lib/analytics_worker.py).
+    threading.Thread(target=analytics.prestart_workers, daemon=True).start()
     # Chat assistant — emit a one-line warning when enabled but unkeyed.
     # Locked per web's §7: never crash on a missing key.
     try:
@@ -6007,55 +6010,75 @@ def get_embedding_data(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _sql_caller(request: Request) -> str:
+    """Who runs a user SQL query, for the per-caller limit: the proxy's Remote-User, else the
+    client address (the last X-Forwarded-For hop when the socket peer is a loopback or private
+    proxy address, else the socket peer), so one anonymous client cannot use up every other
+    one's allowance."""
+    user = (request.headers.get('Remote-User') or '').strip()
+    if user:
+        return f'user:{user}'
+    peer = request.client.host if request.client else ''
+    address = peer
+    try:
+        import ipaddress  # noqa: PLC0415
+        peer_ip = ipaddress.ip_address(peer)
+        via_proxy = peer_ip.is_loopback or peer_ip.is_private
+    except ValueError:
+        via_proxy = not peer  # no socket peer (tests, unix socket)
+    if via_proxy:
+        # Only a proxy in front of us (Caddy on loopback or the compose network) is trusted to
+        # say who the client is; a client reaching ant-serve directly cannot pick its own key.
+        forwarded = [hop.strip() for hop in (request.headers.get('X-Forwarded-For') or '').split(',')
+                     if hop.strip()]
+        if forwarded:
+            address = forwarded[-1]
+    return f'anonymous:{address[:64]}' if address else 'anonymous'
+
+
 @app.post("/databases/{db_id:path}/query/sql", tags=["query"])
-def execute_sql_query(db_id: str, request: QueryRequest):
+def execute_sql_query(db_id: str, request: QueryRequest, http_request: Request):
     """
-    Execute a raw SQL query on the database
+    Execute a read-only SQL query on one dataset and return the rows.
 
     Request Body:
-    - query: SQL query string
-    - limit: Optional limit to append (capped at 100000)
+    - query: one SELECT (or WITH ... SELECT) statement
+    - limit: maximum rows returned (default and cap 100000)
 
-    Returns results in JSON format.
-    All queries are read-only for security. Only SELECT queries are allowed.
+    Runs through the same executor as /analytics/query
+    (``analytics.execute_query``, issues #2, #3, #5, #83): a private DuckDB
+    instance that can read only this dataset's files, the dataset's published
+    tables and views only (obscat, obsnum, layer__*, cells, genes, ...; not the
+    internal ``__`` tables or the system catalogs), allowlisted table functions
+    (range, generate_series, unnest, json_each, json_tree), a time limit
+    (ANTHIVE_QUERY_TIMEOUT, 120 s; 408 when reached) and a row cap applied
+    around the query. ``truncated`` says whether more rows existed.
     """
     try:
-        # Validate SQL (block writes, DDL, file-reading functions)
-        analytics.validate_sql(request.query)
-        effective_limit = min(request.limit or 100_000, 100_000)
-        with _pooled_db(db_id) as db:
-            # Hand-written SQL may say FROM layer__X: shadow the persisted
-            # views (baked host path) with ones over this host's sidecars.
-            # Only when named; installing costs a few ms per request.
-            if 'layer__' in request.query.lower():
-                install_portable_layer_views(db._conn, db.db_url)
-            # Same for the module-score sidecar view (score_sidecar), only
-            # when the query names it.
-            if scores_parquet_lib.SCORE_SIDECAR_LONG_VIEW in request.query.lower():
-                scores_parquet_lib.install_score_views(db._conn, registry.get_database_path(db_id))
-            df = db.execute_sql(request.query, limit=effective_limit)
+        db_url = registry.get_database_path(db_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=unknown_database_detail(db_id))
+    effective_limit = min(request.limit or 100_000, 100_000)
+    if effective_limit <= 0:
+        raise HTTPException(status_code=400, detail="limit must be positive")
+    try:
+        answer = analytics.query_json_answer(
+            db_url, request.query, row_limit=effective_limit, max_cells=_QUERY_SQL_MAX_CELLS,
+            s3_config=registry._s3_config, caller=_sql_caller(http_request), label=f'query_sql db={db_id}')
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Query refused: {exc}")
+    except analytics.QueryBusy as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "5"})
+    except TimeoutError as exc:
+        raise HTTPException(status_code=408, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=f"Query error: {exc}")
 
-        # JSON-safe: missing values and infinities become null. ``df.where(notna, None)`` alone kept NaN in
-        # float and pandas string columns, and the response then failed with "Out of range float values are
-        # not JSON compliant" (HTTP 500 for vark sql on GF4/MIC and M23/IMM, 2026-10-20).
-        dtypes = {col: str(dtype) for col, dtype in df.dtypes.items()}
-        records = df.astype(object).where(pd.notna(df), None).to_dict(orient='records')
-
-        return _json_safe({
-            "query": request.query,
-            "n_rows": len(df),
-            "n_columns": len(df.columns),
-            "columns": df.columns.tolist(),
-            "dtypes": dtypes,
-            "data": records,
-        })
-
-    except HTTPException:
-        raise
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Query error: {str(e)}")
+    # The worker encodes the whole answer (lists, structs, blobs, decimals, NaN as null) and
+    # caps its size; the server streams the file in 64 kB chunks (never the whole answer in
+    # memory) and the caller's query count stays taken until it is sent.
+    return StreamingResponse(answer.chunks(), media_type="application/json",
+                             headers={"Content-Length": str(answer.size)})
 
 
 
@@ -11947,9 +11970,13 @@ def _json_safe(obj: Any) -> Any:
         return None
     if isinstance(obj, dict):
         return {k: _json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, list):
+    if isinstance(obj, (list, tuple)):
         return [_json_safe(v) for v in obj]
     return obj
+
+
+# /query/sql: at most this many cells (rows x columns) in one JSON answer.
+_QUERY_SQL_MAX_CELLS = 2_000_000
 
 
 _SESSION_ID_PATTERN = r'^[0-9a-f]{32}$'
@@ -12013,7 +12040,7 @@ async def analytics_schema(db_id: str):
 
 
 @app.post("/databases/{db_id:path}/analytics/query", tags=["analytics"])
-async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
+async def analytics_query(db_id: str, request: AnalyticsQueryRequest, http_request: Request):
     """Execute a read-only SELECT query and persist results as a Parquet file.
 
     The full result set is saved server-side; only column metadata and a small
@@ -12049,22 +12076,32 @@ async def analytics_query(db_id: str, request: AnalyticsQueryRequest):
         _mv_path = _module_variability_path()
         _extra_views = ({"module_variability": str(_mv_path)}
                         if _mv_path.exists() else None)
-        result = await asyncio.to_thread(
-            lambda: analytics.run_query(
+        # The fleet-wide parquet lists every dataset: leave out the ones hidden
+        # from this caller, as GET /module-variability does (issue #4).
+        _exclusions = ({"module_variability": ("dataset", sorted(_hidden_db_ids()))}
+                       if _extra_views else None)
+        _caller = _sql_caller(http_request)
+        body = await asyncio.to_thread(
+            lambda: analytics.run_query_json(
                 db_url, request.sql, request.session_id,
                 s3_config=registry._s3_config,
                 timeout=request.timeout,
                 attach_sessions=request.attach_sessions,
                 extra_parquet_views=_extra_views,
+                extra_view_exclusions=_exclusions,
+                caller=_caller,
             )
         )
+    except analytics.QueryBusy as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "5"})
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except TimeoutError as exc:
         raise HTTPException(status_code=408, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return _json_safe(result)
+    # Encoded by the worker (preview cut to 2 MB); passed on as bytes, not re-encoded on the event loop.
+    return Response(content=body, media_type="application/json")
 
 
 @app.post("/analytics/viz", tags=["analytics"])

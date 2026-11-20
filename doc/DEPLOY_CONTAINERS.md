@@ -117,7 +117,20 @@ Where the numbers come from:
   take above 1 GB each for signed-in and for anonymous visitors on a full
   store (see "Cache warm-up after a start"). On a small machine set
   `server_memory_limit` to a fixed value (for example `4GB`) and lower
-  `max_open_databases` in `site.yaml` under `resources:`.
+  `max_open_databases` in `site.yaml` under `resources:`. User SQL
+  (`/query/sql`, analytics) runs in separate worker processes in the api
+  container: at most 4 at once (2 per user or anonymous address, 8 more
+  waiting a few seconds for a slot), each with DuckDB's 2 GB
+  memory limit, at most 6 GB of address space and 2 GB of spill under the
+  tmp dir, plus one idle spare (about 150 MB). Analytics session files take
+  at most 5 GB of the tmp dir. Environment variables of the api service
+  tune them: `ANTHIVE_QUERY_CONCURRENCY`, `ANTHIVE_QUERY_PER_CALLER`,
+  `ANTHIVE_QUERY_MEMORY_BUDGET_MB`, `ANTHIVE_QUERY_MAX_RESULT_MB`,
+  `ANTHIVE_QUERY_MAX_BODY_MB`, `ANTHIVE_QUERY_SPARE_WORKERS`,
+  `ANTHIVE_QUERY_MAX_WAITERS`, `ANTHIVE_ANALYTICS_TMP_BUDGET_MB`. Behind
+  a proxy other than the bundled Caddy, the proxy must append the client
+  address to `X-Forwarded-For`: anonymous callers are counted by its last
+  entry.
 - **CPU.** `resources.server_threads: 8` DuckDB threads per open dataset;
   plots and facet tests are CPU-bound. More cores mostly help with several
   users at once.

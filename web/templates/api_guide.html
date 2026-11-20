@@ -62,6 +62,7 @@
       <li><a href="#first-steps">First steps with curl</a></li>
       <li><a href="#pyvark">Python with pyvark</a></li>
       <li><a href="#vark">The vark command line</a></li>
+      <li><a href="#sql">SQL on one dataset</a></li>
       <li><a href="#papers">Library papers</a></li>
       <li><a href="#permissions">What needs admin rights, and limits</a></li>
       <li><a href="#version">Versions and changes</a></li>
@@ -158,6 +159,26 @@ vark gene-stats L26/FMG APOE
 vark plot L26/FMG --geom violin --x ant_disease --y APOE --out apoe.png</pre><button type="button" data-copy-api>Copy</button></div>
   </section>
 
+  <section id="sql">
+    <h2 class="section-head">SQL on one dataset</h2>
+    <p id="api-guide-sql-essential">You can run one read-only <code>SELECT</code> at a time on the tables of one dataset. To find column names, query <code>schema_columns</code>.</p>
+    <div class="cmd"><pre>vark sql L26/FMG "SELECT table_name, column_name, data_type FROM schema_columns ORDER BY table_name, column_index"
+vark sql L26/FMG "SELECT ant_disease, COUNT(*) AS n_cells FROM obscat GROUP BY ant_disease"</pre><button type="button" data-copy-api>Copy</button></div>
+    {% call doc_block('What a query may use, and its limits', id='api-guide-sql-about', summary=True) %}
+    <p>A query sees only the dataset it is sent to. It may read the tables and views that dataset publishes: <code>obscat</code> (categorical cell annotations), <code>obsnum</code> (numeric cell values), <code>cells</code>, <code>genes</code>, <code>varcat</code>, one <code>layer__&lt;name&gt;</code> per expression layer, <code>obsm__&lt;name&gt;</code> for embeddings such as UMAP, <code>score_sidecar</code> (stored gene set scores), <code>__cells</code> and <code>__genes</code>. <code>WITH</code> blocks and the functions <code>range</code>, <code>generate_series</code>, <code>unnest</code>, <code>json_each</code> and <code>json_tree</code> work too.</p>
+    <p>Everything else is refused with a <code>400</code> whose message starts with <code>Query refused:</code> and names the culprit. That covers files and web addresses, other datasets, <code>DESCRIBE</code>, <code>SHOW TABLES</code>, <code>information_schema</code>, the <code>duckdb_*</code> catalogs and more than one statement. Use <code>schema_columns</code> (columns <code>table_name</code>, <code>column_name</code>, <code>data_type</code>, <code>column_index</code>) instead of DESCRIBE.</p>
+    <p>A query gets at most 120 seconds and returns at most 100,000 rows (pass a smaller <code>limit</code> if you want fewer). When more rows existed, the answer has <code>"truncated": true</code>, so aggregate in SQL rather than downloading every cell. A query that runs too long is stopped with <code>408</code>. Each person (or, without login, each address) can run 2 queries at once and the server 4 in total; beyond that the answer is <code>429</code> with a <code>Retry-After</code> header in seconds, and a script should wait and try again.</p>
+    <p>The same request with curl and from Python:</p>
+    <div class="cmd"><pre>curl -n -s -X POST {{ api_base }}/databases/L26/FMG/query/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "SELECT cell_name, n_genes FROM obsnum", "limit": 10}'</pre><button type="button" data-copy-api>Copy</button></div>
+    <div class="cmd"><pre>from vark import AnthiveClient
+
+client = AnthiveClient("{{ api_base }}")  # login from ~/.netrc or vark; or pass auth= as above
+rows = client.execute_sql("L26/FMG", "SELECT ant_disease, COUNT(*) AS n_cells FROM obscat GROUP BY ant_disease", format="dataframe")</pre><button type="button" data-copy-api>Copy</button></div>
+    {% endcall %}
+  </section>
+
   <section id="papers">
     <h2 class="section-head">Library papers</h2>
     <p id="api-guide-papers">Everyone who can log in can read the <a href="/library">paper library</a>: list and search the papers, download their PDFs and BibTeX, search their full text, and see which papers belong to a dataset. These commands need vark 0.0.19 or pyvark 0.7.0 or newer. <em>CITEKEY</em> stands for a paper's key, shown on its page.</p>
@@ -219,11 +240,12 @@ results = client.upload_papers(AnthiveClient.paper_items_from_folder("papers/"))
       <li>custom Python figures (<code>/analytics/viz</code>);</li>
       <li>adding papers to the library, which is limited to the upload groups the site configures (admins by default; see <a href="#papers-upload">adding papers</a>).</li>
     </ul>
-    <p>The API has no request rate limit of its own, but please do not hammer it: plots are cached, and one call per figure is plenty. These limits do apply:</p>
+    <p>Apart from SQL queries, the API has no request rate limit of its own, but please do not hammer it: plots are cached, and one call per figure is plenty. These limits do apply:</p>
     <div class="table-wrap"><table>
       <tr><th>What</th><th>Limit</th></tr>
-      <tr><td>SQL on one dataset (<code>/databases/{id}/query/sql</code>)</td><td>SELECT only, at most 100,000 rows</td></tr>
-      <tr><td>Analytics queries (<code>/databases/{id}/analytics/query</code>)</td><td>SELECT only, at most 500,000 rows, stopped after 120 s by default</td></tr>
+      <tr><td>SQL on one dataset (<code>/databases/{id}/query/sql</code>)</td><td>one SELECT on that dataset's own tables, at most 100,000 rows, stopped after 120 s (see <a href="#sql">SQL</a>)</td></tr>
+      <tr><td>Analytics queries (<code>/databases/{id}/analytics/query</code>)</td><td>the same rules, at most 500,000 rows, stopped after 120 s by default</td></tr>
+      <tr><td>Queries running at once (both kinds)</td><td>2 per person or address, 4 for the whole server; beyond that <code>429</code> with <code>Retry-After</code></td></tr>
       <tr><td>Custom Python figures (admins)</td><td>stopped after 60 s by default</td></tr>
       <tr><td>Paper PDF upload</td><td>{{ max_pdf_mb }} MB on this site</td></tr>
       <tr><td>Failed logins</td><td>5 within 2 minutes block the account for 10 minutes (default)</td></tr>

@@ -1,13 +1,13 @@
 {
   "package": "pyvark",
   "source": "https://codeberg.org/mfiers/pyvark",
-  "version": "0.12.2",
-  "commit": "c1d3572aba5202678de6a57e3e5183320dfc1087",
+  "version": "0.13.0",
+  "commit": "248b20d58f8274769dade05866e26141ab998430",
   "files": {
-    "__init__.py": "c7b29871bfd804a2e36e3561f655ce6e28ceb54e4d2426c7d49c1ae1a7918192",
+    "__init__.py": "8073b3f5d291dcb52c4c88b5e1de77bcc28fb49fc8e08548e956fcda40fdee20",
     "_credentials.py": "7a8d455a942f0944fa3a1d9e384108e70e14f40a8b3b92cab493e79ea026007d",
-    "client.py": "2d882d7a537da459c75ca6846ced0b3e4e85bdbf3f2d6efcf4f20a2cdcdcc088",
-    "exceptions.py": "cac48c8518c959128ab722a2aab69a3930374876d94b57c3fa7ef7347e1c7766",
+    "client.py": "a544370cb6b03b17498200461bd05023f9c2f0810b29ea5ed68ccc57145a0843",
+    "exceptions.py": "02538d5be871286d92af5283b4a236f69f04d8c31db7b53f5be3e9dd4bd61f16",
     "helpers.py": "fbb7cc27a0928d958947b52ab59ec4d19a7cbd9e6546e2f8b3ea585a00919751"
   }
 }

@@ -10,7 +10,8 @@ The artefact store (REST API 2.47.0+) has its own family under
 :class:`ArtefactError`, and the deposit answers a caller is expected to
 handle have subclasses of :class:`DatasetDepositError`
 (:class:`DepositNotOwnerError`, :class:`DepositQuotaError`,
-:class:`DepositHeldError`).
+:class:`DepositHeldError`). The dataset journal (REST API 2.49.0+) has
+its own family under :class:`JournalError`.
 """
 
 from __future__ import annotations
@@ -170,7 +171,8 @@ class ServerTooOldError(ArtefactError):
     """The server does not have this route: the artefact store and the
     collection listing need anthive REST API 2.47.0 or newer, the
     catalogue search (``search``) and the front-page numbers
-    (``stats``) 2.48.0 or newer.
+    (``stats``) 2.48.0 or newer, the dataset journal (``journal_*``,
+    ``declare_use``) 2.49.0 or newer.
 
     Raised instead of a bare 404 when a route answers FastAPI's generic
     ``{"detail": "Not Found"}`` (a 2.47 server always sends a status
@@ -292,9 +294,75 @@ class ArtefactDownloadError(ArtefactError):
     fresh link."""
 
 
+class JournalError(AnthiveAPIError):
+    """A refused answer from a dataset journal route (REST API 2.49.0+):
+    ``/journal/...`` and ``/databases/{db_id}/journal...``.
+
+    The server answers JSON ``{"status": "<word>", "message": ...}``,
+    for example 400 ``bad_category``, ``bad_links``, ``bad_refs``,
+    ``body_too_long``, ``changelog_required``, ``no_status``, 409
+    ``hidden``. A FastAPI validation error (422) has no status word.
+
+    Attributes:
+        status: The status word of the body (``''`` when absent).
+        retry_after: Seconds from the ``Retry-After`` header or the body
+            (429), else ``None``.
+    """
+
+    def __init__(self, message: str, *, status_code: int,
+                 body: Optional[Dict[str, Any]] = None,
+                 response: Optional[requests.Response] = None,
+                 retry_after: Optional[float] = None):
+        super().__init__(message, status_code=status_code, body=body,
+                         response=response)
+        self.status = str((body or {}).get('status') or '')
+        self.retry_after = retry_after
+
+
+class JournalOffError(JournalError):
+    """404 ``journal_off``: the journal is switched off on this site
+    (``journal.enabled: false``); there are no notes, events or download
+    counts. Also the base class of :class:`JournalNotesOffError`."""
+
+
+class JournalNotesOffError(JournalOffError):
+    """404 ``journal_notes_off``: the site has no login (``auth.mode:
+    none``), so journal notes cannot be read or written. Download counts
+    (:meth:`vark.AnthiveClient.journal_downloads`) still work."""
+
+
+class JournalSignInRequiredError(JournalError):
+    """401 ``sign_in_required``: reading and writing journal notes needs a
+    signed-in caller (pass ``auth=`` or use stored credentials)."""
+
+
+class JournalForbiddenError(JournalError):
+    """403 ``forbidden``: the caller may not do this, e.g. edit another
+    person's note, read another person's edit history, set a report's
+    status without being an admin, a triage-group member or the
+    dataset's owner, or hide an entry without being an admin."""
+
+
+class JournalNotFoundError(JournalError):
+    """404 ``not_found``: no such entry or target, or one the caller may
+    not see (the server does not tell them apart)."""
+
+
+class JournalRateLimitedError(JournalError):
+    """429 ``too_many_writes``: more than ``journal.writes_per_minute``
+    entries a minute. Retry after ``retry_after`` seconds."""
+
+
 class ServerWarmingUpWarning(UserWarning):
     """Emitted (once per wait) when the client starts waiting for a
     server that answers 503 ``warming_up``."""
+
+
+class QueryTruncatedWarning(UserWarning):
+    """Emitted by :meth:`vark.AnthiveClient.execute_sql` when the server
+    answers ``truncated: true`` (REST API 2.49.0+): more rows existed
+    than ``limit`` (or than 2,000,000 cells, rows times columns), so the
+    result is incomplete."""
 
 
 class PaperUploadError(AnthiveAPIError):
@@ -449,6 +517,68 @@ def raise_for_artefact_status(response: requests.Response) -> None:
     body = _decode_body(response)
     word = str(body.get('status') or '')
     error_class = _ARTEFACT_ERRORS_BY_WORD.get(word, ArtefactError)
+    raise error_class(_message_from(body, response),
+                      status_code=response.status_code, body=body,
+                      response=response,
+                      retry_after=_retry_after(response, body))
+
+
+def raise_for_query_status(response: requests.Response) -> None:
+    """Raise :class:`AnthiveAPIError` for a non-2xx answer of a user SQL
+    route (``/query/sql``, ``/analytics/query``; REST API 2.49.0+).
+
+    The message carries the server's ``detail`` (``Query refused: ...``
+    names the table or function that is not allowed, ``Query error:
+    ...`` is an error while running). A 429 (the caller already has 2
+    queries running, or every slot is taken) and a 408 (the 120 s time
+    limit) get a message that says what to do. The exception has a
+    ``retry_after`` attribute (seconds from ``Retry-After``, else
+    ``None``).
+    """
+    if response.ok:
+        return
+    body = _decode_body(response)
+    retry_after = _retry_after(response, body)
+    status = response.status_code
+    if status == 429:
+        wait = f"{retry_after:g} s" if retry_after is not None else "a few seconds"
+        message = (f"429 the server is busy with other queries (at most 2 "
+                   f"per caller run at once); retry after {wait} "
+                   f"(url: {response.url})")
+        detail = body.get('detail') or body.get('message')
+        if detail:
+            message += f": {detail}"
+    elif status == 408:
+        message = (f"408 the query hit the server's time limit and was "
+                   f"stopped; filter or aggregate more on the server "
+                   f"(url: {response.url})")
+    else:
+        message = _message_from(body, response)
+    error = AnthiveAPIError(message, status_code=status, body=body,
+                            response=response)
+    error.retry_after = retry_after  # type: ignore[attr-defined]
+    raise error
+
+
+_JOURNAL_ERRORS_BY_WORD = {
+    'journal_off': JournalOffError,
+    'journal_notes_off': JournalNotesOffError,
+    'sign_in_required': JournalSignInRequiredError,
+    'forbidden': JournalForbiddenError,
+    'not_found': JournalNotFoundError,
+    'too_many_writes': JournalRateLimitedError,
+}
+
+
+def raise_for_journal_status(response: requests.Response) -> None:
+    """Raise the matching :class:`JournalError` for a non-2xx answer of a
+    journal route (chosen by the body's status word, so 404
+    ``journal_off`` and 404 ``not_found`` differ)."""
+    if response.ok:
+        return
+    body = _decode_body(response)
+    word = str(body.get('status') or '')
+    error_class = _JOURNAL_ERRORS_BY_WORD.get(word, JournalError)
     raise error_class(_message_from(body, response),
                       status_code=response.status_code, body=body,
                       response=response,

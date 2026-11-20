@@ -39,6 +39,62 @@ counts. New tag `journal`. Errors are `{status, message}` with 400 (bad input), 
 `changelog_required` (a fixed data-error or annotation-concern without `changelog_ref` and
 `fixed_in_version`) and `same_version` (`fixed_in_version` is the version the problem was reported on).
 
+BREAKING (kept in a minor release as a security fix, like the access changes of 2.45.0): **User SQL: one path, an allowlist (GitLab #2, #3, #4, #5, #47, #83).** Tightens what
+`POST /databases/{db_id}/query/sql` accepts; the request and response shapes are unchanged except
+for a new `truncated` field. Before, an anonymous caller could read any file under the data folder and
+the S3 prefix (other datasets, internal ones included, every `.md`, the donor crosswalks) with a file
+path used as a table or SQL hidden in a string, and one query could run forever.
+
+* `/query/sql` and `/analytics/query` (and the MCP `analytics_query` tool) now run through one executor
+  (`analytics.execute_query`): each query runs in its own short-lived worker process
+  (`lib/analytics_worker.py`) on a private DuckDB instance that reads only the dataset's own files,
+  with a memory limit on the process, a time limit (`ANTHIVE_QUERY_TIMEOUT`, 120 s; the worker is
+  killed and `/query/sql` answers **408**), a row cap applied around the query
+  (`SELECT * FROM (<query>) LIMIT n`, so `--` or the word LIMIT no longer removes it), a 256 MB
+  result cap (`ANTHIVE_QUERY_MAX_RESULT_MB`), a 128 MB cap on the JSON answer
+  (`ANTHIVE_QUERY_MAX_BODY_MB`), at most 4 queries at once (`ANTHIVE_QUERY_CONCURRENCY`), 2 per
+  signed-in user or per anonymous client address (`ANTHIVE_QUERY_PER_CALLER`) and 8 requests waiting
+  for a slot (`ANTHIVE_QUERY_MAX_WAITERS`); beyond that **429** with `Retry-After: 5`. The worker
+  encodes the answer; the server streams it from a file (with `Content-Length`), and a `/query/sql`
+  answer counts against its caller until it has been sent. A query that crashes
+  DuckDB or runs out of memory ends its worker and answers 400; the server is not affected.
+* What a query may name, checked on DuckDB's parse tree: tables and views the dataset publishes
+  (`obscat`, `obsnum`, `cells`, `genes`, `varcat`, `layer__<layer>`, `obsm__*`, the `score_sidecar`
+  view, `__cells`, `__genes`) and the query's own CTEs; table functions `range`, `generate_series`,
+  `unnest`, `json_each`, `json_tree`. Refused: file paths and URLs as tables, every other table
+  function (`read_*`, `glob`, `query`, `duckdb_*()`, `pragma_*`, `json_execute_serialized_sql`),
+  system catalogs (`information_schema`, `pg_catalog`, `duckdb_views` and friends), the other
+  `__` tables, `current_setting`, `current_query`, `getenv`, `DESCRIBE` / `SHOW` / `SUMMARIZE`, more
+  than one statement, and queries over 50,000 characters. **New view `schema_columns`**
+  (`table_name, column_name, data_type, column_index`) lists the columns of every published relation,
+  for queries that looked them up in `information_schema` (about 8% of the logged analytics queries
+  did) or with `DESCRIBE`. A refusal answers 400 with a detail that
+  starts `Query refused:` and names the table or function; an error while running answers 400
+  `Query error: ...`.
+* `/query/sql` response: new `truncated` (true when more rows existed than `limit`, or than
+  2,000,000 cells, rows times columns, allow). A negative `limit` answers 400. List, struct, map,
+  blob, bit, decimal and interval columns are now encoded (lists and objects; blobs as base64,
+  intervals in seconds) instead of answering 500. Whole-number decimals (`HUGEINT`, `UHUGEINT`,
+  `DECIMAL(p, 0)`) are exact JSON integers; other decimals stay numbers. Dates and timestamps outside
+  years 1 to 9999 come back as text instead of failing the query. `dtypes` are the pandas dtypes of
+  the result's column types (`object` for a union).
+* `/analytics/query`: the `module_variability` view leaves out the datasets hidden from the caller,
+  as `GET /module-variability` does. `truncated` is now exact (it was `row_count == 500000`). The
+  preview is cut to 2 MB; new `preview_complete` says whether it holds every row it should. List,
+  blob and bit columns answer 200 instead of 500; interval and union columns are stored in the session
+  file as JSON text (Parquet has no such types). Session files are kept within 5 GB in all
+  (`ANTHIVE_ANALYTICS_TMP_BUDGET_MB`, oldest removed first; the budget is shared by all callers), and
+  a failed query leaves none. A second query with a `session_id` whose query is still running
+  answers 429. A `session_id` passed in may only replace a session the same caller (signed-in user or
+  anonymous address) made with `/analytics/query`; any other answers 400 (GitLab #47). Leave it out to
+  get a new one.
+* `/analytics/schema` lists only the published relations (no internal `__` tables but `__cells` and
+  `__genes`).
+
+Clients: vark `sql` and pyvark `execute_sql` need no change to keep working; queries that read files,
+system views, `information_schema` or `DESCRIBE` stop working (by design; use `schema_columns`).
+vark, pyvark, the MCP tool texts and the skills now describe these rules and show `truncated`.
+
 An entry is `{id, target_type, target_id, dataset_version, author, created, kind (note|event), category,
 body, links: [{url, label, type}], refs: {column, value, gene, genes, cell_type, evidence}, parent_id,
 edited, may_edit, replies?}`; reports add `{status, status_by, status_at, status_note, fixed_in_version,
