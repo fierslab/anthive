@@ -168,6 +168,13 @@
   }
   function fmtF(v) { return v == null ? '' : (Math.abs(v) >= 1e4 ? v.toExponential(2) : v.toFixed(3)); }
   const enc = encodeURIComponent;
+  // HTML-escape for text and attribute values interpolated into innerHTML.
+  // Term, contrast and gene names come from the server and from the URL
+  // (?term=, ?contrast=), so none of them may be read as markup (GitLab #6).
+  function esc(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+  }
 
   // ── selection state (also reflected in the URL for shareable links)
   let curTerm = null, curContrast = null, offset = 0, lastCount = 0;
@@ -213,13 +220,13 @@
         row.className = 'de-contrast';
         row.setAttribute('data-contrast', c.contrast);
         const sig = c['n_sig_padj_lt_0.05'];
-        row.innerHTML = `<span>${c.contrast}</span><span class="sig">${sig != null ? sig + ' sig' : ''}</span>`;
+        row.innerHTML = `<span>${esc(c.contrast)}</span><span class="sig">${sig != null ? esc(sig) + ' sig' : ''}</span>`;
         row.addEventListener('click', () => selectContrast(term, c.contrast));
         box.appendChild(row);
       });
       box.setAttribute('data-loaded', '1');
     } catch (e) {
-      box.innerHTML = `<div class="de-err">failed to load contrasts (${e.message})</div>`;
+      box.innerHTML = `<div class="de-err">failed to load contrasts (${esc(e.message)})</div>`;
     }
   }
 
@@ -266,10 +273,10 @@
       const recap = `sorted by ${sort}, ${dir}` +
         `${padj ? `, padj≤${padj}` : ''}${l2fc ? `, |log2FC|≥${l2fc}` : ''}`;
       summaryEl.title = recap;
-      summaryEl.innerHTML = `<b>${curTerm}</b> · <b>${curContrast}</b>, showing <b>${offset}</b> genes`;
+      summaryEl.innerHTML = `<b>${esc(curTerm)}</b> · <b>${esc(curContrast)}</b>, showing <b>${esc(offset)}</b> genes`;
       loadMoreWrap.style.display = (rows.length === PAGE) ? '' : 'none';
     } catch (e) {
-      tableWrap.innerHTML = `<div class="de-err">failed to load genes (${e.message})</div>`;
+      tableWrap.innerHTML = `<div class="de-err">failed to load genes (${esc(e.message)})</div>`;
       loadMoreWrap.style.display = 'none';
     }
   }
@@ -301,16 +308,16 @@
     const scatter = `${BROWSE}/plot/scatter?color=${enc(g)}`;
     const forest  = `${BROWSE}/plot/forest?gene=${enc(g)}&study=${enc(STUDY)}&term=${enc(curTerm)}`;
     tr.innerHTML =
-      `<td class="gene">${g}</td>` +
-      `<td class="num ${fcCls}"${fcTitle}>${fmtF(fc)}</td>` +
-      `<td class="num">${fmtP(r.padj)}</td>` +
-      `<td class="num">${fmtP(r.pvalue)}</td>` +
-      `<td class="num">${fmtF(r.estimate)}</td>` +
-      `<td class="num muted-2">${ci}</td>` +
+      `<td class="gene">${esc(g)}</td>` +
+      `<td class="num ${fcCls}"${fcTitle}>${esc(fmtF(fc))}</td>` +
+      `<td class="num">${esc(fmtP(r.padj))}</td>` +
+      `<td class="num">${esc(fmtP(r.pvalue))}</td>` +
+      `<td class="num">${esc(fmtF(r.estimate))}</td>` +
+      `<td class="num muted-2">${esc(ci)}</td>` +
       `<td class="de-actions">` +
-        `<a href="${volcano}" title="volcano for this contrast">volcano</a> ` +
-        `<a href="${scatter}" title="${g} on the embedding">embedding</a>` +
-        `<a href="${forest}" title="${g} across contrasts">🌲</a>` +
+        `<a href="${esc(volcano)}" title="volcano for this contrast">volcano</a> ` +
+        `<a href="${esc(scatter)}" title="${esc(g)} on the embedding">embedding</a>` +
+        `<a href="${esc(forest)}" title="${esc(g)} across contrasts">🌲</a>` +
       `</td>`;
     return tr;
   }

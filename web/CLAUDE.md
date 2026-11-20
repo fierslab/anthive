@@ -753,9 +753,18 @@ There is **no shared venv** (every tool carries PEP-723 inline deps), so a bare
 
 ```sh
 uv run --with pytest --with fastapi --with httpx --with jinja2 \
-       --with markdown --with requests \
+       --with markdown --with requests --with pyyaml --with markdown-it-py \
+       --with playwright==1.62.0 \
        env PYTHONPATH=lib python -m pytest tests/test_web_browser.py -q
 ```
+
+`playwright` is for the one headless-browser test
+(`test_de_browser_hostile_names_render_as_text_in_a_real_browser`, GitLab #6
+DOM XSS guard). It skips itself when playwright or its chromium build is
+missing. Pin the playwright version to one whose chromium build is already in
+`~/.cache/ms-playwright` (1.62.0 matches the cached build on the dev box; a
+newer playwright wants a newer build and the test then skips), or run
+`uv run --with playwright==<v> python -m playwright install chromium` once.
 
 `make test` wraps the same idea for the full repo suite (its `TEST_DEPS` adds
 duckdb/numpy/pandas/h5py/scipy). `uv.lock` in the repo root is tracked; never

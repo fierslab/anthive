@@ -39,6 +39,10 @@ counts. New tag `journal`. Errors are `{status, message}` with 400 (bad input), 
 `changelog_required` (a fixed data-error or annotation-concern without `changelog_ref` and
 `fixed_in_version`) and `same_version` (`fixed_in_version` is the version the problem was reported on).
 
+**DE names (GitLab #6).** A deposited DE table whose term, contrast or gene names hold markup, quote or
+control characters (`< > " ' ` & `) now fails the new check `de.names`. The DE browser page escapes every
+name it shows, so a hostile name in a link or in older data is shown as text.
+
 BREAKING (kept in a minor release as a security fix, like the access changes of 2.45.0): **User SQL: one path, an allowlist (GitLab #2, #3, #4, #5, #47, #83).** Tightens what
 `POST /databases/{db_id}/query/sql` accepts; the request and response shapes are unchanged except
 for a new `truncated` field. Before, an anonymous caller could read any file under the data folder and

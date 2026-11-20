@@ -2795,6 +2795,104 @@ def test_de_study_view_404_on_missing_study(client, monkeypatch):
     assert resp.status_code == 404
 
 
+# GitLab #6: DOM XSS in the DE browser. Term, contrast and gene names come from
+# the server and from the URL (?term=, ?contrast=); the page must show them as
+# text, never parse them as markup.
+
+_HOSTILE_TERM = '<img src=x onerror="window.__xss=1">'
+_HOSTILE_CONTRAST = "<img src=x onerror=\"window.__xss=2\">'"
+_HOSTILE_GENE = '"><script>window.__xss=3</script><img src=x onerror="window.__xss=4">'
+
+
+def test_de_browser_escapes_interpolated_names_in_inner_html():
+    """Static guard: every name the DE browser script puts into innerHTML or an
+    attribute goes through esc(). Catches a raw ${...} coming back."""
+    text = (Path(__file__).resolve().parent.parent / "web" / "templates"
+            / "de_browser.html").read_text()
+    assert "function esc(" in text
+    for raw in ("${c.contrast}", "${curTerm}", "${curContrast}", "${g}",
+                "${e.message}", "${volcano}", "${scatter}", "${forest}"):
+        assert raw not in text, f"{raw} interpolated without esc()"
+    for escaped in ("${esc(c.contrast)}", "${esc(curTerm)}", "${esc(curContrast)}",
+                    "${esc(g)}", "${esc(e.message)}"):
+        assert escaped in text
+
+
+def test_de_browser_hostile_names_render_as_text_in_a_real_browser(client, monkeypatch):
+    """Load the rendered DE browser in headless chromium with a hostile term
+    (server-rendered rail + ?term= deep link), a hostile contrast (from the
+    contrasts API and ?contrast=) and a hostile gene name (from the genes API).
+    No injected element may appear, no injected handler may run, and the
+    names must show up literally as text."""
+    import json
+    from urllib.parse import quote
+
+    sync_api = pytest.importorskip("playwright.sync_api")
+
+    detail = dict(_DE_STUDY_DETAIL,
+                  terms=[{"term": _HOSTILE_TERM, "n_contrasts": 1, "n_rows": 10}])
+
+    def fake(api_url, path, **kwargs):
+        if "/de/" in path:
+            return detail
+        return _fake_api_get(api_url, path, **kwargs)
+    monkeypatch.setattr(browser, "_api_get", fake)
+
+    page_path = "/browse/GroupA/ds1/de/glmm_demo"
+    html = client.get(page_path).text
+    assert "<img src=x" not in html          # Jinja autoescape covers the rail
+
+    contrasts = {"contrasts": [{"contrast": _HOSTILE_CONTRAST,
+                                "n_sig_padj_lt_0.05": 1}]}
+    genes = {"rows": [{"gene_name": _HOSTILE_GENE, "log2fc": 1.5, "padj": 0.01,
+                       "pvalue": 0.001, "estimate": 0.4,
+                       "ci_low": 0.1, "ci_high": 0.7}]}
+
+    def handle(route):
+        url = route.request.url
+        if url.startswith("http://anthive.test" + page_path):
+            route.fulfill(status=200, content_type="text/html", body=html)
+        elif "/contrasts/" in url:
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(genes))
+        elif "/de/glmm_demo/terms/" in url:
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps(contrasts))
+        else:
+            route.fulfill(status=404, body="")
+
+    url = (f"http://anthive.test{page_path}?term={quote(_HOSTILE_TERM)}"
+           f"&contrast={quote(_HOSTILE_CONTRAST)}")
+    with sync_api.sync_playwright() as pw:
+        try:
+            chromium = pw.chromium.launch()
+        except Exception as exc:  # browser binary not installed
+            pytest.skip(f"chromium not available: {exc}")
+        try:
+            page = chromium.new_page()
+            page.route("**/*", handle)
+            page.goto(url)
+            page.wait_for_selector("#de-tbody tr", timeout=10000)
+            page.wait_for_timeout(300)   # let any injected onerror fire
+
+            assert page.evaluate("window.__xss") is None
+            for sel in ("#de-rail", "#de-summary", "#de-table-wrap"):
+                assert page.locator(f"{sel} img, {sel} script").count() == 0, sel
+
+            assert page.locator(".de-term-hd span").first.text_content() == _HOSTILE_TERM
+            assert page.locator(".de-contrast span").first.text_content() == _HOSTILE_CONTRAST
+            summary = page.locator("#de-summary").text_content()
+            assert _HOSTILE_TERM in summary and _HOSTILE_CONTRAST in summary
+            assert page.locator("#de-tbody td.gene").text_content() == _HOSTILE_GENE
+            links = page.locator("#de-tbody td.de-actions a")
+            assert links.count() == 3
+            assert links.nth(1).get_attribute("title") == f"{_HOSTILE_GENE} on the embedding"
+            assert links.nth(2).get_attribute("title") == f"{_HOSTILE_GENE} across contrasts"
+            assert quote(_HOSTILE_GENE, safe="") in links.nth(1).get_attribute("href")
+        finally:
+            chromium.close()
+
+
 # ── responsive / mobile markup ─────────────────────────────────────────────────
 
 def test_table_wrap_present_on_table_pages(client):

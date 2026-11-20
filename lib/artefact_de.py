@@ -42,6 +42,9 @@ PADJ_BELOW_P_WARN = 0.01
 #: larger table is held for an admin, never passed unchecked (review S4)
 DUPLICATE_KEY_CAP = 2_000_000
 MISSING = {'', 'na', 'nan', 'null', 'none'}
+#: characters a term, contrast or gene name may not hold: markup and quotes (GitLab #6, a name is shown in
+#: web pages) and control characters
+UNSAFE_NAME_RE = re.compile(r'[<>"\'`&\x00-\x1f\x7f]')
 CONTRAST_DIRECTION_RE = re.compile(r'(?P<numerator>.+?)[ _.-]+vs\.?[ _.-]+(?P<denominator>.+)', re.IGNORECASE)
 #: sidecar keys copied into the manifest's ``de`` block (never paths, ELN ids or S3 keys of the uploader)
 DE_KEYS = ('de_format', 'de_term', 'de_contrast', 'de_method', 'de_study_id', 'de_description', 'de_covariates',
@@ -231,6 +234,12 @@ def check_table(path: Path, file_name: str, sidecar_name: str, meta: Dict[str, s
                                      f'not checked', 'an admin looks at the table')
     elif stats['duplicates']:
         add('de.duplicates', 'warn', f'{stats["duplicates"]} duplicated gene(s) within one contrast')
+    if stats['unsafe_names']:
+        shown = ', '.join(repr(value) for value in sorted(stats['unsafe_names'])[:5])
+        add('de.names', 'fail', f'{len(stats["unsafe_names"])} term, contrast or gene name(s) hold markup, quote or '
+                                f'control characters: {shown}', 'rename them without < > " \' ` & or control characters')
+    else:
+        add('de.names', 'pass', 'term, contrast and gene names hold no markup or control characters')
     stated = sorted(stats['contrasts'])
     conventions = {value: sign_convention(value) for value in stated}
     unclear = sorted(value for value, convention in conventions.items() if convention is None)
@@ -256,7 +265,9 @@ def _scan_rows(rows: Iterator[List[str]], columns: Sequence[str], mapped: Dict[s
     effect_at = position(effect_name) if effect_name else None
     term_at, contrast_at = position('term'), position('contrast')
     fixed_contrast = str(meta.get('de_contrast') or '')
-    stats: Dict[str, Any] = {'rows': 0, 'out_of_range': {}, 'has_p': p_at is not None or q_at is not None,
+    fixed_term = str(meta.get('de_term') or '')
+    stats: Dict[str, Any] = {'unsafe_names': set(),
+                             'rows': 0, 'out_of_range': {}, 'has_p': p_at is not None or q_at is not None,
                              'pairs': 0, 'below': 0, 'effect_name': effect_name, 'bad_effects': 0, 'genes': set(),
                              'duplicates': 0, 'contrasts': set(), 'duplicates_unchecked': False}
     seen: Set[int] = set()
@@ -283,6 +294,11 @@ def _scan_rows(rows: Iterator[List[str]], columns: Sequence[str], mapped: Dict[s
         contrast = cell(row, contrast_at).strip() if contrast_at is not None else fixed_contrast.strip()
         if contrast:
             stats['contrasts'].add(contrast)
+        term = cell(row, term_at) if term_at is not None else fixed_term
+        if len(stats['unsafe_names']) < 50:
+            for name in (term, contrast, gene):
+                if name and UNSAFE_NAME_RE.search(name):
+                    stats['unsafe_names'].add(name)
         if stats['duplicates_unchecked']:
             continue
         key = hash((cell(row, term_at), contrast, gene))

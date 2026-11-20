@@ -151,6 +151,21 @@ def test_long_format_with_many_contrasts(tmp_path):
     assert 'first group' in result.sign_convention
 
 
+def test_names_with_markup_are_refused(tmp_path):
+    """GitLab #6: term, contrast and gene names are shown in web pages; markup in them fails the check."""
+    assert _status(_check(tmp_path, deseq2_table()), 'de.names') == ['pass']
+    result = _check(tmp_path, deseq2_table(), de_contrast='<img src=x onerror=alert(1)>_vs_B')
+    assert _status(result, 'de.names') == ['fail']
+    assert _status(_check(tmp_path, deseq2_table(), de_term='t"x'), 'de.names') == ['fail']
+    hostile_gene = deseq2_table().replace(GENES[0].encode(), b'"><script>x</script>', 1)
+    assert _status(_check(tmp_path, hostile_gene), 'de.names') == ['fail']
+    lines = ['gene_id\teffsize\tpvalue\tpadj\tterm\tcontrast']
+    lines += [f'{gene}\t0.5\t0.01\t0.02\tall\tA&B_vs_C' for gene in GENES]
+    result = _check(tmp_path, ('\n'.join(lines) + '\n').encode(), de_format='long', de_term=None, de_contrast=None,
+                    de_method='wilcoxon', de_map_gene='gene_id', de_map_log2fc='effsize')
+    assert _status(result, 'de.names') == ['fail']
+
+
 # ── server rules ──────────────────────────────────────────────────────────────
 
 def _refused(service, body, status, word, identity=ANALYST):
